@@ -273,6 +273,12 @@ function Expand-ReportAttachment {
             $gz.CopyTo($ots); $ots.Dispose(); $gz.Dispose(); $ins.Dispose()
             if ($outFile -match '\.zip$') { [System.IO.Compression.ZipFile]::ExtractToDirectory($outFile,$DestDir); Get-ChildItem $DestDir -Recurse -File | ForEach-Object { $out.Add($_.FullName) } }
             else { $out.Add($outFile) }
+        } else {
+            # Plain attachment (xml/json/txt/eml/msg) - copy to dest dir so cleanup
+            # is uniform across formats, then feed straight into the parsers.
+            $outFile = Join-Path $DestDir (Split-Path $FilePath -Leaf)
+            Copy-Item -Path $FilePath -Destination $outFile -Force
+            $out.Add($outFile)
         }
     } catch { Write-Log "Extraction failed: $(Split-Path $FilePath -Leaf) — $_" -Level WARN }
     return $out
