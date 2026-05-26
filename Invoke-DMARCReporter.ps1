@@ -1194,7 +1194,8 @@ try {
     if ($messages.Count -eq 0) { Write-Log "No new reports." -Level WARN; $exitCode = 4 }
 
     foreach ($msg in $messages) {
-        $isDMARCRua = $false
+        $isDMARCRua  = $false
+        $parseError  = $false
         try {
             $atts = Invoke-Graph -Uri "$base/messages/$($msg.id)/attachments?`$select=id,name,contentType,size"
             foreach ($att in $atts.value) {
@@ -1206,10 +1207,13 @@ try {
                 Write-Log "Downloaded: $($att.name) ($([math]::Round($att.size/1KB,1)) KB)"
 
                 $files = Expand-ReportAttachment -FilePath $rawFile -DestDir $extractDir
+                if (-not $files -or $files.Count -eq 0) { $parseError = $true }
                 foreach ($fp in $files) {
                     switch (Get-ReportType -FilePath $fp) {
                         'DMARC-RUA' {
-                            $isDMARCRua = $true; $recs = ConvertFrom-DMARCReport -FilePath $fp
+                            $recs = ConvertFrom-DMARCReport -FilePath $fp
+                            if ($null -eq $recs -or $recs.Count -eq 0) { $parseError = $true; Write-Log "RUA parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN; break }
+                            $isDMARCRua = $true
                             if ($DMARCFailedOnly) { $recs = $recs | Where-Object { $_.DMARCResult -eq 'fail' } }
                             if ($DMARCPassedOnly) { $recs = $recs | Where-Object { $_.DMARCResult -eq 'pass' } }
                             if ($FilterDomain)    { $recs = $recs | Where-Object { $_.Domain -eq $FilterDomain } }
@@ -1218,12 +1222,16 @@ try {
                             Write-Log "RUA: $(Split-Path $fp -Leaf) | $d | $($recs.Count) records" -Level SUCCESS
                         }
                         'DMARC-RUF' {
-                            $isDMARCRua = $true; $recs = ConvertFrom-DMARCForensicReport -FilePath $fp
+                            $recs = ConvertFrom-DMARCForensicReport -FilePath $fp
+                            if ($null -eq $recs -or $recs.Count -eq 0) { $parseError = $true; Write-Log "RUF parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN; break }
+                            $isDMARCRua = $true
                             $recs | ForEach-Object { $rufRecs.Add($_) }; $rufParsed++
                             Write-Log "RUF: $(Split-Path $fp -Leaf)" -Level SUCCESS
                         }
                         'TLS-RPT'   {
-                            $isDMARCRua = $true; $recs = ConvertFrom-TLSRPTReport -FilePath $fp
+                            $recs = ConvertFrom-TLSRPTReport -FilePath $fp
+                            if ($null -eq $recs -or $recs.Count -eq 0) { $parseError = $true; Write-Log "TLS-RPT parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN; break }
+                            $isDMARCRua = $true
                             $recs | ForEach-Object { $tlsRecs.Add($_) }; $tlsParsed++
                             $d = if ($recs -and $recs.Count -gt 0) { $recs[0].Domain } else { 'unknown' }
                             Write-Log "TLS-RPT: $(Split-Path $fp -Leaf) | $d" -Level SUCCESS
@@ -1234,10 +1242,18 @@ try {
                 Remove-Item $rawFile -Force -EA SilentlyContinue
                 Remove-Item $extractDir -Recurse -Force -EA SilentlyContinue
             }
-        } catch { Write-Log "Failed msg $($msg.id): $_" -Level WARN }
+        } catch { Write-Log "Failed msg $($msg.id): $_" -Level WARN; $parseError = $true }
 
-        $dest = if ($isDMARCRua) { $processedId } else { $noDMARCId }
-        try { Invoke-Graph -Method POST -Uri "$base/messages/$($msg.id)/move" -Body @{ destinationId=$dest } | Out-Null } catch {}
+        # Move policy:
+        #   error AND nothing parsed -> leave in Inbox so next run retries (avoids silent data loss)
+        #   isDMARCRua               -> Processed (treat partial success as done to avoid duplicate records)
+        #   neither error nor DMARC  -> NoDMARCrua (legitimately not a DMARC report)
+        if ($parseError -and -not $isDMARCRua) {
+            Write-Log "Leaving msg $($msg.id) in $SourceFolder for retry (parse failed, no records extracted)" -Level WARN
+        } else {
+            $dest = if ($isDMARCRua) { $processedId } else { $noDMARCId }
+            try { Invoke-Graph -Method POST -Uri "$base/messages/$($msg.id)/move" -Body @{ destinationId=$dest } | Out-Null } catch { Write-Log "Move failed for msg $($msg.id): $_" -Level WARN }
+        }
     }
 
     # Post-parse

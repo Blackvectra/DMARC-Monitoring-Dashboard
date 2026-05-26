@@ -308,28 +308,70 @@ function New-TrendChartHTML {
     $domains = if ($DomainFilter -ne "All Domains") { @($DomainFilter) } else { @($all | Select-Object -ExpandProperty Domain -Unique | Sort-Object) }
     $dates = @($all | Select-Object -ExpandProperty ReportDate -Unique | Sort-Object)
     $colors = @('#3FB950','#79C0FF','#D29922','#F85149','#BC8CFF','#FFA657','#56D364','#FF7B72','#58A6FF','#E6EDF3')
-    $datasetsJson = ($domains | ForEach-Object -Begin { $i=0 } -Process {
-        $domain=$_; $color=$colors[$i % $colors.Count]; $i++
-        $pts=($dates | ForEach-Object { $d=$_; $rows=$all|Where-Object{$_.Domain -eq $domain -and $_.ReportDate -eq $d}
-            $p=($rows|Where-Object{$_.DMARCResult -eq 'pass'}|Measure-Object MessageCount -Sum).Sum
-            $f=($rows|Where-Object{$_.DMARCResult -eq 'fail'}|Measure-Object MessageCount -Sum).Sum
-            $t=[int]$p+[int]$f; if($t -gt 0){[math]::Round(($p/$t)*100,1)}else{'null'} }) -join ','
-        "{`"label`":`"$domain`",`"data`":[$pts],`"borderColor`":`"$color`",`"backgroundColor`":`"${color}22`",`"tension`":0.3,`"fill`":false,`"pointRadius`":4}"
-    }) -join ','
-    $labelsJson=($dates | ForEach-Object { "`"$_`"" }) -join ','
+
+    # SVG layout (no JS, no CDN — renders in any browser including IE WebBrowser)
+    $w = 880; $h = 380; $padL = 56; $padR = 24; $padT = 44; $padB = 110
+    $plotW = $w - $padL - $padR; $plotH = $h - $padT - $padB
+    $n = [Math]::Max($dates.Count, 1)
+    $xStep = if ($n -gt 1) { $plotW / ($n - 1) } else { 0 }
+
+    $gridLines = ''
+    foreach ($pct in 0,25,50,75,100) {
+        $y = $padT + $plotH - ($pct / 100.0) * $plotH
+        $gridLines += "<line x1='$padL' y1='$y' x2='$($padL + $plotW)' y2='$y' stroke='#21262D' stroke-width='1'/>"
+        $gridLines += "<text x='$($padL - 8)' y='$($y + 4)' fill='#6E7681' font-size='11' font-family='Segoe UI' text-anchor='end'>$pct%</text>"
+    }
+
+    $xLabels = ''
+    for ($i = 0; $i -lt $dates.Count; $i++) {
+        $x = $padL + ($i * $xStep)
+        $xLabels += "<line x1='$x' y1='$($padT + $plotH)' x2='$x' y2='$($padT + $plotH + 4)' stroke='#30363D' stroke-width='1'/>"
+        $xLabels += "<text x='$x' y='$($padT + $plotH + 18)' fill='#6E7681' font-size='10' font-family='Segoe UI' text-anchor='middle'>$($dates[$i])</text>"
+    }
+
+    $lines = ''; $legendItems = @(); $ci = 0
+    foreach ($domain in $domains) {
+        $color = $colors[$ci % $colors.Count]; $ci++
+        $pts = @()
+        for ($i = 0; $i -lt $dates.Count; $i++) {
+            $d = $dates[$i]
+            $rows = $all | Where-Object { $_.Domain -eq $domain -and $_.ReportDate -eq $d }
+            $p = ($rows | Where-Object { $_.DMARCResult -eq 'pass' } | Measure-Object MessageCount -Sum).Sum
+            $f = ($rows | Where-Object { $_.DMARCResult -eq 'fail' } | Measure-Object MessageCount -Sum).Sum
+            $t = [int]$p + [int]$f
+            if ($t -gt 0) {
+                $rate = ($p / $t) * 100
+                $x = $padL + ($i * $xStep)
+                $y = $padT + $plotH - ($rate / 100.0) * $plotH
+                $pts += ,@($x, $y, [math]::Round($rate, 1))
+            }
+        }
+        if ($pts.Count -gt 0) {
+            $poly = ($pts | ForEach-Object { "$($_[0]),$($_[1])" }) -join ' '
+            $lines += "<polyline points='$poly' fill='none' stroke='$color' stroke-width='2'/>"
+            foreach ($pt in $pts) {
+                $lines += "<circle cx='$($pt[0])' cy='$($pt[1])' r='3.5' fill='$color' stroke='#0D1117' stroke-width='1'><title>$domain — $($pt[2])%</title></circle>"
+            }
+        }
+        $legendItems += "<span style='display:inline-block;margin:0 14px 4px 0;font-size:11px;color:#CDD9E5'><span style='display:inline-block;width:10px;height:10px;background:$color;border-radius:50%;margin-right:6px;vertical-align:middle'></span>$domain</span>"
+    }
+
+    $legendHTML = ($legendItems -join '')
+    $title = "DMARC Pass Rate &#8212; Last $Days Days"
+
     return @"
 <!DOCTYPE html><html><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8">
-<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;padding:12px}</style></head><body>
-<canvas id="c" style="max-height:380px"></canvas>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script>Chart.defaults.color='#6E7681';Chart.defaults.borderColor='#21262D';
-new Chart(document.getElementById('c'),{type:'line',data:{labels:[$labelsJson],datasets:[$datasetsJson]},
-options:{responsive:true,animation:false,interaction:{mode:'index',intersect:false},
-plugins:{legend:{position:'bottom',labels:{color:'#CDD9E5',padding:12,font:{family:'Segoe UI',size:11}}},
-title:{display:true,text:'DMARC Pass Rate - Last $Days Days',color:'#E6EDF3',font:{size:14,weight:'bold'}}},
-scales:{x:{ticks:{color:'#6E7681'},grid:{color:'#21262D'}},
-y:{min:0,max:100,ticks:{color:'#6E7681',callback:function(v){return v+'%'}},grid:{color:'#21262D'},title:{display:true,text:'Pass Rate (%)',color:'#6E7681'}}}}});
-</script></body></html>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;padding:12px;font-family:'Segoe UI',Arial}</style></head><body>
+<svg width="100%" viewBox="0 0 $w $h" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
+<text x="$([int]($w / 2))" y="22" fill="#E6EDF3" font-size="14" font-weight="bold" font-family="Segoe UI" text-anchor="middle">$title</text>
+<text x="14" y="$([int]($padT + $plotH / 2))" fill="#6E7681" font-size="11" font-family="Segoe UI" transform="rotate(-90 14 $([int]($padT + $plotH / 2)))" text-anchor="middle">Pass Rate (%)</text>
+<rect x="$padL" y="$padT" width="$plotW" height="$plotH" fill="none" stroke="#30363D" stroke-width="1"/>
+$gridLines
+$xLabels
+$lines
+</svg>
+<div style="margin-top:8px;color:#CDD9E5">$legendHTML</div>
+</body></html>
 "@
 }
 
@@ -351,19 +393,55 @@ function New-GeoMapHTML {
             $countryData[$c] = @{msgs=$msgs;pct=$pct;color=$color;lat=$coords[$c][0];lng=$coords[$c][1]}
         }
     }
-    $markersJson = if ($countryData.Count -gt 0) { ($countryData.Keys | ForEach-Object { $d=$countryData[$_]; "{lat:$($d.lat),lng:$($d.lng),country:`"$_`",count:$($d.msgs),pass:$($d.pct),color:`"$($d.color)`"}" }) -join ',' } else { '' }
+
+    if ($countryData.Count -eq 0) {
+        return "<html><body style='background:#0D1117;color:#6E7681;font-family:Segoe UI;padding:20px'>No geolocated sender data yet. Enable IP geolocation in Settings and let the engine run.</body></html>"
+    }
+
+    # SVG world map: equirectangular projection (lon -> x, lat -> y)
+    $mapW = 880; $mapH = 380; $mapPad = 16
+    $maxMsgs = ($countryData.Values | ForEach-Object { $_.msgs } | Measure-Object -Maximum).Maximum
+    if ($maxMsgs -lt 1) { $maxMsgs = 1 }
+
+    function Get-MapXY {
+        param([double]$lat, [double]$lng, [int]$w, [int]$h, [int]$pad)
+        $x = $pad + (($lng + 180.0) / 360.0) * ($w - 2 * $pad)
+        $y = $pad + ((90.0 - $lat)  / 180.0) * ($h - 2 * $pad)
+        return @([math]::Round($x, 1), [math]::Round($y, 1))
+    }
+
+    $markers = ''
+    foreach ($c in $countryData.Keys) {
+        $d = $countryData[$c]
+        $xy = Get-MapXY -lat $d.lat -lng $d.lng -w $mapW -h $mapH -pad $mapPad
+        $r = [math]::Min([math]::Sqrt($d.msgs / $maxMsgs) * 22 + 5, 28)
+        $markers += "<circle cx='$($xy[0])' cy='$($xy[1])' r='$r' fill='$($d.color)' fill-opacity='0.45' stroke='$($d.color)' stroke-width='1.5'><title>$c — $($d.msgs) msgs, $($d.pct)% pass</title></circle>"
+        $markers += "<text x='$($xy[0])' y='$($xy[1] + 4)' fill='#E6EDF3' font-size='10' font-family='Segoe UI' font-weight='bold' text-anchor='middle' pointer-events='none'>$c</text>"
+    }
+
+    # Per-country bar table sorted by volume
+    $rows = ''
+    foreach ($entry in ($countryData.GetEnumerator() | Sort-Object { $_.Value.msgs } -Descending)) {
+        $c = $entry.Key; $d = $entry.Value
+        $barW = [math]::Round(($d.msgs / $maxMsgs) * 100, 1)
+        $rows += "<tr><td style='padding:6px 10px;color:#CDD9E5;font-weight:600;width:50px'>$c</td>" +
+                 "<td style='padding:6px 10px;color:#6E7681;width:90px'>$($d.msgs) msgs</td>" +
+                 "<td style='padding:6px 10px'><div style='background:#21262D;height:8px;border-radius:4px;width:200px'><div style='background:$($d.color);width:$barW%;height:100%;border-radius:4px'></div></div></td>" +
+                 "<td style='padding:6px 10px;color:$($d.color);width:60px;text-align:right;font-weight:600'>$($d.pct)%</td></tr>"
+    }
+
     return @"
 <!DOCTYPE html><html><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0D1117}#map{height:100vh}</style></head><body>
-<div id="map"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script>var map=L.map('map',{zoomControl:true}).setView([30,0],2);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:6}).addTo(map);
-var markers=[$markersJson];
-markers.forEach(function(m){var r=Math.min(Math.sqrt(m.count)*2+8,30);
-L.circleMarker([m.lat,m.lng],{radius:r,color:m.color,fillColor:m.color,fillOpacity:0.5,weight:2})
-.bindPopup('<b>'+m.country+'</b><br>'+m.count+' messages<br>'+m.pass+'% DMARC pass').addTo(map);});</script></body></html>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0D1117;font-family:'Segoe UI',Arial;padding:12px;color:#E6EDF3}</style></head><body>
+<svg width="100%" viewBox="0 0 $mapW $mapH" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="$mapW" height="$mapH" fill="#0D1117"/>
+<rect x="$mapPad" y="$mapPad" width="$($mapW - 2 * $mapPad)" height="$($mapH - 2 * $mapPad)" fill="none" stroke="#21262D" stroke-width="1"/>
+<line x1="$mapPad" y1="$($mapH / 2)" x2="$($mapW - $mapPad)" y2="$($mapH / 2)" stroke="#21262D" stroke-width="1" stroke-dasharray="3,4"/>
+<line x1="$($mapW / 2)" y1="$mapPad" x2="$($mapW / 2)" y2="$($mapH - $mapPad)" stroke="#21262D" stroke-width="1" stroke-dasharray="3,4"/>
+$markers
+</svg>
+<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:12px">$rows</table>
+</body></html>
 "@
 }
 #endregion
@@ -697,6 +775,26 @@ foreach ($n in @('bannerModule','bannerCert','txtCertBanner','btnInstallModule',
     Set-Variable -Name $n -Value $window.FindName($n) -Scope Script
 }
 $txtPSBadge.Text = "PS$($script:PSVer)"
+
+# Suppress IE WebBrowser script-error dialogs (popups from any failed JS / mixed-content notice)
+function Set-WBSilent {
+    param($wb)
+    if ($null -eq $wb) { return }
+    $wb.Add_Navigated({
+        try {
+            $bf  = [Reflection.BindingFlags]::Instance -bor [Reflection.BindingFlags]::NonPublic
+            $fld = $this.GetType().GetField("_axIWebBrowser2", $bf)
+            if ($fld) {
+                $ax = $fld.GetValue($this)
+                if ($ax) { $ax.GetType().InvokeMember("Silent", [Reflection.BindingFlags]::SetProperty, $null, $ax, @($true)) | Out-Null }
+            }
+        } catch {}
+    })
+}
+Set-WBSilent $wbOverview
+Set-WBSilent $wbTrend
+Set-WBSilent $wbGeoMap
+Set-WBSilent $wbSPF
 #endregion
 
 #region Sidebar
