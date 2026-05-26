@@ -381,6 +381,23 @@ In the dashboard, the **domain sidebar** lets you switch between portfolio view 
 
 ---
 
+## Standalone HTML Report
+
+The dashboard's **Report** toolbar button generates a self-contained `.html` file (KPI cards, pass-rate line chart, top senders, country breakdown, recent records) and opens it in your default browser. Useful when you want to share a snapshot with someone who doesn't have the dashboard installed, or when you want the visualizations rendered by a modern JS engine (Edge/Chrome) instead of the embedded WebBrowser control.
+
+Headless usage:
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File ".\Invoke-HTMLReportGenerator.ps1" `
+    -WorkingDir "C:\ProgramData\DMARCMonitor\DMARC" `
+    -OutputPath "C:\Reports\dmarc_$(Get-Date -Format yyyy-MM-dd).html" `
+    -Days 14 -Open
+```
+
+Add `-FilterDomain "yourdomain.com"` to scope to a single domain.
+
+---
+
 ## Headless / Scheduled Task
 
 If you want to run the engine outside the dashboard (after settings are configured):
