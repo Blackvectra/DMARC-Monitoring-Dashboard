@@ -119,6 +119,22 @@ function Test-SettingsComplete {
 function Test-GraphModule { return ($null -ne (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) }
 #endregion
 
+#region Culture-invariant + HTML-encode helpers
+# PowerShell's "$double" interpolation uses CurrentCulture, which produces
+# "12,5" instead of "12.5" on non-en-US locales - that breaks every SVG
+# attribute and any JS/JSON we emit. These helpers force invariant output.
+function Inv { param($n) ([double]$n).ToString('0.###', [cultureinfo]::InvariantCulture) }
+# HTML-encode third-party text (org names, fail reasons, override reasons)
+# before interpolating into the generated dashboard panels.
+function HtmlEnc {
+    param([object]$s)
+    if ($null -eq $s) { return '' }
+    $t = [string]$s
+    if ([string]::IsNullOrEmpty($t)) { return '' }
+    return $t.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;').Replace("'",'&#39;')
+}
+#endregion
+
 #region Data loading
 function Get-AllKnownDomains {
     $cfg = Get-AllSettings; $domains = @()
@@ -233,7 +249,7 @@ function New-OverviewHTML {
         if ($overrides) {
             $orRows = ($overrides | Group-Object OverrideReason | Sort-Object Count -Descending | Select-Object -First 6 | ForEach-Object {
                 $cnt = ($_.Group | Measure-Object MessageCount -Sum).Sum
-                "<tr><td style='padding:5px 10px;color:#CDD9E5'>$($_.Name)</td><td style='padding:5px 10px;color:#D29922'>$cnt msgs</td><td style='padding:5px 10px;color:#6E7681;font-size:11px'>$($_.Count) records</td></tr>"
+                "<tr><td style='padding:5px 10px;color:#CDD9E5'>$(HtmlEnc $_.Name)</td><td style='padding:5px 10px;color:#D29922'>$cnt msgs</td><td style='padding:5px 10px;color:#6E7681;font-size:11px'>$($_.Count) records</td></tr>"
             }) -join ''
             $overrideHTML = "<div style='background:#161B22;border:1px solid #30363D;border-radius:6px;padding:14px;margin-bottom:16px'><div style='font-size:11px;color:#6E7681;margin-bottom:8px;font-weight:600'>POLICY OVERRIDE BREAKDOWN</div><table style='width:100%;border-collapse:collapse;font-size:12px'><tr style='background:#21262D'><th style='padding:5px 10px;text-align:left;color:#6E7681'>REASON</th><th style='padding:5px 10px;text-align:left;color:#6E7681'>MESSAGES</th><th style='padding:5px 10px;text-align:left;color:#6E7681'>RECORDS</th></tr>$orRows</table></div>"
         }
@@ -245,7 +261,7 @@ function New-OverviewHTML {
             $frRows = ($failData | Group-Object FailReason | Sort-Object Count -Descending | ForEach-Object {
                 $cnt = ($_.Group | Measure-Object MessageCount -Sum).Sum
                 $c = if ($_.Name -eq 'both-fail') { '#F85149' } else { '#D29922' }
-                "<tr><td style='padding:5px 10px;color:$c'>$($_.Name)</td><td style='padding:5px 10px'>$cnt msgs</td></tr>"
+                "<tr><td style='padding:5px 10px;color:$c'>$(HtmlEnc $_.Name)</td><td style='padding:5px 10px'>$cnt msgs</td></tr>"
             }) -join ''
             $failHTML = "<div style='background:#161B22;border:1px solid #30363D;border-radius:6px;padding:14px;margin-bottom:16px'><div style='font-size:11px;color:#6E7681;margin-bottom:8px;font-weight:600'>FAILURE REASON BREAKDOWN</div><table style='width:100%;border-collapse:collapse;font-size:12px'><tr style='background:#21262D'><th style='padding:5px 10px;text-align:left;color:#6E7681'>REASON</th><th style='padding:5px 10px;text-align:left;color:#6E7681'>MESSAGES</th></tr>$frRows</table></div>"
         }
@@ -258,12 +274,12 @@ function New-OverviewHTML {
             $orgs = if ($Domain -ne "All Domains") { $e = $cov.domains.($Domain -replace '[^a-zA-Z0-9_]','_'); if ($e) { $e.reportingOrgs } else { '' } } `
                 else { ($cov.domains.PSObject.Properties | ForEach-Object { $_.Value.reportingOrgs } | Where-Object { $_ } | Sort-Object -Unique) -join ', ' }
             if ($orgs) {
-                $orgBadges = ($orgs -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { "<span style='background:#21262D;color:#CDD9E5;padding:2px 8px;border-radius:10px;font-size:11px;margin:2px;display:inline-block'>$_</span>" }) -join ''
+                $orgBadges = ($orgs -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { "<span style='background:#21262D;color:#CDD9E5;padding:2px 8px;border-radius:10px;font-size:11px;margin:2px;display:inline-block'>$(HtmlEnc $_)</span>" }) -join ''
                 $covHTML = "<div style='background:#161B22;border:1px solid #30363D;border-radius:6px;padding:14px;margin-bottom:16px'><div style='font-size:11px;color:#6E7681;margin-bottom:8px;font-weight:600'>REPORTING ORG COVERAGE</div><div>$orgBadges</div></div>"
             }
         } catch {}
     }
-    $domainTitle = if ($Domain -eq "All Domains") { "Portfolio Overview" } else { $Domain }
+    $domainTitle = if ($Domain -eq "All Domains") { "Portfolio Overview" } else { HtmlEnc $Domain }
     return @"
 <!DOCTYPE html><html><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8">
 <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;font-family:'Segoe UI',Arial;padding:16px;overflow-y:auto;color:#E6EDF3}</style></head><body>
@@ -307,26 +323,29 @@ function New-TrendChartHTML {
     if (-not $all) { return "<html><body style='background:#0D1117;color:#6E7681;font-family:Segoe UI;padding:20px'>No data for last $Days days.</body></html>" }
     $domains = if ($DomainFilter -ne "All Domains") { @($DomainFilter) } else { @($all | Select-Object -ExpandProperty Domain -Unique | Sort-Object) }
     $dates = @($all | Select-Object -ExpandProperty ReportDate -Unique | Sort-Object)
+    if ($dates.Count -lt 2) {
+        return "<html><body style='background:#0D1117;color:#6E7681;font-family:Segoe UI;padding:20px'>Need at least 2 days of reports to plot a trend. Currently have $($dates.Count) day(s) of data.</body></html>"
+    }
     $colors = @('#3FB950','#79C0FF','#D29922','#F85149','#BC8CFF','#FFA657','#56D364','#FF7B72','#58A6FF','#E6EDF3')
 
-    # SVG layout (no JS, no CDN — renders in any browser including IE WebBrowser)
+    # SVG layout. Pixel coords are always [int] so we never hit
+    # CurrentCulture decimal-comma issues in the resulting markup.
     $w = 880; $h = 380; $padL = 56; $padR = 24; $padT = 44; $padB = 110
     $plotW = $w - $padL - $padR; $plotH = $h - $padT - $padB
-    $n = [Math]::Max($dates.Count, 1)
-    $xStep = if ($n -gt 1) { $plotW / ($n - 1) } else { 0 }
+    $xStep = $plotW / ($dates.Count - 1)
 
     $gridLines = ''
     foreach ($pct in 0,25,50,75,100) {
-        $y = $padT + $plotH - ($pct / 100.0) * $plotH
+        $y = [int]($padT + $plotH - ($pct / 100.0) * $plotH)
         $gridLines += "<line x1='$padL' y1='$y' x2='$($padL + $plotW)' y2='$y' stroke='#21262D' stroke-width='1'/>"
         $gridLines += "<text x='$($padL - 8)' y='$($y + 4)' fill='#6E7681' font-size='11' font-family='Segoe UI' text-anchor='end'>$pct%</text>"
     }
 
     $xLabels = ''
     for ($i = 0; $i -lt $dates.Count; $i++) {
-        $x = $padL + ($i * $xStep)
+        $x = [int]($padL + ($i * $xStep))
         $xLabels += "<line x1='$x' y1='$($padT + $plotH)' x2='$x' y2='$($padT + $plotH + 4)' stroke='#30363D' stroke-width='1'/>"
-        $xLabels += "<text x='$x' y='$($padT + $plotH + 18)' fill='#6E7681' font-size='10' font-family='Segoe UI' text-anchor='middle'>$($dates[$i])</text>"
+        $xLabels += "<text x='$x' y='$($padT + $plotH + 18)' fill='#6E7681' font-size='10' font-family='Segoe UI' text-anchor='middle'>$(HtmlEnc $dates[$i])</text>"
     }
 
     $lines = ''; $legendItems = @(); $ci = 0
@@ -341,8 +360,8 @@ function New-TrendChartHTML {
             $t = [int]$p + [int]$f
             if ($t -gt 0) {
                 $rate = ($p / $t) * 100
-                $x = $padL + ($i * $xStep)
-                $y = $padT + $plotH - ($rate / 100.0) * $plotH
+                $x = [int]($padL + ($i * $xStep))
+                $y = [int]($padT + $plotH - ($rate / 100.0) * $plotH)
                 $pts += ,@($x, $y, [math]::Round($rate, 1))
             }
         }
@@ -350,21 +369,23 @@ function New-TrendChartHTML {
             $poly = ($pts | ForEach-Object { "$($_[0]),$($_[1])" }) -join ' '
             $lines += "<polyline points='$poly' fill='none' stroke='$color' stroke-width='2'/>"
             foreach ($pt in $pts) {
-                $lines += "<circle cx='$($pt[0])' cy='$($pt[1])' r='3.5' fill='$color' stroke='#0D1117' stroke-width='1'><title>$domain — $($pt[2])%</title></circle>"
+                $rateStr = (Inv $pt[2])
+                $lines += "<circle cx='$($pt[0])' cy='$($pt[1])' r='4' fill='$color' stroke='#0D1117' stroke-width='1'><title>$(HtmlEnc $domain) &#8212; $rateStr%</title></circle>"
             }
         }
-        $legendItems += "<span style='display:inline-block;margin:0 14px 4px 0;font-size:11px;color:#CDD9E5'><span style='display:inline-block;width:10px;height:10px;background:$color;border-radius:50%;margin-right:6px;vertical-align:middle'></span>$domain</span>"
+        $legendItems += "<span style='display:inline-block;margin:0 14px 4px 0;font-size:11px;color:#CDD9E5'><span style='display:inline-block;width:10px;height:10px;background:$color;border-radius:50%;margin-right:6px;vertical-align:middle'></span>$(HtmlEnc $domain)</span>"
     }
 
     $legendHTML = ($legendItems -join '')
     $title = "DMARC Pass Rate &#8212; Last $Days Days"
+    $cx = [int]($w / 2); $cy = [int]($padT + $plotH / 2)
 
     return @"
 <!DOCTYPE html><html><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8">
 <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;padding:12px;font-family:'Segoe UI',Arial}</style></head><body>
 <svg width="100%" viewBox="0 0 $w $h" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
-<text x="$([int]($w / 2))" y="22" fill="#E6EDF3" font-size="14" font-weight="bold" font-family="Segoe UI" text-anchor="middle">$title</text>
-<text x="14" y="$([int]($padT + $plotH / 2))" fill="#6E7681" font-size="11" font-family="Segoe UI" transform="rotate(-90 14 $([int]($padT + $plotH / 2)))" text-anchor="middle">Pass Rate (%)</text>
+<text x="$cx" y="22" fill="#E6EDF3" font-size="14" font-weight="bold" font-family="Segoe UI" text-anchor="middle">$title</text>
+<text x="14" y="$cy" fill="#6E7681" font-size="11" font-family="Segoe UI" transform="rotate(-90 14 $cy)" text-anchor="middle">Pass Rate (%)</text>
 <rect x="$padL" y="$padT" width="$plotW" height="$plotH" fill="none" stroke="#30363D" stroke-width="1"/>
 $gridLines
 $xLabels
@@ -398,46 +419,56 @@ function New-GeoMapHTML {
         return "<html><body style='background:#0D1117;color:#6E7681;font-family:Segoe UI;padding:20px'>No geolocated sender data yet. Enable IP geolocation in Settings and let the engine run.</body></html>"
     }
 
-    # SVG world map: equirectangular projection (lon -> x, lat -> y)
+    # SVG world map: equirectangular projection (lon -> x, lat -> y).
+    # Pixel coords kept as [int] to dodge CurrentCulture decimal-comma bugs.
     $mapW = 880; $mapH = 380; $mapPad = 16
     $maxMsgs = ($countryData.Values | ForEach-Object { $_.msgs } | Measure-Object -Maximum).Maximum
     if ($maxMsgs -lt 1) { $maxMsgs = 1 }
 
     function Get-MapXY {
         param([double]$lat, [double]$lng, [int]$w, [int]$h, [int]$pad)
-        $x = $pad + (($lng + 180.0) / 360.0) * ($w - 2 * $pad)
-        $y = $pad + ((90.0 - $lat)  / 180.0) * ($h - 2 * $pad)
-        return @([math]::Round($x, 1), [math]::Round($y, 1))
+        $x = [int]($pad + (($lng + 180.0) / 360.0) * ($w - 2 * $pad))
+        $y = [int]($pad + ((90.0 - $lat)  / 180.0) * ($h - 2 * $pad))
+        return @($x, $y)
     }
 
     $markers = ''
     foreach ($c in $countryData.Keys) {
         $d = $countryData[$c]
         $xy = Get-MapXY -lat $d.lat -lng $d.lng -w $mapW -h $mapH -pad $mapPad
-        $r = [math]::Min([math]::Sqrt($d.msgs / $maxMsgs) * 22 + 5, 28)
-        $markers += "<circle cx='$($xy[0])' cy='$($xy[1])' r='$r' fill='$($d.color)' fill-opacity='0.45' stroke='$($d.color)' stroke-width='1.5'><title>$c — $($d.msgs) msgs, $($d.pct)% pass</title></circle>"
-        $markers += "<text x='$($xy[0])' y='$($xy[1] + 4)' fill='#E6EDF3' font-size='10' font-family='Segoe UI' font-weight='bold' text-anchor='middle' pointer-events='none'>$c</text>"
+        $r = [int][math]::Min([math]::Sqrt($d.msgs / $maxMsgs) * 22 + 5, 28)
+        $cEnc = HtmlEnc $c
+        $markers += "<circle cx='$($xy[0])' cy='$($xy[1])' r='$r' fill='$($d.color)' fill-opacity='0.45' stroke='$($d.color)' stroke-width='1.5'><title>$cEnc &#8212; $($d.msgs) msgs, $($d.pct)% pass</title></circle>"
+        $markers += "<text x='$($xy[0])' y='$($xy[1] + 4)' fill='#E6EDF3' font-size='10' font-family='Segoe UI' font-weight='bold' text-anchor='middle' pointer-events='none'>$cEnc</text>"
     }
 
     # Per-country bar table sorted by volume
     $rows = ''
     foreach ($entry in ($countryData.GetEnumerator() | Sort-Object { $_.Value.msgs } -Descending)) {
         $c = $entry.Key; $d = $entry.Value
-        $barW = [math]::Round(($d.msgs / $maxMsgs) * 100, 1)
-        $rows += "<tr><td style='padding:6px 10px;color:#CDD9E5;font-weight:600;width:50px'>$c</td>" +
+        $barW = [int]([math]::Round(($d.msgs / $maxMsgs) * 100))
+        $cEnc = HtmlEnc $c
+        $rows += "<tr><td style='padding:6px 10px;color:#CDD9E5;font-weight:600;width:50px'>$cEnc</td>" +
                  "<td style='padding:6px 10px;color:#6E7681;width:90px'>$($d.msgs) msgs</td>" +
-                 "<td style='padding:6px 10px'><div style='background:#21262D;height:8px;border-radius:4px;width:200px'><div style='background:$($d.color);width:$barW%;height:100%;border-radius:4px'></div></div></td>" +
+                 "<td style='padding:6px 10px'><div style='background:#21262D;height:8px;border-radius:4px;width:200px'><div style='background:$($d.color);width:${barW}%;height:100%;border-radius:4px'></div></div></td>" +
                  "<td style='padding:6px 10px;color:$($d.color);width:60px;text-align:right;font-weight:600'>$($d.pct)%</td></tr>"
     }
+
+    $mapInnerW = $mapW - 2 * $mapPad
+    $mapInnerH = $mapH - 2 * $mapPad
+    $mapMidX   = [int]($mapW / 2)
+    $mapMidY   = [int]($mapH / 2)
+    $mapRight  = $mapW - $mapPad
+    $mapBottom = $mapH - $mapPad
 
     return @"
 <!DOCTYPE html><html><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8">
 <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0D1117;font-family:'Segoe UI',Arial;padding:12px;color:#E6EDF3}</style></head><body>
 <svg width="100%" viewBox="0 0 $mapW $mapH" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
 <rect x="0" y="0" width="$mapW" height="$mapH" fill="#0D1117"/>
-<rect x="$mapPad" y="$mapPad" width="$($mapW - 2 * $mapPad)" height="$($mapH - 2 * $mapPad)" fill="none" stroke="#21262D" stroke-width="1"/>
-<line x1="$mapPad" y1="$($mapH / 2)" x2="$($mapW - $mapPad)" y2="$($mapH / 2)" stroke="#21262D" stroke-width="1" stroke-dasharray="3,4"/>
-<line x1="$($mapW / 2)" y1="$mapPad" x2="$($mapW / 2)" y2="$($mapH - $mapPad)" stroke="#21262D" stroke-width="1" stroke-dasharray="3,4"/>
+<rect x="$mapPad" y="$mapPad" width="$mapInnerW" height="$mapInnerH" fill="none" stroke="#21262D" stroke-width="1"/>
+<line x1="$mapPad" y1="$mapMidY" x2="$mapRight" y2="$mapMidY" stroke="#21262D" stroke-width="1" stroke-dasharray="3,4"/>
+<line x1="$mapMidX" y1="$mapPad" x2="$mapMidX" y2="$mapBottom" stroke="#21262D" stroke-width="1" stroke-dasharray="3,4"/>
 $markers
 </svg>
 <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:12px">$rows</table>
@@ -1163,6 +1194,12 @@ function Show-Settings {
         if ([string]::IsNullOrWhiteSpace($thumb)) { $errors += "Cert thumbprint required - use Generate Certificate" }
         if ([string]::IsNullOrWhiteSpace($src))   { $errors += "Source folder required" }
         $rdInt = 0; if (-not [int]::TryParse($rd, [ref]$rdInt) -or $rdInt -lt 1) { $errors += "Retention must be positive integer" }
+        $atText = $sw.FindName("fAlertThreshold").Text.Trim(); $atInt = 10
+        if ($atText -and -not [int]::TryParse($atText, [ref]$atInt)) { $errors += "Alert threshold must be a whole number (e.g. 10)" }
+        if ($atInt -lt 0 -or $atInt -gt 100) { $errors += "Alert threshold must be 0-100" }
+        $dhText = $sw.FindName("fDigestHour").Text.Trim(); $dhInt = 7
+        if ($dhText -and -not [int]::TryParse($dhText, [ref]$dhInt)) { $errors += "Digest hour must be a whole number 0-23" }
+        if ($dhInt -lt 0 -or $dhInt -gt 23) { $errors += "Digest hour must be 0-23" }
         if ($thumb -and -not (Test-Path "Cert:\$store\My\$thumb")) { $errors += "Cert thumbprint not found in $store\My" }
         if ($errors.Count -gt 0) { $lbl.Text = $errors -join "`n"; return }
 
@@ -1177,9 +1214,13 @@ function Show-Settings {
         Set-RegPlain     "EnableGeoLookup"             $([int]($sw.FindName("fEnableGeo").IsChecked -eq $true))
         Set-RegPlain     "GeoAPIToken"                 $sw.FindName("fGeoToken").Text.Trim()
         Set-RegPlain     "EnableAlerts"                $([int]($sw.FindName("fEnableAlerts").IsChecked -eq $true))
-        Set-RegPlain     "AlertThresholdPct"           ([int]($sw.FindName("fAlertThreshold").Text.Trim()))
+        Set-RegPlain     "AlertThresholdPct"           $atInt
         Set-RegPlain     "AlertEmailTo"                $sw.FindName("fAlertEmail").Text.Trim()
-        if ($sw.FindName("fTeamsWebhook").Text.Trim()) { Set-RegEncrypted "TeamsWebhookUrl" $sw.FindName("fTeamsWebhook").Text.Trim() }
+        # Save webhook on non-empty; remove from registry when cleared so we
+        # don't keep sending alerts to a stale channel.
+        $webhookText = $sw.FindName("fTeamsWebhook").Text.Trim()
+        if ($webhookText) { Set-RegEncrypted "TeamsWebhookUrl" $webhookText }
+        else { Remove-ItemProperty -Path $script:RegPath -Name "TeamsWebhookUrl" -EA SilentlyContinue }
         Set-RegPlain     "EnableNewSenderAlerts"       $([int]($sw.FindName("fEnableNewSender").IsChecked -eq $true))
         Set-RegPlain     "EnableVolumeAnomalyAlerts"   $([int]($sw.FindName("fEnableVolume").IsChecked -eq $true))
         Set-RegPlain     "VolumeMultiplier"            $sw.FindName("fVolumeMultiplier").Text.Trim()
@@ -1191,18 +1232,20 @@ function Show-Settings {
         Set-RegPlain     "EnableDKIMTracking"          $([int]($sw.FindName("fEnableDKIM").IsChecked -eq $true))
         Set-RegPlain     "EnableDailyDigest"           $([int]($sw.FindName("fEnableDigest").IsChecked -eq $true))
         Set-RegPlain     "DigestEmailTo"               $sw.FindName("fDigestEmail").Text.Trim()
-        Set-RegPlain     "DigestHour"                  ([int]($sw.FindName("fDigestHour").Text.Trim()))
+        Set-RegPlain     "DigestHour"                  $dhInt
 
         $sw.Close(); Refresh-AllData
         $txtStatus.Text = "Settings saved"; $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen
         $btnRun.IsEnabled = Test-SettingsComplete
+        # Re-evaluate cert banner so a freshly regenerated cert clears it
+        try { Test-CertExpiryUI } catch {}
     })
     $sw.ShowDialog() | Out-Null
 }
 #endregion
 
 #region Engine runner + Module installer
-$script:sync = [hashtable]::Synchronized(@{ IsRunning=$false; LogQueue=[System.Collections.Generic.Queue[string]]::new(); Done=$false; ExitCode=-1 })
+$script:sync = [hashtable]::Synchronized(@{ IsRunning=$false; LogQueue=[System.Collections.Concurrent.ConcurrentQueue[string]]::new(); Done=$false; ExitCode=-1 })
 
 function Start-EngineRun {
     if ($script:sync.IsRunning) { [System.Windows.MessageBox]::Show("Run already in progress.", "Busy", "OK", "Information") | Out-Null; return }
@@ -1210,7 +1253,10 @@ function Start-EngineRun {
     if (-not (Test-Path $script:EngineScript)) { [System.Windows.MessageBox]::Show("Engine script not found:`n$($script:EngineScript)", "Engine Missing", "OK", "Error") | Out-Null; return }
 
     $cfg = Get-AllSettings
-    $script:sync.IsRunning = $true; $script:sync.Done = $false; $script:sync.ExitCode = -1; $script:sync.LogQueue.Clear()
+    $script:sync.IsRunning = $true; $script:sync.Done = $false; $script:sync.ExitCode = -1
+    # ConcurrentQueue doesn't have Clear() on PS5.1; drain it instead
+    $_drain = ''
+    while ($script:sync.LogQueue.TryDequeue([ref]$_drain)) {}
     $btnRun.IsEnabled = $false; $txtRunStatus.Text = "Running..."
     $txtStatus.Text = "Ingesting reports..."; $txtStatus.Foreground = [System.Windows.Media.Brushes]::Orange
 
@@ -1241,27 +1287,50 @@ function Start-EngineRun {
     $ps = [powershell]::Create(); $ps.Runspace = $rs
     $ps.AddScript({
         try {
-            $output = & $enginePath @engParams 2>&1
-            foreach ($line in $output) { $sync.LogQueue.Enqueue($line.ToString()) }
+            # Stream the engine's output line-by-line through the pipeline so the
+            # UI log panel shows progress live, instead of dumping everything
+            # only after the engine has finished.
+            & $enginePath @engParams 2>&1 | ForEach-Object { $sync.LogQueue.Enqueue($_.ToString()) }
             $sync.ExitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
         } catch { $sync.LogQueue.Enqueue("[ERROR] $_"); $sync.ExitCode = 99 }
         finally { $sync.IsRunning = $false; $sync.Done = $true }
     }) | Out-Null
-    $ps.BeginInvoke() | Out-Null
+    # Capture the async handle and PS instance so the timer can dispose them
+    $script:engineAsync = $ps.BeginInvoke()
+    $script:enginePS    = $ps
+    $script:engineRS    = $rs
 
     $timer = New-Object System.Windows.Threading.DispatcherTimer; $timer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:engineTimer = $timer
     $timer.Add_Tick({
-        while ($script:sync.LogQueue.Count -gt 0) { $txtLog.AppendText("$($script:sync.LogQueue.Dequeue())`n"); $txtLog.ScrollToEnd() }
-        if ($script:sync.Done) {
-            $timer.Stop(); $code = $script:sync.ExitCode
-            switch ($code) {
-                0       { $txtStatus.Text = "Completed"; $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen }
-                4       { $txtStatus.Text = "No new reports"; $txtStatus.Foreground = [System.Windows.Media.Brushes]::Orange }
-                default { $txtStatus.Text = "Error (exit $code)"; $txtStatus.Foreground = [System.Windows.Media.Brushes]::Tomato }
+        try {
+            $line = ''
+            while ($script:sync.LogQueue.TryDequeue([ref]$line)) {
+                $txtLog.AppendText("$line`n"); $txtLog.ScrollToEnd()
             }
-            $txtLastRun.Text = "Last run: $(Get-Date -Format 'HH:mm:ss') | Exit: $code"
-            $txtRunStatus.Text = "Exit: $code"; $btnRun.IsEnabled = $true
-            Refresh-AllTabs
+            if ($script:sync.Done) {
+                $timer.Stop(); $code = $script:sync.ExitCode
+                switch ($code) {
+                    0       { $txtStatus.Text = "Completed"; $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen }
+                    4       { $txtStatus.Text = "No new reports"; $txtStatus.Foreground = [System.Windows.Media.Brushes]::Orange }
+                    default { $txtStatus.Text = "Error (exit $code)"; $txtStatus.Foreground = [System.Windows.Media.Brushes]::Tomato }
+                }
+                $txtLastRun.Text = "Last run: $(Get-Date -Format 'HH:mm:ss') | Exit: $code"
+                $txtRunStatus.Text = "Exit: $code"; $btnRun.IsEnabled = $true
+                # Drain any final log lines that arrived between the loop and Done flip
+                while ($script:sync.LogQueue.TryDequeue([ref]$line)) {
+                    $txtLog.AppendText("$line`n"); $txtLog.ScrollToEnd()
+                }
+                # Dispose the runspace + PowerShell instance to avoid leaks per Run
+                try { if ($script:enginePS -and $script:engineAsync) { $script:enginePS.EndInvoke($script:engineAsync) | Out-Null } } catch {}
+                try { if ($script:enginePS) { $script:enginePS.Dispose() } } catch {}
+                try { if ($script:engineRS) { $script:engineRS.Close(); $script:engineRS.Dispose() } } catch {}
+                $script:enginePS = $null; $script:engineRS = $null; $script:engineAsync = $null
+                Refresh-AllTabs
+            }
+        } catch {
+            # Don't propagate dispatcher-tick exceptions (e.g. controls disposed on shutdown)
+            try { $timer.Stop() } catch {}
         }
     })
     $timer.Start()
@@ -1278,15 +1347,24 @@ function Start-ModuleInstall {
         catch { $sync.LogQueue.Enqueue("[ERROR] Install failed: $_") }
         $sync.Done = $true
     }) | Out-Null
-    $ps.BeginInvoke() | Out-Null
+    $script:moduleAsync = $ps.BeginInvoke()
+    $script:modulePS = $ps; $script:moduleRS = $rs
     $t = New-Object System.Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromMilliseconds(300)
     $t.Add_Tick({
-        while ($script:sync.LogQueue.Count -gt 0) { $txtLog.AppendText("$($script:sync.LogQueue.Dequeue())`n") }
-        if ($script:sync.Done) {
-            $t.Stop(); $script:sync.Done = $false
-            if (Test-GraphModule) { $bannerModule.Visibility = [System.Windows.Visibility]::Collapsed; $btnRun.IsEnabled = Test-SettingsComplete }
-            $btnInstallModule.IsEnabled = $true
-        }
+        try {
+            $line = ''
+            while ($script:sync.LogQueue.TryDequeue([ref]$line)) { $txtLog.AppendText("$line`n") }
+            if ($script:sync.Done) {
+                $t.Stop(); $script:sync.Done = $false
+                while ($script:sync.LogQueue.TryDequeue([ref]$line)) { $txtLog.AppendText("$line`n") }
+                if (Test-GraphModule) { $bannerModule.Visibility = [System.Windows.Visibility]::Collapsed; $btnRun.IsEnabled = Test-SettingsComplete }
+                $btnInstallModule.IsEnabled = $true
+                try { if ($script:modulePS -and $script:moduleAsync) { $script:modulePS.EndInvoke($script:moduleAsync) | Out-Null } } catch {}
+                try { if ($script:modulePS) { $script:modulePS.Dispose() } } catch {}
+                try { if ($script:moduleRS) { $script:moduleRS.Close(); $script:moduleRS.Dispose() } } catch {}
+                $script:modulePS = $null; $script:moduleRS = $null; $script:moduleAsync = $null
+            }
+        } catch { try { $t.Stop() } catch {} }
     })
     $t.Start()
 }
@@ -1312,6 +1390,11 @@ function Show-ScheduleDialog {
 }
 
 function Test-CertExpiryUI {
+    # Reset state every call so a freshly regenerated cert clears the banner
+    # and re-enables Run without needing to relaunch the dashboard.
+    $bannerCert.Visibility = [System.Windows.Visibility]::Collapsed
+    if (Test-SettingsComplete -and (Test-GraphModule)) { $btnRun.IsEnabled = $true }
+
     $cfg = Get-AllSettings
     if ([string]::IsNullOrWhiteSpace($cfg.CertThumbprint)) { return }
     try {

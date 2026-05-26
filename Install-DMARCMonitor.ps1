@@ -97,11 +97,15 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     $pwsh7 = Get-Command pwsh -EA SilentlyContinue
     if ($pwsh7) {
         Write-Warn "Currently running PowerShell $($PSVersionTable.PSVersion). Relaunching in PS7..."
-        $argList = @("-ExecutionPolicy","Bypass","-File",("`"$($MyInvocation.MyCommand.Path)`""))
+        # Build the arg list as a plain string[]; PowerShell's external-process
+        # invoker handles quoting paths with spaces automatically. Adding our
+        # own literal " characters would double-wrap and break -File / arg
+        # parsing on the receiving side.
+        $argList = @("-ExecutionPolicy","Bypass","-File",$MyInvocation.MyCommand.Path)
         foreach ($k in $PSBoundParameters.Keys) {
             $v = $PSBoundParameters[$k]
             if ($v -is [switch]) { if ($v) { $argList += "-$k" } }
-            else { $argList += "-$k"; $argList += "`"$v`"" }
+            else { $argList += "-$k"; $argList += [string]$v }
         }
         & pwsh @argList
         exit $LASTEXITCODE
@@ -258,16 +262,23 @@ try {
 #region App registration
 Write-Step "Entra app registration"
 
-# Check for existing app
-$existingApp = Get-MgApplication -Filter "displayName eq '$AppDisplayName'" -EA SilentlyContinue
-if ($existingApp) {
-    Write-Warn "Existing app found: $($existingApp.DisplayName) (AppId: $($existingApp.AppId))"
+# Check for existing app. Escape single quotes for the OData filter and treat
+# a multi-result hit as an error so we don't pick the wrong app silently.
+$nameFiltered = $AppDisplayName.Replace("'","''")
+$existingApp = @(Get-MgApplication -Filter "displayName eq '$nameFiltered'" -EA SilentlyContinue)
+if ($existingApp.Count -gt 1) {
+    Write-Fail "Multiple Entra apps named '$AppDisplayName' exist. Delete the unwanted duplicate(s) and re-run, or use a unique -AppDisplayName."
+    exit 1
+}
+if ($existingApp.Count -eq 1) {
+    $existingAppObj = $existingApp[0]
+    Write-Warn "Existing app found: $($existingAppObj.DisplayName) (AppId: $($existingAppObj.AppId))"
     $reuseApp = Read-Host "Reuse this app registration? (Y/n)"
     if ($reuseApp -and $reuseApp -notmatch '^[Yy]') {
         Write-Fail "Aborted to avoid duplicate app."
         exit 1
     }
-    $app = $existingApp
+    $app = $existingAppObj
     Write-OK "Reusing app: $($app.AppId)"
 } else {
     # Build the requiredResourceAccess for Microsoft Graph

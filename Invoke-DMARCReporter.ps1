@@ -168,6 +168,21 @@ function Write-Log {
     Write-Output $entry
 }
 
+# Atomic JSON state writer - prevents corruption on crash mid-write or
+# concurrent runs (scheduled task + manual Run Now). Write to .tmp first,
+# then Move-Item which is atomic on NTFS.
+function Save-StateAtomic {
+    param([string]$Path, [object]$Object, [int]$Depth=10)
+    $tmp = "$Path.tmp"
+    try {
+        $Object | ConvertTo-Json -Depth $Depth | Set-Content -Path $tmp -Encoding UTF8 -EA Stop
+        Move-Item -Path $tmp -Destination $Path -Force -EA Stop
+    } catch {
+        Write-Log "State write failed for $(Split-Path $Path -Leaf): $_" -Level ERROR
+        Remove-Item -Path $tmp -Force -EA SilentlyContinue
+    }
+}
+
 $script:EvtSrc = "DMARCMonitor"
 function Write-AuditEvent {
     param([string]$Message, [string]$EntryType='Information', [int]$EventId=1000)
@@ -215,12 +230,33 @@ function Connect-ToGraph {
 
 #region Graph
 function Invoke-Graph {
-    param([string]$Uri, [string]$Method="GET", [hashtable]$Body=$null, [string]$OutFile=$null)
+    param([string]$Uri, [string]$Method="GET", [hashtable]$Body=$null, [string]$OutFile=$null, [int]$MaxRetries=4)
     $p = @{ Method=$Method; Uri=$Uri }
     if (-not $OutFile) { $p.OutputType = "PSObject" }
     if ($Body)    { $p.Body=$Body; $p.ContentType="application/json" }
     if ($OutFile) { $p.OutputFilePath=$OutFile }
-    return Invoke-MgGraphRequest @p
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try { return Invoke-MgGraphRequest @p } catch {
+            $status = $null
+            try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+            if ($attempt -le $MaxRetries) {
+                if ($status -eq 429 -or $status -eq 503) {
+                    $retryAfter = 30
+                    try { $h = $_.Exception.Response.Headers['Retry-After']; if ($h) { $retryAfter = [int]$h } } catch {}
+                    Write-Log "Graph $status; sleeping ${retryAfter}s (attempt $attempt/$MaxRetries): $Uri" -Level WARN
+                    Start-Sleep -Seconds $retryAfter; continue
+                } elseif ($status -eq 401) {
+                    Write-Log "Graph 401; reconnecting (attempt $attempt/$MaxRetries)" -Level WARN
+                    try { Disconnect-MgGraph -EA SilentlyContinue | Out-Null } catch {}
+                    try { $c = Test-CertExpiry; Connect-ToGraph -Cert $c; Remove-Variable c -EA SilentlyContinue } catch { throw }
+                    continue
+                }
+            }
+            throw
+        }
+    }
 }
 
 function Resolve-MailFolder {
@@ -267,10 +303,18 @@ function Expand-ReportAttachment {
             Get-ChildItem $DestDir -Recurse -File | ForEach-Object { $out.Add($_.FullName) }
         } elseif ($FilePath -match '\.gz$') {
             $outFile = Join-Path $DestDir ([System.IO.Path]::GetFileNameWithoutExtension($FilePath))
-            $ins = [System.IO.File]::OpenRead($FilePath)
-            $gz  = New-Object System.IO.Compression.GZipStream($ins,[System.IO.Compression.CompressionMode]::Decompress)
-            $ots = [System.IO.File]::Create($outFile)
-            $gz.CopyTo($ots); $ots.Dispose(); $gz.Dispose(); $ins.Dispose()
+            $ins = $null; $gz = $null; $ots = $null
+            try {
+                $ins = [System.IO.File]::OpenRead($FilePath)
+                $gz  = New-Object System.IO.Compression.GZipStream($ins,[System.IO.Compression.CompressionMode]::Decompress)
+                $ots = [System.IO.File]::Create($outFile)
+                $gz.CopyTo($ots)
+            } finally {
+                # Dispose in reverse order; null guards in case ctor threw
+                if ($ots) { try { $ots.Dispose() } catch {} }
+                if ($gz)  { try { $gz.Dispose()  } catch {} }
+                if ($ins) { try { $ins.Dispose() } catch {} }
+            }
             if ($outFile -match '\.zip$') { [System.IO.Compression.ZipFile]::ExtractToDirectory($outFile,$DestDir); Get-ChildItem $DestDir -Recurse -File | ForEach-Object { $out.Add($_.FullName) } }
             else { $out.Add($outFile) }
         } else {
@@ -280,7 +324,11 @@ function Expand-ReportAttachment {
             Copy-Item -Path $FilePath -Destination $outFile -Force
             $out.Add($outFile)
         }
-    } catch { Write-Log "Extraction failed: $(Split-Path $FilePath -Leaf) — $_" -Level WARN }
+    } catch {
+        Write-Log "Extraction failed: $(Split-Path $FilePath -Leaf) — $_" -Level WARN
+        # Best-effort cleanup of any partial output file
+        if ($outFile -and (Test-Path $outFile)) { Remove-Item -Path $outFile -Force -EA SilentlyContinue }
+    }
     return $out
 }
 
@@ -301,7 +349,11 @@ function ConvertFrom-DMARCReport {
     param([string]$FilePath)
     $records = [System.Collections.Generic.List[PSCustomObject]]::new()
     try {
-        [xml]$xml = Get-Content -Path $FilePath -Raw -Encoding UTF8
+        # Use XmlDocument.Load so the XML declaration's own encoding is honored
+        # (Yahoo/some Asian receivers send ISO-8859-1; forcing UTF-8 corrupts them).
+        $xml = New-Object System.Xml.XmlDocument
+        $xml.PreserveWhitespace = $false
+        $xml.Load($FilePath)
         $meta     = $xml.feedback.report_metadata
         $pol      = $xml.feedback.policy_published
         $dateBegin = [DateTimeOffset]::FromUnixTimeSeconds([long]$meta.date_range.begin).UtcDateTime.ToString('yyyy-MM-dd')
@@ -374,19 +426,44 @@ function ConvertFrom-DMARCForensicReport {
     param([string]$FilePath)
     $records = [System.Collections.Generic.List[PSCustomObject]]::new()
     try {
-        $content    = Get-Content -Path $FilePath -Raw -Encoding UTF8
+        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8
         if ([string]::IsNullOrWhiteSpace($content)) { return $records }
-        $arrival    = if ($content -match 'Arrival-Date:\s*(.+)')            { $Matches[1].Trim() } else { '' }
-        $source     = if ($content -match 'Source-IP:\s*(.+)')               { $Matches[1].Trim() } else { '' }
-        $returnPath = if ($content -match 'Return-Path:\s*<?([^>\r\n]+)>?')  { $Matches[1].Trim() } else { '' }
-        $headerFrom = if ($content -match 'From:\s*<?([^>\r\n]+)>?')         { $Matches[1].Trim() } else { '' }
-        $subject    = if ($content -match 'Subject:\s*(.+)')                 { $Matches[1].Trim() } else { '' }
-        $msgId      = if ($content -match 'Message-ID:\s*<?([^>\r\n]+)>?')   { $Matches[1].Trim() } else { '' }
-        $dkimResult = if ($content -match 'dkim=(\w+)')                      { $Matches[1].ToLower() } else { 'unknown' }
-        $spfResult  = if ($content -match 'spf=(\w+)')                       { $Matches[1].ToLower() } else { 'unknown' }
-        $dkimDomain = if ($content -match 'dkim=\w+.*?@([^\s;>]+)')          { $Matches[1].Trim() } else { '' }
-        $domain     = if ($content -match 'Reported-Domain:\s*(.+)')         { $Matches[1].Trim() } `
-                 elseif ($headerFrom -match '@(.+)$')                        { $Matches[1].Trim() } else { '' }
+
+        # Unfold RFC 5322 folded headers (continuation lines start with space/tab)
+        $content = $content -replace "\r?\n[ \t]+", " "
+
+        # Real ARF reports are multipart/report with three parts. The reported
+        # message's headers live in the third part (message/rfc822). When we
+        # can find it, use it for the From / Subject / Message-ID extraction so
+        # we don't accidentally read the outer envelope's headers.
+        $reportedPart = $content
+        $rfc822Match = [regex]::Match($content, '(?ims)Content-Type:\s*message/rfc822.*?\r?\n\r?\n(.+?)(?=\r?\n--|\Z)')
+        if ($rfc822Match.Success) {
+            $reportedPart = $rfc822Match.Groups[1].Value
+            # If the reported part is base64-encoded, decode it
+            $encMatch = [regex]::Match($content, '(?ims)Content-Type:\s*message/rfc822.*?Content-Transfer-Encoding:\s*base64')
+            if ($encMatch.Success) {
+                try {
+                    $b64 = ($reportedPart -replace '\s','')
+                    $reportedPart = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
+                } catch {}
+            }
+        }
+
+        # Feedback-report fields come from the human-readable / feedback-report
+        # parts, which live in $content (the whole thing). Reported-message
+        # headers come from $reportedPart.
+        $arrival    = if ($content      -match 'Arrival-Date:\s*(.+)')            { $Matches[1].Trim() } else { '' }
+        $source     = if ($content      -match 'Source-IP:\s*(.+)')               { $Matches[1].Trim() } else { '' }
+        $returnPath = if ($reportedPart -match 'Return-Path:\s*<?([^>\r\n]+)>?')  { $Matches[1].Trim() } else { '' }
+        $headerFrom = if ($reportedPart -match '(?im)^From:\s*<?([^>\r\n]+)>?')   { $Matches[1].Trim() } else { '' }
+        $subject    = if ($reportedPart -match '(?im)^Subject:\s*(.+)')           { $Matches[1].Trim() } else { '' }
+        $msgId      = if ($reportedPart -match 'Message-ID:\s*<?([^>\r\n]+)>?')   { $Matches[1].Trim() } else { '' }
+        $dkimResult = if ($reportedPart -match 'dkim=(\w+)')                      { $Matches[1].ToLower() } else { 'unknown' }
+        $spfResult  = if ($reportedPart -match 'spf=(\w+)')                       { $Matches[1].ToLower() } else { 'unknown' }
+        $dkimDomain = if ($reportedPart -match 'dkim=\w+.*?@([^\s;>]+)')          { $Matches[1].Trim() } else { '' }
+        $domain     = if ($content      -match 'Reported-Domain:\s*(.+)')         { $Matches[1].Trim() } `
+                 elseif ($headerFrom    -match '@(.+)$')                          { $Matches[1].Trim() } else { '' }
         $records.Add([PSCustomObject]@{
             ParsedAt=''; ArrivalDate=$arrival; Domain=$domain; SourceIP=$source
             ReturnPath=$returnPath; HeaderFrom=$headerFrom; Subject=$subject; MessageId=$msgId
@@ -553,7 +630,7 @@ function Find-CousinDomains {
         $cousinStateFile = Join-Path $stateDir "cousin-domains.json"
         $cs = if (Test-Path $cousinStateFile) { try { Get-Content $cousinStateFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{ detections=@() } } } else { [PSCustomObject]@{ detections=@() } }
         $cs.detections += $cousins | ForEach-Object { [PSCustomObject]@{ date=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); targetDomain=$_.TargetDomain; actualFrom=$_.ActualHeaderFrom; sourceIP=$_.SourceIP; distance=$_.Distance } }
-        $cs | ConvertTo-Json -Depth 10 | Set-Content $cousinStateFile -Encoding UTF8
+        Save-StateAtomic -Path $cousinStateFile -Object $cs -Depth 10
     }
 }
 #endregion
@@ -587,7 +664,7 @@ function Update-ReportingOrgCoverage {
         Write-Log "Reporting coverage: $domain — $orgs"
     }
 
-    $state | ConvertTo-Json -Depth 10 | Set-Content $covFile -Encoding UTF8
+    Save-StateAtomic -Path $covFile -Object $state -Depth 10
 }
 #endregion
 
@@ -654,7 +731,7 @@ function Get-ComplianceScore {
     elseif ($DNSHealth -and $DNSHealth.IssueCount -gt 0) { $details.Add("+0 $($DNSHealth.IssueCount) DNS/policy issue(s) need attention") }
 
     $score = [math]::Max(0,[math]::Min(100,$score))
-    return [PSCustomObject]@{ Domain=$domain; Score=$score; Policy=$policy; PassRate=0; Details=$details }
+    return [PSCustomObject]@{ Domain=$Domain; Score=$score; Policy=$policy; PassRate=0; Details=$details }
 }
 #endregion
 
@@ -665,10 +742,10 @@ function Get-EnforcementRecommendation {
     $invFile  = Join-Path $stateDir "source-inventory.json"
     $rptDir   = $reportDir
 
-    if (-not (Test-Path $progFile)) { return [PSCustomObject]@{ Domain=$domain; Recommendation='insufficient-data'; Details='No progression data yet. Run for at least 7 days.'; ReadyToAdvance=$false } }
+    if (-not (Test-Path $progFile)) { return [PSCustomObject]@{ Domain=$Domain; Recommendation='insufficient-data'; Details='No progression data yet. Run for at least 7 days.'; ReadyToAdvance=$false } }
 
-    $prog = $null; try { $prog = (Get-Content $progFile -Raw | ConvertFrom-Json).domains.($domain -replace '[^a-zA-Z0-9_]','_') } catch {}
-    if (-not $prog) { return [PSCustomObject]@{ Domain=$domain; Recommendation='insufficient-data'; Details='No data for this domain yet.'; ReadyToAdvance=$false } }
+    $prog = $null; try { $prog = (Get-Content $progFile -Raw | ConvertFrom-Json).domains.($Domain -replace '[^a-zA-Z0-9_]','_') } catch {}
+    if (-not $prog) { return [PSCustomObject]@{ Domain=$Domain; Recommendation='insufficient-data'; Details='No data for this domain yet.'; ReadyToAdvance=$false } }
 
     $currentPolicy = $prog.currentPolicy
 
@@ -677,9 +754,9 @@ function Get-EnforcementRecommendation {
     $allData = @()
     Get-ChildItem $rptDir -Filter "dmarc_aggregate_*.csv" -EA SilentlyContinue |
         Where-Object { $_.LastWriteTime -ge $cutoff } | Sort-Object Name |
-        ForEach-Object { try { $allData += Import-Csv $_.FullName | Where-Object { $_.Domain -eq $domain } } catch {} }
+        ForEach-Object { try { $allData += Import-Csv $_.FullName | Where-Object { $_.Domain -eq $Domain } } catch {} }
 
-    if ($allData.Count -eq 0) { return [PSCustomObject]@{ Domain=$domain; Recommendation='insufficient-data'; Details='Less than 14 days of data available.'; ReadyToAdvance=$false } }
+    if ($allData.Count -eq 0) { return [PSCustomObject]@{ Domain=$Domain; Recommendation='insufficient-data'; Details='Less than 14 days of data available.'; ReadyToAdvance=$false } }
 
     $pass     = ($allData | Where-Object { $_.DMARCResult -eq 'pass' } | Measure-Object MessageCount -Sum).Sum
     $fail     = ($allData | Where-Object { $_.DMARCResult -eq 'fail' } | Measure-Object MessageCount -Sum).Sum
@@ -691,7 +768,7 @@ function Get-EnforcementRecommendation {
     if (Test-Path $invFile) {
         try {
             $inv = Get-Content $invFile -Raw | ConvertFrom-Json
-            $inv.sources.PSObject.Properties | Where-Object { $_.Value.domain -eq $domain -and $_.Value.senderClass -eq 'Unknown' -and [int]$_.Value.totalFail -gt 0 } |
+            $inv.sources.PSObject.Properties | Where-Object { $_.Value.domain -eq $Domain -and $_.Value.senderClass -eq 'Unknown' -and [int]$_.Value.totalFail -gt 0 } |
                 ForEach-Object { $unknownFail += [int]$_.Value.totalFail }
         } catch {}
     }
@@ -731,7 +808,7 @@ function Get-EnforcementRecommendation {
     $summary = if ($ready -and $currentPolicy -ne 'reject') { "✅ READY to advance from p=$currentPolicy to p=$targetPolicy" } elseif ($currentPolicy -eq 'reject' -and $blockers.Count -eq 0) { "🏆 FULLY OPTIMIZED — p=reject at 100%" } else { "⏳ NOT READY — resolve $($blockers.Count) blocker(s) before advancing" }
 
     return [PSCustomObject]@{
-        Domain=$domain; CurrentPolicy=$currentPolicy; TargetPolicy=$targetPolicy
+        Domain=$Domain; CurrentPolicy=$currentPolicy; TargetPolicy=$targetPolicy
         PassRate=$passRate; TotalMessages=$total; UnknownFailing=$unknownFail
         Recommendation=$recommendation; Summary=$summary; ReadyToAdvance=$ready
         Reasons=($reasons -join '|'); Blockers=($blockers -join '|')
@@ -778,7 +855,7 @@ function Update-SourceInventory {
         }
     }
 
-    $inv | ConvertTo-Json -Depth 10 | Set-Content $invFile -Encoding UTF8
+    Save-StateAtomic -Path $invFile -Object $inv -Depth 10
 
     if ($EnableNewSenderAlerts -and $newSenders.Count -gt 0 -and $EnableAlerts) {
         Send-TeamsCard -Title "⚠️ New Email Sender(s) — $($newSenders.Count) new source(s)" -Color "D29922" -Facts (
@@ -819,7 +896,7 @@ function Test-VolumeAnomalies {
             $existing.lastUpdated = $today
         }
     }
-    $base | ConvertTo-Json -Depth 10 | Set-Content $bFile -Encoding UTF8
+    Save-StateAtomic -Path $bFile -Object $base -Depth 10
     if ($anomalies.Count -gt 0 -and $EnableAlerts) {
         Send-TeamsCard -Title "⚠️ Email Volume Anomaly" -Color "F85149" -Facts (
             $anomalies | ForEach-Object { @{"name"=$_.Domain;"value"="$($_.Volume) messages ($($_.Ratio)x normal avg $($_.Avg))"} }
@@ -867,7 +944,7 @@ function Test-AlertThresholds {
         }
         $alertState | Add-Member -NotePropertyName $alertKey -NotePropertyValue (Get-Date -Format 'o') -Force
     }
-    $alertState | ConvertTo-Json -Depth 5 | Set-Content $alertFile -Encoding UTF8
+    Save-StateAtomic -Path $alertFile -Object $alertState -Depth 5
 }
 #endregion
 
@@ -942,7 +1019,7 @@ function Invoke-DNSHealthCheck {
         else { Write-Log "DNS Health: $domain — clean" }
     }
 
-    $state | ConvertTo-Json -Depth 10 | Set-Content $stateFile -Encoding UTF8
+    Save-StateAtomic -Path $stateFile -Object $state -Depth 10
     if ($results.Count -gt 0) { $results | Export-Csv (Join-Path $reportDir "dns_health_$(Get-Date -Format 'yyyy-MM-dd').csv") -NoTypeInformation -Encoding UTF8 }
     if ($allIssues.Count -gt 0 -and $EnableAlerts) {
         Write-AuditEvent "DNS health issues: $($allIssues -join '; ')" -EntryType Warning -EventId 1013
@@ -982,7 +1059,7 @@ function Update-DomainProgression {
             $existing.currentPolicy = $policy; $existing.enforcementLevel = $level; $existing.adkim = $adkim; $existing.aspf = $aspf; $existing.pct = $pct; $existing.lastUpdated = $today
         }
     }
-    $state | ConvertTo-Json -Depth 10 | Set-Content $pFile -Encoding UTF8
+    Save-StateAtomic -Path $pFile -Object $state -Depth 10
 }
 #endregion
 
@@ -1016,7 +1093,7 @@ function Invoke-MTASTSCheck {
         $state.domains | Add-Member -NotePropertyName $safeKey -NotePropertyValue ([PSCustomObject]@{ domain=$domain; PolicyMode=$r.PolicyMode; Status=$r.Status; MaxAge=$r.MaxAge; MXHosts=$r.MXHosts; LastChecked=$today }) -Force
         $results.Add($r); Write-Log "MTA-STS: $domain — $($r.Status)"
     }
-    $state | ConvertTo-Json -Depth 10 | Set-Content $sf -Encoding UTF8
+    Save-StateAtomic -Path $sf -Object $state -Depth 10
     if ($results.Count -gt 0) { $results | Export-Csv (Join-Path $reportDir "mtasts_$(Get-Date -Format 'yyyy-MM-dd').csv") -NoTypeInformation -Encoding UTF8 }
 }
 #endregion
@@ -1048,7 +1125,7 @@ function Test-BIMIRecords {
         $state.domains | Add-Member -NotePropertyName $safeKey -NotePropertyValue ([PSCustomObject]@{ domain=$domain; Status=$r.Status; HasBIMI=$r.HasBIMI; HasVMC=$r.HasVMC; LogoURL=$r.LogoURL; LogoReachable=$r.LogoReachable; LastChecked=$today }) -Force
         $results.Add($r); Write-Log "BIMI: $domain — $($r.Status)"
     }
-    $state | ConvertTo-Json -Depth 10 | Set-Content $sf -Encoding UTF8
+    Save-StateAtomic -Path $sf -Object $state -Depth 10
     if ($results.Count -gt 0) { $results | Export-Csv (Join-Path $reportDir "bimi_$(Get-Date -Format 'yyyy-MM-dd').csv") -NoTypeInformation -Encoding UTF8 }
 }
 #endregion
@@ -1075,7 +1152,7 @@ function Update-DKIMDomainTracker {
         }
         if ($existing) { $existing.lastSeen = $today }
     }
-    $state | ConvertTo-Json -Depth 10 | Set-Content $sf -Encoding UTF8
+    Save-StateAtomic -Path $sf -Object $state -Depth 10
 }
 #endregion
 
@@ -1186,6 +1263,20 @@ try {
     $noDMARCId   = Resolve-MailFolder -Name "NoDMARCrua"
     $sourceId    = Resolve-MailFolder -Name $SourceFolder
 
+    # Load processed-report ledger for dedup. When a message is left in the
+    # Inbox after a parse error and gets retried next run, its previously-
+    # written ReportIds are skipped so the CSV doesn't double-count.
+    $processedReportsFile = Join-Path $stateDir "processed-reports.json"
+    $seenReportIds = @{}
+    if (Test-Path $processedReportsFile) {
+        try {
+            $data = Get-Content $processedReportsFile -Raw | ConvertFrom-Json
+            if ($data -and $data.reportIds) {
+                $data.reportIds.PSObject.Properties | ForEach-Object { $seenReportIds[$_.Name] = $true }
+            }
+        } catch { Write-Log "Could not load processed-reports ledger: $_" -Level WARN }
+    }
+
     Write-Log "Polling: $SourceFolder"
 
     $nextUri  = "$base/mailFolders/$sourceId/messages?`$filter=hasAttachments eq true&`$top=50&`$orderby=receivedDateTime desc"
@@ -1218,31 +1309,57 @@ try {
                     switch (Get-ReportType -FilePath $fp) {
                         'DMARC-RUA' {
                             $recs = ConvertFrom-DMARCReport -FilePath $fp
-                            if ($null -eq $recs -or $recs.Count -eq 0) { $parseError = $true; Write-Log "RUA parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN; break }
-                            $isDMARCRua = $true
-                            if ($DMARCFailedOnly) { $recs = $recs | Where-Object { $_.DMARCResult -eq 'fail' } }
-                            if ($DMARCPassedOnly) { $recs = $recs | Where-Object { $_.DMARCResult -eq 'pass' } }
-                            if ($FilterDomain)    { $recs = $recs | Where-Object { $_.Domain -eq $FilterDomain } }
-                            $recs | ForEach-Object { $dmarcRecs.Add($_) }; $dmarcParsed++
-                            $d = if ($recs -and $recs.Count -gt 0) { $recs[0].Domain } else { 'unknown' }
-                            Write-Log "RUA: $(Split-Path $fp -Leaf) | $d | $($recs.Count) records" -Level SUCCESS
+                            if ($null -eq $recs -or $recs.Count -eq 0) {
+                                $parseError = $true
+                                Write-Log "RUA parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN
+                            } else {
+                                $rid = $recs[0].ReportId
+                                if ($rid -and $seenReportIds.ContainsKey($rid)) {
+                                    $isDMARCRua = $true
+                                    Write-Log "Skipping already-ingested RUA report (ReportId=$rid)"
+                                } else {
+                                    $isDMARCRua = $true
+                                    if ($DMARCFailedOnly) { $recs = $recs | Where-Object { $_.DMARCResult -eq 'fail' } }
+                                    if ($DMARCPassedOnly) { $recs = $recs | Where-Object { $_.DMARCResult -eq 'pass' } }
+                                    if ($FilterDomain)    { $recs = $recs | Where-Object { $_.Domain -eq $FilterDomain } }
+                                    $recs | ForEach-Object { $dmarcRecs.Add($_) }; $dmarcParsed++
+                                    if ($rid) { $seenReportIds[$rid] = $true }
+                                    $d = if ($recs -and $recs.Count -gt 0) { $recs[0].Domain } else { 'unknown' }
+                                    Write-Log "RUA: $(Split-Path $fp -Leaf) | $d | $($recs.Count) records" -Level SUCCESS
+                                }
+                            }
                         }
                         'DMARC-RUF' {
                             $recs = ConvertFrom-DMARCForensicReport -FilePath $fp
-                            if ($null -eq $recs -or $recs.Count -eq 0) { $parseError = $true; Write-Log "RUF parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN; break }
-                            $isDMARCRua = $true
-                            $recs | ForEach-Object { $rufRecs.Add($_) }; $rufParsed++
-                            Write-Log "RUF: $(Split-Path $fp -Leaf)" -Level SUCCESS
+                            if ($null -eq $recs -or $recs.Count -eq 0) {
+                                $parseError = $true
+                                Write-Log "RUF parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN
+                            } else {
+                                $isDMARCRua = $true
+                                $recs | ForEach-Object { $rufRecs.Add($_) }; $rufParsed++
+                                Write-Log "RUF: $(Split-Path $fp -Leaf)" -Level SUCCESS
+                            }
                         }
                         'TLS-RPT'   {
                             $recs = ConvertFrom-TLSRPTReport -FilePath $fp
-                            if ($null -eq $recs -or $recs.Count -eq 0) { $parseError = $true; Write-Log "TLS-RPT parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN; break }
-                            $isDMARCRua = $true
-                            $recs | ForEach-Object { $tlsRecs.Add($_) }; $tlsParsed++
-                            $d = if ($recs -and $recs.Count -gt 0) { $recs[0].Domain } else { 'unknown' }
-                            Write-Log "TLS-RPT: $(Split-Path $fp -Leaf) | $d" -Level SUCCESS
+                            if ($null -eq $recs -or $recs.Count -eq 0) {
+                                $parseError = $true
+                                Write-Log "TLS-RPT parse produced no records: $(Split-Path $fp -Leaf)" -Level WARN
+                            } else {
+                                $rid = $recs[0].ReportId
+                                if ($rid -and $seenReportIds.ContainsKey($rid)) {
+                                    $isDMARCRua = $true
+                                    Write-Log "Skipping already-ingested TLS-RPT report (ReportId=$rid)"
+                                } else {
+                                    $isDMARCRua = $true
+                                    $recs | ForEach-Object { $tlsRecs.Add($_) }; $tlsParsed++
+                                    if ($rid) { $seenReportIds[$rid] = $true }
+                                    $d = if ($recs -and $recs.Count -gt 0) { $recs[0].Domain } else { 'unknown' }
+                                    Write-Log "TLS-RPT: $(Split-Path $fp -Leaf) | $d" -Level SUCCESS
+                                }
+                            }
                         }
-                        'UNKNOWN' { Write-Log "Unknown: $(Split-Path $fp -Leaf)" -Level WARN }
+                        'UNKNOWN' { Write-Log "Unknown content type: $(Split-Path $fp -Leaf)" -Level WARN }
                     }
                 }
                 Remove-Item $rawFile -Force -EA SilentlyContinue
@@ -1331,6 +1448,14 @@ try {
     }
 
     if ($dmarcRecs.Count -eq 0 -and $rufRecs.Count -eq 0 -and $tlsRecs.Count -eq 0 -and $exitCode -eq 0) { $exitCode = 4 }
+
+    # Persist the dedup ledger so the next run doesn't re-ingest these reports
+    if ($seenReportIds.Count -gt 0) {
+        Save-StateAtomic -Path $processedReportsFile -Object @{
+            updatedAt = (Get-Date).ToString('o')
+            reportIds = $seenReportIds
+        } -Depth 5
+    }
 
     Invoke-DailyDigest -DMARC $dmarcRecs -TLS $tlsRecs
     foreach ($filter in @("*.csv","*.log")) { Invoke-RetentionCleanup -Path $reportDir -Filter $filter -Days $RetentionDays }

@@ -41,7 +41,13 @@ $ErrorActionPreference = "Stop"
 $script:LookupCount = 0
 
 function Get-SPFNode {
-    param([string]$Domain, [int]$Depth=0)
+    param(
+        [string]$Domain,
+        [int]$Depth=0,
+        [System.Collections.Generic.HashSet[string]]$Visited
+    )
+
+    if (-not $Visited) { $Visited = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase) }
 
     $node = [PSCustomObject]@{
         Domain      = $Domain
@@ -55,11 +61,19 @@ function Get-SPFNode {
     }
 
     if ($Depth -gt 10) { $node.Error = "Max depth reached"; return $node }
+    if (-not $Visited.Add($Domain)) {
+        $node.Error = "SPF cycle detected at $Domain (already traversed in this chain)"
+        return $node
+    }
 
     try {
         $dns  = Resolve-DnsName -Name $Domain -Type TXT -EA Stop
-        $spf  = ($dns | Where-Object { $_.Strings -match 'v=spf1' } | Select-Object -First 1).Strings -join ''
-
+        $spfRec = $dns | Where-Object { $_.Strings -match 'v=spf1' } | Select-Object -First 1
+        if (-not $spfRec) {
+            $node.Error = "No SPF record found"
+            return $node
+        }
+        $spf = ($spfRec.Strings -join '')
         if ([string]::IsNullOrWhiteSpace($spf)) {
             $node.Error = "No SPF record found"
             return $node
@@ -76,13 +90,13 @@ function Get-SPFNode {
                 $incDomain = $Matches[1]
                 $script:LookupCount++; $node.NodeLookups++
                 $node.Mechanisms.Add([PSCustomObject]@{ Type='include'; Value=$incDomain; Qualifier=$qualifier; CountsAsLookup=$true })
-                if ($Depth -lt 10) { $node.Children.Add((Get-SPFNode -Domain $incDomain -Depth ($Depth+1))) }
+                if ($Depth -lt 10) { $node.Children.Add((Get-SPFNode -Domain $incDomain -Depth ($Depth+1) -Visited $Visited)) }
 
             } elseif ($mechTerm -match '^redirect=(.+)') {
                 $reDomain = $Matches[1]
                 $script:LookupCount++; $node.NodeLookups++; $node.IsRedirect = $true
                 $node.Mechanisms.Add([PSCustomObject]@{ Type='redirect'; Value=$reDomain; Qualifier=$qualifier; CountsAsLookup=$true })
-                if ($Depth -lt 10) { $node.Children.Add((Get-SPFNode -Domain $reDomain -Depth ($Depth+1))) }
+                if ($Depth -lt 10) { $node.Children.Add((Get-SPFNode -Domain $reDomain -Depth ($Depth+1) -Visited $Visited)) }
 
             } elseif ($mechTerm -match '^(a|mx|exists)') {
                 $script:LookupCount++; $node.NodeLookups++
@@ -164,6 +178,15 @@ function Get-DKIMKeys {
 #endregion
 
 #region HTML Rendering
+# Encode third-party text (domain names, mechanism values, error text)
+# before interpolating into HTML so a malicious upstream SPF can't break
+# the page layout or inject script.
+function HtmlEnc {
+    param([object]$s)
+    if ($null -eq $s) { return '' }
+    return [System.Web.HttpUtility]::HtmlEncode([string]$s)
+}
+
 function ConvertTo-SPFNodeHTML {
     param([PSCustomObject]$Node, [int]$TotalLookups)
 
@@ -187,26 +210,26 @@ function ConvertTo-SPFNodeHTML {
             default { '#3FB950' }
         }
         $icon = switch ($m.Type) {
-            'include'  { '↪' }
-            'redirect' { '→' }
-            'ip'       { '🌐' }
+            'include'  { '&#x21AA;' }
+            'redirect' { '&#x2192;' }
+            'ip'       { '&#x1F310;' }
             'a'        { 'A' }
             'mx'       { 'MX' }
-            'all'      { '✱' }
-            default    { '•' }
+            'all'      { '&#x2731;' }
+            default    { '&bull;' }
         }
         $lookupBadge = if ($m.CountsAsLookup) { "<span style='background:#21262D;color:#6E7681;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px'>DNS lookup</span>" } else { '' }
-        $mechHTML += "<div style='display:inline-block;background:#21262D;border-radius:4px;padding:2px 8px;margin:2px;font-size:11px;font-family:monospace'><span style='color:$mColor'>$icon $($m.Qualifier)$($m.Type)</span><span style='color:#8B949E'>:$($m.Value)</span>$lookupBadge</div>"
+        $mechHTML += "<div style='display:inline-block;background:#21262D;border-radius:4px;padding:2px 8px;margin:2px;font-size:11px;font-family:monospace'><span style='color:$mColor'>$icon $(HtmlEnc $m.Qualifier)$(HtmlEnc $m.Type)</span><span style='color:#8B949E'>:$(HtmlEnc $m.Value)</span>$lookupBadge</div>"
     }
 
-    $errHTML = if ($hasErr) { "<div style='color:#F85149;font-size:11px;margin-top:4px'>⚠ $($Node.Error)</div>" } else { '' }
-    $recordHTML = if ($Node.Record) { "<div style='font-family:monospace;font-size:10px;color:#6E7681;word-break:break-all;margin-top:4px;background:#0A0D13;padding:4px 8px;border-radius:3px'>$([System.Web.HttpUtility]::HtmlEncode($Node.Record))</div>" } else { '' }
+    $errHTML = if ($hasErr) { "<div style='color:#F85149;font-size:11px;margin-top:4px'>&#x26A0; $(HtmlEnc $Node.Error)</div>" } else { '' }
+    $recordHTML = if ($Node.Record) { "<div style='font-family:monospace;font-size:10px;color:#6E7681;word-break:break-all;margin-top:4px;background:#0A0D13;padding:4px 8px;border-radius:3px'>$(HtmlEnc $Node.Record)</div>" } else { '' }
 
     $html = @"
 <div style='margin-left:${indent}px;margin-bottom:6px'>
 <div style='background:$bgColor;border:1px solid #30363D;border-radius:6px;padding:10px 14px'>
 <div style='display:flex;align-items:center;margin-bottom:6px'>
-<span style='color:$domColor;font-weight:600;font-size:13px'>$($Node.Domain)</span>$lookupPill
+<span style='color:$domColor;font-weight:600;font-size:13px'>$(HtmlEnc $Node.Domain)</span>$lookupPill
 </div>
 <div>$mechHTML</div>
 $recordHTML$errHTML
@@ -236,20 +259,21 @@ function Build-SPFInspectorHTML {
         $rows = ($dkimKeys | ForEach-Object {
             $kColor = switch ($_.KeyStatus) { 'strong' { '#3FB950' } 'acceptable' { '#D29922' } 'WEAK' { '#F85149' } 'REVOKED' { '#F85149' } default { '#6E7681' } }
             $bg = if ($_.KeyStatus -eq 'WEAK' -or $_.KeyStatus -eq 'REVOKED') { '#2D1A1A' } else { '' }
-            "<tr style='background:$bg'><td style='padding:7px 10px;font-family:monospace;color:#79C0FF'>$($_.Selector)</td><td style='padding:7px 10px'>$($_.Algorithm)</td><td style='padding:7px 10px;color:$kColor;font-weight:600'>$($_.KeyStatus)</td><td style='padding:7px 10px;color:#6E7681'>~$($_.KeyLength) bits</td></tr>"
+            "<tr style='background:$bg'><td style='padding:7px 10px;font-family:monospace;color:#79C0FF'>$(HtmlEnc $_.Selector)</td><td style='padding:7px 10px'>$(HtmlEnc $_.Algorithm)</td><td style='padding:7px 10px;color:$kColor;font-weight:600'>$(HtmlEnc $_.KeyStatus)</td><td style='padding:7px 10px;color:#6E7681'>~$($_.KeyLength) bits</td></tr>"
         }) -join ''
         @"
 <div style='margin-top:20px'>
-<h3 style='color:#CDD9E5;font-size:13px;margin:0 0 10px'>DKIM Key Inspector — $($dkimKeys.Count) selector(s) found</h3>
+<h3 style='color:#CDD9E5;font-size:13px;margin:0 0 10px'>DKIM Key Inspector &#8212; $($dkimKeys.Count) selector(s) found</h3>
 <table style='width:100%;border-collapse:collapse;font-size:12px'>
 <tr style='background:#21262D'><th style='padding:7px 10px;text-align:left;color:#6E7681'>SELECTOR</th><th style='padding:7px 10px;text-align:left;color:#6E7681'>ALGORITHM</th><th style='padding:7px 10px;text-align:left;color:#6E7681'>STATUS</th><th style='padding:7px 10px;text-align:left;color:#6E7681'>KEY LENGTH</th></tr>
 $rows
 </table>
 </div>
 "@
-    } else { "<div style='color:#6E7681;font-size:12px;margin-top:16px'>No DKIM keys found for common selectors on $Domain.</div>" }
+    } else { "<div style='color:#6E7681;font-size:12px;margin-top:16px'>No DKIM keys found for common selectors on $(HtmlEnc $Domain).</div>" }
 
     $treeHTML = ConvertTo-SPFNodeHTML -Node $tree -TotalLookups $total
+    $domEnc = HtmlEnc $Domain
 
     return @"
 <!DOCTYPE html>
@@ -262,7 +286,7 @@ $rows
 <div style='max-width:900px'>
 <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:16px'>
 <div>
-<h2 style='color:#E6EDF3;font-size:16px;margin-bottom:4px'>SPF Chain Inspector — $Domain</h2>
+<h2 style='color:#E6EDF3;font-size:16px;margin-bottom:4px'>SPF Chain Inspector &#8212; $domEnc</h2>
 <div style='font-size:13px'>$status</div>
 </div>
 </div>
