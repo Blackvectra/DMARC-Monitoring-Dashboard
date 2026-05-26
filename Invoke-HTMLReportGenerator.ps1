@@ -49,6 +49,36 @@ function HtmlEncode {
     return $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;').Replace("'",'&#39;')
 }
 
+# JSON-string escape for values embedded inside a <script> tag. HtmlEncode
+# is wrong there: browsers don't decode entities in script context, and a
+# raw quote breaks the JSON. Also neutralizes "</" so a value can never
+# end the enclosing <script>.
+function JsonEscape {
+    param([string]$s)
+    if ($null -eq $s) { return '' }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($c in $s.ToCharArray()) {
+        switch ([int]$c) {
+            8  { [void]$sb.Append('\b') }
+            9  { [void]$sb.Append('\t') }
+            10 { [void]$sb.Append('\n') }
+            12 { [void]$sb.Append('\f') }
+            13 { [void]$sb.Append('\r') }
+            34 { [void]$sb.Append('\"') }
+            47 { [void]$sb.Append('\/') } # forward slash escaped so "</script>" is harmless
+            92 { [void]$sb.Append('\\') }
+            default {
+                if ([int]$c -lt 32 -or [int]$c -eq 0x2028 -or [int]$c -eq 0x2029) {
+                    [void]$sb.AppendFormat('\u{0:x4}', [int]$c)
+                } else {
+                    [void]$sb.Append($c)
+                }
+            }
+        }
+    }
+    return $sb.ToString()
+}
+
 function Get-SafeKey { param([string]$Domain) return ($Domain -replace '[^a-zA-Z0-9_]','_') }
 
 $reportDir = Join-Path $WorkingDir 'Reports'
@@ -107,10 +137,10 @@ foreach ($dom in $domains) {
         if ($t -gt 0) { [math]::Round(($p / $t) * 100, 1) } else { $null }
     }
     $pointsJson = ($points | ForEach-Object { if ($null -eq $_) { 'null' } else { $_ } }) -join ','
-    $domSafe = HtmlEncode $dom
-    $datasets += "{`"label`":`"$domSafe`",`"data`":[$pointsJson],`"borderColor`":`"$color`",`"backgroundColor`":`"${color}33`",`"tension`":0.3,`"fill`":false,`"pointRadius`":4,`"spanGaps`":true}"
+    $domJson = JsonEscape $dom
+    $datasets += "{`"label`":`"$domJson`",`"data`":[$pointsJson],`"borderColor`":`"$color`",`"backgroundColor`":`"${color}33`",`"tension`":0.3,`"fill`":false,`"pointRadius`":4,`"spanGaps`":true}"
 }
-$labelsJson   = ($dates | ForEach-Object { "`"$(HtmlEncode $_)`"" }) -join ','
+$labelsJson   = ($dates | ForEach-Object { "`"$(JsonEscape $_)`"" }) -join ','
 $datasetsJson = $datasets -join ','
 
 # Per-domain summary cards
