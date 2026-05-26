@@ -997,6 +997,23 @@ function Refresh-AllData {
         7 { Refresh-ProtocolStatus }
     }
 }
+
+# Called after a Run Now completes: refresh every tab so charts/data are ready
+# the moment the user clicks any tab, not only the one currently in front.
+function Refresh-AllTabs {
+    Update-Sidebar -Filter $txtDomainSearch.Text.Trim()
+    $cfg = Get-AllSettings
+    if ($cfg.MailboxAddress) { $txtMailboxLabel.Text = $cfg.MailboxAddress }
+    try { Refresh-Overview }       catch { $txtLog.AppendText("[WARN] Overview refresh: $_`n") }
+    try { Refresh-DMARCData }      catch { $txtLog.AppendText("[WARN] DMARC refresh: $_`n") }
+    try { Refresh-TLSData }        catch { $txtLog.AppendText("[WARN] TLS refresh: $_`n") }
+    try { Refresh-Sources }        catch { $txtLog.AppendText("[WARN] Sources refresh: $_`n") }
+    try { Refresh-DNSHealth }      catch { $txtLog.AppendText("[WARN] DNS refresh: $_`n") }
+    try { Refresh-RUFData }        catch { $txtLog.AppendText("[WARN] RUF refresh: $_`n") }
+    try { Refresh-TrendChart }     catch { $txtLog.AppendText("[WARN] Trend refresh: $_`n") }
+    try { Refresh-GeoMap }         catch { $txtLog.AppendText("[WARN] Geo refresh: $_`n") }
+    try { Refresh-ProtocolStatus } catch { $txtLog.AppendText("[WARN] Protocol refresh: $_`n") }
+}
 #endregion
 
 #region Settings dialog
@@ -1244,7 +1261,7 @@ function Start-EngineRun {
             }
             $txtLastRun.Text = "Last run: $(Get-Date -Format 'HH:mm:ss') | Exit: $code"
             $txtRunStatus.Text = "Exit: $code"; $btnRun.IsEnabled = $true
-            Refresh-AllData
+            Refresh-AllTabs
         }
     })
     $timer.Start()
