@@ -49,35 +49,8 @@ function HtmlEncode {
     return $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;').Replace("'",'&#39;')
 }
 
-# JSON-string escape for values embedded inside a <script> tag. HtmlEncode
-# is wrong there: browsers don't decode entities in script context, and a
-# raw quote breaks the JSON. Also neutralizes "</" so a value can never
-# end the enclosing <script>.
-function JsonEscape {
-    param([string]$s)
-    if ($null -eq $s) { return '' }
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($c in $s.ToCharArray()) {
-        switch ([int]$c) {
-            8  { [void]$sb.Append('\b') }
-            9  { [void]$sb.Append('\t') }
-            10 { [void]$sb.Append('\n') }
-            12 { [void]$sb.Append('\f') }
-            13 { [void]$sb.Append('\r') }
-            34 { [void]$sb.Append('\"') }
-            47 { [void]$sb.Append('\/') } # forward slash escaped so "</script>" is harmless
-            92 { [void]$sb.Append('\\') }
-            default {
-                if ([int]$c -lt 32 -or [int]$c -eq 0x2028 -or [int]$c -eq 0x2029) {
-                    [void]$sb.AppendFormat('\u{0:x4}', [int]$c)
-                } else {
-                    [void]$sb.Append($c)
-                }
-            }
-        }
-    }
-    return $sb.ToString()
-}
+# (JsonEscape removed - report no longer embeds JS / Chart.js. The
+# trend chart is now pure SVG; all text is HTML-encoded via HtmlEncode.)
 
 function Get-SafeKey { param([string]$Domain) return ($Domain -replace '[^a-zA-Z0-9_]','_') }
 
@@ -125,7 +98,7 @@ $passRate  = if ($totalMsgs -gt 0) { [math]::Round(($totalPass / $totalMsgs) * 1
 # Trend dataset per domain
 $dates = @($records | Select-Object -ExpandProperty ReportDate -Unique | Sort-Object)
 $colors = @('#3FB950','#79C0FF','#D29922','#F85149','#BC8CFF','#FFA657','#56D364','#FF7B72','#58A6FF','#E6EDF3')
-$datasets = @()
+$seriesData = [System.Collections.Generic.List[object]]::new()
 $ci = 0
 foreach ($dom in $domains) {
     $color = $colors[$ci % $colors.Count]; $ci++
@@ -136,12 +109,8 @@ foreach ($dom in $domains) {
         $t = [int]$p + [int]$f
         if ($t -gt 0) { [math]::Round(($p / $t) * 100, 1) } else { $null }
     }
-    $pointsJson = ($points | ForEach-Object { if ($null -eq $_) { 'null' } else { $_ } }) -join ','
-    $domJson = JsonEscape $dom
-    $datasets += "{`"label`":`"$domJson`",`"data`":[$pointsJson],`"borderColor`":`"$color`",`"backgroundColor`":`"${color}33`",`"tension`":0.3,`"fill`":false,`"pointRadius`":4,`"spanGaps`":true}"
+    $seriesData.Add([PSCustomObject]@{ Domain=$dom; Color=$color; Points=@($points) })
 }
-$labelsJson   = ($dates | ForEach-Object { "`"$(JsonEscape $_)`"" }) -join ','
-$datasetsJson = $datasets -join ','
 
 # Per-domain summary cards
 $domainCards = ''
@@ -233,42 +202,70 @@ $title       = if ($FilterDomain) { "DMARC Report: $FilterDomain" } else { "DMAR
 $titleSafe   = HtmlEncode $title
 $generated   = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 $overallColor= if ($passRate -ge 95) { '#3FB950' } elseif ($passRate -ge 80) { '#D29922' } else { '#F85149' }
-$hasChart    = ($dates.Count -gt 0 -and $datasets.Count -gt 0)
+$hasChart    = ($dates.Count -ge 2 -and $seriesData.Count -gt 0)
 
-$chartBlock = if ($hasChart) { @"
+# Pure inline SVG trend chart. No Chart.js CDN dependency - the whole
+# report renders offline / on air-gapped networks, which was the point of
+# not needing a 3rd-party tool. Pixel coords kept as [int] so non-en-US
+# locales don't emit "12,5" and break the SVG.
+function _svgEscape { param([string]$s) if ($null -eq $s) { return '' }; return $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;').Replace("'",'&#39;') }
+$chartBlock = if ($hasChart) {
+    $w = 980; $h = 420; $padL = 60; $padR = 28; $padT = 36; $padB = 70
+    $plotW = $w - $padL - $padR; $plotH = $h - $padT - $padB
+    $xStep = if ($dates.Count -gt 1) { $plotW / ($dates.Count - 1) } else { $plotW }
+
+    $gridLines = ''
+    foreach ($pct in 0,25,50,75,100) {
+        $y = [int]($padT + $plotH - ($pct / 100.0) * $plotH)
+        $gridLines += "<line x1='$padL' y1='$y' x2='$($padL + $plotW)' y2='$y' stroke='#21262D' stroke-width='1'/>"
+        $gridLines += "<text x='$($padL - 8)' y='$($y + 4)' fill='#6E7681' font-size='11' font-family='Segoe UI,Arial' text-anchor='end'>$pct%</text>"
+    }
+    $xLabels = ''
+    for ($i = 0; $i -lt $dates.Count; $i++) {
+        $x = [int]($padL + ($i * $xStep))
+        $xLabels += "<line x1='$x' y1='$($padT + $plotH)' x2='$x' y2='$($padT + $plotH + 4)' stroke='#30363D' stroke-width='1'/>"
+        $xLabels += "<text x='$x' y='$($padT + $plotH + 18)' fill='#6E7681' font-size='10' font-family='Segoe UI,Arial' text-anchor='middle'>$(_svgEscape $dates[$i])</text>"
+    }
+
+    $lines = ''; $legendItems = @()
+    foreach ($s in $seriesData) {
+        $pts = @()
+        for ($i = 0; $i -lt $s.Points.Count; $i++) {
+            $v = $s.Points[$i]
+            if ($null -ne $v) {
+                $x = [int]($padL + ($i * $xStep))
+                $y = [int]($padT + $plotH - ([double]$v / 100.0) * $plotH)
+                $pts += ,@($x, $y, $v)
+            }
+        }
+        if ($pts.Count -gt 0) {
+            $poly = ($pts | ForEach-Object { "$($_[0]),$($_[1])" }) -join ' '
+            $lines += "<polyline points='$poly' fill='none' stroke='$($s.Color)' stroke-width='2'/>"
+            foreach ($pt in $pts) {
+                $rateStr = ([double]$pt[2]).ToString('0.#', [cultureinfo]::InvariantCulture)
+                $lines += "<circle cx='$($pt[0])' cy='$($pt[1])' r='4' fill='$($s.Color)' stroke='#0D1117' stroke-width='1'><title>$(_svgEscape $s.Domain) &#8212; $rateStr%</title></circle>"
+            }
+        }
+        $legendItems += "<span style='display:inline-block;margin:0 14px 4px 0;font-size:12px;color:#CDD9E5'><span style='display:inline-block;width:10px;height:10px;background:$($s.Color);border-radius:50%;margin-right:6px;vertical-align:middle'></span>$(_svgEscape $s.Domain)</span>"
+    }
+
+    $legendHTML = ($legendItems -join '')
+    $cx = [int]($w / 2); $cy = [int]($padT + $plotH / 2)
+
+    @"
 <section class="panel">
   <h2>Pass Rate Trend (Last $Days Days)</h2>
-  <canvas id="trendChart" style="max-height:420px"></canvas>
+  <svg viewBox="0 0 $w $h" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-height:440px;display:block">
+    <text x="14" y="$cy" fill="#6E7681" font-size="11" font-family="Segoe UI,Arial" transform="rotate(-90 14 $cy)" text-anchor="middle">Pass Rate (%)</text>
+    <rect x="$padL" y="$padT" width="$plotW" height="$plotH" fill="none" stroke="#30363D" stroke-width="1"/>
+    $gridLines
+    $xLabels
+    $lines
+  </svg>
+  <div style="margin-top:8px;color:#CDD9E5;font-family:'Segoe UI',Arial">$legendHTML</div>
 </section>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script>
-(function(){
-  if (typeof Chart === 'undefined') {
-    document.getElementById('trendChart').outerHTML = '<div class="empty">Chart.js failed to load. Check your internet connection and reload this report.</div>';
-    return;
-  }
-  Chart.defaults.color = '#6E7681';
-  Chart.defaults.borderColor = '#21262D';
-  new Chart(document.getElementById('trendChart'), {
-    type: 'line',
-    data: { labels: [$labelsJson], datasets: [$datasetsJson] },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { position: 'bottom', labels: { color: '#CDD9E5', padding: 14, font: { family: 'Segoe UI, Arial', size: 12 } } },
-        tooltip: { backgroundColor: '#161B22', borderColor: '#30363D', borderWidth: 1, titleColor: '#E6EDF3', bodyColor: '#CDD9E5' }
-      },
-      scales: {
-        x: { ticks: { color: '#6E7681' }, grid: { color: '#21262D' } },
-        y: { min: 0, max: 100, ticks: { color: '#6E7681', callback: function(v){return v+'%';} }, grid: { color: '#21262D' }, title: { display: true, text: 'Pass Rate (%)', color: '#6E7681' } }
-      }
-    }
-  });
-})();
-</script>
-"@ } else { '<section class="panel"><h2>Pass Rate Trend</h2><div class="empty">No aggregate data in the last ' + $Days + ' days.</div></section>' }
+"@
+} else { '<section class="panel"><h2>Pass Rate Trend</h2><div class="empty">Need at least 2 days of aggregate data to plot a trend. Currently have ' + $dates.Count + ' day(s).</div></section>' }
 
 $html = @"
 <!DOCTYPE html>
