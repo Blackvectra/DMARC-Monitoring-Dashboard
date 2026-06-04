@@ -568,7 +568,7 @@ $markers
         <GridSplitter Grid.Column="1" Width="1" HorizontalAlignment="Stretch" Background="#21262D"/>
         <TabControl x:Name="tabMain" Grid.Column="2" Background="#0D1117" BorderThickness="0" Padding="0">
             <TabControl.Resources><Style TargetType="TabPanel"><Setter Property="Background" Value="#161B22"/></Style></TabControl.Resources>
-            <TabItem Header="  Overview  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbOverview" Background="#0D1117"/></TabItem>
+            <TabItem Header="  Overview  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbOverview"/></TabItem>
             <TabItem Header="  DMARC  " Style="{StaticResource TabStyle}">
                 <Grid Background="#0D1117">
                     <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -639,7 +639,7 @@ $markers
                     </DataGrid>
                 </Grid>
             </TabItem>
-            <TabItem Header="  Senders  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbSenders" Background="#0D1117"/></TabItem>
+            <TabItem Header="  Senders  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbSenders"/></TabItem>
             <TabItem Header="  Sources  " Style="{StaticResource TabStyle}">
                 <Grid Background="#0D1117">
                     <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="32"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -731,7 +731,7 @@ $markers
                         </DataGrid.Columns>
                     </DataGrid>
                     <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch" Background="#21262D" Cursor="SizeNS"/>
-                    <WebBrowser Grid.Row="3" x:Name="wbSPF" Background="#0D1117"/>
+                    <WebBrowser Grid.Row="3" x:Name="wbSPF"/>
                 </Grid>
             </TabItem>
             <TabItem Header="  Forensic  " Style="{StaticResource TabStyle}">
@@ -768,7 +768,7 @@ $markers
                             <Button x:Name="btnRefreshTrend" Content="Refresh" Style="{StaticResource Btn2}" Padding="10,4"/>
                         </StackPanel>
                     </Border>
-                    <WebBrowser Grid.Row="1" x:Name="wbTrend" Background="#0D1117"/>
+                    <WebBrowser Grid.Row="1" x:Name="wbTrend"/>
                     <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch" Background="#21262D" Cursor="SizeNS"/>
                     <Border Grid.Row="3" Background="#0A0D13" BorderBrush="#21262D" BorderThickness="0,1,0,0">
                         <Grid>
@@ -776,7 +776,7 @@ $markers
                             <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
                                 <TextBlock Text="GEOGRAPHIC SENDER MAP" Foreground="#6E7681" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" Margin="14,0"/>
                             </Border>
-                            <WebBrowser Grid.Row="1" x:Name="wbGeoMap" Background="#0D1117"/>
+                            <WebBrowser Grid.Row="1" x:Name="wbGeoMap"/>
                         </Grid>
                     </Border>
                 </Grid>
