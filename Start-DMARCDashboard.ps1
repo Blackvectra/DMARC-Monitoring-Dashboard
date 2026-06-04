@@ -1192,6 +1192,17 @@ $authBlock
     $tmp = [System.IO.Path]::GetTempPath() + "dmarcmonitor_auth.html"
     $page = "<!DOCTYPE html><html><head><meta http-equiv='X-UA-Compatible' content='IE=edge'><meta charset='UTF-8'><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;color:#E6EDF3;font-family:Segoe UI,Arial;padding:18px;overflow-y:auto;line-height:1.5}h3{margin-top:12px}code{background:#21262D;padding:1px 4px;border-radius:3px}</style></head><body>$body</body></html>"
     $page | Set-Content $tmp -Encoding UTF8
+    # Intercept clicks on the vendor website link so they open in the system
+    # default browser instead of clobbering the wizard's WebBrowser content.
+    # Allow only file:/// (the wizard's own page) and about:blank through.
+    $wbAuth.Add_Navigating({
+        param($s, $e)
+        $u = [string]$e.Uri
+        if ($u -and -not ($u.StartsWith('file:') -or $u.StartsWith('about:'))) {
+            $e.Cancel = $true
+            try { Start-Process $u } catch {}
+        }
+    })
     $wbAuth.Navigate("file:///$($tmp.Replace('\','/'))")
     $win.FindName('btnMarkApproved').Add_Click({
         Set-SourceApproval -Approved $true

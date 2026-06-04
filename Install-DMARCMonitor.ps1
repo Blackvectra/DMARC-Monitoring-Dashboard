@@ -531,21 +531,45 @@ Write-Info "Daily digest disabled — configure email in dashboard Settings."
 
 #region Verify cert auth
 Write-Step "Verifying certificate authentication"
-Write-Info "Waiting 15 seconds for admin consent propagation..."
-Start-Sleep -Seconds 15
+Write-Info "Admin consent for app permissions can take 1-10 minutes to propagate across Microsoft Graph."
+Write-Info "Retrying with backoff until it works (max ~7 minutes total)..."
 
-try {
-    Connect-MgGraph -TenantId $tenantId -ClientId $clientId -Certificate $cert -NoWelcome -EA Stop
-    $testMailbox = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/users/$MailboxAddress" -Method GET -EA Stop
-    if ($testMailbox.id) {
-        Write-OK "Cert auth verified — mailbox $MailboxAddress is accessible via Graph"
+# Schedule: 15s, 30s, 60s, 90s, 120s, 180s = total ~8 minutes
+$waits = @(15, 30, 60, 90, 120, 180)
+$verified = $false
+foreach ($i in 0..($waits.Count - 1)) {
+    $w = $waits[$i]
+    Write-Info "  Waiting $w seconds..."
+    Start-Sleep -Seconds $w
+    try {
+        Connect-MgGraph -TenantId $tenantId -ClientId $clientId -Certificate $cert -NoWelcome -EA Stop
+        $testMailbox = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/users/$MailboxAddress" -Method GET -EA Stop
+        if ($testMailbox.id) {
+            Write-OK "Cert auth verified - mailbox $MailboxAddress is accessible via Graph (attempt $($i+1)/$($waits.Count))"
+            $verified = $true
+        }
+        Disconnect-MgGraph -EA SilentlyContinue | Out-Null
+        if ($verified) { break }
+    } catch {
+        $status = $null
+        try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+        $isPropagation = ($status -eq 403 -or $status -eq 401 -or "$_" -match 'Authorization_RequestDenied|Insufficient privileges')
+        if ($isPropagation -and $i -lt ($waits.Count - 1)) {
+            Write-Info "  Still propagating (HTTP $status) - will retry."
+        } else {
+            Write-Warn "Cert auth test failed after $($i+1) attempts: $_"
+            Write-Warn "Try this command manually after a few more minutes:"
+            Write-Warn "  Connect-MgGraph -TenantId $tenantId -ClientId $clientId -Certificate (Get-Item Cert:\$CertStore\My\$($cert.Thumbprint))"
+            Write-Warn "If still failing after 15 minutes, check Entra portal -> $AppDisplayName -> API permissions"
+            break
+        }
+        try { Disconnect-MgGraph -EA SilentlyContinue | Out-Null } catch {}
     }
-    Disconnect-MgGraph -EA SilentlyContinue | Out-Null
-} catch {
-    Write-Warn "Cert auth test failed: $_"
-    Write-Warn "This is usually consent propagation. Try again in 30-60 seconds:"
-    Write-Warn "  Connect-MgGraph -TenantId $tenantId -ClientId $clientId -Certificate (Get-Item Cert:\$CertStore\My\$($cert.Thumbprint))"
-    Write-Warn "If still failing, check Entra portal → $AppDisplayName → API permissions"
+}
+if ($verified) {
+    Write-Info "Run Now in the dashboard should work immediately."
+} else {
+    Write-Info "The dashboard will still launch - try Run Now in 5-10 minutes."
 }
 #endregion
 
