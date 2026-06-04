@@ -447,12 +447,33 @@ try {
     Connect-ExchangeOnline -ShowBanner:$false -EA Stop
     Write-OK "Connected to Exchange Online"
 } catch {
-    Write-Fail "EXO connect failed: $_"
-    Write-Warn "You'll need to run this manually:"
-    Write-Warn "  Connect-ExchangeOnline"
-    Write-Warn "  New-ApplicationAccessPolicy -AppId '$clientId' -PolicyScopeGroupId '$MailboxAddress' -AccessRight RestrictAccess -Description 'DMARC Monitor'"
-    $proceed = Read-Host "Skip EXO policy and continue? (y/N)"
-    if ($proceed -notmatch '^[Yy]') { exit 1 }
+    $err = "$_"
+    # MSAL WAM broker null-deref - common in elevated PowerShell, certain
+    # RDP sessions, or when Web Account Manager is half-initialized.
+    # Workaround: fall back to device-code flow which skips the broker.
+    $isBrokerBug = ($err -match 'RuntimeBroker' -or $err -match 'Object reference not set')
+    if ($isBrokerBug) {
+        Write-Warn "EXO connect hit the MSAL WAM broker null-deref. Falling back to device-code flow..."
+        Write-Host ""
+        try {
+            Connect-ExchangeOnline -ShowBanner:$false -Device -EA Stop
+            Write-OK "Connected to Exchange Online (device-code flow)"
+        } catch {
+            Write-Fail "EXO device-code connect also failed: $_"
+            Write-Warn "Run these two commands manually after install completes:"
+            Write-Warn "  Connect-ExchangeOnline -Device"
+            Write-Warn "  New-ApplicationAccessPolicy -AppId '$clientId' -PolicyScopeGroupId '$MailboxAddress' -AccessRight RestrictAccess -Description 'DMARC Monitor'"
+            $proceed = Read-Host "Skip EXO policy and continue? (y/N)"
+            if ($proceed -notmatch '^[Yy]') { exit 1 }
+        }
+    } else {
+        Write-Fail "EXO connect failed: $err"
+        Write-Warn "Run these two commands manually after install completes:"
+        Write-Warn "  Connect-ExchangeOnline -Device"
+        Write-Warn "  New-ApplicationAccessPolicy -AppId '$clientId' -PolicyScopeGroupId '$MailboxAddress' -AccessRight RestrictAccess -Description 'DMARC Monitor'"
+        $proceed = Read-Host "Skip EXO policy and continue? (y/N)"
+        if ($proceed -notmatch '^[Yy]') { exit 1 }
+    }
 }
 
 if (Get-Command New-ApplicationAccessPolicy -EA SilentlyContinue) {
