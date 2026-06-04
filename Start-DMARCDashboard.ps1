@@ -639,25 +639,37 @@ $markers
                     </DataGrid>
                 </Grid>
             </TabItem>
+            <TabItem Header="  Senders  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbSenders" Background="#0D1117"/></TabItem>
             <TabItem Header="  Sources  " Style="{StaticResource TabStyle}">
                 <Grid Background="#0D1117">
-                    <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="32"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                     <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0">
                             <TextBlock Text="Status" Foreground="#6E7681" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"/>
                             <ComboBox x:Name="cmbSrcStatus" Width="160" Margin="0,0,12,0"><ComboBoxItem Content="All" IsSelected="True"/><ComboBoxItem Content="Unknown - Failing"/><ComboBoxItem Content="New Sender"/><ComboBoxItem Content="Unapproved"/></ComboBox>
+                            <TextBlock Text="Service" Foreground="#6E7681" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <ComboBox x:Name="cmbSrcService" Width="200" Margin="0,0,12,0"><ComboBoxItem Content="All Services" IsSelected="True"/></ComboBox>
                             <Button x:Name="btnApprove" Content="Approve" Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,4,0"/>
                             <Button x:Name="btnUnapprove" Content="Unapprove" Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,4,0"/>
+                            <Button x:Name="btnAuthorize" Content="Authorize..." Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,4,0"/>
                             <Button x:Name="btnRefreshSources" Content="Refresh" Style="{StaticResource Btn2}" Padding="10,4"/>
                             <TextBlock x:Name="txtSourceCount" Foreground="#484F58" FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0"/>
                         </StackPanel>
                     </Border>
-                    <DataGrid Grid.Row="1" x:Name="dgSources" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" CanUserReorderColumns="True" CanUserResizeColumns="True" CanUserSortColumns="True" EnableRowVirtualization="True" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                    <Border Grid.Row="1" Background="#0D1117" BorderBrush="#21262D" BorderThickness="0,0,0,1">
+                        <StackPanel x:Name="pnlSourceCrumb" Orientation="Horizontal" Margin="16,0" VerticalAlignment="Center">
+                            <TextBlock Text="Drill:" Foreground="#6E7681" FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <TextBlock x:Name="txtSourceCrumb" Foreground="#79C0FF" FontSize="11" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+                    <DataGrid Grid.Row="2" x:Name="dgSources" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" CanUserReorderColumns="True" CanUserResizeColumns="True" CanUserSortColumns="True" EnableRowVirtualization="True" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Domain" Binding="{Binding domain}" Width="160"/>
                             <DataGridTextColumn Header="Source IP" Binding="{Binding sourceIP}" Width="125"/>
-                            <DataGridTextColumn Header="Sender" Binding="{Binding senderClass}" Width="115"/>
-                            <DataGridTextColumn Header="Org" Binding="{Binding orgName}" Width="155"/>
+                            <DataGridTextColumn Header="Service" Binding="{Binding senderClass}" Width="155"/>
+                            <DataGridTextColumn Header="Category" Binding="{Binding serviceCategory}" Width="90"/>
+                            <DataGridTextColumn Header="Confidence" Binding="{Binding serviceConfidence}" Width="80"/>
+                            <DataGridTextColumn Header="Org (rDNS)" Binding="{Binding orgName}" Width="160"/>
                             <DataGridTextColumn Header="Country" Binding="{Binding country}" Width="65"/>
                             <DataGridTextColumn Header="Pass" Binding="{Binding totalPass}" Width="60"/>
                             <DataGridTextColumn Header="Fail" Binding="{Binding totalFail}" Width="60"/>
@@ -666,6 +678,29 @@ $markers
                             <DataGridTextColumn Header="Last Seen" Binding="{Binding lastSeen}" Width="95"/>
                             <DataGridTextColumn Header="New?" Binding="{Binding isNew}" Width="55"/>
                             <DataGridTextColumn Header="Approved" Binding="{Binding isApproved}" Width="75"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+            <TabItem Header="  DNS Drift  " Style="{StaticResource TabStyle}">
+                <Grid Background="#0D1117">
+                    <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0">
+                            <TextBlock Text="Record" Foreground="#6E7681" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <ComboBox x:Name="cmbDriftType" Width="150" Margin="0,0,12,0"><ComboBoxItem Content="All" IsSelected="True"/><ComboBoxItem Content="spf"/><ComboBoxItem Content="dmarc"/><ComboBoxItem Content="mta-sts"/><ComboBoxItem Content="bimi"/><ComboBoxItem Content="tls-rpt"/><ComboBoxItem Content="mx"/></ComboBox>
+                            <Button x:Name="btnRefreshDrift" Content="Refresh" Style="{StaticResource Btn2}" Padding="10,4"/>
+                            <TextBlock x:Name="txtDriftCount" Foreground="#484F58" FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0"/>
+                        </StackPanel>
+                    </Border>
+                    <DataGrid Grid.Row="1" x:Name="dgDrift" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" CanUserReorderColumns="True" CanUserResizeColumns="True" CanUserSortColumns="True" EnableRowVirtualization="True" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Detected" Binding="{Binding detectedAt}" Width="140"/>
+                            <DataGridTextColumn Header="Domain" Binding="{Binding domain}" Width="160"/>
+                            <DataGridTextColumn Header="Record" Binding="{Binding recordType}" Width="80"/>
+                            <DataGridTextColumn Header="Summary" Binding="{Binding summary}" Width="280"/>
+                            <DataGridTextColumn Header="Old" Binding="{Binding oldValue}" Width="*"/>
+                            <DataGridTextColumn Header="New" Binding="{Binding newValue}" Width="*"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Grid>
@@ -802,7 +837,7 @@ $markers
 $reader = New-Object System.Xml.XmlNodeReader $mainXaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-foreach ($n in @('bannerModule','bannerCert','txtCertBanner','btnInstallModule','btnRun','btnRefresh','btnSettings','btnSchedule','btnExport','btnGenReport','btnClearLog','txtLog','txtStatus','txtLastRun','txtRunStatus','txtMailboxLabel','txtPSBadge','lbDomains','txtDomainSearch','tabMain','wbOverview','wbTrend','wbGeoMap','wbSPF','dgDMARC','cmbDMARCResult','cmbFailReason','txtDMARCIP','btnDMARCFilter','btnDMARCReset','txtDMARCCount','dgTLS','cmbTLSResult','btnTLSFilter','btnTLSReset','txtTLSCount','dgSources','cmbSrcStatus','btnApprove','btnUnapprove','btnRefreshSources','txtSourceCount','dgDNS','btnRefreshDNS','btnInspectSPF','txtDNSCount','dgRUF','btnRefreshRUF','txtRUFCount','cmbTrendPeriod','btnRefreshTrend','dgProtocol','btnRefreshProtocol','txtProtocolCount')) {
+foreach ($n in @('bannerModule','bannerCert','txtCertBanner','btnInstallModule','btnRun','btnRefresh','btnSettings','btnSchedule','btnExport','btnGenReport','btnClearLog','txtLog','txtStatus','txtLastRun','txtRunStatus','txtMailboxLabel','txtPSBadge','lbDomains','txtDomainSearch','tabMain','wbOverview','wbSenders','wbTrend','wbGeoMap','wbSPF','dgDMARC','cmbDMARCResult','cmbFailReason','txtDMARCIP','btnDMARCFilter','btnDMARCReset','txtDMARCCount','dgTLS','cmbTLSResult','btnTLSFilter','btnTLSReset','txtTLSCount','dgSources','cmbSrcStatus','cmbSrcService','btnApprove','btnUnapprove','btnAuthorize','btnRefreshSources','txtSourceCount','txtSourceCrumb','dgDNS','btnRefreshDNS','btnInspectSPF','txtDNSCount','dgRUF','btnRefreshRUF','txtRUFCount','cmbTrendPeriod','btnRefreshTrend','dgProtocol','btnRefreshProtocol','txtProtocolCount','dgDrift','cmbDriftType','btnRefreshDrift','txtDriftCount')) {
     Set-Variable -Name $n -Value $window.FindName($n) -Scope Script
 }
 $txtPSBadge.Text = "PS$($script:PSVer)"
@@ -823,6 +858,7 @@ function Set-WBSilent {
     })
 }
 Set-WBSilent $wbOverview
+Set-WBSilent $wbSenders
 Set-WBSilent $wbTrend
 Set-WBSilent $wbGeoMap
 Set-WBSilent $wbSPF
@@ -875,20 +911,34 @@ function Refresh-TLSData {
     $table = Load-CSVData -Pattern "tlsrpt_aggregate_*.csv" -DomainFilter $script:SelectedDomain -ResultFilter $result
     $dgTLS.ItemsSource = $table.DefaultView; $txtTLSCount.Text = "$($table.Rows.Count) records"
 }
+# Drill-through state shared between the Senders tab and the Sources tab.
+# Clicking a service card on Senders sets $script:DrillService; the Sources
+# tab honors it and shows the breadcrumb at the top.
+$script:DrillService = $null
+
 function Refresh-Sources {
     $cfg = Get-AllSettings; if ([string]::IsNullOrWhiteSpace($cfg.WorkingDir)) { return }
     $invFile = Join-Path $cfg.WorkingDir "State\source-inventory.json"
     $table = New-Object System.Data.DataTable
-    @('domain','sourceIP','senderClass','orgName','country','totalPass','totalFail','totalMessages','firstSeen','lastSeen','isNew','isApproved') | ForEach-Object { $table.Columns.Add($_) | Out-Null }
+    @('domain','sourceIP','senderClass','serviceCategory','serviceConfidence','orgName','country','totalPass','totalFail','totalMessages','firstSeen','lastSeen','isNew','isApproved') | ForEach-Object { $table.Columns.Add($_) | Out-Null }
+    $allServices = New-Object System.Collections.Generic.HashSet[string]
     if (Test-Path $invFile) {
         try {
             $inv = Get-Content $invFile -Raw | ConvertFrom-Json
             $sf = if ($cmbSrcStatus.SelectedItem) { ($cmbSrcStatus.SelectedItem).Content } else { "All" }
-            $sources = $inv.sources.PSObject.Properties | ForEach-Object { $_.Value }
+            $svcFilter = if ($cmbSrcService.SelectedItem) { ($cmbSrcService.SelectedItem).Content } else { "All Services" }
+            $sources = @($inv.sources.PSObject.Properties | ForEach-Object { $_.Value })
+            foreach ($s in $sources) {
+                $cls = if ($s.senderClass) { [string]$s.senderClass } else { 'Unknown' }
+                if ($cls) { [void]$allServices.Add($cls) }
+            }
             if ($script:SelectedDomain -ne "All Domains") { $sources = $sources | Where-Object { $_.domain -eq $script:SelectedDomain } }
             if ($sf -eq "Unknown - Failing") { $sources = $sources | Where-Object { $_.senderClass -eq 'Unknown' -and [int]$_.totalFail -gt 0 } }
             if ($sf -eq "New Sender")        { $sources = $sources | Where-Object { $_.isNew -eq $true } }
             if ($sf -eq "Unapproved")        { $sources = $sources | Where-Object { $_.isApproved -ne $true } }
+            # Drill-through filter from Senders tab takes precedence over the dropdown
+            $effectiveSvc = if ($script:DrillService) { $script:DrillService } elseif ($svcFilter -and $svcFilter -ne 'All Services') { $svcFilter } else { $null }
+            if ($effectiveSvc) { $sources = $sources | Where-Object { ([string]$_.senderClass) -eq $effectiveSvc } }
             foreach ($s in $sources) {
                 $dr = $table.NewRow()
                 foreach ($col in $table.Columns) { try { $dr[$col.ColumnName] = $s.($col.ColumnName) } catch {} }
@@ -896,7 +946,259 @@ function Refresh-Sources {
             }
         } catch {}
     }
-    $dgSources.ItemsSource = $table.DefaultView; $txtSourceCount.Text = "$($table.Rows.Count) sources"
+    $dgSources.ItemsSource = $table.DefaultView
+    $txtSourceCount.Text = "$($table.Rows.Count) sources"
+
+    # Repopulate the Service filter dropdown to match observed services
+    $current = if ($cmbSrcService.SelectedItem) { ($cmbSrcService.SelectedItem).Content } else { "All Services" }
+    $cmbSrcService.Items.Clear()
+    $allItem = New-Object System.Windows.Controls.ComboBoxItem; $allItem.Content = "All Services"; $cmbSrcService.Items.Add($allItem) | Out-Null
+    foreach ($svc in ($allServices | Sort-Object)) {
+        $i = New-Object System.Windows.Controls.ComboBoxItem; $i.Content = $svc
+        $cmbSrcService.Items.Add($i) | Out-Null
+        if ($svc -eq $current) { $cmbSrcService.SelectedItem = $i }
+    }
+    if (-not $cmbSrcService.SelectedItem) { $cmbSrcService.SelectedItem = $allItem }
+
+    # Breadcrumb
+    $crumb = @()
+    if ($script:SelectedDomain -and $script:SelectedDomain -ne 'All Domains') { $crumb += $script:SelectedDomain } else { $crumb += 'All Domains' }
+    if ($script:DrillService) { $crumb += $script:DrillService }
+    elseif ($cmbSrcService.SelectedItem -and ($cmbSrcService.SelectedItem).Content -ne 'All Services') { $crumb += ($cmbSrcService.SelectedItem).Content }
+    $txtSourceCrumb.Text = ($crumb -join '  >  ')
+}
+# Sender catalog loader (read by Senders panel + Authorization Wizard)
+$script:LoadedCatalog = $null
+function Get-LoadedSenderCatalog {
+    if ($script:LoadedCatalog) { return $script:LoadedCatalog }
+    $catFile = Join-Path $PSScriptRoot 'sender-catalog.json'
+    if (Test-Path $catFile) {
+        try { $script:LoadedCatalog = Get-Content $catFile -Raw -Encoding UTF8 | ConvertFrom-Json }
+        catch { $script:LoadedCatalog = [PSCustomObject]@{ services=@() } }
+    } else { $script:LoadedCatalog = [PSCustomObject]@{ services=@() } }
+    return $script:LoadedCatalog
+}
+
+function Get-CatalogServiceById {
+    param([string]$Id)
+    if (-not $Id -or $Id -eq 'unknown') { return $null }
+    $cat = Get-LoadedSenderCatalog
+    return ($cat.services | Where-Object { $_.id -eq $Id } | Select-Object -First 1)
+}
+
+function New-SendersHTML {
+    param([string]$Domain)
+    $cfg = Get-AllSettings
+    if ([string]::IsNullOrWhiteSpace($cfg.WorkingDir)) {
+        return "<html><body style='background:#0D1117;color:#6E7681;font-family:Segoe UI;padding:20px'>Configure settings first.</body></html>"
+    }
+    $invFile = Join-Path $cfg.WorkingDir "State\source-inventory.json"
+    if (-not (Test-Path $invFile)) {
+        return "<html><body style='background:#0D1117;color:#6E7681;font-family:Segoe UI;padding:20px'>No sender inventory yet - click Run Now to ingest reports.</body></html>"
+    }
+    $inv = $null; try { $inv = Get-Content $invFile -Raw | ConvertFrom-Json } catch { return "<html><body style='background:#0D1117;color:#F85149;font-family:Segoe UI;padding:20px'>source-inventory.json parse error.</body></html>" }
+    $rows = @($inv.sources.PSObject.Properties | ForEach-Object { $_.Value })
+    if ($Domain -and $Domain -ne 'All Domains') { $rows = $rows | Where-Object { $_.domain -eq $Domain } }
+
+    # Group by service name (senderClass)
+    $groups = $rows | Group-Object senderClass | Sort-Object { ($_.Group | Measure-Object totalMessages -Sum).Sum } -Descending
+    if (-not $groups -or $groups.Count -eq 0) {
+        return "<html><body style='background:#0D1117;color:#6E7681;font-family:Segoe UI;padding:20px'>No senders observed for $(HtmlEnc $Domain) yet.</body></html>"
+    }
+
+    $totalMsgs = ($rows | Measure-Object totalMessages -Sum).Sum
+    $totalPass = ($rows | Measure-Object totalPass -Sum).Sum
+    $portfolioRate = if ($totalMsgs -gt 0) { [math]::Round(($totalPass/$totalMsgs)*100,1) } else { 0 }
+    $rateStr = (Inv $portfolioRate)
+
+    $catColors = @{
+        'transactional'='#79C0FF'; 'marketing'='#BC8CFF'; 'productivity'='#3FB950'
+        'sales'='#FFA657'; 'support'='#56D364'; 'security'='#F85149'; 'alerts'='#D29922'
+        'crm'='#58A6FF'; 'ecommerce'='#FF7B72'; 'consumer'='#6E7681'; 'relay'='#8B949E'
+    }
+
+    $cards = ''
+    foreach ($g in $groups) {
+        $svcName = $g.Name; if (-not $svcName) { $svcName = 'Unknown' }
+        $msgs = ($g.Group | Measure-Object totalMessages -Sum).Sum
+        $pass = ($g.Group | Measure-Object totalPass -Sum).Sum
+        $fail = ($g.Group | Measure-Object totalFail -Sum).Sum
+        $rate = if ($msgs -gt 0) { [math]::Round(($pass/$msgs)*100,1) } else { 0 }
+        $ips  = ($g.Group | Select-Object -ExpandProperty sourceIP -Unique).Count
+        $unappr = @($g.Group | Where-Object { -not $_.isApproved }).Count
+        $first = ($g.Group[0])
+        $cat   = if ($first.serviceCategory) { [string]$first.serviceCategory } else { '' }
+        $vendor = if ($first.serviceVendor) { [string]$first.serviceVendor } else { '' }
+        $conf  = if ($first.serviceConfidence) { [string]$first.serviceConfidence } else { 'none' }
+        $rateColor = if ($rate -ge 95) { '#3FB950' } elseif ($rate -ge 80) { '#D29922' } else { '#F85149' }
+        $catColor  = if ($cat -and $catColors.ContainsKey($cat)) { $catColors[$cat] } else { '#6E7681' }
+        $confBadge = switch ($conf) { 'high' { "<span style='background:#0E2F1A;color:#3FB950;padding:1px 6px;border-radius:3px;font-size:9px;margin-left:6px'>HIGH</span>" } 'medium' { "<span style='background:#2F2210;color:#D29922;padding:1px 6px;border-radius:3px;font-size:9px;margin-left:6px'>MED</span>" } default { "<span style='background:#2F1010;color:#F85149;padding:1px 6px;border-radius:3px;font-size:9px;margin-left:6px'>UNCLASSIFIED</span>" } }
+        $vendorLine = if ($vendor -and $vendor -ne $svcName) { "<div style='font-size:11px;color:#6E7681;margin-bottom:6px'>by $(HtmlEnc $vendor)</div>" } else { '' }
+        $unapprBadge = if ($unappr -gt 0 -and $svcName -ne 'Unknown') { "<span style='background:#2F2210;color:#D29922;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px'>$unappr unapproved</span>" } elseif ($svcName -eq 'Unknown') { "<span style='background:#2F1010;color:#F85149;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:6px'>review</span>" } else { '' }
+        $drillUrl = "dmarc:drill?service=$([uri]::EscapeDataString($svcName))"
+        $cards += @"
+<div style='background:#161B22;border:1px solid #30363D;border-radius:8px;padding:16px;margin:8px;width:300px;display:inline-block;vertical-align:top'>
+  <div style='display:flex;align-items:center;margin-bottom:4px'>
+    <span style='display:inline-block;width:8px;height:8px;background:$catColor;border-radius:50%;margin-right:8px'></span>
+    <a href='$drillUrl' style='color:#E6EDF3;text-decoration:none;font-weight:600;font-size:14px'>$(HtmlEnc $svcName)</a>
+    $confBadge
+  </div>
+  $vendorLine
+  <div style='display:flex;justify-content:space-between;align-items:baseline;margin-top:10px'>
+    <span style='color:$rateColor;font-size:24px;font-weight:600'>$(Inv $rate)%</span>
+    <span style='color:#6E7681;font-size:11px'>$msgs msgs / $ips IPs</span>
+  </div>
+  <div style='font-size:11px;color:#6E7681;margin-top:6px'>$(if ($cat) { "$(HtmlEnc $cat) &middot; " }) pass $pass &middot; fail $fail $unapprBadge</div>
+</div>
+"@
+    }
+
+    $head = "<div style='color:#6E7681;font-size:11px;margin-bottom:8px;font-weight:600'>SENDING SERVICES &mdash; $(HtmlEnc $Domain)</div><div style='color:#E6EDF3;font-size:14px;margin-bottom:14px'>$($groups.Count) service(s) sending mail. Portfolio pass rate: <span style='color:#3FB950;font-weight:600'>$rateStr%</span>. Click a card to drill into the Sources tab filtered to that service.</div>"
+
+    return @"
+<!DOCTYPE html><html><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8">
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;color:#E6EDF3;font-family:'Segoe UI',Arial;padding:14px;overflow-y:auto}a{cursor:pointer}</style></head>
+<body>
+$head
+<div>$cards</div>
+</body></html>
+"@
+}
+
+function Refresh-Senders {
+    try {
+        $html = New-SendersHTML -Domain $script:SelectedDomain
+        $tmp = [System.IO.Path]::GetTempPath() + "dmarcmonitor_senders.html"
+        $html | Set-Content $tmp -Encoding UTF8
+        $wbSenders.Navigate("file:///$($tmp.Replace('\','/'))")
+    } catch { $txtLog.AppendText("[WARN] Senders: $_`n") }
+}
+
+function Refresh-Drift {
+    $cfg = Get-AllSettings; if ([string]::IsNullOrWhiteSpace($cfg.WorkingDir)) { return }
+    $driftFile = Join-Path $cfg.WorkingDir "State\dns-drift.json"
+    $table = New-Object System.Data.DataTable
+    @('detectedAt','domain','recordType','summary','oldValue','newValue') | ForEach-Object { $table.Columns.Add($_) | Out-Null }
+    if (Test-Path $driftFile) {
+        try {
+            $state = Get-Content $driftFile -Raw | ConvertFrom-Json
+            $events = @($state.events)
+            if ($script:SelectedDomain -ne "All Domains") { $events = $events | Where-Object { $_.domain -eq $script:SelectedDomain } }
+            $rt = if ($cmbDriftType.SelectedItem) { ($cmbDriftType.SelectedItem).Content } else { "All" }
+            if ($rt -and $rt -ne 'All') { $events = $events | Where-Object { $_.recordType -eq $rt } }
+            # Newest first
+            $events = $events | Sort-Object { [datetime]$_.detectedAt } -Descending
+            foreach ($e in $events) {
+                $dr = $table.NewRow()
+                foreach ($col in $table.Columns) { try { $dr[$col.ColumnName] = $e.($col.ColumnName) } catch {} }
+                $table.Rows.Add($dr)
+            }
+        } catch {}
+    }
+    $dgDrift.ItemsSource = $table.DefaultView
+    $txtDriftCount.Text = if ($table.Rows.Count -gt 0) { "$($table.Rows.Count) drift events" } else { "No drift events yet - history builds over successive runs" }
+}
+
+function Show-AuthorizationWizard {
+    $sel = $dgSources.SelectedItem
+    if (-not $sel) { [System.Windows.MessageBox]::Show("Select a sender row first.", "No Selection", "OK", "Information") | Out-Null; return }
+    $domain   = [string]$sel.Row["domain"]
+    $ip       = [string]$sel.Row["sourceIP"]
+    $service  = [string]$sel.Row["senderClass"]
+    $category = [string]$sel.Row["serviceCategory"]
+    $confidence = [string]$sel.Row["serviceConfidence"]
+
+    # Look up by service name (catalog uses name; sourceInventory stores it)
+    $cat = Get-LoadedSenderCatalog
+    $svc = $cat.services | Where-Object { $_.name -eq $service } | Select-Object -First 1
+
+    $headerColor = if ($svc) { '#3FB950' } else { '#D29922' }
+    $headerText  = if ($svc) { "Authorize $($svc.name) for $domain" } else { "Unknown sender for $domain" }
+    $body = ""
+    if ($svc) {
+        $spfBlock = if ($svc.spfInclude) {
+            "<div style='font-family:Consolas,monospace;background:#0D1117;border:1px solid #30363D;border-radius:4px;padding:10px;color:#E6EDF3;font-size:12px'>v=spf1 include:$($svc.spfInclude) -all</div>" +
+            "<div style='font-size:11px;color:#6E7681;margin-top:4px'>Append <code style='color:#79C0FF'>include:$($svc.spfInclude)</code> to your existing SPF TXT at the apex of <b>$domain</b>.</div>"
+        } else {
+            "<div style='font-size:12px;color:#D29922'>No SPF include published by this service. They likely send through your connected mailbox (Salesloft / Apollo / Mixmax pattern). Authentication uses your existing DKIM.</div>"
+        }
+        $dkimBlock = if ($svc.dkimCnameTemplate) {
+            $tmpl = ($svc.dkimCnameTemplate -replace '\{your-domain\}', $domain) -replace '\{your-domain-hyphens\}', ($domain -replace '\.','-')
+            # Preserve newlines for readability but escape the rest of the
+            # template (catalog data could in theory be hostile).
+            $tmplEnc = (HtmlEnc $tmpl) -replace "`r?`n", "<br/>"
+            "<div style='font-family:Consolas,monospace;background:#0D1117;border:1px solid #30363D;border-radius:4px;padding:10px;color:#E6EDF3;font-size:12px;white-space:pre-wrap'>$tmplEnc</div>" +
+            "<div style='font-size:11px;color:#6E7681;margin-top:4px'>Fill in placeholders (account-id, tenant, token) from your $(HtmlEnc $svc.name) admin console.</div>"
+        } elseif ($svc.dkimSelectors -and $svc.dkimSelectors.Count -gt 0) {
+            $sels = HtmlEnc ($svc.dkimSelectors -join ', ')
+            "<div style='font-size:12px;color:#CDD9E5'>Known selectors: <code style='color:#79C0FF'>$sels</code>. Look for them in $(HtmlEnc $svc.name)'s admin console under DKIM / email authentication.</div>"
+        } else { "<div style='font-size:12px;color:#6E7681'>This service does not publish a custom DKIM key.</div>" }
+        $authBlock = if ($svc.authInstructions) { "<div style='color:#CDD9E5;font-size:12px;line-height:1.5'>$(HtmlEnc $svc.authInstructions)</div>" } else { '' }
+        $catLine = "<span style='background:#21262D;color:#CDD9E5;padding:2px 8px;border-radius:10px;font-size:11px;margin-right:8px'>$(HtmlEnc $svc.category)</span><span style='background:#21262D;color:#CDD9E5;padding:2px 8px;border-radius:10px;font-size:11px'>$(HtmlEnc $svc.vendor)</span>"
+        $linkLine = if ($svc.website) { $w = HtmlEnc $svc.website; "<a href='$w' style='color:#79C0FF;font-size:11px'>$w</a>" } else { '' }
+        $body = @"
+<div style='margin-bottom:14px'>$catLine</div>
+<div style='margin-bottom:14px'>$linkLine</div>
+<h3 style='color:#E6EDF3;font-size:13px;margin-bottom:6px'>1. SPF</h3>
+$spfBlock
+<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>2. DKIM</h3>
+$dkimBlock
+<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>3. Provider Setup</h3>
+$authBlock
+"@
+    } else {
+        $orgEnc = HtmlEnc $sel.Row['orgName']
+        $ctEnc  = HtmlEnc $sel.Row['country']
+        $ipEnc  = HtmlEnc $ip
+        $body = @"
+<div style='color:#D29922;font-size:13px;margin-bottom:14px'>This source IP did not match any catalog entry. Investigate before authorizing:</div>
+<ul style='color:#CDD9E5;font-size:12px;line-height:1.8'>
+  <li>Source IP: <code style='color:#79C0FF'>$ipEnc</code></li>
+  <li>rDNS / Org: <code style='color:#79C0FF'>$orgEnc</code></li>
+  <li>Country: <code style='color:#79C0FF'>$ctEnc</code></li>
+  <li>Pass / fail: <span style='color:#3FB950'>$($sel.Row['totalPass'])</span> / <span style='color:#F85149'>$($sel.Row['totalFail'])</span></li>
+</ul>
+<div style='color:#6E7681;font-size:11px;margin-top:12px'>Steps: identify the sender (whois the IP, ask the org); if it's legitimate, add its SPF include or DKIM record per the vendor's docs; mark it Approved here. If it's not a legitimate sender, leave Unapproved and watch the failure rate.</div>
+"@
+    }
+
+    # Build a minimal WPF dialog
+    $xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Authorize Sender" Height="600" Width="720" Background="#0D1117" WindowStartupLocation="CenterOwner">
+  <Grid>
+    <Grid.RowDefinitions><RowDefinition Height="60"/><RowDefinition Height="*"/><RowDefinition Height="50"/></Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
+      <StackPanel Margin="20,10" Orientation="Vertical">
+        <TextBlock Foreground="#$($headerColor.TrimStart('#'))" FontSize="15" FontWeight="SemiBold" Text="$([System.Net.WebUtility]::HtmlEncode($headerText))"/>
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,4,0,0" Text="Source IP $([System.Net.WebUtility]::HtmlEncode($ip))   ·   Detection: $([System.Net.WebUtility]::HtmlEncode($confidence)) confidence"/>
+      </StackPanel>
+    </Border>
+    <WebBrowser Grid.Row="1" x:Name="wbAuth" Margin="0"/>
+    <Border Grid.Row="2" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,1,0,0">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="20,8" VerticalAlignment="Center">
+        <Button x:Name="btnMarkApproved" Content="Mark Approved" Width="130" Height="28" Background="#3FB950" Foreground="White" BorderBrush="#3FB950" Margin="0,0,8,0"/>
+        <Button x:Name="btnClose" Content="Close" Width="80" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D"/>
+      </StackPanel>
+    </Border>
+  </Grid>
+</Window>
+"@
+    $win = [Windows.Markup.XamlReader]::Parse($xaml)
+    $win.Owner = $window
+    $wbAuth = $win.FindName('wbAuth')
+    Set-WBSilent $wbAuth
+    $tmp = [System.IO.Path]::GetTempPath() + "dmarcmonitor_auth.html"
+    $page = "<!DOCTYPE html><html><head><meta http-equiv='X-UA-Compatible' content='IE=edge'><meta charset='UTF-8'><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;color:#E6EDF3;font-family:Segoe UI,Arial;padding:18px;overflow-y:auto;line-height:1.5}h3{margin-top:12px}code{background:#21262D;padding:1px 4px;border-radius:3px}</style></head><body>$body</body></html>"
+    $page | Set-Content $tmp -Encoding UTF8
+    $wbAuth.Navigate("file:///$($tmp.Replace('\','/'))")
+    $win.FindName('btnMarkApproved').Add_Click({
+        Set-SourceApproval -Approved $true
+        $win.Close()
+    })
+    $win.FindName('btnClose').Add_Click({ $win.Close() })
+    $win.ShowDialog() | Out-Null
 }
 function Set-SourceApproval {
     param([bool]$Approved)
@@ -1017,15 +1319,20 @@ function Refresh-AllData {
     Update-Sidebar -Filter $txtDomainSearch.Text.Trim()
     $cfg = Get-AllSettings
     if ($cfg.MailboxAddress) { $txtMailboxLabel.Text = $cfg.MailboxAddress }
+    # Index map after adding Senders (3) + DNS Drift (5):
+    #   0 Overview  1 DMARC  2 TLS  3 Senders  4 Sources  5 DNS Drift
+    #   6 DNS Health  7 Forensic  8 Trends  9 Protocol
     switch ($tabMain.SelectedIndex) {
         0 { Refresh-Overview }
         1 { Refresh-DMARCData }
         2 { Refresh-TLSData }
-        3 { Refresh-Sources }
-        4 { Refresh-DNSHealth }
-        5 { Refresh-RUFData }
-        6 { Refresh-TrendChart; Refresh-GeoMap }
-        7 { Refresh-ProtocolStatus }
+        3 { Refresh-Senders }
+        4 { Refresh-Sources }
+        5 { Refresh-Drift }
+        6 { Refresh-DNSHealth }
+        7 { Refresh-RUFData }
+        8 { Refresh-TrendChart; Refresh-GeoMap }
+        9 { Refresh-ProtocolStatus }
     }
 }
 
@@ -1038,7 +1345,9 @@ function Refresh-AllTabs {
     try { Refresh-Overview }       catch { $txtLog.AppendText("[WARN] Overview refresh: $_`n") }
     try { Refresh-DMARCData }      catch { $txtLog.AppendText("[WARN] DMARC refresh: $_`n") }
     try { Refresh-TLSData }        catch { $txtLog.AppendText("[WARN] TLS refresh: $_`n") }
+    try { Refresh-Senders }        catch { $txtLog.AppendText("[WARN] Senders refresh: $_`n") }
     try { Refresh-Sources }        catch { $txtLog.AppendText("[WARN] Sources refresh: $_`n") }
+    try { Refresh-Drift }          catch { $txtLog.AppendText("[WARN] Drift refresh: $_`n") }
     try { Refresh-DNSHealth }      catch { $txtLog.AppendText("[WARN] DNS refresh: $_`n") }
     try { Refresh-RUFData }        catch { $txtLog.AppendText("[WARN] RUF refresh: $_`n") }
     try { Refresh-TrendChart }     catch { $txtLog.AppendText("[WARN] Trend refresh: $_`n") }
@@ -1457,6 +1766,39 @@ $btnDMARCReset.Add_Click({ $cmbDMARCResult.SelectedIndex=0; $cmbFailReason.Selec
 $txtDMARCIP.Add_KeyDown({ if ($_.Key -eq [System.Windows.Input.Key]::Return) { Refresh-DMARCData } })
 $btnTLSFilter.Add_Click({ Refresh-TLSData })
 $btnTLSReset.Add_Click({ $cmbTLSResult.SelectedIndex=0; Refresh-TLSData })
+# Drill-through: clicking a service card on the Senders page navigates to a
+# pseudo-URL like "dmarc:drill?service=SendGrid". Intercept Navigating,
+# cancel the actual nav, set $script:DrillService, switch to Sources tab.
+$wbSenders.Add_Navigating({
+    param($s, $e)
+    $u = [string]$e.Uri
+    if ($u -and $u.StartsWith('dmarc:drill')) {
+        $e.Cancel = $true
+        try {
+            $q = $u.Substring($u.IndexOf('?') + 1)
+            $svc = $null
+            foreach ($pair in $q.Split('&')) {
+                $kv = $pair.Split('=',2)
+                if ($kv.Length -eq 2 -and $kv[0] -eq 'service') { $svc = [uri]::UnescapeDataString($kv[1]) }
+            }
+            if ($svc) {
+                $script:DrillService = $svc
+                # Switch to Sources tab (index 4 after Senders was inserted at 3)
+                $tabMain.SelectedIndex = 4
+                Refresh-Sources
+            }
+        } catch { $txtLog.AppendText("[WARN] Drill nav: $_`n") }
+    }
+})
+$btnAuthorize.Add_Click({ Show-AuthorizationWizard })
+$btnRefreshDrift.Add_Click({ Refresh-Drift })
+$cmbDriftType.Add_SelectionChanged({ Refresh-Drift })
+$cmbSrcService.Add_SelectionChanged({
+    # Manual service-dropdown change clears the drill-from-card state
+    $sel = if ($cmbSrcService.SelectedItem) { ($cmbSrcService.SelectedItem).Content } else { 'All Services' }
+    if ($sel -ne $script:DrillService) { $script:DrillService = $null }
+    Refresh-Sources
+})
 $btnApprove.Add_Click({ Set-SourceApproval -Approved $true })
 $btnUnapprove.Add_Click({ Set-SourceApproval -Approved $false })
 $btnRefreshSources.Add_Click({ Refresh-Sources })
@@ -1477,15 +1819,20 @@ $lbDomains.Add_SelectionChanged({
 })
 
 $tabMain.Add_SelectionChanged({
+    # Index map after adding Senders (3) + DNS Drift (5):
+    #   0 Overview  1 DMARC  2 TLS  3 Senders  4 Sources  5 DNS Drift
+    #   6 DNS Health  7 Forensic  8 Trends  9 Protocol
     switch ($tabMain.SelectedIndex) {
         0 { Refresh-Overview }
         1 { Refresh-DMARCData }
         2 { Refresh-TLSData }
-        3 { Refresh-Sources }
-        4 { Refresh-DNSHealth }
-        5 { Refresh-RUFData }
-        6 { Refresh-TrendChart; Refresh-GeoMap }
-        7 { Refresh-ProtocolStatus }
+        3 { Refresh-Senders }
+        4 { Refresh-Sources }
+        5 { Refresh-Drift }
+        6 { Refresh-DNSHealth }
+        7 { Refresh-RUFData }
+        8 { Refresh-TrendChart; Refresh-GeoMap }
+        9 { Refresh-ProtocolStatus }
     }
 })
 

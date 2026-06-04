@@ -413,6 +413,7 @@ function ConvertFrom-DMARCReport {
                 DKIMDomain   = if ($rec.auth_results -and $rec.auth_results.dkim -and $rec.auth_results.dkim.domain) { $rec.auth_results.dkim.domain } else { '' }
                 GeoCountry   = ''; GeoOrg = ''; GeoHostname = ''; GeoCity = ''
                 SenderClass  = ''; IsNewSender = $false; IsCousinDomain = $false
+                ServiceId    = ''; ServiceVendor = ''; ServiceCategory = ''; ServiceConfidence = ''
                 ParsedAt     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             })
         }
@@ -553,32 +554,73 @@ function Add-GeoData {
 }
 #endregion
 
-#region ESP Classification
+#region Sender Service Classification (catalog-driven)
+# sender-catalog.json sits next to this script and ships a curated list of
+# ~80 common email-sending services with rDNS patterns + org-keyword hints.
+# Each record gets ServiceId/Vendor/Category/Confidence so the dashboard
+# can group by service and the Authorization Wizard can suggest the right
+# SPF include + DKIM CNAMEs for unauthorized senders.
+$script:SenderCatalog = $null
+function Get-SenderCatalog {
+    if ($script:SenderCatalog) { return $script:SenderCatalog }
+    $here = if ($PSCommandPath) { Split-Path $PSCommandPath -Parent } else { $PSScriptRoot }
+    if (-not $here) { $here = (Get-Location).Path }
+    $catFile = Join-Path $here 'sender-catalog.json'
+    if (Test-Path $catFile) {
+        try { $script:SenderCatalog = Get-Content $catFile -Raw -Encoding UTF8 | ConvertFrom-Json }
+        catch { Write-Log "Sender catalog load failed: $_" -Level WARN; $script:SenderCatalog = [PSCustomObject]@{ version='missing'; services=@() } }
+    } else {
+        Write-Log "sender-catalog.json not found at $catFile - falling back to Unknown classifications" -Level WARN
+        $script:SenderCatalog = [PSCustomObject]@{ version='missing'; services=@() }
+    }
+    return $script:SenderCatalog
+}
+
+function Resolve-SenderService {
+    param([string]$OrgName, [string]$Hostname)
+    $cat = Get-SenderCatalog
+    $orgLower  = if ($OrgName)  { $OrgName.ToLowerInvariant()  } else { '' }
+    $hostLower = if ($Hostname) { $Hostname.ToLowerInvariant() } else { '' }
+    # Pass 1: rDNS patterns - high confidence
+    if ($hostLower) {
+        foreach ($svc in $cat.services) {
+            if (-not $svc.rdns) { continue }
+            foreach ($p in $svc.rdns) {
+                if ($hostLower -match $p) {
+                    return [PSCustomObject]@{ Id=$svc.id; Name=$svc.name; Vendor=$svc.vendor; Category=$svc.category; Confidence='high' }
+                }
+            }
+        }
+    }
+    # Pass 2: org-name keyword substring - medium confidence (ASNs are shared)
+    if ($orgLower) {
+        foreach ($svc in $cat.services) {
+            if (-not $svc.orgKeywords -or $svc.orgKeywords.Count -eq 0) { continue }
+            foreach ($kw in $svc.orgKeywords) {
+                if ($orgLower.Contains($kw.ToLowerInvariant())) {
+                    return [PSCustomObject]@{ Id=$svc.id; Name=$svc.name; Vendor=$svc.vendor; Category=$svc.category; Confidence='medium' }
+                }
+            }
+        }
+    }
+    return [PSCustomObject]@{ Id='unknown'; Name='Unknown'; Vendor=''; Category=''; Confidence='none' }
+}
+
 function Get-ESPClass {
     param([string]$OrgName, [string]$Hostname)
-    $s = "$OrgName $Hostname".ToLower()
-    if ($s -match 'google|gmail')                      { return 'Google'          }
-    if ($s -match 'microsoft|outlook|hotmail|office')  { return 'Microsoft'       }
-    if ($s -match 'sendgrid')                          { return 'SendGrid'        }
-    if ($s -match 'mandrill|mailchimp')                { return 'Mailchimp'       }
-    if ($s -match 'mailgun')                           { return 'Mailgun'         }
-    if ($s -match 'amazon|aws|amazonses')              { return 'Amazon SES'      }
-    if ($s -match 'postmark|wildbit')                  { return 'Postmark'        }
-    if ($s -match 'sparkpost|messagebird')             { return 'SparkPost'       }
-    if ($s -match 'proofpoint')                        { return 'Proofpoint'      }
-    if ($s -match 'mimecast')                          { return 'Mimecast'        }
-    if ($s -match 'barracuda')                         { return 'Barracuda'       }
-    if ($s -match 'twilio')                            { return 'Twilio'          }
-    if ($s -match 'constantcontact')                   { return 'Constant Contact'}
-    if ($s -match 'hubspot')                           { return 'HubSpot'         }
-    if ($s -match 'salesforce|exacttarget|pardot')     { return 'Salesforce'      }
-    if ($s -match 'zendesk')                           { return 'Zendesk'         }
-    return 'Unknown'
+    (Resolve-SenderService -OrgName $OrgName -Hostname $Hostname).Name
 }
 
 function Add-ESPClassification {
     param([System.Collections.Generic.List[PSCustomObject]]$Records)
-    foreach ($r in $Records) { $r.SenderClass = Get-ESPClass -OrgName $r.GeoOrg -Hostname $r.GeoHostname }
+    foreach ($r in $Records) {
+        $svc = Resolve-SenderService -OrgName $r.GeoOrg -Hostname $r.GeoHostname
+        $r.SenderClass       = $svc.Name
+        $r.ServiceId         = $svc.Id
+        $r.ServiceVendor     = $svc.Vendor
+        $r.ServiceCategory   = $svc.Category
+        $r.ServiceConfidence = $svc.Confidence
+    }
 }
 #endregion
 
@@ -831,12 +873,16 @@ function Update-SourceInventory {
         $pass   = ($_.Group | Where-Object { $_.DMARCResult -eq 'pass' } | Measure-Object MessageCount -Sum).Sum
         $fail   = ($_.Group | Where-Object { $_.DMARCResult -eq 'fail' } | Measure-Object MessageCount -Sum).Sum
         $total  = [int]$pass + [int]$fail
-        $org = ($_.Group[0]).GeoOrg; $country = ($_.Group[0]).GeoCountry; $class = ($_.Group[0]).SenderClass
+        $first  = $_.Group[0]
+        $org    = $first.GeoOrg; $country = $first.GeoCountry; $class = $first.SenderClass
+        $svcId  = $first.ServiceId; $svcVendor = $first.ServiceVendor
+        $svcCat = $first.ServiceCategory; $svcConf = $first.ServiceConfidence
 
         $existing = $null; try { $existing = $inv.sources.$key } catch {}
         if (-not $existing) {
             $entry = [PSCustomObject]@{
                 domain=$domain; sourceIP=$ip; orgName=$org; country=$country; senderClass=$class
+                serviceId=$svcId; serviceVendor=$svcVendor; serviceCategory=$svcCat; serviceConfidence=$svcConf
                 firstSeen=$today; lastSeen=$today; totalPass=[int]$pass; totalFail=[int]$fail
                 totalMessages=$total; runCount=1; isNew=$true; isApproved=$false
             }
@@ -852,6 +898,14 @@ function Update-SourceInventory {
             $existing.runCount = [int]$existing.runCount + 1; $existing.isNew = $false
             if ($org -and -not $existing.orgName) { $existing.orgName = $org }
             if ($country -and -not $existing.country) { $existing.country = $country }
+            # Refresh service classification each run - the catalog may have
+            # learned this sender between runs, and the user may have changed
+            # GeoOrg by enabling/disabling the IP geolocation enrichment.
+            if ($class    -and $class    -ne 'Unknown') { $existing | Add-Member -NotePropertyName senderClass       -NotePropertyValue $class    -Force }
+            if ($svcId    -and $svcId    -ne 'unknown') { $existing | Add-Member -NotePropertyName serviceId         -NotePropertyValue $svcId    -Force }
+            if ($svcVendor)                             { $existing | Add-Member -NotePropertyName serviceVendor     -NotePropertyValue $svcVendor -Force }
+            if ($svcCat)                                { $existing | Add-Member -NotePropertyName serviceCategory   -NotePropertyValue $svcCat   -Force }
+            if ($svcConf)                               { $existing | Add-Member -NotePropertyName serviceConfidence -NotePropertyValue $svcConf  -Force }
         }
     }
 
@@ -948,6 +1002,133 @@ function Test-AlertThresholds {
 }
 #endregion
 
+#region DNS History + Drift Detection
+# Every run snapshots SPF/DMARC/MTA-STS/BIMI/TLS-RPT/MX for each domain
+# and appends any diff vs. the previous snapshot to dns-drift.json. The
+# dashboard's DNS Drift tab reads those events. 3rd-party tools surface
+# drift but usually don't give you a full record-level history that
+# stays on your own disk.
+function Get-DNSSnapshot {
+    param([string]$Domain)
+    $snap = [PSCustomObject]@{
+        domain     = $Domain
+        capturedAt = (Get-Date).ToString('o')
+        spf=$null; dmarc=$null; mtaSts=$null; bimi=$null; tlsRpt=$null; mx=$null
+    }
+    function _txt { param($name, $marker)
+        try {
+            $r = Resolve-DnsName -Name $name -Type TXT -EA Stop |
+                Where-Object { $_.Strings -match $marker } | Select-Object -First 1
+            if ($r) { ($r.Strings -join '') } else { $null }
+        } catch { $null }
+    }
+    $snap.spf    = _txt $Domain                   'v=spf1'
+    $snap.dmarc  = _txt "_dmarc.$Domain"          'v=DMARC1'
+    $snap.mtaSts = _txt "_mta-sts.$Domain"        'v=STSv1'
+    $snap.bimi   = _txt "default._bimi.$Domain"   'v=BIMI1'
+    $snap.tlsRpt = _txt "_smtp._tls.$Domain"      'v=TLSRPTv1'
+    try {
+        $snap.mx = ((Resolve-DnsName -Name $Domain -Type MX -EA Stop) |
+            Sort-Object Preference |
+            ForEach-Object { "$($_.Preference) $($_.NameExchange)" }) -join ' | '
+    } catch { $snap.mx = $null }
+    return $snap
+}
+
+function Compare-DNSSnapshot {
+    param([object]$Old, [object]$New)
+    $drifts = [System.Collections.Generic.List[object]]::new()
+    $checks = @(
+        @{Field='spf';    Type='spf';     Label='SPF'},
+        @{Field='dmarc';  Type='dmarc';   Label='DMARC'},
+        @{Field='mtaSts'; Type='mta-sts'; Label='MTA-STS'},
+        @{Field='bimi';   Type='bimi';    Label='BIMI'},
+        @{Field='tlsRpt'; Type='tls-rpt'; Label='TLS-RPT'},
+        @{Field='mx';     Type='mx';      Label='MX'}
+    )
+    foreach ($c in $checks) {
+        $o = $Old.$($c.Field); $n = $New.$($c.Field)
+        if ($o -ne $n) {
+            $summary = if ([string]::IsNullOrEmpty([string]$o)) { "$($c.Label) added" }
+                       elseif ([string]::IsNullOrEmpty([string]$n)) { "$($c.Label) removed" }
+                       else { "$($c.Label) changed" }
+            # DMARC: surface the most important diff inline (p= or pct=)
+            if ($c.Field -eq 'dmarc' -and $o -and $n) {
+                $oldPol = if ($o -match 'p=(\w+)') { $Matches[1] } else { '?' }
+                $newPol = if ($n -match 'p=(\w+)') { $Matches[1] } else { '?' }
+                $oldPct = if ($o -match 'pct=(\d+)') { $Matches[1] } else { '100' }
+                $newPct = if ($n -match 'pct=(\d+)') { $Matches[1] } else { '100' }
+                if ($oldPol -ne $newPol) { $summary = "DMARC policy: $oldPol -> $newPol" }
+                elseif ($oldPct -ne $newPct) { $summary = "DMARC pct: $oldPct -> $newPct" }
+            }
+            if ($c.Field -eq 'spf' -and $o -and $n) {
+                $oldInc = [regex]::Matches($o,'include:([\w.-]+)') | ForEach-Object { $_.Groups[1].Value }
+                $newInc = [regex]::Matches($n,'include:([\w.-]+)') | ForEach-Object { $_.Groups[1].Value }
+                $removed = $oldInc | Where-Object { $_ -notin $newInc }
+                $added   = $newInc | Where-Object { $_ -notin $oldInc }
+                $parts = @()
+                if ($removed) { $parts += "-include:$($removed -join ',')" }
+                if ($added)   { $parts += "+include:$($added -join ',')" }
+                if ($parts)   { $summary = "SPF: $($parts -join ' ')" }
+            }
+            $drifts.Add([PSCustomObject]@{
+                domain      = $New.domain
+                recordType  = $c.Type
+                oldValue    = $o
+                newValue    = $n
+                detectedAt  = $New.capturedAt
+                summary     = $summary
+            })
+        }
+    }
+    return $drifts
+}
+
+function Update-DNSHistory {
+    param([string]$Domain)
+    $histDir = Join-Path $stateDir "dns-history"
+    if (-not (Test-Path $histDir)) { New-Item -ItemType Directory -Path $histDir -Force | Out-Null }
+    $safe     = $Domain -replace '[^a-zA-Z0-9.-]','_'
+    $histFile = Join-Path $histDir "$safe.json"
+    $newSnap  = Get-DNSSnapshot -Domain $Domain
+    $hist     = if (Test-Path $histFile) { try { Get-Content $histFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{ snapshots=@() } } } else { [PSCustomObject]@{ snapshots=@() } }
+    $existing = [System.Collections.Generic.List[object]]::new()
+    if ($hist.snapshots) { $hist.snapshots | ForEach-Object { $existing.Add($_) } }
+    $prev = if ($existing.Count -gt 0) { $existing[$existing.Count - 1] } else { $null }
+
+    # Drift events: only when there's a previous snapshot to diff against
+    if ($prev) {
+        $drifts = Compare-DNSSnapshot -Old $prev -New $newSnap
+        if ($drifts.Count -gt 0) {
+            foreach ($d in $drifts) { Write-Log "DNS DRIFT: $Domain $($d.recordType) - $($d.summary)" -Level WARN }
+            $driftFile  = Join-Path $stateDir "dns-drift.json"
+            $driftState = if (Test-Path $driftFile) { try { Get-Content $driftFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{ events=@() } } } else { [PSCustomObject]@{ events=@() } }
+            $events     = [System.Collections.Generic.List[object]]::new()
+            if ($driftState.events) { $driftState.events | ForEach-Object { $events.Add($_) } }
+            foreach ($d in $drifts) { $events.Add($d) }
+            # Cap drift log at 2000 events to keep the file tractable
+            if ($events.Count -gt 2000) { $events = $events.GetRange($events.Count - 2000, 2000) }
+            Save-StateAtomic -Path $driftFile -Object ([PSCustomObject]@{ events = $events }) -Depth 8
+        }
+    }
+
+    # Only append a snapshot row when something actually changed (or it's
+    # the first capture). Keeps the history file small and the snapshot
+    # list a true change log.
+    $shouldAppend = -not $prev
+    if ($prev) {
+        $shouldAppend = ($prev.spf -ne $newSnap.spf -or $prev.dmarc -ne $newSnap.dmarc -or
+                         $prev.mtaSts -ne $newSnap.mtaSts -or $prev.bimi -ne $newSnap.bimi -or
+                         $prev.tlsRpt -ne $newSnap.tlsRpt -or $prev.mx -ne $newSnap.mx)
+    }
+    if ($shouldAppend) {
+        $existing.Add($newSnap)
+        if ($existing.Count -gt 90) { $existing = $existing.GetRange($existing.Count - 90, 90) }
+        Save-StateAtomic -Path $histFile -Object ([PSCustomObject]@{ snapshots = $existing }) -Depth 8
+    }
+}
+#endregion
+
 #region DNS Health
 function Invoke-DNSHealthCheck {
     param([string[]]$Domains)
@@ -1017,6 +1198,9 @@ function Invoke-DNSHealthCheck {
 
         if ($domIssues.Count -gt 0) { Write-Log "DNS HEALTH: $domain — $($domIssues -join '; ')" -Level WARN; $allIssues.Add("$domain`: $($r.Issues)") }
         else { Write-Log "DNS Health: $domain — clean" }
+
+        # Snapshot live DNS state + record any drift since previous run
+        try { Update-DNSHistory -Domain $domain } catch { Write-Log "DNS history update failed for $domain : $_" -Level WARN }
     }
 
     Save-StateAtomic -Path $stateFile -Object $state -Depth 10
