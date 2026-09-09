@@ -236,11 +236,22 @@ function Invoke-Graph {
     if ($Body)    { $p.Body=$Body; $p.ContentType="application/json" }
     if ($OutFile) { $p.OutputFilePath=$OutFile }
     $attempt = 0
+    # Adaptive consent-propagation backoff: 30s, 60s, 120s, 180s (~6.5 min total).
+    # Right after an installer run, admin consent can take many minutes to
+    # propagate across Graph. Without this, a Run Now within the propagation
+    # window would just hard-fail with Authorization_RequestDenied.
+    $consentWaits = @(30, 60, 120, 180)
+    $consentTry = 0
     while ($true) {
         $attempt++
         try { return Invoke-MgGraphRequest @p } catch {
             $status = $null
             try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+            $msg = "$_"
+            $isConsentPropagation = (
+                ($status -eq 403 -and $msg -match 'Authorization_RequestDenied|Insufficient privileges') -or
+                ($msg -match 'Authorization_RequestDenied')
+            )
             if ($attempt -le $MaxRetries) {
                 if ($status -eq 429 -or $status -eq 503) {
                     $retryAfter = 30
@@ -253,6 +264,14 @@ function Invoke-Graph {
                     try { $c = Test-CertExpiry; Connect-ToGraph -Cert $c; Remove-Variable c -EA SilentlyContinue } catch { throw }
                     continue
                 }
+            }
+            # Consent-propagation retries are SEPARATE from MaxRetries so a
+            # fresh-install run isn't gated by the normal retry budget.
+            if ($isConsentPropagation -and $consentTry -lt $consentWaits.Count) {
+                $w = $consentWaits[$consentTry]; $consentTry++
+                Write-Log "Graph 403 Authorization_RequestDenied; consent propagation - sleeping ${w}s (propagation attempt $consentTry/$($consentWaits.Count))" -Level WARN
+                Start-Sleep -Seconds $w
+                continue
             }
             throw
         }

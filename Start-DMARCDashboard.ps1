@@ -568,7 +568,7 @@ $markers
         <GridSplitter Grid.Column="1" Width="1" HorizontalAlignment="Stretch" Background="#21262D"/>
         <TabControl x:Name="tabMain" Grid.Column="2" Background="#0D1117" BorderThickness="0" Padding="0">
             <TabControl.Resources><Style TargetType="TabPanel"><Setter Property="Background" Value="#161B22"/></Style></TabControl.Resources>
-            <TabItem Header="  Overview  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbOverview" Background="#0D1117"/></TabItem>
+            <TabItem Header="  Overview  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbOverview"/></TabItem>
             <TabItem Header="  DMARC  " Style="{StaticResource TabStyle}">
                 <Grid Background="#0D1117">
                     <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -639,7 +639,7 @@ $markers
                     </DataGrid>
                 </Grid>
             </TabItem>
-            <TabItem Header="  Senders  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbSenders" Background="#0D1117"/></TabItem>
+            <TabItem Header="  Senders  " Style="{StaticResource TabStyle}"><WebBrowser x:Name="wbSenders"/></TabItem>
             <TabItem Header="  Sources  " Style="{StaticResource TabStyle}">
                 <Grid Background="#0D1117">
                     <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="32"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -731,7 +731,7 @@ $markers
                         </DataGrid.Columns>
                     </DataGrid>
                     <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch" Background="#21262D" Cursor="SizeNS"/>
-                    <WebBrowser Grid.Row="3" x:Name="wbSPF" Background="#0D1117"/>
+                    <WebBrowser Grid.Row="3" x:Name="wbSPF"/>
                 </Grid>
             </TabItem>
             <TabItem Header="  Forensic  " Style="{StaticResource TabStyle}">
@@ -768,7 +768,7 @@ $markers
                             <Button x:Name="btnRefreshTrend" Content="Refresh" Style="{StaticResource Btn2}" Padding="10,4"/>
                         </StackPanel>
                     </Border>
-                    <WebBrowser Grid.Row="1" x:Name="wbTrend" Background="#0D1117"/>
+                    <WebBrowser Grid.Row="1" x:Name="wbTrend"/>
                     <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch" Background="#21262D" Cursor="SizeNS"/>
                     <Border Grid.Row="3" Background="#0A0D13" BorderBrush="#21262D" BorderThickness="0,1,0,0">
                         <Grid>
@@ -776,7 +776,7 @@ $markers
                             <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
                                 <TextBlock Text="GEOGRAPHIC SENDER MAP" Foreground="#6E7681" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" Margin="14,0"/>
                             </Border>
-                            <WebBrowser Grid.Row="1" x:Name="wbGeoMap" Background="#0D1117"/>
+                            <WebBrowser Grid.Row="1" x:Name="wbGeoMap"/>
                         </Grid>
                     </Border>
                 </Grid>
@@ -1192,6 +1192,17 @@ $authBlock
     $tmp = [System.IO.Path]::GetTempPath() + "dmarcmonitor_auth.html"
     $page = "<!DOCTYPE html><html><head><meta http-equiv='X-UA-Compatible' content='IE=edge'><meta charset='UTF-8'><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;color:#E6EDF3;font-family:Segoe UI,Arial;padding:18px;overflow-y:auto;line-height:1.5}h3{margin-top:12px}code{background:#21262D;padding:1px 4px;border-radius:3px}</style></head><body>$body</body></html>"
     $page | Set-Content $tmp -Encoding UTF8
+    # Intercept clicks on the vendor website link so they open in the system
+    # default browser instead of clobbering the wizard's WebBrowser content.
+    # Allow only file:/// (the wizard's own page) and about:blank through.
+    $wbAuth.Add_Navigating({
+        param($s, $e)
+        $u = [string]$e.Uri
+        if ($u -and -not ($u.StartsWith('file:') -or $u.StartsWith('about:'))) {
+            $e.Cancel = $true
+            try { Start-Process $u } catch {}
+        }
+    })
     $wbAuth.Navigate("file:///$($tmp.Replace('\','/'))")
     $win.FindName('btnMarkApproved').Add_Click({
         Set-SourceApproval -Approved $true
