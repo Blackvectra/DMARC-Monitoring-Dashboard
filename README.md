@@ -1,5 +1,7 @@
 # DMARC Monitor
 
+[![License](https://img.shields.io/badge/License-CC%20BY--ND%204.0-blue?style=flat-square)](https://creativecommons.org/licenses/by-nd/4.0/)
+
 Self-hosted DMARC monitoring with feature parity to paid tools (DMARCian, Valimail, Sendmarc). Polls a shared mailbox via Microsoft Graph every 30 minutes. WPF dashboard with domain sidebar, compliance scoring, and per-domain views.
 
 **No hardcoded values. No config files. No client secrets.** Certificate-based app-only auth. All configuration through the GUI, persisted to Windows Registry (DPAPI-encrypted for secrets).
