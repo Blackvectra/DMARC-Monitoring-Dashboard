@@ -501,14 +501,47 @@ function ConvertFrom-DMARCForensicReport {
 #endregion
 
 #region TLS-RPT Parser (RFC 8460)
+function ConvertTo-ReportDate {
+    <#
+        Normalises a report's date-range value to yyyy-MM-dd.
+
+        Needed because ConvertFrom-Json on PowerShell 7 silently coerces an
+        ISO-8601 string like "2026-09-16T00:00:00Z" into a [DateTime]. The
+        previous implementation did:
+
+            ($value -replace 'T.*','').Substring(0,10)
+
+        which assumed it was still a string. Against a [DateTime] the -replace
+        stringifies it first ("09/16/2026 00:00:00"), finds no 'T' to strip,
+        and Substring slices the front off the locale-formatted date - giving
+        "09/16/2026".
+
+        That is the wrong format AND inconsistent with the DMARC parsers, which
+        emit yyyy-MM-dd. Two date formats in one working directory means the
+        dashboard's date-range filters compare them lexicographically and get
+        the wrong answer, and TLS-RPT rows never line up with DMARC rows.
+
+        Handles both shapes: a coerced [DateTime], or a plain string if a
+        reporter sends a format ConvertFrom-Json does not recognise.
+    #>
+    param($Value)
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [datetime]) {
+        return ([datetime]$Value).ToString('yyyy-MM-dd', [cultureinfo]::InvariantCulture)
+    }
+    $s = [string]$Value
+    if ($s.Length -ge 10) { return $s.Substring(0, 10) }
+    return $s
+}
+
 function ConvertFrom-TLSRPTReport {
     param([string]$FilePath)
     $records = [System.Collections.Generic.List[PSCustomObject]]::new()
     try {
-        $json    = Get-Content -Path $FilePath -Raw | ConvertFrom-Json
+        $json    = Get-Content -Path $FilePath -Raw -EA Stop | ConvertFrom-Json
         $orgName = $json.'organization-name'; $reportId = $json.'report-id'
-        $dBegin  = ($json.'date-range'.'start-datetime' -replace 'T.*','').Substring(0,10)
-        $dEnd    = ($json.'date-range'.'end-datetime'   -replace 'T.*','').Substring(0,10)
+        $dBegin  = ConvertTo-ReportDate $json.'date-range'.'start-datetime'
+        $dEnd    = ConvertTo-ReportDate $json.'date-range'.'end-datetime'
 
         foreach ($policy in $json.policies) {
             $pType = $policy.policy.'policy-type'; $pDomain = $policy.policy.'policy-domain'
