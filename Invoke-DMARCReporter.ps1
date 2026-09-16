@@ -446,7 +446,12 @@ function ConvertFrom-DMARCForensicReport {
     param([string]$FilePath)
     $records = [System.Collections.Generic.List[PSCustomObject]]::new()
     try {
-        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8
+        # -EA Stop so a missing/unreadable file is caught by this function's
+        # own try/catch and logged as a parse failure. Without it Get-Content
+        # raises a non-terminating error that bypasses the catch and writes
+        # straight to the error stream, which a scheduled task can surface as
+        # a run failure even though the engine handled it fine.
+        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8 -EA Stop
         if ([string]::IsNullOrWhiteSpace($content)) { return $records }
 
         # Unfold RFC 5322 folded headers (continuation lines start with space/tab)
@@ -496,14 +501,47 @@ function ConvertFrom-DMARCForensicReport {
 #endregion
 
 #region TLS-RPT Parser (RFC 8460)
+function ConvertTo-ReportDate {
+    <#
+        Normalises a report's date-range value to yyyy-MM-dd.
+
+        Needed because ConvertFrom-Json on PowerShell 7 silently coerces an
+        ISO-8601 string like "2026-09-16T00:00:00Z" into a [DateTime]. The
+        previous implementation did:
+
+            ($value -replace 'T.*','').Substring(0,10)
+
+        which assumed it was still a string. Against a [DateTime] the -replace
+        stringifies it first ("09/16/2026 00:00:00"), finds no 'T' to strip,
+        and Substring slices the front off the locale-formatted date - giving
+        "09/16/2026".
+
+        That is the wrong format AND inconsistent with the DMARC parsers, which
+        emit yyyy-MM-dd. Two date formats in one working directory means the
+        dashboard's date-range filters compare them lexicographically and get
+        the wrong answer, and TLS-RPT rows never line up with DMARC rows.
+
+        Handles both shapes: a coerced [DateTime], or a plain string if a
+        reporter sends a format ConvertFrom-Json does not recognise.
+    #>
+    param($Value)
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [datetime]) {
+        return ([datetime]$Value).ToString('yyyy-MM-dd', [cultureinfo]::InvariantCulture)
+    }
+    $s = [string]$Value
+    if ($s.Length -ge 10) { return $s.Substring(0, 10) }
+    return $s
+}
+
 function ConvertFrom-TLSRPTReport {
     param([string]$FilePath)
     $records = [System.Collections.Generic.List[PSCustomObject]]::new()
     try {
-        $json    = Get-Content -Path $FilePath -Raw | ConvertFrom-Json
+        $json    = Get-Content -Path $FilePath -Raw -EA Stop | ConvertFrom-Json
         $orgName = $json.'organization-name'; $reportId = $json.'report-id'
-        $dBegin  = ($json.'date-range'.'start-datetime' -replace 'T.*','').Substring(0,10)
-        $dEnd    = ($json.'date-range'.'end-datetime'   -replace 'T.*','').Substring(0,10)
+        $dBegin  = ConvertTo-ReportDate $json.'date-range'.'start-datetime'
+        $dEnd    = ConvertTo-ReportDate $json.'date-range'.'end-datetime'
 
         foreach ($policy in $json.policies) {
             $pType = $policy.policy.'policy-type'; $pDomain = $policy.policy.'policy-domain'
@@ -1021,6 +1059,33 @@ function Test-AlertThresholds {
 }
 #endregion
 
+#region SPF lookup accounting
+function Get-SPFLookupCount {
+    <#
+        Counts the terms in an SPF record that cost a DNS lookup against the
+        RFC 7208 s4.6.4 limit of 10. Exceeding it is a PermError: the record
+        stops evaluating and mail starts failing SPF, so an inaccurate count
+        here is the difference between warning a client and not.
+
+        Countable: include:, redirect=, exists:, a, mx, ptr
+        Free:      ip4:, ip6:, all, exp=, v=spf1
+
+        The a/mx/ptr alternatives need a lookahead because they are bare words
+        that also prefix other tokens. Without it:
+          - '(a|mx|include|exists|redirect)[:=]' (the previous implementation)
+            required a colon or equals immediately after, so bare 'a' and 'mx'
+            were invisible and 'ptr' was absent entirely - a consistent
+            UNDERCOUNT that could report a genuinely broken record as healthy.
+          - '^(a|mx|exists)' unanchored matches 'all', charging a phantom
+            lookup to essentially every record - an OVERCOUNT.
+    #>
+    param([string]$SpfRecord)
+    if ([string]::IsNullOrWhiteSpace($SpfRecord)) { return 0 }
+    $pattern = '(?:^|\s)[+~?-]?(?:include:|redirect=|exists:|a(?=[\s:/]|$)|mx(?=[\s:/]|$)|ptr(?=[\s:/]|$))'
+    return ([regex]::Matches($SpfRecord, $pattern)).Count
+}
+#endregion
+
 #region DNS History + Drift Detection
 # Every run snapshots SPF/DMARC/MTA-STS/BIMI/TLS-RPT/MX for each domain
 # and appends any diff vs. the previous snapshot to dns-drift.json. The
@@ -1194,7 +1259,7 @@ function Invoke-DNSHealthCheck {
             $spfTxt = ($spfDns | Where-Object { $_.Strings -match 'v=spf1' } | Select-Object -First 1).Strings -join ''
             if ($spfTxt) {
                 $r.SPFRecord = $spfTxt
-                $lookups = ([regex]::Matches($spfTxt,'(a|mx|include|exists|redirect)[:=]')).Count
+                $lookups = Get-SPFLookupCount -SpfRecord $spfTxt
                 $r.SPFLookupCount = $lookups
                 $allM = [regex]::Match($spfTxt,'([+~?-]all)')
                 $r.SPFHasAll = $allM.Success; $r.SPFAllMechanism = if ($allM.Success) { $allM.Value } else { 'missing' }
