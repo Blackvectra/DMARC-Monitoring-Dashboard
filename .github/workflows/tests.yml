@@ -166,11 +166,25 @@ jobs:
             fi
           }
           check "UNIQUE constraint failed: aggregate_reports.org_name" "duplicate report rejected"
-          check "UNIQUE constraint failed: domains.name"               "two clients claiming one domain rejected"
+          check "UNIQUE constraint failed: domains.tenant_id, domains.name" "same-tenant domain conflict rejected"
           check "FOREIGN KEY constraint failed"                        "orphan record rejected"
           check "CHECK constraint failed"                              "invalid enum rejected"
           check "orphan_domains=0"                                     "cascade delete removed client's domains"
           check "acme_survives=2"                                      "other client's data untouched"
+          # Tenant layer. These are the security boundary in a hosted
+          # deployment, not a convenience: if a tenant-scoped read ever
+          # returns another tenant's rows, one MSP is reading a competitor's
+          # book of business.
+          check "nls_sees_rival_rows=0"                                "TENANT ISOLATION: no cross-tenant rows"
+          check "rival_row_count=1"                                    "the other tenant has its own data"
+          check "acme_com_managed_by=2_tenants"                        "two tenants may manage the same domain name"
+          check "acme_corp_slug_used_by=2_tenants"                     "two tenants may reuse a client slug"
+          check "UNIQUE constraint failed: clients.tenant_id, clients.slug" "one tenant cannot reuse a client slug"
+          check "rival_clients=0"                                      "tenant cascade removed its clients"
+          check "rival_domains=0"                                      "tenant cascade removed its domains"
+          check "rival_records=0"                                      "tenant cascade removed its aggregate records"
+          check "nls_survives=2"                                       "deleting one tenant leaves the other intact"
+          check "USING INDEX ix_agg_rec_tenant_date"                   "isolation filter uses a tenant-leading index"
           # Remediation tables: a refused plan is still recorded, an applied
           # change keeps its rollback target, secrets stay out of the database,
           # and a client's remediation history dies with the client.
