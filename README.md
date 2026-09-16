@@ -48,14 +48,20 @@ Self-hosted DMARC monitoring with feature parity to paid tools (DMARCian, Valima
 
 ## Files
 
+All files live at the repository root — there is no `src/` subdirectory.
+
 ```
-src/
-├── Install-DMARCMonitor.ps1    # Automated installer — Entra + cert + EXO + registry (run this first)
+DMARC-Monitoring-Dashboard/
+├── Install-DMARCMonitor.ps1        # Automated installer — Entra + cert + EXO + registry (run this first)
 ├── Start-DMARCDashboard.ps1        # WPF dashboard — daily use
 ├── Invoke-DMARCReporter.ps1        # Engine — called by dashboard or scheduled task
 ├── Invoke-SPFInspector.ps1         # SPF chain + DKIM key inspector (called by dashboard)
-└── Invoke-HTMLReportGenerator.ps1  # Client-facing HTML reports (optional)
+├── Invoke-HTMLReportGenerator.ps1  # Client-facing HTML reports (optional)
+└── sender-catalog.json             # Sending-service catalog — read by the engine at runtime
 ```
+
+`sender-catalog.json` must sit next to `Invoke-DMARCReporter.ps1`. Without it the
+engine still runs, but every sender is classified as `Unknown`.
 
 ---
 
@@ -102,7 +108,7 @@ The `Install-DMARCMonitor.ps1` script does all the Entra + EXO + cert + registry
 
 3. **Run the installer**
    ```powershell
-   cd C:\Tools\DMARC-Monitoring-Dashboard\src
+   cd C:\Tools\DMARC-Monitoring-Dashboard
    pwsh -ExecutionPolicy Bypass -File .\Install-DMARCMonitor.ps1
    ```
    If you don't have PowerShell 7 yet:
@@ -211,7 +217,7 @@ Or download the ZIP and extract.
 #### Step 5 — Launch the Dashboard
 
 ```powershell
-cd C:\Tools\DMARC-Monitoring-Dashboard\src
+cd C:\Tools\DMARC-Monitoring-Dashboard
 pwsh -STA -ExecutionPolicy Bypass -File .\Start-DMARCDashboard.ps1
 ```
 
@@ -408,7 +414,7 @@ If you want to run the engine outside the dashboard (after settings are configur
 # Engine reads settings from registry when called via Task Scheduler
 # Or pass all params explicitly:
 
-pwsh -ExecutionPolicy Bypass -File ".\src\Invoke-DMARCReporter.ps1" `
+pwsh -ExecutionPolicy Bypass -File ".\Invoke-DMARCReporter.ps1" `
     -TenantId "YOUR-TENANT-ID" `
     -ClientId "YOUR-CLIENT-ID" `
     -MailboxAddress "dmarc@yourdomain.com" `
