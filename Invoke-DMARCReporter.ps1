@@ -1420,6 +1420,75 @@ function Update-DNSHistory {
 #endregion
 
 #region DNS Health
+# The silent-failure detection engine lives in Invoke-DNSRemediation.ps1, which
+# is also the script that plans and applies fixes. Loaded on demand so a
+# collection run does not pay for it when DNS health checking is switched off,
+# and so the reporter still runs if that file is absent.
+$script:SilentEngineLoaded = $false
+function Import-SilentFailureEngine {
+    if ($script:SilentEngineLoaded) { return $true }
+    $here = if ($PSCommandPath) { Split-Path $PSCommandPath -Parent } else { $PSScriptRoot }
+    if (-not $here) { $here = (Get-Location).Path }
+    $engine = Join-Path $here 'Invoke-DNSRemediation.ps1'
+    if (-not (Test-Path $engine)) {
+        Write-Log "Invoke-DNSRemediation.ps1 not found at $engine - silent-failure analysis skipped" -Level WARN
+        return $false
+    }
+    try {
+        . $engine
+        $script:SilentEngineLoaded = $true
+        return $true
+    } catch {
+        Write-Log "Silent-failure engine failed to load: $_" -Level WARN
+        return $false
+    }
+}
+
+function Test-ReportDestinationAuthorized {
+    <#
+    .SYNOPSIS
+        RFC 7489 s7.1 external destination verification.
+
+    .DESCRIPTION
+        When a domain sends its DMARC reports to an address at a different
+        organisational domain, that destination must publish
+
+            <policy-domain>._report._dmarc.<destination>  TXT  "v=DMARC1"
+
+        or conforming receivers refuse to send the reports. The operator sees a
+        valid-looking record, no data arriving, and nothing anywhere explaining
+        why. This is also the mechanism that makes per-client onboarding cheap:
+        two DNS records, no tenant app registration.
+    #>
+    param([string]$PolicyDomain, [string]$ExternalDomain)
+    try {
+        $ans = Resolve-DnsName -Name "$PolicyDomain._report._dmarc.$ExternalDomain" -Type TXT -EA Stop
+        return [bool](@($ans | Where-Object { $_.Strings -match 'v=DMARC1' }).Count -gt 0)
+    } catch { return $false }
+}
+
+function Get-NewSilentFailures {
+    <#
+    .SYNOPSIS
+        Which critical findings are new since the previous run.
+
+    .DESCRIPTION
+        Alert suppression, by finding code rather than by domain. A domain that
+        has been failing for a month must not alert every hour, but a NEW kind
+        of failure on that same domain must still get through - so this compares
+        codes, not merely "was this domain broken before".
+
+        A code that disappears and later returns is treated as new, because it
+        is: something regressed.
+    #>
+    param(
+        [AllowNull()] [AllowEmptyCollection()] $Current,
+        [AllowNull()] [AllowEmptyCollection()] $PreviousCodes
+    )
+    $prev = @($PreviousCodes | Where-Object { $_ })
+    return @(@($Current) | Where-Object { $_ -and ($_.Code -notin $prev) })
+}
+
 function Invoke-DNSHealthCheck {
     param([string[]]$Domains)
     if (-not $Domains -or $Domains.Count -eq 0) { return }
@@ -1427,6 +1496,8 @@ function Invoke-DNSHealthCheck {
     $state = if (Test-Path $stateFile) { try { Get-Content $stateFile -Raw | ConvertFrom-Json } catch { [PSCustomObject]@{ domains=[PSCustomObject]@{} } } } else { [PSCustomObject]@{ domains=[PSCustomObject]@{} } }
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     $today   = Get-Date -Format 'yyyy-MM-dd'; $allIssues = [System.Collections.Generic.List[string]]::new()
+    $silentAlerts = [System.Collections.Generic.List[PSCustomObject]]::new()
+    Import-SilentFailureEngine | Out-Null
 
     foreach ($domain in $Domains) {
         $r = [PSCustomObject]@{
@@ -1494,6 +1565,45 @@ function Invoke-DNSHealthCheck {
         $results.Add($r)
 
         $safeKey = $domain -replace '[^a-zA-Z0-9_]','_'
+
+        # Silent-failure analysis. Runs on every collection, not only when
+        # somebody opens the dashboard and presses a button: a record that is
+        # published and inert stays that way indefinitely, and the whole point
+        # is that nothing else will draw attention to it.
+        $prevEntry = $state.domains.$safeKey
+        $prevCrit  = @()
+        if ($prevEntry -and $prevEntry.PSObject.Properties['SilentCriticalCodes']) {
+            $prevCrit = @($prevEntry.SilentCriticalCodes)
+        }
+        # Carry the previous codes forward by default. If the analysis throws,
+        # recording "no criticals" would make a still-broken domain look newly
+        # broken on the next run and alert all over again, so a transient DNS
+        # failure would turn into a spurious alert.
+        $silentCodes = $prevCrit
+
+        try {
+            $analysis = Test-AuthenticationSilentFailures -Domain $domain `
+                -SpfRecords $r.SPFRecords -DmarcRecords $r.DMARCRecords `
+                -ReportDomainVerifier { param($pd, $ed) Test-ReportDestinationAuthorized -PolicyDomain $pd -ExternalDomain $ed }
+
+            $crit        = @($analysis.Findings | Where-Object Severity -eq 'critical')
+            $silentCodes = @($crit | ForEach-Object { $_.Code })
+
+            foreach ($f in $crit) {
+                Write-Log "SILENT FAILURE: $domain — $($f.Title) [$($f.Code)] ($($f.Reference))" -Level ERROR
+            }
+
+            # Alert only on codes that were not present last run. An MSP running
+            # this hourly must not be re-alerted about the same inert record
+            # forever, or the alert stops being read. A code that clears and
+            # later returns does alert again, which is correct: that is a
+            # regression, not a repeat.
+            foreach ($f in (Get-NewSilentFailures -Current $crit -PreviousCodes $prevCrit)) {
+                Write-AuditEvent "Silent failure on $domain`: $($f.Title) [$($f.Code)]" -EntryType Error -EventId 1014
+                $silentAlerts.Add([PSCustomObject]@{ Domain=$domain; Finding=$f })
+            }
+        } catch { Write-Log "Silent-failure analysis failed for $domain : $_" -Level WARN }
+
         $state.domains | Add-Member -NotePropertyName $safeKey -NotePropertyValue ([PSCustomObject]@{
             domain=$domain; DMARCPolicy=$r.DMARCPolicy; DMARCPct=$r.DMARCPct; SPFStatus=$r.SPFStatus
             SPFLookups=$r.SPFLookupCount; IssueCount=$domIssues.Count; Issues=$r.Issues; LastChecked=$today
@@ -1501,6 +1611,9 @@ function Invoke-DNSHealthCheck {
             # re-resolving DNS, and so a stored snapshot can be re-analysed when
             # the detection rules improve.
             SPFRecords=$r.SPFRecords; DMARCRecords=$r.DMARCRecords
+            # Critical codes seen this run, so the next run can alert only on
+            # what is new rather than repeating itself.
+            SilentCriticalCodes=$silentCodes
         }) -Force
 
         if ($domIssues.Count -gt 0) { Write-Log "DNS HEALTH: $domain — $($domIssues -join '; ')" -Level WARN; $allIssues.Add("$domain`: $($r.Issues)") }
@@ -1515,6 +1628,16 @@ function Invoke-DNSHealthCheck {
     if ($allIssues.Count -gt 0 -and $EnableAlerts) {
         Write-AuditEvent "DNS health issues: $($allIssues -join '; ')" -EntryType Warning -EventId 1013
         Send-TeamsCard -Title "🔍 DNS Health Issues — $($allIssues.Count) domain(s)" -Color "D29922" -Facts ($allIssues | ForEach-Object { @{"name"="Issue";"value"=$_} })
+    }
+
+    # Separate card, and red. A silently-inert record is not the same class of
+    # problem as "pct is below 100": the operator believes they are protected
+    # and they are not. Folding it into the amber advisory card would bury it.
+    if ($silentAlerts.Count -gt 0 -and $EnableAlerts) {
+        $facts = $silentAlerts | ForEach-Object {
+            @{ "name" = $_.Domain; "value" = "$($_.Finding.Title) — $($_.Finding.Reference)" }
+        }
+        Send-TeamsCard -Title "🛑 Silent Failure — $($silentAlerts.Count) record(s) published but not in effect" -Color "F85149" -Facts $facts
     }
 }
 #endregion
