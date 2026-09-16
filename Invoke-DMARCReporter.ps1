@@ -870,6 +870,195 @@ function Update-ReportingOrgCoverage {
 #endregion
 
 #region Enforcement Recommendation Engine
+function Get-DaysAtCurrentPolicy {
+    <#
+    .SYNOPSIS
+        How long a domain has actually been at its current DMARC policy.
+
+    .DESCRIPTION
+        This number gates the advance to p=reject, which is the one DMARC
+        transition that cannot be walked back after the fact: quarantine sends
+        failing mail to junk where a user can retrieve it, reject tells the
+        receiver to discard it outright.
+
+        It previously read (lastUpdated - firstSeen), which measures something
+        else entirely. firstSeen is when the DOMAIN was first observed and is
+        never updated after that, so a domain monitored for six months that
+        moved to quarantine yesterday reported ~180 days and sailed through a
+        gate meant to hold it for 14.
+
+        policyHistory already records every transition with its date, so the
+        honest answer is the age of the most recent entry whose policy equals
+        the current one. Falls back to firstSeen only when no history exists
+        at all, which is the case for a domain recorded before history was
+        being written.
+    #>
+    param(
+        # AllowNull so a missing progression entry returns 0 like the guard
+        # below intends, rather than a binding exception the caller has to
+        # catch separately.
+        [Parameter(Mandatory)] [AllowNull()] $Progression,
+        [datetime]$AsOf = (Get-Date)
+    )
+
+    if (-not $Progression) { return 0 }
+
+    $current = if ($Progression.PSObject.Properties.Name -contains 'currentPolicy') { [string]$Progression.currentPolicy } else { '' }
+    if (-not $current) { return 0 }
+
+    $history = @()
+    if ($Progression.PSObject.Properties.Name -contains 'policyHistory' -and $Progression.policyHistory) {
+        $history = @($Progression.policyHistory)
+    }
+
+    # Walk backwards to the point the domain ENTERED the current policy. Taking
+    # the newest matching entry alone would be wrong for none -> quarantine ->
+    # none -> quarantine: we want the start of the current run, not the first
+    # time this policy was ever seen.
+    $since = $null
+    for ($i = $history.Count - 1; $i -ge 0; $i--) {
+        $entry = $history[$i]
+        if (-not $entry) { continue }
+        $p = if ($entry.PSObject.Properties.Name -contains 'policy') { [string]$entry.policy } else { '' }
+        if ($p -ne $current) { break }
+        if ($entry.PSObject.Properties.Name -contains 'date' -and $entry.date) { $since = $entry.date }
+    }
+
+    if (-not $since -and $Progression.PSObject.Properties.Name -contains 'firstSeen') {
+        $since = $Progression.firstSeen
+    }
+    if (-not $since) { return 0 }
+
+    try {
+        $d = [int]($AsOf.Date - ([datetime]$since).Date).Days
+        return [math]::Max(0, $d)
+    } catch { return 0 }
+}
+
+function Get-EnforcementDecision {
+    <#
+    .SYNOPSIS
+        Decides whether a domain is ready to advance, from already-gathered
+        numbers. Pure: no file or network access, so it is directly testable.
+
+    .DESCRIPTION
+        Separates BLOCKERS from ADVICE, which the previous version conflated.
+        Suggesting adkim=s is not the same kind of statement as "you still have
+        unidentified senders failing"; putting both in one list meant a domain
+        at p=reject pct=100 with relaxed alignment - the RFC default, and
+        perfectly correct - was reported as "NOT READY, resolve 2 blockers"
+        permanently and could never reach fully-optimized. An operator who sees
+        a permanent red state stops reading it.
+
+        Volume floors apply to BOTH advances. The previous version only
+        required 100+ messages for none -> quarantine and let the more
+        dangerous quarantine -> reject through on any volume at all.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Domain,
+        [AllowEmptyString()] [string]$CurrentPolicy,
+        [double]$PassRate = 0,
+        [int]$TotalMessages = 0,
+        [int]$UnknownFailingMessages = 0,
+        [int]$DaysAtCurrentPolicy = 0,
+        [int]$Pct = 100,
+        [string]$Adkim = 'r',
+        [string]$Aspf = 'r',
+        [int]$MinDaysAtQuarantine = 14,
+        [int]$MinMessages = 100
+    )
+
+    $reasons  = [System.Collections.Generic.List[string]]::new()
+    $blockers = [System.Collections.Generic.List[string]]::new()
+    $advice   = [System.Collections.Generic.List[string]]::new()
+    $ready    = $false
+    $targetPolicy = 'quarantine'
+
+    $policy = if ($CurrentPolicy) { $CurrentPolicy.ToLowerInvariant() } else { '' }
+
+    switch ($policy) {
+        'none' {
+            $targetPolicy = 'quarantine'
+            if ($PassRate -ge 90) { $reasons.Add("Pass rate $PassRate% meets the 90% threshold") }
+            else { $blockers.Add("Pass rate $PassRate% is below the 90% threshold") }
+
+            if ($UnknownFailingMessages -eq 0) { $reasons.Add("No unidentified senders are failing DMARC") }
+            else { $blockers.Add("$UnknownFailingMessages messages from unidentified senders are failing - identify and authorize them first") }
+
+            if ($TotalMessages -ge $MinMessages) { $reasons.Add("Sufficient volume ($TotalMessages messages) to judge") }
+            else { $blockers.Add("Only $TotalMessages messages observed - need $MinMessages+ before the pass rate means anything") }
+
+            $ready = ($blockers.Count -eq 0)
+        }
+        'quarantine' {
+            $targetPolicy = 'reject'
+            if ($PassRate -ge 95) { $reasons.Add("Pass rate $PassRate% meets the 95% threshold") }
+            else { $blockers.Add("Pass rate $PassRate% is below the 95% threshold") }
+
+            if ($UnknownFailingMessages -eq 0) { $reasons.Add("No unidentified senders are failing DMARC") }
+            else { $blockers.Add("$UnknownFailingMessages messages from unidentified senders are failing") }
+
+            # reject discards mail rather than junking it, so this advance gets
+            # the same volume floor as the first one, not a free pass.
+            if ($TotalMessages -ge $MinMessages) { $reasons.Add("Sufficient volume ($TotalMessages messages) to judge") }
+            else { $blockers.Add("Only $TotalMessages messages observed - need $MinMessages+ before moving to reject") }
+
+            if ($DaysAtCurrentPolicy -ge $MinDaysAtQuarantine) { $reasons.Add("At quarantine for $DaysAtCurrentPolicy days") }
+            else { $blockers.Add("Only $DaysAtCurrentPolicy days at quarantine - allow $MinDaysAtQuarantine minimum so slow-cycle senders appear in reports") }
+
+            $ready = ($blockers.Count -eq 0)
+        }
+        'reject' {
+            $targetPolicy = 'optimized'
+            $reasons.Add("Already at p=reject, the maximum DMARC enforcement")
+
+            if ($Pct -ge 100) { $reasons.Add("pct=100, policy applies to all failing mail") }
+            else { $blockers.Add("pct=$Pct - raise to 100 so the policy applies to all failing mail") }
+
+            # Relaxed alignment is the RFC default and correct for most
+            # domains. Suggesting strict is advice, never a blocker.
+            if ($Adkim -eq 's') { $reasons.Add("adkim=s, strict DKIM alignment") } else { $advice.Add("Consider adkim=s for strict DKIM alignment") }
+            if ($Aspf  -eq 's') { $reasons.Add("aspf=s, strict SPF alignment")   } else { $advice.Add("Consider aspf=s for strict SPF alignment")  }
+
+            $ready = ($blockers.Count -eq 0)
+        }
+        default {
+            # No usable policy recorded. Say so plainly rather than emitting
+            # "resolve 0 blocker(s)", which reads like a bug to the operator.
+            return [PSCustomObject]@{
+                Domain=$Domain; CurrentPolicy=$CurrentPolicy; TargetPolicy='quarantine'
+                PassRate=$PassRate; TotalMessages=$TotalMessages; UnknownFailing=$UnknownFailingMessages
+                DaysAtCurrentPolicy=$DaysAtCurrentPolicy
+                Recommendation='insufficient-data'
+                Summary='No DMARC policy recorded for this domain yet'
+                ReadyToAdvance=$false
+                Reasons=''; Blockers=''; Advice=''
+            }
+        }
+    }
+
+    $recommendation =
+        if ($policy -eq 'reject' -and $blockers.Count -eq 0) { 'fully-optimized' }
+        elseif ($ready) { "advance-to-$targetPolicy" }
+        else { 'not-ready' }
+
+    $summary =
+        if ($policy -eq 'reject' -and $blockers.Count -eq 0) {
+            if ($advice.Count -gt 0) { "Fully enforced at p=reject pct=100. $($advice.Count) optional hardening step(s) available." }
+            else { 'Fully optimized: p=reject at pct=100 with strict alignment' }
+        }
+        elseif ($ready) { "READY to advance from p=$policy to p=$targetPolicy" }
+        else { "NOT READY - $($blockers.Count) blocker(s) to resolve before advancing" }
+
+    return [PSCustomObject]@{
+        Domain=$Domain; CurrentPolicy=$policy; TargetPolicy=$targetPolicy
+        PassRate=$PassRate; TotalMessages=$TotalMessages; UnknownFailing=$UnknownFailingMessages
+        DaysAtCurrentPolicy=$DaysAtCurrentPolicy
+        Recommendation=$recommendation; Summary=$summary; ReadyToAdvance=$ready
+        Reasons=($reasons -join '|'); Blockers=($blockers -join '|'); Advice=($advice -join '|')
+    }
+}
+
 function Get-EnforcementRecommendation {
     param([string]$Domain)
     $progFile = Join-Path $stateDir "progression.json"
@@ -890,7 +1079,17 @@ function Get-EnforcementRecommendation {
         Where-Object { $_.LastWriteTime -ge $cutoff } | Sort-Object Name |
         ForEach-Object { try { $allData += Import-Csv $_.FullName | Where-Object { $_.Domain -eq $Domain } } catch {} }
 
-    if ($allData.Count -eq 0) { return [PSCustomObject]@{ Domain=$Domain; Recommendation='insufficient-data'; Details='Less than 14 days of data available.'; ReadyToAdvance=$false } }
+    # No rows at all is exactly that - not "less than 14 days", which is what
+    # this used to claim and which sent operators looking for the wrong problem.
+    if ($allData.Count -eq 0) {
+        return [PSCustomObject]@{
+            Domain=$Domain; CurrentPolicy=$currentPolicy; TargetPolicy='quarantine'
+            PassRate=0; TotalMessages=0; UnknownFailing=0; DaysAtCurrentPolicy=0
+            Recommendation='insufficient-data'
+            Summary="No aggregate data for $Domain in the last 14 days"
+            ReadyToAdvance=$false; Reasons=''; Blockers=''; Advice=''
+        }
+    }
 
     $pass     = ($allData | Where-Object { $_.DMARCResult -eq 'pass' } | Measure-Object MessageCount -Sum).Sum
     $fail     = ($allData | Where-Object { $_.DMARCResult -eq 'fail' } | Measure-Object MessageCount -Sum).Sum
@@ -907,46 +1106,18 @@ function Get-EnforcementRecommendation {
         } catch {}
     }
 
-    $reasons  = [System.Collections.Generic.List[string]]::new()
-    $blockers = [System.Collections.Generic.List[string]]::new()
-    $ready    = $false
+    # Time at the CURRENT policy, read from policyHistory rather than inferred
+    # from firstSeen. See Get-DaysAtCurrentPolicy for why that distinction
+    # decides whether a domain can be advanced to reject prematurely.
+    $daysAtPolicy = Get-DaysAtCurrentPolicy -Progression $prog
 
-    switch ($currentPolicy) {
-        'none' {
-            $targetPolicy = 'quarantine'
-            if ($passRate -ge 90) { $reasons.Add("✓ Pass rate $passRate% ≥ 90% threshold") } else { $blockers.Add("✗ Pass rate $passRate% below 90% required threshold") }
-            if ($unknownFail -eq 0) { $reasons.Add("✓ No unknown senders failing DMARC") } else { $blockers.Add("✗ $unknownFail messages from unknown failing senders — identify and authorize these sources first") }
-            if ($total -ge 100) { $reasons.Add("✓ Sufficient message volume ($total) for analysis") } else { $blockers.Add("✗ Insufficient message volume ($total) — need 100+ messages for confidence") }
-            $ready = ($blockers.Count -eq 0)
-        }
-        'quarantine' {
-            $targetPolicy = 'reject'
-            if ($passRate -ge 95) { $reasons.Add("✓ Pass rate $passRate% ≥ 95% threshold") } else { $blockers.Add("✗ Pass rate $passRate% below 95% required threshold") }
-            if ($unknownFail -eq 0) { $reasons.Add("✓ No unknown senders failing DMARC") } else { $blockers.Add("✗ $unknownFail messages from unknown failing senders") }
-            $daysAtQuarantine = if ($prog.firstSeen) { ([datetime]$prog.lastUpdated - [datetime]$prog.firstSeen).Days } else { 0 }
-            if ($daysAtQuarantine -ge 14) { $reasons.Add("✓ At quarantine for $daysAtQuarantine days (recommend 14+ days minimum)") } else { $blockers.Add("✗ Only $daysAtQuarantine days at quarantine — allow 14 days minimum") }
-            $ready = ($blockers.Count -eq 0)
-        }
-        'reject' {
-            $targetPolicy = 'optimized'
-            $reasons.Add("✓ Already at p=reject — maximum DMARC enforcement achieved")
-            if ([int]$prog.pct -lt 100) { $blockers.Add("✗ pct=$($prog.pct) — increase to 100% for full coverage") } else { $reasons.Add("✓ pct=100 — full enforcement") }
-            if ($prog.adkim -eq 's') { $reasons.Add("✓ adkim=s (strict DKIM alignment)") } else { $blockers.Add("⚠ Consider adkim=s for stricter DKIM alignment") }
-            if ($prog.aspf  -eq 's') { $reasons.Add("✓ aspf=s (strict SPF alignment)")  } else { $blockers.Add("⚠ Consider aspf=s for stricter SPF alignment")  }
-            $ready = ($blockers.Count -eq 0)
-        }
-        default { $targetPolicy = 'quarantine' }
-    }
+    $pctVal   = if ($prog.PSObject.Properties.Name -contains 'pct'   -and $prog.pct)   { [int]$prog.pct } else { 100 }
+    $adkimVal = if ($prog.PSObject.Properties.Name -contains 'adkim' -and $prog.adkim) { [string]$prog.adkim } else { 'r' }
+    $aspfVal  = if ($prog.PSObject.Properties.Name -contains 'aspf'  -and $prog.aspf)  { [string]$prog.aspf } else { 'r' }
 
-    $recommendation = if ($ready -and $currentPolicy -ne 'reject') { "advance-to-$targetPolicy" } elseif ($currentPolicy -eq 'reject' -and $blockers.Count -eq 0) { 'fully-optimized' } elseif ($blockers.Count -gt 0) { 'not-ready' } else { 'maintain' }
-    $summary = if ($ready -and $currentPolicy -ne 'reject') { "✅ READY to advance from p=$currentPolicy to p=$targetPolicy" } elseif ($currentPolicy -eq 'reject' -and $blockers.Count -eq 0) { "🏆 FULLY OPTIMIZED — p=reject at 100%" } else { "⏳ NOT READY — resolve $($blockers.Count) blocker(s) before advancing" }
-
-    return [PSCustomObject]@{
-        Domain=$Domain; CurrentPolicy=$currentPolicy; TargetPolicy=$targetPolicy
-        PassRate=$passRate; TotalMessages=$total; UnknownFailing=$unknownFail
-        Recommendation=$recommendation; Summary=$summary; ReadyToAdvance=$ready
-        Reasons=($reasons -join '|'); Blockers=($blockers -join '|')
-    }
+    return Get-EnforcementDecision -Domain $Domain -CurrentPolicy $currentPolicy `
+        -PassRate $passRate -TotalMessages $total -UnknownFailingMessages $unknownFail `
+        -DaysAtCurrentPolicy $daysAtPolicy -Pct $pctVal -Adkim $adkimVal -Aspf $aspfVal
 }
 #endregion
 
