@@ -1,6 +1,6 @@
 # DMARC Monitor
 
-[![License](https://img.shields.io/badge/License-CC%20BY--ND%204.0-blue?style=flat-square)](https://creativecommons.org/licenses/by-nd/4.0/)
+[![License](https://img.shields.io/badge/License-Proprietary-red?style=flat-square)](LICENSE)
 
 Self-hosted DMARC monitoring with feature parity to paid tools (DMARCian, Valimail, Sendmarc). Polls a shared mailbox via Microsoft Graph every 30 minutes. WPF dashboard with domain sidebar, compliance scoring, and per-domain views.
 
@@ -550,3 +550,12 @@ To rotate:
 **Dashboard banner shows cert expiring** — Follow Certificate Rotation above.
 
 **SPF Inspector tab shows "Domain Required"** — Select a specific domain in the sidebar (not "All Domains") before clicking SPF + DKIM Inspector.
+
+## License
+
+Copyright © 2026 NextLayerSec ([nextlayersec.io](https://nextlayersec.io)). All rights reserved.
+
+This is proprietary software. No license to use, copy, modify, or distribute is
+granted by the publication of this repository. See [LICENSE](LICENSE) for full
+terms. Commercial, managed-service, and white-label licensing inquiries:
+[nextlayersec.io](https://nextlayersec.io).
