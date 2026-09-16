@@ -446,7 +446,12 @@ function ConvertFrom-DMARCForensicReport {
     param([string]$FilePath)
     $records = [System.Collections.Generic.List[PSCustomObject]]::new()
     try {
-        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8
+        # -EA Stop so a missing/unreadable file is caught by this function's
+        # own try/catch and logged as a parse failure. Without it Get-Content
+        # raises a non-terminating error that bypasses the catch and writes
+        # straight to the error stream, which a scheduled task can surface as
+        # a run failure even though the engine handled it fine.
+        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8 -EA Stop
         if ([string]::IsNullOrWhiteSpace($content)) { return $records }
 
         # Unfold RFC 5322 folded headers (continuation lines start with space/tab)
@@ -1021,6 +1026,33 @@ function Test-AlertThresholds {
 }
 #endregion
 
+#region SPF lookup accounting
+function Get-SPFLookupCount {
+    <#
+        Counts the terms in an SPF record that cost a DNS lookup against the
+        RFC 7208 s4.6.4 limit of 10. Exceeding it is a PermError: the record
+        stops evaluating and mail starts failing SPF, so an inaccurate count
+        here is the difference between warning a client and not.
+
+        Countable: include:, redirect=, exists:, a, mx, ptr
+        Free:      ip4:, ip6:, all, exp=, v=spf1
+
+        The a/mx/ptr alternatives need a lookahead because they are bare words
+        that also prefix other tokens. Without it:
+          - '(a|mx|include|exists|redirect)[:=]' (the previous implementation)
+            required a colon or equals immediately after, so bare 'a' and 'mx'
+            were invisible and 'ptr' was absent entirely - a consistent
+            UNDERCOUNT that could report a genuinely broken record as healthy.
+          - '^(a|mx|exists)' unanchored matches 'all', charging a phantom
+            lookup to essentially every record - an OVERCOUNT.
+    #>
+    param([string]$SpfRecord)
+    if ([string]::IsNullOrWhiteSpace($SpfRecord)) { return 0 }
+    $pattern = '(?:^|\s)[+~?-]?(?:include:|redirect=|exists:|a(?=[\s:/]|$)|mx(?=[\s:/]|$)|ptr(?=[\s:/]|$))'
+    return ([regex]::Matches($SpfRecord, $pattern)).Count
+}
+#endregion
+
 #region DNS History + Drift Detection
 # Every run snapshots SPF/DMARC/MTA-STS/BIMI/TLS-RPT/MX for each domain
 # and appends any diff vs. the previous snapshot to dns-drift.json. The
@@ -1194,7 +1226,7 @@ function Invoke-DNSHealthCheck {
             $spfTxt = ($spfDns | Where-Object { $_.Strings -match 'v=spf1' } | Select-Object -First 1).Strings -join ''
             if ($spfTxt) {
                 $r.SPFRecord = $spfTxt
-                $lookups = ([regex]::Matches($spfTxt,'(a|mx|include|exists|redirect)[:=]')).Count
+                $lookups = Get-SPFLookupCount -SpfRecord $spfTxt
                 $r.SPFLookupCount = $lookups
                 $allM = [regex]::Match($spfTxt,'([+~?-]all)')
                 $r.SPFHasAll = $allM.Success; $r.SPFAllMechanism = if ($allM.Success) { $allM.Value } else { 'missing' }

@@ -1,0 +1,174 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pester:
+    name: Pester (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu proves the parsers are pure and portable, which is what makes
+        # the eventual C# port straightforward. windows is the platform the
+        # engine actually ships on, so it is the one that must stay green.
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache PowerShell modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/powershell/Modules
+            ~/Documents/PowerShell/Modules
+          key: psmodules-${{ runner.os }}-pester6
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          $existing = Get-Module -ListAvailable Pester |
+            Where-Object { $_.Version -ge [version]'6.0.0' } |
+            Sort-Object Version -Descending | Select-Object -First 1
+          if ($existing) {
+            "Pester $($existing.Version) already present"
+          } else {
+            Set-PSRepository PSGallery -InstallationPolicy Trusted
+            Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck -MinimumVersion 6.0.0
+          }
+
+      - name: Syntax check every script
+        shell: pwsh
+        run: |
+          # The PowerShell parser is the first thing that runs on the target
+          # machine too. A parse error here means the dashboard never opens -
+          # exactly the failure mode of PR #7.
+          $bad = 0
+          Get-ChildItem -Path . -Filter *.ps1 -File | ForEach-Object {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$null, [ref]$errs) | Out-Null
+            if ($errs -and $errs.Count -gt 0) {
+              $bad++
+              Write-Host "::error file=$($_.Name)::$($errs.Count) parse error(s)"
+              $errs | ForEach-Object {
+                Write-Host "::error file=$($_.Extent.File),line=$($_.Extent.StartLineNumber)::$($_.Message)"
+              }
+            } else {
+              Write-Host "ok  $($_.Name)"
+            }
+          }
+          if ($bad -gt 0) { exit 1 }
+
+      - name: Validate main window XAML
+        shell: pwsh
+        run: |
+          # Catches the class of bug that shipped in PR #7: XAML that parses as
+          # XML but that WPF rejects at load time takes the whole dashboard
+          # down. Full XamlReader.Load needs WPF, so on Linux we can only check
+          # well-formedness; Windows gets the real thing.
+          $dash = Get-Content ./Start-DMARCDashboard.ps1 -Raw
+          $start = $dash.IndexOf('<Window')
+          $end   = $dash.IndexOf('</Window>')
+          if ($start -lt 0 -or $end -lt 0) { throw 'Could not locate the main window XAML' }
+          $xamlText = $dash.Substring($start, $end - $start + 9)
+
+          [xml]$doc = $xamlText
+          "XAML is well-formed XML. Root: $($doc.DocumentElement.Name)"
+
+          $tabs = [regex]::Matches($xamlText, 'TabItem Header="([^"]+)"') |
+            ForEach-Object { $_.Groups[1].Value.Trim() }
+          "Tabs: $($tabs -join ' | ')"
+
+          if ($IsWindows) {
+            Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+            $reader = New-Object System.Xml.XmlNodeReader ([xml]$xamlText)
+            $null = [Windows.Markup.XamlReader]::Load($reader)
+            'XamlReader.Load succeeded - the window will construct at runtime'
+          }
+
+      - name: Validate sender-catalog.json
+        shell: pwsh
+        run: |
+          $cat = Get-Content ./sender-catalog.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          "Catalog $($cat.version): $($cat.services.Count) services"
+          foreach ($svc in $cat.services) {
+            if (-not $svc.id)   { throw "A service entry is missing an id" }
+            if (-not $svc.name) { throw "Service '$($svc.id)' is missing a name" }
+            foreach ($p in @($svc.rdns)) {
+              if ($p) { $null = [regex]::new($p) }
+            }
+          }
+          'Catalog structurally valid and every rdns pattern compiles'
+
+      - name: Run Pester
+        shell: pwsh
+        run: |
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path        = './tests'
+          $cfg.Run.Exit        = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          $cfg.TestResult.Enabled      = $true
+          $cfg.TestResult.OutputPath   = 'testresults.xml'
+          $cfg.TestResult.OutputFormat = 'NUnitXml'
+          Invoke-Pester -Configuration $cfg
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results-${{ matrix.os }}
+          path: testresults.xml
+          if-no-files-found: warn
+
+  schema:
+    name: SQLite schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply schema to an empty database
+        run: |
+          # db/schema.sql is the contract the future EF Core migration is
+          # generated from. If it stops applying cleanly, everything built on
+          # it is built on sand.
+          sqlite3 /tmp/schema-check.db < db/schema.sql
+          echo "--- tables ---"
+          sqlite3 /tmp/schema-check.db \
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+          echo "--- views ---"
+          sqlite3 /tmp/schema-check.db "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name;"
+
+      - name: Run schema constraint checks
+        run: |
+          # Proves the constraints actually fire: report dedup, one-domain-one-
+          # client, FK integrity, CHECK enums, tenant isolation, cascade delete.
+          # The negative cases are expected to error, so this deliberately does
+          # not use "set -e" semantics for the whole file.
+          sqlite3 /tmp/schema-check.db < db/schema-verify.sql > /tmp/verify.out 2>&1 || true
+          cat /tmp/verify.out
+
+          fail=0
+          check() {
+            if grep -qF "$1" /tmp/verify.out; then
+              echo "ok   $2"
+            else
+              echo "FAIL $2 (expected to find: $1)"
+              fail=1
+            fi
+          }
+          check "UNIQUE constraint failed: aggregate_reports.org_name" "duplicate report rejected"
+          check "UNIQUE constraint failed: domains.name"               "two clients claiming one domain rejected"
+          check "FOREIGN KEY constraint failed"                        "orphan record rejected"
+          check "CHECK constraint failed"                              "invalid enum rejected"
+          check "orphan_domains=0"                                     "cascade delete removed client's domains"
+          check "acme_survives=2"                                      "other client's data untouched"
+          exit $fail

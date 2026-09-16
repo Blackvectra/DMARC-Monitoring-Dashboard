@@ -98,9 +98,20 @@ function Get-SPFNode {
                 $node.Mechanisms.Add([PSCustomObject]@{ Type='redirect'; Value=$reDomain; Qualifier=$qualifier; CountsAsLookup=$true })
                 if ($Depth -lt 10) { $node.Children.Add((Get-SPFNode -Domain $reDomain -Depth ($Depth+1) -Visited $Visited)) }
 
-            } elseif ($mechTerm -match '^(a|mx|exists)') {
+            } elseif ($mechTerm -match '^(a|mx|ptr)([:/]|$)' -or $mechTerm -match '^exists:') {
+                # RFC 7208 s4.6.4: include, a, mx, ptr, exists and redirect are
+                # the terms that cost a DNS lookup against the limit of 10.
+                #
+                # The end of each alternative must be anchored. '^(a|mx|exists)'
+                # also matched 'all', so every record ending -all/~all - which
+                # is essentially every record - was charged one phantom lookup.
+                # That pushed domains into the "approaching limit" (>=8) and
+                # "PermError risk" (>=10) bands a full lookup early.
+                #
+                # Valid forms: a, a:domain, a/24, a:domain/24 (same for mx/ptr),
+                # and exists:domain which always carries a colon.
                 $script:LookupCount++; $node.NodeLookups++
-                $node.Mechanisms.Add([PSCustomObject]@{ Type=($mechTerm -split ':')[0]; Value=$mechTerm; Qualifier=$qualifier; CountsAsLookup=$true })
+                $node.Mechanisms.Add([PSCustomObject]@{ Type=(($mechTerm -split '[:/]')[0]); Value=$mechTerm; Qualifier=$qualifier; CountsAsLookup=$true })
 
             } elseif ($mechTerm -match '^ip[46]:(.+)') {
                 $node.Mechanisms.Add([PSCustomObject]@{ Type='ip'; Value=$mechTerm; Qualifier=$qualifier; CountsAsLookup=$false })
