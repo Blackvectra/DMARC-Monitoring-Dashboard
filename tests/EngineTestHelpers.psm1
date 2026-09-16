@@ -46,7 +46,11 @@ function Import-EngineFunction {
     #>
     param(
         [Parameter(Mandatory)] [string]$ScriptPath,
-        [Parameter(Mandatory)] [string[]]$FunctionName
+        [Parameter(Mandatory)] [string[]]$FunctionName,
+        # Engine-wide helpers that New-EngineStub already provides. The
+        # dependency guard below ignores these so callers don't have to list
+        # them. Pass extra names here if a test stubs something else itself.
+        [string[]]$AlreadyStubbed = @('Write-Log', 'Write-AuditEvent')
     )
 
     $parseErrors = $null
@@ -66,6 +70,7 @@ function Import-EngineFunction {
     }, $true)
 
     $sourceParts = [System.Collections.Generic.List[string]]::new()
+    $selected    = [System.Collections.Generic.List[object]]::new()
     foreach ($wanted in $FunctionName) {
         $match = $allFunctions | Where-Object { $_.Name -eq $wanted } | Select-Object -First 1
         if (-not $match) {
@@ -73,6 +78,44 @@ function Import-EngineFunction {
             throw "Function '$wanted' not found in $ScriptPath. Available: $available"
         }
         $sourceParts.Add($match.Extent.Text)
+        $selected.Add($match)
+    }
+
+    # Guard against the silent-failure trap this extraction approach creates.
+    #
+    # If an extracted function calls another engine function that was NOT
+    # requested, the call fails at runtime with "command not found". Every
+    # parser here wraps its body in try/catch and returns an empty list on
+    # error, so a missing dependency is indistinguishable from a malformed
+    # report: the tests just see zero records and report a confusing failure
+    # far from the real cause.
+    #
+    # Detect it at extraction time instead and say exactly what to add.
+    $requested = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]($FunctionName + $AlreadyStubbed), [System.StringComparer]::OrdinalIgnoreCase)
+    $definedInFile = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]$allFunctions.Name, [System.StringComparer]::OrdinalIgnoreCase)
+
+    $missing = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($fn in $selected) {
+        $calls = $fn.FindAll({
+            param($node) $node -is [System.Management.Automation.Language.CommandAst]
+        }, $true)
+        foreach ($call in $calls) {
+            $name = $call.GetCommandName()
+            if (-not $name) { continue }
+            # A call to something this file defines, that the caller did not ask for.
+            if ($definedInFile.Contains($name) -and -not $requested.Contains($name)) {
+                [void]$missing.Add($name)
+            }
+        }
+    }
+    if ($missing.Count -gt 0) {
+        $names = ($missing | Sort-Object | ForEach-Object { "'$_'" }) -join ', '
+        throw ("Extracted function(s) call engine function(s) that were not requested: $names. " +
+               "They would fail at runtime as 'command not found', and because the parsers " +
+               "catch their own exceptions you would see an empty result rather than an error. " +
+               "Add them to -FunctionName, or stub them before dot-sourcing.")
     }
 
     return [scriptblock]::Create($sourceParts -join "`n`n")
