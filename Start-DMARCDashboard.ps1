@@ -712,7 +712,8 @@ $markers
                     <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0">
                             <Button x:Name="btnRefreshDNS" Content="Refresh" Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,8,0"/>
-                            <Button x:Name="btnInspectSPF" Content="SPF + DKIM Inspector" Style="{StaticResource Btn2}" Padding="10,4"/>
+                            <Button x:Name="btnInspectSPF" Content="SPF + DKIM Inspector" Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,8,0"/>
+                            <Button x:Name="btnSilentCheck" Content="Silent Failure Check" Style="{StaticResource Btn2}" Padding="10,4"/>
                             <TextBlock x:Name="txtDNSCount" Foreground="#484F58" FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0"/>
                         </StackPanel>
                     </Border>
@@ -838,7 +839,7 @@ $markers
 $reader = New-Object System.Xml.XmlNodeReader $mainXaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-foreach ($n in @('bannerModule','bannerCert','txtCertBanner','btnInstallModule','btnRun','btnRefresh','btnSettings','btnSchedule','btnExport','btnGenReport','btnClearLog','txtLog','txtStatus','txtLastRun','txtRunStatus','txtMailboxLabel','txtPSBadge','lbDomains','txtDomainSearch','tabMain','wbOverview','wbSenders','wbTrend','wbGeoMap','wbSPF','dgDMARC','cmbDMARCResult','cmbFailReason','txtDMARCIP','btnDMARCFilter','btnDMARCReset','txtDMARCCount','dgTLS','cmbTLSResult','btnTLSFilter','btnTLSReset','txtTLSCount','dgSources','cmbSrcStatus','cmbSrcService','btnApprove','btnUnapprove','btnAuthorize','btnRefreshSources','txtSourceCount','txtSourceCrumb','dgDNS','btnRefreshDNS','btnInspectSPF','txtDNSCount','dgRUF','btnRefreshRUF','txtRUFCount','cmbTrendPeriod','btnRefreshTrend','dgProtocol','btnRefreshProtocol','txtProtocolCount','dgDrift','cmbDriftType','btnRefreshDrift','txtDriftCount')) {
+foreach ($n in @('bannerModule','bannerCert','txtCertBanner','btnInstallModule','btnRun','btnRefresh','btnSettings','btnSchedule','btnExport','btnGenReport','btnClearLog','txtLog','txtStatus','txtLastRun','txtRunStatus','txtMailboxLabel','txtPSBadge','lbDomains','txtDomainSearch','tabMain','wbOverview','wbSenders','wbTrend','wbGeoMap','wbSPF','dgDMARC','cmbDMARCResult','cmbFailReason','txtDMARCIP','btnDMARCFilter','btnDMARCReset','txtDMARCCount','dgTLS','cmbTLSResult','btnTLSFilter','btnTLSReset','txtTLSCount','dgSources','cmbSrcStatus','cmbSrcService','btnApprove','btnUnapprove','btnAuthorize','btnRefreshSources','txtSourceCount','txtSourceCrumb','dgDNS','btnRefreshDNS','btnInspectSPF','btnSilentCheck','txtDNSCount','dgRUF','btnRefreshRUF','txtRUFCount','cmbTrendPeriod','btnRefreshTrend','dgProtocol','btnRefreshProtocol','txtProtocolCount','dgDrift','cmbDriftType','btnRefreshDrift','txtDriftCount')) {
     Set-Variable -Name $n -Value $window.FindName($n) -Scope Script
 }
 $txtPSBadge.Text = "PS$($script:PSVer)"
@@ -1396,6 +1397,141 @@ function Invoke-SPFInspection {
         else { $txtLog.AppendText("[WARN] SPF inspection produced no output.`n") }
     } catch { $txtLog.AppendText("[WARN] SPF inspection: $_`n") }
 }
+function Test-ReportDestinationAuthorized {
+    <#
+        RFC 7489 s7.1: when a domain sends its DMARC reports to an address at a
+        different organisational domain, that destination must publish
+        <policy-domain>._report._dmarc.<destination> TXT "v=DMARC1"
+        or conforming receivers will refuse to send the reports. The operator
+        sees a working-looking record and no data, with nothing to explain why.
+    #>
+    param([string]$PolicyDomain, [string]$ExternalDomain)
+    try {
+        $probe = "$PolicyDomain._report._dmarc.$ExternalDomain"
+        $ans = Resolve-DnsName -Name $probe -Type TXT -EA Stop
+        return [bool](@($ans | Where-Object { $_.Strings -match 'v=DMARC1' }).Count -gt 0)
+    } catch { return $false }
+}
+
+function Invoke-SilentFailureCheck {
+    <#
+        Runs the silent-failure analysis over whatever DNS the last health check
+        recorded. Deliberately reads stored records rather than re-resolving:
+        the point is to analyse exactly what was observed, and it stays usable
+        when the dashboard has no outbound DNS.
+    #>
+    $cfg = Get-AllSettings
+    if ([string]::IsNullOrWhiteSpace($cfg.WorkingDir)) {
+        [System.Windows.MessageBox]::Show("Set a working directory in Settings first.", "Not Configured", "OK", "Information") | Out-Null; return
+    }
+    if (-not (Test-Path $script:RemediationScript)) {
+        [System.Windows.MessageBox]::Show("Invoke-DNSRemediation.ps1 not found at $script:RemediationScript", "Missing", "OK", "Warning") | Out-Null; return
+    }
+    $dnsFile = Join-Path $cfg.WorkingDir "State\dns-health.json"
+    if (-not (Test-Path $dnsFile)) {
+        [System.Windows.MessageBox]::Show("No DNS health data yet. Run a collection first.", "No Data", "OK", "Information") | Out-Null; return
+    }
+
+    $txtLog.AppendText("[INFO] Running silent-failure analysis...`n"); $txtLog.ScrollToEnd()
+    try {
+        . $script:RemediationScript
+
+        $entries = @((Get-Content $dnsFile -Raw | ConvertFrom-Json).domains.PSObject.Properties | ForEach-Object { $_.Value })
+        if ($script:SelectedDomain -ne "All Domains") { $entries = @($entries | Where-Object { $_.domain -eq $script:SelectedDomain }) }
+        if ($entries.Count -eq 0) { $txtLog.AppendText("[WARN] No domains to analyse.`n"); return }
+
+        $verifier = { param($pd, $ed) Test-ReportDestinationAuthorized -PolicyDomain $pd -ExternalDomain $ed }
+
+        $results = foreach ($e in $entries) {
+            # Records were only stored from this version onward. An older
+            # dns-health.json has the analysis fields absent, which must not be
+            # read as "the domain publishes nothing" - that would invent
+            # critical findings for domains that are fine.
+            $hasRecords = ($null -ne $e.PSObject.Properties['SPFRecords']) -or ($null -ne $e.PSObject.Properties['DMARCRecords'])
+            if (-not $hasRecords) { continue }
+            Test-AuthenticationSilentFailures -Domain $e.domain `
+                -SpfRecords @($e.SPFRecords) -DmarcRecords @($e.DMARCRecords) `
+                -ReportDomainVerifier $verifier
+        }
+        $results = @($results)
+
+        if ($results.Count -eq 0) {
+            $txtLog.AppendText("[WARN] Stored DNS data predates raw-record capture. Run a collection to refresh, then re-check.`n")
+            [System.Windows.MessageBox]::Show("The stored DNS data was collected before raw records were captured.`n`nRun a collection to refresh it, then run this check again.", "Refresh Needed", "OK", "Information") | Out-Null
+            return
+        }
+
+        $broken = @($results | Where-Object { $_.IsSilentlyBroken })
+        $totalF = ($results | Measure-Object -Property TotalCount -Sum).Sum
+        if ($null -eq $totalF) { $totalF = 0 }
+
+        $sevColor = @{ critical='#F85149'; high='#DB6D28'; medium='#D29922'; low='#58A6FF'; info='#8B949E' }
+        $sb = [System.Text.StringBuilder]::new()
+        [void]$sb.Append(@"
+<html><head><meta charset="utf-8"><style>
+body{background:#0D1117;color:#C9D1D9;font-family:'Segoe UI',sans-serif;font-size:13px;margin:0;padding:16px}
+h1{font-size:17px;margin:0 0 4px 0;color:#E6EDF3}
+.sub{color:#8B949E;font-size:12px;margin-bottom:16px}
+.dom{background:#161B22;border:1px solid #30363D;border-radius:6px;margin-bottom:12px}
+.domh{padding:9px 13px;border-bottom:1px solid #30363D;font-weight:600;font-size:14px;display:flex;justify-content:space-between}
+.ok{color:#3FB950}.bad{color:#F85149}
+.f{padding:10px 13px;border-bottom:1px solid #21262D}
+.f:last-child{border-bottom:none}
+.badge{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:700;letter-spacing:.5px;color:#0D1117;margin-right:8px}
+.t{font-weight:600;color:#E6EDF3}
+.d{color:#8B949E;margin-top:5px;line-height:1.55}
+.ev{font-family:Consolas,monospace;font-size:11px;background:#0D1117;border:1px solid #30363D;border-radius:4px;padding:6px 8px;margin-top:6px;color:#79C0FF;word-break:break-all}
+.rem{margin-top:6px;color:#3FB950}
+.ref{color:#484F58;font-size:11px;margin-left:8px}
+.clean{padding:11px 13px;color:#3FB950}
+</style></head><body>
+<h1>Silent Failure Analysis</h1>
+<div class="sub">Records that are published, parse correctly, and do not take effect.
+Analysed $($results.Count) domain(s) &mdash; $($broken.Count) silently broken, $totalF finding(s) total.</div>
+"@)
+
+        foreach ($r in ($results | Sort-Object -Property @{Expression={$_.CriticalCount};Descending=$true}, @{Expression={$_.TotalCount};Descending=$true}, Domain)) {
+            $state = if ($r.IsSilentlyBroken) { "<span class='bad'>SILENTLY BROKEN</span>" }
+                     elseif ($r.TotalCount -gt 0) { "<span style='color:#D29922'>$($r.TotalCount) finding(s)</span>" }
+                     else { "<span class='ok'>clean</span>" }
+            [void]$sb.Append("<div class='dom'><div class='domh'><span>$(HtmlEnc $r.Domain)</span>$state</div>")
+            if ($r.TotalCount -eq 0) {
+                [void]$sb.Append("<div class='clean'>No silent failures detected.</div>")
+            } else {
+                foreach ($f in $r.Findings) {
+                    $c = $sevColor[$f.Severity]; if (-not $c) { $c = '#8B949E' }
+                    [void]$sb.Append("<div class='f'><span class='badge' style='background:$c'>$(HtmlEnc $f.Severity.ToUpper())</span>")
+                    [void]$sb.Append("<span class='t'>$(HtmlEnc $f.Title)</span><span class='ref'>$(HtmlEnc $f.Reference)</span>")
+                    [void]$sb.Append("<div class='d'>$(HtmlEnc $f.Detail)</div>")
+                    if ($f.Evidence)    { [void]$sb.Append("<div class='ev'>$(HtmlEnc $f.Evidence)</div>") }
+                    if ($f.Remediation) { [void]$sb.Append("<div class='rem'>Fix: $(HtmlEnc $f.Remediation)</div>") }
+                    [void]$sb.Append("</div>")
+                }
+            }
+            [void]$sb.Append("</div>")
+        }
+        [void]$sb.Append("</body></html>")
+
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "dmarcmonitor_silent_check.html"
+        $sb.ToString() | Set-Content -Path $tmp -Encoding UTF8
+        $wbSPF.Navigate("file:///$($tmp.Replace('\','/'))")
+
+        if ($broken.Count -gt 0) {
+            $txtStatus.Text = "$($broken.Count) domain(s) silently broken"
+            $txtStatus.Foreground = [System.Windows.Media.Brushes]::Salmon
+            $txtLog.AppendText("[WARN] Silent failures: $($broken.Count) domain(s) publish records that do not take effect.`n")
+            foreach ($b in $broken) { $txtLog.AppendText("        $($b.Domain): $($b.Findings[0].Title)`n") }
+        } else {
+            $txtStatus.Text = "No silent failures"
+            $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen
+            $txtLog.AppendText("[SUCCESS] No silently-broken domains. $totalF advisory finding(s).`n")
+        }
+        $txtLog.ScrollToEnd()
+    } catch {
+        $txtLog.AppendText("[WARN] Silent-failure analysis: $_`n"); $txtLog.ScrollToEnd()
+    }
+}
+
 function Refresh-RUFData {
     $cfg = Get-AllSettings; if ([string]::IsNullOrWhiteSpace($cfg.WorkingDir)) { return }
     $rptDir = Join-Path $cfg.WorkingDir "Reports"
@@ -1949,6 +2085,7 @@ $btnRefreshSources.Add_Click({ Refresh-Sources })
 $cmbSrcStatus.Add_SelectionChanged({ Refresh-Sources })
 $btnRefreshDNS.Add_Click({ Refresh-DNSHealth })
 $btnInspectSPF.Add_Click({ Invoke-SPFInspection })
+$btnSilentCheck.Add_Click({ Invoke-SilentFailureCheck })
 $btnRefreshRUF.Add_Click({ Refresh-RUFData })
 $btnRefreshTrend.Add_Click({ Refresh-TrendChart })
 $cmbTrendPeriod.Add_SelectionChanged({ Refresh-TrendChart })

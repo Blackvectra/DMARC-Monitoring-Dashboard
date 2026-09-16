@@ -1433,6 +1433,10 @@ function Invoke-DNSHealthCheck {
             CheckDate=''; Domain=$domain; DMARCRecord=''; DMARCPolicy='missing'; DMARCSubPolicy=''
             DMARCPct=100; DMARCRua=''; DMARCRuf=''; DMARCAdkim='r'; DMARCAspf='r'; DMARCStatus='missing'
             SPFRecord=''; SPFLookupCount=0; SPFHasAll=$false; SPFAllMechanism=''; SPFStatus='missing'
+            # ALL records, not just the first. RFC 7208 s4.5 and RFC 7489 s6.6.3
+            # both make a second record a hard failure rather than a tiebreak,
+            # so keeping only the first discards the evidence of the failure.
+            DMARCRecords=@(); SPFRecords=@()
             Issues=''; IssueCount=0
         }
         $r.CheckDate = $today
@@ -1441,7 +1445,13 @@ function Invoke-DNSHealthCheck {
         # DMARC record
         try {
             $dns = Resolve-DnsName -Name "_dmarc.$domain" -Type TXT -EA Stop
-            $txt = ($dns | Where-Object { $_.Strings -match 'v=DMARC1' } | Select-Object -First 1).Strings -join ''
+            # A TXT RRset can hold several records, and each record can itself be
+            # split into multiple strings that must be concatenated (RFC 7208 s3.3).
+            # Join within a record, never across records.
+            $dmarcAll = @($dns | Where-Object { $_.Strings -match 'v=DMARC1' } | ForEach-Object { ($_.Strings -join '').Trim() } | Where-Object { $_ })
+            $r.DMARCRecords = $dmarcAll
+            $txt = if ($dmarcAll.Count -gt 0) { $dmarcAll[0] } else { '' }
+            if ($dmarcAll.Count -gt 1) { $domIssues.Add("$($dmarcAll.Count) DMARC records — DMARC is not applied at all (RFC 7489 s6.6.3)") }
             if ($txt) {
                 $r.DMARCRecord = $txt
                 $r.DMARCPolicy    = if ($txt -match 'p=(\w+)')   { $Matches[1] } else { 'none' }
@@ -1462,7 +1472,10 @@ function Invoke-DNSHealthCheck {
         # SPF record
         try {
             $spfDns = Resolve-DnsName -Name $domain -Type TXT -EA Stop
-            $spfTxt = ($spfDns | Where-Object { $_.Strings -match 'v=spf1' } | Select-Object -First 1).Strings -join ''
+            $spfAll = @($spfDns | Where-Object { $_.Strings -match 'v=spf1' } | ForEach-Object { ($_.Strings -join '').Trim() } | Where-Object { $_ })
+            $r.SPFRecords = $spfAll
+            $spfTxt = if ($spfAll.Count -gt 0) { $spfAll[0] } else { '' }
+            if ($spfAll.Count -gt 1) { $domIssues.Add("$($spfAll.Count) SPF records — permanent error, SPF fails entirely (RFC 7208 s4.5)") }
             if ($spfTxt) {
                 $r.SPFRecord = $spfTxt
                 $lookups = Get-SPFLookupCount -SpfRecord $spfTxt
@@ -1484,6 +1497,10 @@ function Invoke-DNSHealthCheck {
         $state.domains | Add-Member -NotePropertyName $safeKey -NotePropertyValue ([PSCustomObject]@{
             domain=$domain; DMARCPolicy=$r.DMARCPolicy; DMARCPct=$r.DMARCPct; SPFStatus=$r.SPFStatus
             SPFLookups=$r.SPFLookupCount; IssueCount=$domIssues.Count; Issues=$r.Issues; LastChecked=$today
+            # Raw records so silent-failure analysis can run from state without
+            # re-resolving DNS, and so a stored snapshot can be re-analysed when
+            # the detection rules improve.
+            SPFRecords=$r.SPFRecords; DMARCRecords=$r.DMARCRecords
         }) -Force
 
         if ($domIssues.Count -gt 0) { Write-Log "DNS HEALTH: $domain — $($domIssues -join '; ')" -Level WARN; $allIssues.Add("$domain`: $($r.Issues)") }
