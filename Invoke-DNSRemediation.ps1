@@ -171,7 +171,10 @@ function New-SPFIncludePlan {
     param(
         [Parameter(Mandatory)] [string]$Domain,
         [AllowEmptyString()] [string]$CurrentRecord,
-        [Parameter(Mandatory)] [string]$IncludeDomain,
+        # AllowEmptyString so an empty value returns a structured refusal plan
+        # like every other rejection here, rather than a binding exception the
+        # caller has to catch separately.
+        [Parameter(Mandatory)] [AllowEmptyString()] [string]$IncludeDomain,
         [ValidateSet('-all','~all','?all')] [string]$DefaultAll = '~all'
     )
 

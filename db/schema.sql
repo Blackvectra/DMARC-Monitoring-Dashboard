@@ -600,6 +600,146 @@ CREATE TABLE user_client_access (
 
 
 -- ============================================================================
+--  REMEDIATION  (DNS changes this tool plans and publishes)
+-- ============================================================================
+
+-- Where a client's DNS actually lives, and how we are allowed to touch it.
+-- Credentials are NOT stored here: the secret lives DPAPI-encrypted in the
+-- registry under the operator's profile, and this row holds only the
+-- non-secret coordinates plus a pointer to it. A database file that leaks
+-- must not hand over write access to a client's zone.
+CREATE TABLE dns_provider_configs (
+    id                  TEXT PRIMARY KEY,
+    client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    domain_id           TEXT REFERENCES domains(id) ON DELETE CASCADE,  -- NULL = all client domains
+
+    provider            TEXT NOT NULL
+                        CHECK (provider IN ('cloudflare','azuredns','route53','godaddy','manual')),
+    -- Non-secret coordinates: Cloudflare zone id, Azure subscription/RG/zone.
+    config_json         TEXT,
+    -- Registry value name holding the DPAPI-encrypted token, never the token.
+    credential_ref      TEXT,
+
+    is_enabled          INTEGER NOT NULL DEFAULT 1,
+    last_verified_at    TEXT,
+    last_error          TEXT,
+
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    UNIQUE(client_id, domain_id, provider)
+);
+
+CREATE INDEX ix_dnsprov_client ON dns_provider_configs(client_id) WHERE is_enabled = 1;
+
+
+-- A planned change, whether or not it was ever applied. Plans are kept even
+-- when refused: "we could not authorize this sender because the SPF record is
+-- at the lookup cap" is itself the finding an operator needs to act on.
+CREATE TABLE dns_change_plans (
+    id                  TEXT PRIMARY KEY,
+    client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    sender_id           TEXT REFERENCES senders(id) ON DELETE SET NULL,
+
+    change_type         TEXT NOT NULL
+                        CHECK (change_type IN ('spf-include-add','spf-include-remove','spf-flatten',
+                                               'dkim-publish','dmarc-policy','mta-sts','bimi','tls-rpt')),
+    record_name         TEXT NOT NULL,
+    record_type         TEXT NOT NULL,
+    current_value       TEXT,
+    proposed_value      TEXT,
+
+    -- Why the plan is or is not safe. Blockers are hard refusals, warnings
+    -- are things the operator should read before confirming.
+    is_safe             INTEGER NOT NULL DEFAULT 0,
+    is_noop             INTEGER NOT NULL DEFAULT 0,
+    blockers_json       TEXT,
+    warnings_json       TEXT,
+    lookups_before      INTEGER,
+    lookups_after       INTEGER,
+    summary             TEXT,
+
+    status              TEXT NOT NULL DEFAULT 'proposed'
+                        CHECK (status IN ('proposed','refused','applied','rolled_back','superseded','cancelled')),
+
+    created_at          TEXT NOT NULL,
+    created_by          TEXT
+);
+
+CREATE INDEX ix_plan_client_date ON dns_change_plans(client_id, created_at DESC);
+CREATE INDEX ix_plan_domain      ON dns_change_plans(domain_id, created_at DESC);
+CREATE INDEX ix_plan_open        ON dns_change_plans(client_id) WHERE status = 'proposed';
+
+
+-- What was actually written. Separate from the plan because a plan can be
+-- applied, rolled back and re-applied, and because this table is the billing
+-- and compliance evidence: who changed a client's DNS, when, and why.
+--
+-- previous_value is captured from the live zone immediately before the write,
+-- not copied from the plan, so it is a trustworthy rollback target even if
+-- the plan had gone stale.
+CREATE TABLE dns_changes (
+    id                  TEXT PRIMARY KEY,
+    plan_id             TEXT REFERENCES dns_change_plans(id) ON DELETE SET NULL,
+    client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+
+    record_name         TEXT NOT NULL,
+    record_type         TEXT NOT NULL,
+    previous_value      TEXT,
+    new_value           TEXT,
+
+    provider            TEXT NOT NULL,
+    provider_record_id  TEXT,
+
+    applied_at          TEXT NOT NULL,
+    applied_by          TEXT,
+    reason              TEXT,
+
+    -- A successful API call means accepted, not visible. Until this is 1 the
+    -- client's mail is still behaving as it did before the change.
+    is_propagated       INTEGER NOT NULL DEFAULT 0,
+    propagated_at       TEXT,
+    propagation_error   TEXT,
+
+    rolled_back_at      TEXT,
+    rolled_back_by      TEXT,
+    rollback_reason     TEXT
+);
+
+CREATE INDEX ix_change_client_date ON dns_changes(client_id, applied_at DESC);
+CREATE INDEX ix_change_domain      ON dns_changes(domain_id, applied_at DESC);
+CREATE INDEX ix_change_unpropagated ON dns_changes(client_id) WHERE is_propagated = 0 AND rolled_back_at IS NULL;
+
+
+-- Flattened SPF records go stale when a provider changes its sending ranges,
+-- and stale means legitimate mail starts failing with no obvious cause. This
+-- tracks what was flattened from what, and when it must be refreshed.
+CREATE TABLE spf_flatten_state (
+    id                  TEXT PRIMARY KEY,
+    client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+
+    flattened_includes  TEXT NOT NULL,   -- JSON array of the include domains inlined
+    resolved_ips        TEXT NOT NULL,   -- JSON array of the ip4/ip6 mechanisms produced
+    preserved_terms     TEXT,            -- JSON array of a/mx/ptr kept as-is
+    flattened_value     TEXT NOT NULL,
+
+    lookups_before      INTEGER,
+    lookups_after       INTEGER,
+
+    flattened_at        TEXT NOT NULL,
+    refresh_by          TEXT NOT NULL,
+    last_refreshed_at   TEXT,
+    is_stale            INTEGER NOT NULL DEFAULT 0,
+
+    UNIQUE(domain_id)
+);
+
+CREATE INDEX ix_flatten_due ON spf_flatten_state(refresh_by) WHERE is_stale = 0;
+
+
+-- ============================================================================
 --  SCHEMA VERSIONING
 -- ============================================================================
 
@@ -611,6 +751,8 @@ CREATE TABLE schema_migrations (
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0001', datetime('now'), 'Initial multi-tenant schema');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0002', datetime('now'), 'DNS remediation: provider configs, change plans, applied changes, SPF flatten state');
 
 
 -- ============================================================================
