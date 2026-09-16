@@ -30,6 +30,27 @@
 --  6. Soft delete (deleted_at) on client-owned entities. An MSP that loses a
 --     client still needs their history for the final invoice and for the
 --     "we told you so" conversation.
+--
+--  7. TWO TENANCY LEVELS, because the product ships both hosted and
+--     self-hosted from ONE codebase:
+--
+--         tenants  -> the MSP (or, self-hosted, the single operator)
+--         clients  -> that MSP's customers
+--         domains  -> that customer's domains
+--
+--     Self-hosted is simply hosted with exactly one row in `tenants`. There
+--     is no second schema, no second query path and no build flag: the only
+--     difference is how many tenant rows exist. The moment those diverge you
+--     are maintaining two products.
+--
+--     tenant_id is denormalized alongside client_id onto every tenant-scoped
+--     table, hot ones included, for the same reason client_id is (rule 1) —
+--     and for a stronger one. Self-hosted, client_id scoping is organisational
+--     hygiene. Hosted, tenant_id scoping is the security boundary that stops
+--     MSP A reading MSP B's book of business. A boundary enforced by
+--     remembering to write a JOIN is not a boundary. Every read filters
+--     tenant_id directly, and in PostgreSQL these columns are what Row Level
+--     Security policies attach to.
 -- ============================================================================
 
 PRAGMA foreign_keys = ON;
@@ -40,11 +61,62 @@ PRAGMA journal_mode = WAL;
 --  TENANCY
 -- ============================================================================
 
+-- The operator of the platform. Hosted, one row per MSP customer. Self-hosted,
+-- exactly one row, seeded at install.
+--
+-- Everything below hangs off this. Code never branches on deployment mode for
+-- data access; it resolves the current tenant and filters by it, which in the
+-- self-hosted case happens to always be the same one.
+CREATE TABLE tenants (
+    id                  TEXT PRIMARY KEY,              -- UUID
+    name                TEXT NOT NULL,                 -- "NextLayerSec", "Some Other MSP"
+    slug                TEXT NOT NULL UNIQUE,          -- URL-safe, used in hosted routing
+
+    -- Recorded for support and telemetry, NOT branched on for data access.
+    -- If a query needs to know the deployment mode to be correct, the design
+    -- has gone wrong.
+    deployment_mode     TEXT NOT NULL DEFAULT 'self_hosted'
+                        CHECK (deployment_mode IN ('self_hosted','hosted')),
+
+    status              TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('trial','active','suspended','cancelled')),
+
+    -- Where this tenant's secrets actually live. Self-hosted uses DPAPI, which
+    -- is bound to a Windows user on one machine and cannot work server-side.
+    -- Hosted needs envelope encryption via a KMS. The credential_ref columns
+    -- elsewhere are opaque pointers so neither mode leaks into the schema.
+    secret_backend      TEXT NOT NULL DEFAULT 'dpapi'
+                        CHECK (secret_backend IN ('dpapi','aws_kms','azure_keyvault','gcp_kms','age')),
+    secret_backend_config TEXT,                        -- JSON, non-secret coordinates only
+
+    -- Hosted collection: each tenant needs its own inbound address, because
+    -- RFC 7489 s7.1 verification records point at a specific destination
+    -- domain and two MSPs cannot share one.
+    collection_address  TEXT,
+
+    -- Commercial. Deliberately NOT per-domain: the whole positioning is that
+    -- a small MSP can add a client without the price moving.
+    plan                TEXT,
+    domain_limit        INTEGER,                       -- NULL = unlimited
+    client_limit        INTEGER,                       -- NULL = unlimited
+    billing_reference   TEXT,
+
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    deleted_at          TEXT
+);
+
+CREATE INDEX ix_tenants_status ON tenants(status) WHERE deleted_at IS NULL;
+
+
 -- The MSP's customers. One row per billable organization.
 CREATE TABLE clients (
     id                  TEXT PRIMARY KEY,              -- UUID
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name                TEXT NOT NULL,                 -- "Acme Corp"
-    slug                TEXT NOT NULL UNIQUE,          -- "acme-corp", used in report filenames + future URLs
+    -- Scoped to the tenant, not global: two different MSPs may both have a
+    -- customer they call "acme-corp" and neither should block the other.
+    slug                TEXT NOT NULL,                 -- "acme-corp", used in report filenames + future URLs
     status              TEXT NOT NULL DEFAULT 'onboarding'
                         CHECK (status IN ('onboarding','active','suspended','offboarded')),
 
@@ -52,8 +124,12 @@ CREATE TABLE clients (
     collection_method   TEXT NOT NULL DEFAULT 'central_mailbox'
                         CHECK (collection_method IN ('central_mailbox','tenant_graph','imap')),
 
-    -- Populated only when collection_method = 'tenant_graph'
-    tenant_id           TEXT,                          -- Entra tenant GUID
+    -- Populated only when collection_method = 'tenant_graph'.
+    -- Named entra_tenant_id, not tenant_id: this is Microsoft's directory GUID
+    -- for the CUSTOMER's Azure AD, which has nothing to do with tenant_id
+    -- above (the MSP operating this platform). Two columns called tenant_id
+    -- meaning different things in one table is a bug waiting to be written.
+    entra_tenant_id     TEXT,                          -- customer's Entra directory GUID
     client_app_id       TEXT,                          -- app registration in THEIR tenant
     cert_thumbprint     TEXT,
     mailbox_address     TEXT,
@@ -70,15 +146,18 @@ CREATE TABLE clients (
 
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
-    deleted_at          TEXT
+    deleted_at          TEXT,
+    UNIQUE(tenant_id, slug)
 );
 
-CREATE INDEX ix_clients_status ON clients(status) WHERE deleted_at IS NULL;
+CREATE INDEX ix_clients_tenant ON clients(tenant_id) WHERE deleted_at IS NULL;
+CREATE INDEX ix_clients_status ON clients(tenant_id, status) WHERE deleted_at IS NULL;
 
 
 -- Who receives reports and alerts for a client.
 CREATE TABLE client_contacts (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     email               TEXT NOT NULL,
     display_name        TEXT,
@@ -97,6 +176,7 @@ CREATE INDEX ix_client_contacts_client ON client_contacts(client_id) WHERE delet
 -- platform default. Kept as key/value rather than columns so adding a knob
 -- doesn't require a migration.
 CREATE TABLE client_settings (
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     key                 TEXT NOT NULL,                 -- 'alert_threshold_pct', 'digest_day_of_month'
     value               TEXT NOT NULL,
@@ -115,8 +195,14 @@ CREATE TABLE client_settings (
 -- fail loudly at onboarding rather than silently misroute someone's mail data.
 CREATE TABLE domains (
     id                      TEXT PRIMARY KEY,          -- UUID
+    tenant_id               TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id               TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-    name                    TEXT NOT NULL UNIQUE,      -- "acme.com"
+    -- Unique per TENANT, not globally. Report routing resolves policy-domain
+    -- -> client within one tenant, so two different MSPs can each manage
+    -- example.com for their own customer without colliding. Within a tenant
+    -- it must still fail loudly, or reports get misrouted between that MSP's
+    -- own customers.
+    name                    TEXT NOT NULL,             -- "acme.com"
     is_active               INTEGER NOT NULL DEFAULT 1,
 
     -- RFC 7489 s7.1 external destination verification. For central_mailbox
@@ -143,6 +229,8 @@ CREATE TABLE domains (
     deleted_at              TEXT
 );
 
+CREATE UNIQUE INDEX ux_domains_tenant_name ON domains(tenant_id, name);
+CREATE INDEX ix_domains_tenant ON domains(tenant_id) WHERE deleted_at IS NULL;
 CREATE INDEX ix_domains_client ON domains(client_id) WHERE deleted_at IS NULL;
 CREATE INDEX ix_domains_active ON domains(is_active, client_id);
 
@@ -154,6 +242,7 @@ CREATE INDEX ix_domains_active ON domains(is_active, client_id);
 -- One row per received report file. The envelope/metadata.
 CREATE TABLE aggregate_reports (
     id                  TEXT PRIMARY KEY,              -- UUID
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
 
@@ -197,7 +286,8 @@ CREATE TABLE aggregate_records (
     id                  INTEGER PRIMARY KEY,           -- rowid alias, see design rule 3
     report_id           TEXT NOT NULL REFERENCES aggregate_reports(id) ON DELETE CASCADE,
 
-    -- Denormalized for tenant-isolated queries without a join (design rule 1)
+    -- Denormalized for isolated queries without a join (design rules 1 and 7)
+    tenant_id           TEXT NOT NULL,
     client_id           TEXT NOT NULL,
     domain_id           TEXT NOT NULL,
     date_begin          TEXT NOT NULL,                 -- denormalized: time-range scans skip the join
@@ -231,13 +321,14 @@ CREATE TABLE aggregate_records (
 );
 
 -- The four access patterns that matter, in order of frequency:
+CREATE INDEX ix_agg_rec_tenant_date   ON aggregate_records(tenant_id, date_begin DESC);
 CREATE INDEX ix_agg_rec_client_date   ON aggregate_records(client_id, date_begin DESC);
 CREATE INDEX ix_agg_rec_domain_date   ON aggregate_records(domain_id, date_begin DESC);
 CREATE INDEX ix_agg_rec_client_ip     ON aggregate_records(client_id, source_ip);
 CREATE INDEX ix_agg_rec_report        ON aggregate_records(report_id);
 CREATE INDEX ix_agg_rec_sender        ON aggregate_records(sender_id) WHERE sender_id IS NOT NULL;
 -- Partial index for the "what's failing" query, which is most of the product:
-CREATE INDEX ix_agg_rec_failures      ON aggregate_records(client_id, date_begin DESC)
+CREATE INDEX ix_agg_rec_failures      ON aggregate_records(tenant_id, client_id, date_begin DESC)
                                       WHERE dmarc_result = 'fail';
 
 
@@ -249,6 +340,7 @@ CREATE INDEX ix_agg_rec_failures      ON aggregate_records(client_id, date_begin
 -- the Authorization Wizard operates on and the thing that gates p=reject.
 CREATE TABLE senders (
     id                  TEXT PRIMARY KEY,              -- UUID
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     source_ip           TEXT NOT NULL,
 
@@ -283,6 +375,7 @@ CREATE TABLE senders (
     UNIQUE(client_id, source_ip)
 );
 
+CREATE INDEX ix_senders_tenant        ON senders(tenant_id);
 CREATE INDEX ix_senders_client        ON senders(client_id);
 CREATE INDEX ix_senders_service       ON senders(client_id, service_id);
 CREATE INDEX ix_senders_unapproved    ON senders(client_id) WHERE is_approved = 0;
@@ -296,6 +389,7 @@ CREATE INDEX ix_senders_unapproved    ON senders(client_id) WHERE is_approved = 
 -- message headers. Retention is deliberately separate from aggregate data.
 CREATE TABLE forensic_reports (
     id                  INTEGER PRIMARY KEY,
+    tenant_id           TEXT NOT NULL,
     client_id           TEXT NOT NULL,
     domain_id           TEXT NOT NULL,
 
@@ -317,6 +411,7 @@ CREATE TABLE forensic_reports (
     ingested_at         TEXT NOT NULL
 );
 
+CREATE INDEX ix_forensic_tenant_date ON forensic_reports(tenant_id, received_at DESC);
 CREATE INDEX ix_forensic_client_date ON forensic_reports(client_id, received_at DESC);
 CREATE INDEX ix_forensic_domain      ON forensic_reports(domain_id, received_at DESC);
 CREATE INDEX ix_forensic_ip          ON forensic_reports(client_id, source_ip);
@@ -328,6 +423,7 @@ CREATE INDEX ix_forensic_ip          ON forensic_reports(client_id, source_ip);
 
 CREATE TABLE tls_reports (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
 
@@ -354,6 +450,7 @@ CREATE INDEX ix_tls_client_date ON tls_reports(client_id, date_begin DESC);
 CREATE TABLE tls_failure_details (
     id                      INTEGER PRIMARY KEY,
     tls_report_id           TEXT NOT NULL REFERENCES tls_reports(id) ON DELETE CASCADE,
+    tenant_id               TEXT NOT NULL,
     client_id               TEXT NOT NULL,
     result_type             TEXT,                      -- starttls-not-supported, certificate-expired...
     sending_mta_ip          TEXT,
@@ -375,6 +472,7 @@ CREATE INDEX ix_tls_fail_report ON tls_failure_details(tls_report_id);
 -- log you can replay, not a firehose.
 CREATE TABLE dns_snapshots (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
     captured_at         TEXT NOT NULL,
@@ -409,6 +507,7 @@ CREATE UNIQUE INDEX ux_dns_snap_dedup ON dns_snapshots(domain_id, content_hash);
 -- their own SPF at 2am.
 CREATE TABLE dns_drift_events (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
 
@@ -428,6 +527,7 @@ CREATE TABLE dns_drift_events (
     acknowledgement_note TEXT
 );
 
+CREATE INDEX ix_drift_tenant_date ON dns_drift_events(tenant_id, detected_at DESC);
 CREATE INDEX ix_drift_client_date ON dns_drift_events(client_id, detected_at DESC);
 CREATE INDEX ix_drift_unack       ON dns_drift_events(client_id, detected_at DESC) WHERE acknowledged_at IS NULL;
 
@@ -435,6 +535,7 @@ CREATE INDEX ix_drift_unack       ON dns_drift_events(client_id, detected_at DES
 -- Discovered DKIM keys per domain.
 CREATE TABLE dkim_selectors (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
     selector            TEXT NOT NULL,
@@ -460,6 +561,7 @@ CREATE INDEX ix_dkim_client ON dkim_selectors(client_id);
 -- month deltas are a two-row lookup.
 CREATE TABLE compliance_scores (
     id                      TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id               TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id               TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
     score_date              TEXT NOT NULL,             -- ISO-8601 date
@@ -484,6 +586,7 @@ CREATE INDEX ix_scores_client_date ON compliance_scores(client_id, score_date DE
 -- This is the client-facing roadmap that justifies the retainer.
 CREATE TABLE enforcement_assessments (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
     assessed_at         TEXT NOT NULL,
@@ -504,6 +607,7 @@ CREATE INDEX ix_enforce_domain ON enforcement_assessments(domain_id, assessed_at
 -- Lookalike domains observed in the wild.
 CREATE TABLE cousin_domains (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
     cousin_domain       TEXT NOT NULL,
@@ -528,6 +632,7 @@ CREATE INDEX ix_cousin_client ON cousin_domains(client_id) WHERE is_dismissed = 
 -- hour) and for the SLA conversation ("we alerted you at 14:22").
 CREATE TABLE alerts (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT REFERENCES domains(id) ON DELETE CASCADE,
 
@@ -553,6 +658,7 @@ CREATE INDEX ix_alerts_open        ON alerts(client_id) WHERE resolved_at IS NUL
 -- answer that doesn't require reading log files.
 CREATE TABLE ingest_log (
     id                  INTEGER PRIMARY KEY,
+    tenant_id           TEXT NOT NULL,                 -- known from the collection address
     client_id           TEXT,                          -- NULL until domain->client resolves
     source_message_id   TEXT NOT NULL,
     report_type         TEXT,                          -- rua / ruf / tlsrpt / unknown
@@ -576,19 +682,24 @@ CREATE INDEX ix_ingest_unmapped       ON ingest_log(processed_at DESC) WHERE sta
 
 CREATE TABLE users (
     id                  TEXT PRIMARY KEY,
-    email               TEXT NOT NULL UNIQUE,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    -- Unique per tenant: the same person may legitimately hold an account
+    -- with two different MSPs on a hosted deployment.
+    email               TEXT NOT NULL,
     display_name        TEXT,
     is_platform_admin   INTEGER NOT NULL DEFAULT 0,    -- MSP staff, sees all clients
     auth_provider       TEXT,                          -- entra / local
     external_subject_id TEXT,                          -- oid claim from Entra
     created_at          TEXT NOT NULL,
     last_login_at       TEXT,
-    deleted_at          TEXT
+    deleted_at          TEXT,
+    UNIQUE(tenant_id, email)
 );
 
 -- Client-scoped access. A client's own IT staff can be granted read access to
 -- exactly their org without seeing the rest of the book of business.
 CREATE TABLE user_client_access (
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     role                TEXT NOT NULL DEFAULT 'viewer'
@@ -610,6 +721,7 @@ CREATE TABLE user_client_access (
 -- must not hand over write access to a client's zone.
 CREATE TABLE dns_provider_configs (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT REFERENCES domains(id) ON DELETE CASCADE,  -- NULL = all client domains
 
@@ -637,6 +749,7 @@ CREATE INDEX ix_dnsprov_client ON dns_provider_configs(client_id) WHERE is_enabl
 -- at the lookup cap" is itself the finding an operator needs to act on.
 CREATE TABLE dns_change_plans (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
     sender_id           TEXT REFERENCES senders(id) ON DELETE SET NULL,
@@ -681,6 +794,7 @@ CREATE INDEX ix_plan_open        ON dns_change_plans(client_id) WHERE status = '
 CREATE TABLE dns_changes (
     id                  TEXT PRIMARY KEY,
     plan_id             TEXT REFERENCES dns_change_plans(id) ON DELETE SET NULL,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
 
@@ -707,6 +821,7 @@ CREATE TABLE dns_changes (
     rollback_reason     TEXT
 );
 
+CREATE INDEX ix_change_tenant_date ON dns_changes(tenant_id, applied_at DESC);
 CREATE INDEX ix_change_client_date ON dns_changes(client_id, applied_at DESC);
 CREATE INDEX ix_change_domain      ON dns_changes(domain_id, applied_at DESC);
 CREATE INDEX ix_change_unpropagated ON dns_changes(client_id) WHERE is_propagated = 0 AND rolled_back_at IS NULL;
@@ -717,6 +832,7 @@ CREATE INDEX ix_change_unpropagated ON dns_changes(client_id) WHERE is_propagate
 -- tracks what was flattened from what, and when it must be refreshed.
 CREATE TABLE spf_flatten_state (
     id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
 
@@ -753,6 +869,8 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0001', datetime('now'), 'Initial multi-tenant schema');
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0002', datetime('now'), 'DNS remediation: provider configs, change plans, applied changes, SPF flatten state');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0003', datetime('now'), 'Tenant layer: tenants table, tenant_id on every scoped table, per-tenant uniqueness');
 
 
 -- ============================================================================
@@ -763,6 +881,7 @@ VALUES ('0002', datetime('now'), 'DNS remediation: provider configs, change plan
 CREATE VIEW v_domain_posture AS
 SELECT
     d.id                AS domain_id,
+    d.tenant_id,
     d.client_id,
     c.name              AS client_name,
     d.name              AS domain_name,
@@ -788,6 +907,7 @@ WHERE d.deleted_at IS NULL AND c.deleted_at IS NULL;
 -- Daily pass-rate rollup. Backs the trend chart without scanning raw records.
 CREATE VIEW v_daily_rollup AS
 SELECT
+    tenant_id,
     client_id,
     domain_id,
     substr(date_begin, 1, 10)                                           AS day,
@@ -796,4 +916,4 @@ SELECT
     SUM(CASE WHEN dmarc_result = 'fail' THEN message_count ELSE 0 END)  AS failing,
     COUNT(DISTINCT source_ip)                                           AS distinct_sources
 FROM aggregate_records
-GROUP BY client_id, domain_id, substr(date_begin, 1, 10);
+GROUP BY tenant_id, client_id, domain_id, substr(date_begin, 1, 10);
