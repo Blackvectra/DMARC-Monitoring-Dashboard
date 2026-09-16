@@ -364,6 +364,92 @@ function Get-ReportType {
 #endregion
 
 #region DMARC RUA Parser (RFC 7489) — with override reasons + subdomain flag
+function Get-XmlText {
+    <#
+        Returns the text of an XML value as a plain string.
+
+        PowerShell's XML adapter is inconsistent by design: for an element
+        holding only simple text it hands back a [string], but for one holding
+        ANY child node - an entity reference, CDATA, nested markup - it hands
+        back the [XmlElement] itself. Assigning that straight into a record
+        writes the literal text "System.Xml.XmlElement" into the CSV.
+
+        Repeated elements are a second shape: PowerShell member enumeration
+        turns <dkim><domain>a</domain></dkim><dkim><domain>b</domain></dkim>
+        into an Object[] of domains, which stringifies to "a b".
+
+        One helper covers all three shapes so no caller has to remember which
+        it is dealing with.
+    #>
+    param($Value)
+    if ($null -eq $Value) { return '' }
+
+    # Order matters. Both [string] and [XmlNode] implement IEnumerable, so a
+    # generic "is it enumerable" test would send an XmlElement down the
+    # array branch and recurse on itself. Check the concrete types first and
+    # only treat a genuine array as a repeated element.
+    if ($Value -is [string])             { return $Value.Trim() }
+    if ($Value -is [System.Xml.XmlNode]) { return ([string]$Value.InnerText).Trim() }
+
+    # Repeated element / member enumeration - take the first. Callers that
+    # need to choose between them use Get-DmarcAuthDomain instead.
+    if ($Value -is [System.Array]) {
+        $first = @($Value) | Select-Object -First 1
+        if ($null -eq $first) { return '' }
+        return (Get-XmlText $first)
+    }
+
+    return ([string]$Value).Trim()
+}
+
+function Get-DmarcAuthDomain {
+    <#
+        Picks the DMARC-relevant signing/authenticating domain out of an
+        <auth_results> child collection.
+
+        RFC 7489 allows several <dkim> elements, one per signature, and mail
+        sent through an ESP almost always carries at least two: the ESP's own
+        signature and the customer's aligned one. Taking the first is a coin
+        flip, and taking all of them produces "esp-signer.net acme.com" in a
+        single CSV cell.
+
+        What an operator actually needs is the signature that made DMARC pass:
+        one that both authenticates AND aligns with the From: domain. Order of
+        preference:
+          1. result=pass AND aligned with the policy domain (exact or subdomain)
+          2. result=pass, whatever the domain
+          3. the first entry, so something useful is recorded either way
+
+        Returns '' when there is nothing to report.
+    #>
+    param($AuthEntries, [string]$PolicyDomain)
+
+    $entries = @($AuthEntries) | Where-Object { $null -ne $_ }
+    if ($entries.Count -eq 0) { return '' }
+
+    $shaped = foreach ($e in $entries) {
+        [PSCustomObject]@{
+            Domain = (Get-XmlText $e.domain)
+            Result = (Get-XmlText $e.result).ToLowerInvariant()
+        }
+    }
+    $shaped = @($shaped | Where-Object { $_.Domain })
+    if ($shaped.Count -eq 0) { return '' }
+
+    if ($PolicyDomain) {
+        $escaped = [regex]::Escape($PolicyDomain)
+        $aligned = $shaped | Where-Object {
+            $_.Result -eq 'pass' -and ($_.Domain -eq $PolicyDomain -or $_.Domain -match "\.$escaped$")
+        } | Select-Object -First 1
+        if ($aligned) { return $aligned.Domain }
+    }
+
+    $passing = $shaped | Where-Object { $_.Result -eq 'pass' } | Select-Object -First 1
+    if ($passing) { return $passing.Domain }
+
+    return $shaped[0].Domain
+}
+
 function ConvertFrom-DMARCReport {
     param([string]$FilePath)
     $records = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -375,24 +461,36 @@ function ConvertFrom-DMARCReport {
         $xml.Load($FilePath)
         $meta     = $xml.feedback.report_metadata
         $pol      = $xml.feedback.policy_published
-        $dateBegin = [DateTimeOffset]::FromUnixTimeSeconds([long]$meta.date_range.begin).UtcDateTime.ToString('yyyy-MM-dd')
-        $dateEnd   = [DateTimeOffset]::FromUnixTimeSeconds([long]$meta.date_range.end).UtcDateTime.ToString('yyyy-MM-dd')
-        $pctTag    = if ($pol.pct)  { [int]$pol.pct  } else { 100 }
-        $spTag     = if ($pol.sp)   { $pol.sp         } else { 'inherit' }
-        $domain    = $pol.domain
+        # Every value below goes through Get-XmlText: PowerShell's XML adapter
+        # returns a [string] for a simple-text element but the [XmlElement]
+        # itself once the element holds any child node, and a raw assignment
+        # then writes "System.Xml.XmlElement" into the CSV.
+        $dateBegin = [DateTimeOffset]::FromUnixTimeSeconds([long](Get-XmlText $meta.date_range.begin)).UtcDateTime.ToString('yyyy-MM-dd')
+        $dateEnd   = [DateTimeOffset]::FromUnixTimeSeconds([long](Get-XmlText $meta.date_range.end)).UtcDateTime.ToString('yyyy-MM-dd')
+        $pctRaw    = Get-XmlText $pol.pct
+        $pctTag    = if ($pctRaw) { [int]$pctRaw } else { 100 }
+        $spRaw     = Get-XmlText $pol.sp
+        $spTag     = if ($spRaw)  { $spRaw } else { 'inherit' }
+        $domain    = Get-XmlText $pol.domain
+        $orgName   = Get-XmlText $meta.org_name
+        $reportId  = Get-XmlText $meta.report_id
+        $policyP   = Get-XmlText $pol.p
+        $adkimRaw  = Get-XmlText $pol.adkim
+        $aspfRaw   = Get-XmlText $pol.aspf
 
         foreach ($rec in $xml.feedback.record) {
             $row   = $rec.row
-            $dkim  = $row.policy_evaluated.dkim
-            $spf   = $row.policy_evaluated.spf
-            $hFrom = if ($rec.identifiers -and $rec.identifiers.header_from) { $rec.identifiers.header_from } else { '' }
+            $dkim  = (Get-XmlText $row.policy_evaluated.dkim).ToLowerInvariant()
+            $spf   = (Get-XmlText $row.policy_evaluated.spf).ToLowerInvariant()
+            $hFrom = if ($rec.identifiers) { Get-XmlText $rec.identifiers.header_from } else { '' }
 
             # Override/policy reasons
             $overrideReasons = @()
             if ($row.policy_evaluated.reason) {
                 $reasons = @($row.policy_evaluated.reason)
                 $reasons | ForEach-Object {
-                    if ($_.type) { $overrideReasons += $_.type }
+                    $t = Get-XmlText $_.type
+                    if ($t) { $overrideReasons += $t }
                 }
             }
             $overrideStr = if ($overrideReasons.Count -gt 0) { $overrideReasons -join '; ' } else { 'none' }
@@ -411,16 +509,16 @@ function ConvertFrom-DMARCReport {
                 ReportDate   = $dateBegin
                 ReportEnd    = $dateEnd
                 Domain       = $domain
-                OrgName      = $meta.org_name
-                ReportId     = $meta.report_id
-                Policy       = $pol.p
+                OrgName      = $orgName
+                ReportId     = $reportId
+                Policy       = $policyP
                 SubPolicy    = $spTag
                 PCTPct       = $pctTag
-                ADKIM        = if ($pol.adkim) { $pol.adkim } else { 'r' }
-                ASPF         = if ($pol.aspf)  { $pol.aspf  } else { 'r' }
-                SourceIP     = $row.source_ip
-                MessageCount = [int]$row.count
-                Disposition  = $row.policy_evaluated.disposition
+                ADKIM        = if ($adkimRaw) { $adkimRaw } else { 'r' }
+                ASPF         = if ($aspfRaw)  { $aspfRaw  } else { 'r' }
+                SourceIP     = Get-XmlText $row.source_ip
+                MessageCount = [int](Get-XmlText $row.count)
+                Disposition  = Get-XmlText $row.policy_evaluated.disposition
                 DKIMResult   = $dkim
                 SPFResult    = $spf
                 DMARCResult  = if ($dkim -eq 'pass' -or $spf -eq 'pass') { 'pass' } else { 'fail' }
@@ -428,8 +526,12 @@ function ConvertFrom-DMARCReport {
                 OverrideReason = $overrideStr
                 HeaderFrom   = $hFrom
                 IsSubdomain  = $isSubdomain
-                SPFDomain    = if ($rec.auth_results -and $rec.auth_results.spf  -and $rec.auth_results.spf.domain)  { $rec.auth_results.spf.domain  } else { '' }
-                DKIMDomain   = if ($rec.auth_results -and $rec.auth_results.dkim -and $rec.auth_results.dkim.domain) { $rec.auth_results.dkim.domain } else { '' }
+                # A message sent through an ESP normally carries two DKIM
+                # signatures - the ESP's own and the customer's aligned one.
+                # Report the signature that actually made DMARC pass, not a
+                # space-joined list of every domain that signed.
+                SPFDomain    = if ($rec.auth_results) { Get-DmarcAuthDomain -AuthEntries $rec.auth_results.spf  -PolicyDomain $domain } else { '' }
+                DKIMDomain   = if ($rec.auth_results) { Get-DmarcAuthDomain -AuthEntries $rec.auth_results.dkim -PolicyDomain $domain } else { '' }
                 GeoCountry   = ''; GeoOrg = ''; GeoHostname = ''; GeoCity = ''
                 SenderClass  = ''; IsNewSender = $false; IsCousinDomain = $false
                 ServiceId    = ''; ServiceVendor = ''; ServiceCategory = ''; ServiceConfidence = ''
