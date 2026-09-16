@@ -79,3 +79,38 @@ EXPLAIN QUERY PLAN SELECT * FROM aggregate_records WHERE client_id='c-acme' AND 
 EXPLAIN QUERY PLAN SELECT * FROM senders WHERE client_id='c-acme' AND is_approved=0;
 .print '---'
 EXPLAIN QUERY PLAN SELECT * FROM dns_drift_events WHERE client_id='c-acme' AND acknowledged_at IS NULL ORDER BY detected_at DESC;
+
+.print ''
+.print '=== T10: remediation - a plan can be recorded even when refused ==='
+INSERT INTO dns_change_plans (id,client_id,domain_id,change_type,record_name,record_type,current_value,proposed_value,is_safe,blockers_json,lookups_before,lookups_after,summary,status,created_at,created_by)
+VALUES ('pl1','c-acme','d-acme','spf-include-add','acme.com','TXT','v=spf1 ... -all','v=spf1 ... include:sendgrid.net -all',0,'["would exceed 10 lookups"]',10,11,'REFUSED: lookup cap','refused',datetime('now'),'alex');
+SELECT 'refused_plan_stored=' || COUNT(*) FROM dns_change_plans WHERE status='refused';
+
+.print ''
+.print '=== T11: remediation - applied change links to its plan and keeps rollback target ==='
+INSERT INTO dns_change_plans (id,client_id,domain_id,change_type,record_name,record_type,current_value,proposed_value,is_safe,lookups_before,lookups_after,summary,status,created_at,created_by)
+VALUES ('pl2','c-acme','d-acme','spf-include-add','acme.com','TXT','v=spf1 include:a -all','v=spf1 include:a include:b -all',1,1,2,'add include:b','applied',datetime('now'),'alex');
+INSERT INTO dns_changes (id,plan_id,client_id,domain_id,record_name,record_type,previous_value,new_value,provider,applied_at,applied_by,reason,is_propagated)
+VALUES ('ch1','pl2','c-acme','d-acme','acme.com','TXT','v=spf1 include:a -all','v=spf1 include:a include:b -all','cloudflare',datetime('now'),'alex','ticket 42',1);
+SELECT 'change_rollback_target=' || previous_value FROM dns_changes WHERE id='ch1';
+
+.print ''
+.print '=== T12: remediation - credentials are never stored in the DB ==='
+INSERT INTO dns_provider_configs (id,client_id,domain_id,provider,config_json,credential_ref,created_at,updated_at)
+VALUES ('pc1','c-acme','d-acme','cloudflare','{"zoneId":"abc123"}','DnsToken_c-acme_cloudflare',datetime('now'),datetime('now'));
+SELECT 'stores_only_ref=' || credential_ref FROM dns_provider_configs WHERE id='pc1';
+
+.print ''
+.print '=== T13: remediation - one flatten state per domain ==='
+INSERT INTO spf_flatten_state (id,client_id,domain_id,flattened_includes,resolved_ips,flattened_value,lookups_before,lookups_after,flattened_at,refresh_by)
+VALUES ('fs1','c-acme','d-acme','["sendgrid.net"]','["ip4:167.89.0.0/17"]','v=spf1 ip4:167.89.0.0/17 -all',2,0,datetime('now'),date('now','+30 day'));
+INSERT INTO spf_flatten_state (id,client_id,domain_id,flattened_includes,resolved_ips,flattened_value,flattened_at,refresh_by)
+VALUES ('fs2','c-acme','d-acme','["other"]','[]','v=spf1 -all',datetime('now'),date('now','+30 day'));
+
+.print ''
+.print '=== T14: remediation - deleting a client removes all its remediation history ==='
+DELETE FROM clients WHERE id='c-acme';
+SELECT 'orphan_plans='    || COUNT(*) FROM dns_change_plans      WHERE client_id='c-acme';
+SELECT 'orphan_changes='  || COUNT(*) FROM dns_changes           WHERE client_id='c-acme';
+SELECT 'orphan_provider=' || COUNT(*) FROM dns_provider_configs  WHERE client_id='c-acme';
+SELECT 'orphan_flatten='  || COUNT(*) FROM spf_flatten_state     WHERE client_id='c-acme';

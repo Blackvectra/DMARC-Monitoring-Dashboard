@@ -51,6 +51,7 @@ $script:ScriptDir      = Split-Path $MyInvocation.MyCommand.Path -Parent
 $script:EngineScript   = Join-Path $script:ScriptDir "Invoke-DMARCReporter.ps1"
 $script:SPFScript      = Join-Path $script:ScriptDir "Invoke-SPFInspector.ps1"
 $script:ReportScript   = Join-Path $script:ScriptDir "Invoke-HTMLReportGenerator.ps1"
+$script:RemediationScript = Join-Path $script:ScriptDir "Invoke-DNSRemediation.ps1"
 $script:PSVer          = $PSVersionTable.PSVersion.Major
 $script:SelectedDomain = "All Domains"
 
@@ -1178,6 +1179,7 @@ $authBlock
     <WebBrowser Grid.Row="1" x:Name="wbAuth" Margin="0"/>
     <Border Grid.Row="2" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,1,0,0">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="20,8" VerticalAlignment="Center">
+        <Button x:Name="btnPlanFix" Content="Plan DNS Fix..." Width="130" Height="28" Background="#1F6FEB" Foreground="White" BorderBrush="#1F6FEB" Margin="0,0,8,0"/>
         <Button x:Name="btnMarkApproved" Content="Mark Approved" Width="130" Height="28" Background="#3FB950" Foreground="White" BorderBrush="#3FB950" Margin="0,0,8,0"/>
         <Button x:Name="btnClose" Content="Close" Width="80" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D"/>
       </StackPanel>
@@ -1208,8 +1210,139 @@ $authBlock
         Set-SourceApproval -Approved $true
         $win.Close()
     })
+    # Closes the loop competitors leave open: instead of only naming the record
+    # the operator should publish, plan the exact change against the domain's
+    # live SPF and show whether it is safe to apply.
+    $win.FindName('btnPlanFix').Add_Click({
+        $spfInclude = if ($svc -and $svc.PSObject.Properties.Name -contains 'spfInclude') { [string]$svc.spfInclude } else { '' }
+        Show-DNSFixPlan -Domain $domain -IncludeDomain $spfInclude -ServiceName $service -Owner $win
+    })
     $win.FindName('btnClose').Add_Click({ $win.Close() })
     $win.ShowDialog() | Out-Null
+}
+
+function Show-DNSFixPlan {
+    <#
+        Renders a plan produced by Invoke-DNSRemediation for human review.
+
+        Deliberately stops at "here is exactly what would change and whether
+        it is safe". Actually writing to a client's zone needs provider
+        credentials the dashboard does not hold yet, and publishing DNS on a
+        single click with no configured provider is how you break a customer's
+        mail. The plan, the before/after and the refusal reasons are the part
+        that has value today; Apply lights up once a provider is configured.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Domain,
+        [AllowEmptyString()] [string]$IncludeDomain,
+        [string]$ServiceName = '',
+        $Owner
+    )
+
+    if (-not (Test-Path $script:RemediationScript)) {
+        [System.Windows.MessageBox]::Show("Invoke-DNSRemediation.ps1 not found at $script:RemediationScript", "Missing", "OK", "Warning") | Out-Null
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($IncludeDomain)) {
+        [System.Windows.MessageBox]::Show(
+            "$ServiceName does not publish an SPF include, so there is no SPF change to plan.`n`nIt most likely relays through your own mailbox and authenticates with your existing DKIM.",
+            "Nothing to plan", "OK", "Information") | Out-Null
+        return
+    }
+
+    # Read the domain's live SPF so the plan is costed against reality rather
+    # than against whatever the last ingest happened to record.
+    $currentSpf = ''
+    try {
+        $dns = Resolve-DnsName -Name $Domain -Type TXT -EA Stop
+        $rec = $dns | Where-Object { $_.Strings -match 'v=spf1' } | Select-Object -First 1
+        if ($rec) { $currentSpf = ($rec.Strings -join '') }
+    } catch {
+        $txtLog.AppendText("[WARN] Could not read live SPF for $Domain`: $_`n")
+    }
+
+    $plan = $null
+    try {
+        . $script:RemediationScript
+        $plan = New-SPFIncludePlan -Domain $Domain -CurrentRecord $currentSpf -IncludeDomain $IncludeDomain
+    } catch {
+        [System.Windows.MessageBox]::Show("Could not build a plan: $_", "Plan failed", "OK", "Error") | Out-Null
+        return
+    }
+
+    $statusColor = if ($plan.IsNoOp) { '#6E7681' } elseif ($plan.IsSafe) { '#3FB950' } else { '#F85149' }
+    $statusText  = if ($plan.IsNoOp) { 'ALREADY IN PLACE' } elseif ($plan.IsSafe) { 'SAFE TO APPLY' } else { 'REFUSED' }
+
+    $blockHtml = ''
+    if ($plan.Blockers.Count -gt 0) {
+        $items = ($plan.Blockers | ForEach-Object { "<li>$(HtmlEnc $_)</li>" }) -join ''
+        $blockHtml = "<h3 style='color:#F85149;font-size:13px;margin:14px 0 6px'>Blockers</h3><ul style='color:#FFA198;font-size:12px;line-height:1.7;padding-left:18px'>$items</ul>"
+    }
+    $warnHtml = ''
+    if ($plan.Warnings.Count -gt 0) {
+        $items = ($plan.Warnings | ForEach-Object { "<li>$(HtmlEnc $_)</li>" }) -join ''
+        $warnHtml = "<h3 style='color:#D29922;font-size:13px;margin:14px 0 6px'>Warnings</h3><ul style='color:#E3B341;font-size:12px;line-height:1.7;padding-left:18px'>$items</ul>"
+    }
+
+    $diffHtml = if ($plan.IsNoOp) { '' } else { @"
+<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>Before</h3>
+<div style='font-family:Consolas,monospace;background:#2D1A1A;border-left:3px solid #F85149;padding:10px;color:#FFA198;font-size:12px;word-break:break-all'>$(HtmlEnc $(if ($plan.CurrentValue) { $plan.CurrentValue } else { '(no SPF record published)' }))</div>
+<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>After</h3>
+<div style='font-family:Consolas,monospace;background:#12261E;border-left:3px solid #3FB950;padding:10px;color:#7EE787;font-size:12px;word-break:break-all'>$(HtmlEnc $plan.NewValue)</div>
+"@ }
+
+    $body = @"
+<div style='display:inline-block;background:$statusColor;color:#fff;padding:3px 12px;border-radius:12px;font-size:11px;font-weight:bold;margin-bottom:12px'>$statusText</div>
+<div style='color:#CDD9E5;font-size:13px;margin-bottom:12px'>$(HtmlEnc $plan.Summary)</div>
+<div style='color:#6E7681;font-size:12px'>DNS lookups: <b style='color:#E6EDF3'>$($plan.LookupsBefore)</b> &rarr; <b style='color:#E6EDF3'>$($plan.LookupsAfter)</b> of 10 (RFC 7208)</div>
+$diffHtml
+$blockHtml
+$warnHtml
+<h3 style='color:#E6EDF3;font-size:13px;margin:16px 0 6px'>Publishing</h3>
+<div style='color:#8B949E;font-size:12px;line-height:1.6'>No DNS provider is configured for this client yet, so nothing can be published from here. Copy the <b>After</b> value into the TXT record for <code style='background:#21262D;padding:1px 4px;border-radius:3px'>$(HtmlEnc $Domain)</code>, or configure a provider to publish, verify and roll back automatically.</div>
+"@
+
+    $xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DNS Fix Plan" Height="620" Width="760" Background="#0D1117" WindowStartupLocation="CenterOwner">
+  <Grid>
+    <Grid.RowDefinitions><RowDefinition Height="56"/><RowDefinition Height="*"/><RowDefinition Height="50"/></Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
+      <StackPanel Margin="20,9">
+        <TextBlock Foreground="#E6EDF3" FontSize="15" FontWeight="SemiBold" Text="DNS fix plan"/>
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,3,0,0" Text="$([System.Net.WebUtility]::HtmlEncode("$Domain  -  authorize $ServiceName"))"/>
+      </StackPanel>
+    </Border>
+    <WebBrowser Grid.Row="1" x:Name="wbPlan"/>
+    <Border Grid.Row="2" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,1,0,0">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="20,8">
+        <Button x:Name="btnCopy" Content="Copy New Record" Width="150" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D" Margin="0,0,8,0"/>
+        <Button x:Name="btnPlanClose" Content="Close" Width="80" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D"/>
+      </StackPanel>
+    </Border>
+  </Grid>
+</Window>
+"@
+
+    $pw = [Windows.Markup.XamlReader]::Parse($xaml)
+    if ($Owner) { $pw.Owner = $Owner }
+    $wbPlan = $pw.FindName('wbPlan')
+    Set-WBSilent $wbPlan
+    $tmp = [System.IO.Path]::GetTempPath() + "dmarcmonitor_plan.html"
+    $page = "<!DOCTYPE html><html><head><meta http-equiv='X-UA-Compatible' content='IE=edge'><meta charset='UTF-8'><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;color:#E6EDF3;font-family:Segoe UI,Arial;padding:18px;overflow-y:auto;line-height:1.5}</style></head><body>$body</body></html>"
+    $page | Set-Content $tmp -Encoding UTF8
+    $wbPlan.Navigate("file:///$($tmp.Replace('\','/'))")
+
+    $newValueForCopy = $plan.NewValue
+    $pw.FindName('btnCopy').Add_Click({
+        if ($newValueForCopy) {
+            try { Set-Clipboard -Value $newValueForCopy; $txtStatus.Text = 'New SPF record copied to clipboard'; $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen } catch {}
+        }
+    }.GetNewClosure())
+    $pw.FindName('btnPlanClose').Add_Click({ $pw.Close() })
+    $pw.ShowDialog() | Out-Null
 }
 function Set-SourceApproval {
     param([bool]$Approved)

@@ -171,4 +171,15 @@ jobs:
           check "CHECK constraint failed"                              "invalid enum rejected"
           check "orphan_domains=0"                                     "cascade delete removed client's domains"
           check "acme_survives=2"                                      "other client's data untouched"
+          # Remediation tables: a refused plan is still recorded, an applied
+          # change keeps its rollback target, secrets stay out of the database,
+          # and a client's remediation history dies with the client.
+          check "refused_plan_stored=1"                                "refused plan is still recorded"
+          check "change_rollback_target=v=spf1 include:a -all"         "applied change keeps its rollback target"
+          check "stores_only_ref=DnsToken_c-acme_cloudflare"           "provider config stores a credential ref, not a secret"
+          check "UNIQUE constraint failed: spf_flatten_state.domain_id" "one flatten state per domain enforced"
+          check "orphan_plans=0"                                       "cascade removed change plans"
+          check "orphan_changes=0"                                     "cascade removed applied changes"
+          check "orphan_provider=0"                                    "cascade removed provider configs"
+          check "orphan_flatten=0"                                     "cascade removed flatten state"
           exit $fail
