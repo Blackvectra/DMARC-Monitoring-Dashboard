@@ -334,6 +334,366 @@ function New-SPFRemovePlan {
 }
 #endregion
 
+#region Silent failure detection
+<#
+    A record can be syntactically fine, published, and completely inert.
+
+    The motivating case is real and third-party checkable: a live customer of
+    a commercial DMARC vendor publishes
+
+        v=spf1 redirect=_xxxxx.sdmarc.net ip4:41.121.57.146 include:spf.protection.outlook.com -all
+
+    RFC 7208 s6.1: "any redirect modifier MUST be ignored if there is an all
+    mechanism anywhere in the record". The record ends -all, so the redirect is
+    ignored and the vendor's hosted record is never consulted. The customer is
+    paying for managed SPF that does nothing, their dashboard shows a healthy
+    published record, and nothing anywhere reports a problem.
+
+    That is the whole category this region addresses: configurations that pass
+    a "does the record exist and parse" check while doing nothing, or doing
+    something other than what the operator believes. None of them raise an
+    error. All of them are detectable from the published DNS alone.
+
+    Every check cites the clause that makes it a failure rather than an
+    opinion, so a finding can be defended to a client who disagrees.
+#>
+
+function New-AuthFinding {
+    param(
+        [Parameter(Mandatory)] [ValidateSet('critical','high','medium','low','info')] [string]$Severity,
+        [Parameter(Mandatory)] [string]$Code,
+        [Parameter(Mandatory)] [string]$Title,
+        [Parameter(Mandatory)] [string]$Detail,
+        [string]$Reference = '',
+        [string]$Evidence  = '',
+        [string]$Remediation = ''
+    )
+    return [PSCustomObject]@{
+        Severity    = $Severity
+        Code        = $Code
+        Title       = $Title
+        Detail      = $Detail
+        Reference   = $Reference
+        Evidence    = $Evidence
+        Remediation = $Remediation
+    }
+}
+
+function Test-SPFSilentFailure {
+    <#
+    .SYNOPSIS
+        Finds SPF configurations that are published but not doing what the
+        operator thinks.
+
+    .PARAMETER SpfRecords
+        ALL v=spf1 TXT records found at the domain, not just the first. More
+        than one is itself a hard failure and cannot be detected from a single
+        record.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Domain,
+        [AllowEmptyCollection()] [string[]]$SpfRecords = @()
+    )
+
+    $findings = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $records  = @($SpfRecords | Where-Object { $_ -and $_.Trim() })
+
+    if ($records.Count -eq 0) {
+        $findings.Add((New-AuthFinding -Severity 'high' -Code 'SPF_MISSING' `
+            -Title 'No SPF record published' `
+            -Detail "No v=spf1 TXT record found at $Domain. Receivers have nothing to check the envelope sender against, so SPF cannot contribute to DMARC alignment." `
+            -Reference 'RFC 7208' `
+            -Remediation 'Publish an SPF record listing the services authorized to send for this domain.'))
+        return ,$findings.ToArray()
+    }
+
+    # RFC 7208 s4.5: more than one SPF record is a permerror. Not "the first
+    # one wins" - the whole evaluation fails, so a domain that looks like it
+    # has SPF has none.
+    if ($records.Count -gt 1) {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'SPF_MULTIPLE_RECORDS' `
+            -Title "$($records.Count) SPF records published, which is a permanent error" `
+            -Detail "RFC 7208 requires exactly one v=spf1 record. When more than one is present the check returns permerror and SPF fails for every message, including legitimate ones. This commonly happens when a second service is onboarded and adds its own record instead of editing the existing one." `
+            -Reference 'RFC 7208 s4.5' `
+            -Evidence ($records -join '  ||  ') `
+            -Remediation 'Merge the records into one, combining their mechanisms, and delete the others.'))
+        # Everything below reads the first record; the multiple-record failure
+        # dominates anyway.
+    }
+
+    $raw    = $records[0]
+    $parsed = ConvertFrom-SPFRecord -Record $raw
+    if (-not $parsed.IsValid) {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'SPF_UNPARSEABLE' `
+            -Title 'SPF record cannot be parsed' `
+            -Detail "The record at $Domain does not parse as SPF: $($parsed.Error). Receivers will treat this as permerror." `
+            -Reference 'RFC 7208 s4.5' -Evidence $raw))
+        return ,$findings.ToArray()
+    }
+
+    $redirect = $parsed.Terms | Where-Object { $_.Kind -eq 'redirect' } | Select-Object -First 1
+
+    # THE headline check. A published redirect= that is silently ignored.
+    if ($redirect -and $parsed.AllTerm) {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'SPF_REDIRECT_NEUTERED_BY_ALL' `
+            -Title 'redirect= is silently ignored because an all mechanism is present' `
+            -Detail "RFC 7208 requires a redirect modifier to be ignored whenever an all mechanism appears anywhere in the record. This record contains both, so the redirect to '$($redirect.Value)' is never followed and whatever it points at is never consulted. The record still parses, still resolves, and still looks correct in any tool that only checks whether SPF exists. If the redirect target is a managed or delegated SPF service, that service is doing nothing for this domain." `
+            -Reference 'RFC 7208 s6.1' `
+            -Evidence $raw `
+            -Remediation "Remove the '$($parsed.AllTerm.Text)' mechanism so the redirect takes effect, or drop the redirect and list the mechanisms inline. A record cannot use both."))
+    }
+
+    # +all authorizes the entire internet. Almost always a typo for -all or a
+    # leftover from testing.
+    $allTerm = $parsed.AllTerm
+    if ($allTerm -and $allTerm.Qualifier -eq '+') {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'SPF_PLUS_ALL' `
+            -Title '+all authorizes every host on the internet to send as this domain' `
+            -Detail "A '+all' mechanism passes SPF for any sending IP whatsoever, which defeats the purpose of publishing SPF and hands anyone a passing SPF result for this domain." `
+            -Reference 'RFC 7208 s5.1' -Evidence $raw `
+            -Remediation "Replace '+all' with '-all', or '~all' while still identifying senders."))
+    }
+
+    # An all that is not last makes every later term unreachable.
+    if ($allTerm) {
+        $lastTerm = $parsed.Terms[$parsed.Terms.Count - 1]
+        if ($lastTerm -and $lastTerm.Kind -ne 'all' -and -not $redirect) {
+            $unreachable = @($parsed.Terms[($parsed.Terms.IndexOf($allTerm) + 1)..($parsed.Terms.Count - 1)] |
+                             Where-Object { $_ } | ForEach-Object { $_.Text })
+            if ($unreachable.Count -gt 0) {
+                $findings.Add((New-AuthFinding -Severity 'high' -Code 'SPF_TERMS_AFTER_ALL' `
+                    -Title 'Mechanisms appear after all and are never evaluated' `
+                    -Detail "SPF stops at the first matching mechanism and 'all' always matches, so every term after it is unreachable. These are silently ignored: $($unreachable -join ', ')." `
+                    -Reference 'RFC 7208 s5.1' -Evidence $raw `
+                    -Remediation "Move '$($allTerm.Text)' to the end of the record."))
+            }
+        }
+    }
+
+    # Neither all nor redirect: the result is neutral, which DMARC treats as
+    # a non-pass. Operators frequently believe this is a default-deny.
+    if (-not $allTerm -and -not $redirect) {
+        $findings.Add((New-AuthFinding -Severity 'medium' -Code 'SPF_NO_TERMINAL' `
+            -Title 'No all mechanism and no redirect, so unlisted senders get a neutral result' `
+            -Detail 'Without a terminal all or a redirect, a sender that matches nothing produces neutral rather than fail. Neutral does not contribute to DMARC alignment, so the record provides no protection against unlisted senders.' `
+            -Reference 'RFC 7208 s4.7' -Evidence $raw `
+            -Remediation "Append '-all' once the authorized senders are known, or '~all' while still identifying them."))
+    }
+
+    # Lookup cap. Exceeding it is permerror for the whole record.
+    $lookups = Get-SPFRecordLookupCount -Parsed $parsed
+    if ($lookups -gt $script:SPFMaxLookups) {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'SPF_LOOKUP_LIMIT_EXCEEDED' `
+            -Title "$lookups DNS lookups exceeds the limit of $script:SPFMaxLookups" `
+            -Detail "RFC 7208 caps a record at $script:SPFMaxLookups DNS-costing terms. Beyond that, evaluation stops and returns permerror, so SPF fails for every message including legitimate ones. The record still looks correct because the failure only appears during evaluation." `
+            -Reference 'RFC 7208 s4.6.4' -Evidence $raw `
+            -Remediation 'Remove unused includes, or flatten the record to inline the IP ranges behind them.'))
+    } elseif ($lookups -eq $script:SPFMaxLookups) {
+        $findings.Add((New-AuthFinding -Severity 'medium' -Code 'SPF_LOOKUP_LIMIT_REACHED' `
+            -Title "At the $script:SPFMaxLookups-lookup limit with no headroom" `
+            -Detail 'The next sender added to this record will push it over the limit and break SPF entirely. Note the count can also rise without any local change, because an upstream include may add lookups of its own.' `
+            -Reference 'RFC 7208 s4.6.4' -Evidence $raw `
+            -Remediation 'Flatten or prune before authorizing another sender.'))
+    }
+
+    # ptr is deprecated and many receivers ignore it outright.
+    $ptr = $parsed.Terms | Where-Object { $_.Kind -eq 'ptr' }
+    if ($ptr) {
+        $findings.Add((New-AuthFinding -Severity 'medium' -Code 'SPF_PTR_DEPRECATED' `
+            -Title 'ptr mechanism is deprecated and unreliable' `
+            -Detail 'RFC 7208 says the ptr mechanism SHOULD NOT be used: it is slow, fails badly on DNS errors, and burdens .arpa nameservers. Some receivers skip it entirely, so senders it was meant to authorize may fail SPF anyway.' `
+            -Reference 'RFC 7208 s5.5' -Evidence $raw `
+            -Remediation 'Replace ptr with explicit ip4/ip6 ranges or an include for the sending service.'))
+    }
+
+    return ,$findings.ToArray()
+}
+
+function Test-DMARCSilentFailure {
+    <#
+    .SYNOPSIS
+        Finds DMARC configurations that are published but not enforcing, not
+        reporting, or not applied at all.
+
+    .PARAMETER ReportDomainVerifier
+        Scriptblock taking (policyDomain, externalDomain) and returning $true
+        when the RFC 7489 s7.1 authorisation record exists. Supplied by tests;
+        production passes a DNS resolver. When omitted the external-destination
+        check is reported as unverified rather than skipped silently.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Domain,
+        [AllowEmptyCollection()] [string[]]$DmarcRecords = @(),
+        [scriptblock]$ReportDomainVerifier
+    )
+
+    $findings = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $records  = @($DmarcRecords | Where-Object { $_ -and $_.Trim() })
+
+    if ($records.Count -eq 0) {
+        $findings.Add((New-AuthFinding -Severity 'high' -Code 'DMARC_MISSING' `
+            -Title 'No DMARC record published' `
+            -Detail "No v=DMARC1 TXT record at _dmarc.$Domain. Receivers have no policy to apply and no address to send reports to, so nothing about this domain's mail is visible or enforced." `
+            -Reference 'RFC 7489 s6.1' `
+            -Remediation 'Publish v=DMARC1; p=none with a rua= address and collect reports before enforcing.'))
+        return ,$findings.ToArray()
+    }
+
+    # RFC 7489 s6.6.3: multiple records means DMARC is not applied AT ALL.
+    # Not "the first wins" - the domain is silently unprotected.
+    if ($records.Count -gt 1) {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'DMARC_MULTIPLE_RECORDS' `
+            -Title "$($records.Count) DMARC records published, so DMARC is not applied at all" `
+            -Detail 'RFC 7489 says that when policy discovery finds multiple records, DMARC processing is abandoned for the message. The domain is therefore completely unprotected despite appearing to have a policy, and no reports are generated.' `
+            -Reference 'RFC 7489 s6.6.3' `
+            -Evidence ($records -join '  ||  ') `
+            -Remediation 'Delete all but one DMARC record.'))
+    }
+
+    $raw = $records[0]
+
+    if ($raw -notmatch '(?i)^\s*v=DMARC1\s*;') {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'DMARC_BAD_VERSION' `
+            -Title 'Record does not begin with v=DMARC1' `
+            -Detail 'RFC 7489 requires v=DMARC1 as the first tag. A record that does not start with it is not recognised as DMARC and is ignored entirely.' `
+            -Reference 'RFC 7489 s6.3' -Evidence $raw))
+        return ,$findings.ToArray()
+    }
+
+    $policy = if ($raw -match '(?i)\bp=(none|quarantine|reject)\b') { $Matches[1].ToLowerInvariant() } else { $null }
+    if (-not $policy) {
+        $findings.Add((New-AuthFinding -Severity 'critical' -Code 'DMARC_NO_POLICY' `
+            -Title 'No valid p= tag' `
+            -Detail 'The p= tag is required and must be none, quarantine or reject. Without it the record is invalid and receivers ignore it, leaving the domain unprotected.' `
+            -Reference 'RFC 7489 s6.3' -Evidence $raw))
+    }
+
+    # pct=0 means the policy applies to nothing.
+    if ($raw -match '(?i)\bpct=(\d+)\b') {
+        $pct = [int]$Matches[1]
+        if ($pct -eq 0) {
+            $findings.Add((New-AuthFinding -Severity 'high' -Code 'DMARC_PCT_ZERO' `
+                -Title "pct=0 means the policy is applied to no messages" `
+                -Detail "p=$policy is published but pct=0 applies it to zero percent of failing mail. The domain reads as enforcing in any tool that only looks at p=, while behaving exactly as p=none." `
+                -Reference 'RFC 7489 s6.3' -Evidence $raw `
+                -Remediation 'Raise pct, or drop the tag entirely to apply the policy to all failing mail.'))
+        } elseif ($pct -lt 100 -and $policy -in @('quarantine','reject')) {
+            $findings.Add((New-AuthFinding -Severity 'medium' -Code 'DMARC_PCT_PARTIAL' `
+                -Title "pct=$pct applies the policy to only $pct% of failing mail" `
+                -Detail "The remaining $((100 - $pct))% is treated as p=none, so most spoofed mail is still delivered. This is correct during a ramp and a gap if it was forgotten." `
+                -Reference 'RFC 7489 s6.3' -Evidence $raw `
+                -Remediation 'Raise to pct=100 once the ramp is complete.'))
+        }
+    }
+
+    # Enforcing with no reporting address is flying blind.
+    $ruaMatch = [regex]::Match($raw, '(?i)\brua=([^;]+)')
+    if (-not $ruaMatch.Success) {
+        $sev = if ($policy -in @('quarantine','reject')) { 'high' } else { 'medium' }
+        $findings.Add((New-AuthFinding -Severity $sev -Code 'DMARC_NO_RUA' `
+            -Title 'No rua= address, so no aggregate reports are received' `
+            -Detail "Without rua= no receiver sends aggregate reports, so there is no visibility into who is sending as this domain or whether enforcement is breaking legitimate mail. At p=$policy that means enforcing without being able to see the consequences." `
+            -Reference 'RFC 7489 s6.3' -Evidence $raw `
+            -Remediation 'Add rua=mailto: pointing at the mailbox this platform ingests.'))
+    } else {
+        # RFC 7489 s7.1 external destination verification. Without the
+        # authorisation record at the DESTINATION, conforming receivers refuse
+        # to send reports - and nothing anywhere reports that refusal. The
+        # domain simply never receives data.
+        foreach ($uri in ($ruaMatch.Groups[1].Value -split ',')) {
+            $u = $uri.Trim()
+            if ($u -notmatch '(?i)^mailto:') {
+                $findings.Add((New-AuthFinding -Severity 'high' -Code 'DMARC_RUA_NOT_MAILTO' `
+                    -Title "rua= entry '$u' is not a mailto: URI" `
+                    -Detail 'RFC 7489 requires report destinations to be URIs; in practice only mailto: is supported by receivers. A malformed entry is ignored, and if it is the only one no reports arrive.' `
+                    -Reference 'RFC 7489 s6.3' -Evidence $raw))
+                continue
+            }
+            $addr = ($u -replace '(?i)^mailto:', '') -replace '!.*$', ''
+            if ($addr -notmatch '@') { continue }
+            $destDomain = ($addr -split '@')[-1].Trim()
+            if (-not $destDomain) { continue }
+
+            $isExternal = -not ($destDomain -ieq $Domain -or $destDomain -imatch "\.$([regex]::Escape($Domain))$")
+            if (-not $isExternal) { continue }
+
+            if (-not $ReportDomainVerifier) {
+                $findings.Add((New-AuthFinding -Severity 'info' -Code 'DMARC_RUA_EXTERNAL_UNVERIFIED' `
+                    -Title "Reports go to an external domain ($destDomain) - authorisation not checked" `
+                    -Detail "rua= points outside $Domain, which requires an authorisation record at $Domain._report._dmarc.$destDomain. No verifier was supplied so this was not checked." `
+                    -Reference 'RFC 7489 s7.1' -Evidence $raw))
+                continue
+            }
+
+            $authorized = $false
+            try { $authorized = [bool](& $ReportDomainVerifier $Domain $destDomain) } catch { $authorized = $false }
+
+            if (-not $authorized) {
+                $findings.Add((New-AuthFinding -Severity 'critical' -Code 'DMARC_RUA_EXTERNAL_UNAUTHORIZED' `
+                    -Title "Aggregate reports are silently discarded: $destDomain has not authorised reports for $Domain" `
+                    -Detail "rua= sends reports to $addr, which is outside $Domain. RFC 7489 requires the destination to publish '$Domain._report._dmarc.$destDomain  TXT  v=DMARC1' before conforming receivers will send anything. That record is absent, so receivers refuse and no report ever arrives. Nothing surfaces an error: the DMARC record looks correct and the reports simply never come." `
+                    -Reference 'RFC 7489 s7.1' -Evidence $raw `
+                    -Remediation "Publish  $Domain._report._dmarc.$destDomain  TXT  ""v=DMARC1""  in the $destDomain zone."))
+            }
+        }
+    }
+
+    # sp=none under an enforcing policy leaves every subdomain open, which is
+    # exactly what a spoofer will use.
+    if ($raw -match '(?i)\bsp=(none|quarantine|reject)\b') {
+        $sp = $Matches[1].ToLowerInvariant()
+        if ($sp -eq 'none' -and $policy -in @('quarantine','reject')) {
+            $findings.Add((New-AuthFinding -Severity 'high' -Code 'DMARC_SUBDOMAIN_UNPROTECTED' `
+                -Title "p=$policy but sp=none leaves every subdomain unprotected" `
+                -Detail "The organisational domain enforces, but sp=none tells receivers to apply no policy to subdomains. An attacker can send as anything.$Domain and pass. This is a common way an apparently-enforcing domain remains spoofable." `
+                -Reference 'RFC 7489 s6.3' -Evidence $raw `
+                -Remediation 'Remove sp= so subdomains inherit p=, or set sp= to match.'))
+        }
+    }
+
+    return ,$findings.ToArray()
+}
+
+function Test-AuthenticationSilentFailures {
+    <#
+    .SYNOPSIS
+        Runs every silent-failure check for a domain and returns the findings
+        ordered by severity.
+
+    .DESCRIPTION
+        Built to be runnable against a domain nobody has onboarded yet: it
+        needs only published DNS. That makes it usable as a pre-sales check
+        as well as an ongoing one - point it at a prospect's domain and show
+        them what is quietly broken.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Domain,
+        [AllowEmptyCollection()] [string[]]$SpfRecords = @(),
+        [AllowEmptyCollection()] [string[]]$DmarcRecords = @(),
+        [scriptblock]$ReportDomainVerifier
+    )
+
+    $all = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($f in (Test-SPFSilentFailure -Domain $Domain -SpfRecords $SpfRecords)) { $all.Add($f) }
+
+    $dmarcArgs = @{ Domain = $Domain; DmarcRecords = $DmarcRecords }
+    if ($ReportDomainVerifier) { $dmarcArgs['ReportDomainVerifier'] = $ReportDomainVerifier }
+    foreach ($f in (Test-DMARCSilentFailure @dmarcArgs)) { $all.Add($f) }
+
+    $rank = @{ 'critical' = 0; 'high' = 1; 'medium' = 2; 'low' = 3; 'info' = 4 }
+    $ordered = @($all | Sort-Object @{ Expression = { $rank[$_.Severity] } }, Code)
+
+    return [PSCustomObject]@{
+        Domain       = $Domain
+        Findings     = $ordered
+        CriticalCount= @($ordered | Where-Object Severity -eq 'critical').Count
+        HighCount    = @($ordered | Where-Object Severity -eq 'high').Count
+        TotalCount   = $ordered.Count
+        IsSilentlyBroken = (@($ordered | Where-Object Severity -eq 'critical').Count -gt 0)
+    }
+}
+#endregion
+
 #region DKIM change planning
 function New-DKIMPlan {
     <#
