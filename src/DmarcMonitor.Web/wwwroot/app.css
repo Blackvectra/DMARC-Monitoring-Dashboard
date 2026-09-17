@@ -201,3 +201,7 @@ button.primary {
     padding: 6px 14px; font: inherit; font-weight: 600; cursor: pointer;
 }
 button.primary:disabled { opacity: .45; cursor: default; }
+
+.form-row input.wide { min-width: 360px; }
+.errors { margin: 0 0 6px 18px; color: var(--muted); font-size: 13px; }
+.errors li { margin-bottom: 3px; }

@@ -23,6 +23,7 @@ builder.Services.AddScoped<DomainDetailService>();
 // The one write path a page has. See OnboardingService for why it is an
 // exception to the read-only rule rather than a loosening of it.
 builder.Services.AddScoped<OnboardingService>();
+builder.Services.AddScoped<ImportUiService>();
 
 var app = builder.Build();
 
