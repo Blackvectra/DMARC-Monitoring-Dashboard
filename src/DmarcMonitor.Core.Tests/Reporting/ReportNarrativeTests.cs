@@ -1,3 +1,4 @@
+using System.Globalization;
 using DmarcMonitor.Core.Reporting;
 
 namespace DmarcMonitor.Core.Tests.Reporting;
@@ -258,6 +259,36 @@ public sealed class ReportNarrativeTests
             messages: 1000, passing: 960));
 
         Assert.Contains("NRG Tech Services", AllText(summary), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NeverClaimsASubsetIsLargerThanTheSetItCameFrom()
+    {
+        // Found on real data: the impersonation sentence named 137 messages
+        // and then said "210 of those" were stopped, because the second figure
+        // counted every failing message on every enforcing domain - the
+        // client's own misconfigured mail included. A client who spots one of
+        // those stops believing the rest of the report.
+        var report = Report(
+            domains: [Domain(policy: "quarantine", messages: 4393, passing: 4183)],
+            sources:
+            [
+                Source(ip: "203.0.113.9", messages: 137),                                  // impersonating
+                Source(ip: "198.51.100.7", messages: 73, authenticatedFor: "vendor.net"),  // the client's own
+            ],
+            messages: 4393, passing: 4183);
+
+        var summary = ReportNarrative.Summarise(report);
+        var impersonation = Assert.Single(summary.Points, p => p.Contains("could not prove otherwise", StringComparison.Ordinal));
+
+        // Every number in that sentence must be one the sentence is entitled
+        // to use: the impersonating total and its source count, nothing wider.
+        var numbers = System.Text.RegularExpressions.Regex
+            .Matches(impersonation, @"\d[\d,]*")
+            .Select(m => long.Parse(m.Value.Replace(",", ""), CultureInfo.InvariantCulture))
+            .ToList();
+
+        Assert.All(numbers, n => Assert.True(n <= 137, $"{n} is larger than the 137 message(s) the sentence is about"));
     }
 
     [Fact]
