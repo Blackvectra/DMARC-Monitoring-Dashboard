@@ -216,3 +216,6 @@ a.primary-link {
 /* An inline warning that is not a whole callout: for something worth
    stopping at, next to the control it applies to. */
 .warn-inline { color: var(--warn); }
+
+/* A record is one long unbroken string and must not push the page sideways. */
+code.wrap { word-break: break-all; white-space: normal; }

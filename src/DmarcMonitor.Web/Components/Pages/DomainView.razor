@@ -1,8 +1,10 @@
 @page "/domains/{Domain}"
+@using DmarcMonitor.Core.Dns
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Core.Domains
 @using DmarcMonitor.Web.Data
 @inject DomainDetailService Detail
+@inject DnsLookup Dns
 @inject ReportStoreConnection Db
 @rendermode InteractiveServer
 
@@ -219,6 +221,126 @@ else
     }
 
     <section>
+        <h2>What is published right now</h2>
+        <p class="sub">Everything above comes from reports, and the newest of those is
+           @Ago(_detail.LastReport). This is DNS, read just now.</p>
+
+        @if (_dnsPending)
+        {
+            <p class="muted">Reading DNS…</p>
+        }
+        else if (_dns is null || _dns.LookupFailed)
+        {
+            @* Not "no record". A resolver that failed proves nothing, and
+               saying otherwise sends somebody to publish a second record over
+               a working first. *@
+            <p class="muted">Could not read DNS for this domain just now, so nothing here is known.</p>
+        }
+        else
+        {
+            var published = DmarcRecord.Parse(_dns.DmarcRecord);
+
+            @if (!published.IsValid)
+            {
+                <section class="callout act">
+                    <h2>No DMARC record is published</h2>
+                    <p>Reports arrived for this domain, so one existed when they were sent. Either it has
+                       been removed or it is no longer readable.</p>
+                </section>
+            }
+            else
+            {
+                @* The reason this section exists. For a domain that has gone
+                   quiet the reported policy is stale by definition, and that
+                   is exactly when somebody asks whether their change landed. *@
+                @if (!string.Equals(published.Policy, _detail.Policy, StringComparison.OrdinalIgnoreCase))
+                {
+                    <section class="callout act">
+                        <h2>DNS says p=@published.Policy, the reports say p=@_detail.Policy</h2>
+                        <p>
+                            The record has been changed since the last report arrived
+                            @Ago(_detail.LastReport). DNS is the truth; everything above still describes
+                            @_detail.Policy, because that is what was in force when the mail it counts was
+                            sent. The figures catch up as new reports arrive.
+                        </p>
+                    </section>
+                }
+
+                <table class="triage">
+                    <tbody>
+                        <tr>
+                            <td>Policy</td>
+                            <td><code>p=@published.Policy</code></td>
+                        </tr>
+                        <tr>
+                            <td>Subdomains</td>
+                            <td>
+                                @if (published.SubdomainPolicy.Length == 0)
+                                {
+                                    <span><code>sp</code> not set, so subdomains inherit
+                                          <code>p=@published.Policy</code></span>
+                                }
+                                else if (Weaker(published.SubdomainPolicy, published.Policy))
+                                {
+                                    <span class="bad"><code>sp=@published.SubdomainPolicy</code> — weaker than the
+                                          domain itself, so mail from a subdomain is treated more leniently</span>
+                                }
+                                else
+                                {
+                                    <span><code>sp=@published.SubdomainPolicy</code></span>
+                                }
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Applied to</td>
+                            <td>
+                                @if (published.Percent < 100)
+                                {
+                                    <span class="bad">@published.Percent% of failing mail — the rest is
+                                          delivered whatever the policy says</span>
+                                }
+                                else
+                                {
+                                    <span>all failing mail</span>
+                                }
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Reports to</td>
+                            <td>
+                                @if (published.Rua.Length == 0)
+                                {
+                                    <span class="bad">nobody — no <code>rua</code>, so this page stops
+                                          updating</span>
+                                }
+                                else
+                                {
+                                    <code>@published.Rua</code>
+                                }
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Record</td>
+                            <td><code class="wrap">@published.Raw</code></td>
+                        </tr>
+                        @if (_dns.SpfRecords.Count > 0)
+                        {
+                            <tr>
+                                <td>SPF</td>
+                                <td>
+                                    <code class="wrap">@_dns.SpfRecords[0]</code>
+                                    <span class="muted"> — @_dns.SpfLookups of
+                                          @DnsHygiene.SpfLookupLimit DNS lookups</span>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    </section>
+
+    <section>
         <h2>Who is reporting</h2>
         <p class="sub">A clean pass rate heard from one receiver is a partial picture, not a verdict.</p>
         @if (_detail.Reporters.Count == 0)
@@ -250,6 +372,14 @@ else
     [Parameter] public string Domain { get; set; } = "";
 
     private DomainDetail? _detail;
+    private PublishedRecords? _dns;
+
+    // Starts true, because before anything has been attempted the honest
+    // state is "not yet", not "failed". A page rendered before its circuit
+    // connects would otherwise claim DNS could not be read when nothing had
+    // tried - the same confusion between absence and failure that the lookup
+    // itself is careful to avoid.
+    private bool _dnsPending = true;
     private string? _error;
     private bool _loading = true;
     private bool _showAllClean;
@@ -257,10 +387,56 @@ else
 
     protected override Task OnParametersSetAsync() => LoadAsync();
 
+    /// <summary>
+    /// Reads DNS after the page has already rendered.
+    /// </summary>
+    /// <remarks>
+    /// The only thing on this page that leaves the machine. Doing it during
+    /// the first render would hold the whole page behind a resolver that can
+    /// take seconds and sometimes never answers, so the reports appear
+    /// immediately and this section fills itself in.
+    /// </remarks>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _detail is null || _dns is not null) { return; }
+
+        try
+        {
+            _dns = await Dns.ReadAsync(_detail.Domain);
+        }
+        catch (Exception)
+        {
+            // Rendered as "could not read", never as "no record". The two mean
+            // opposite things to somebody about to edit a customer's DNS.
+            _dns = new PublishedRecords { Domain = _detail.Domain, LookupFailed = true };
+        }
+        finally
+        {
+            _dnsPending = false;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>True when a subdomain policy is more lenient than the domain's own.</summary>
+    private static bool Weaker(string sp, string p) => Strength(sp) < Strength(p);
+
+    private static int Strength(string policy) => policy.ToLowerInvariant() switch
+    {
+        "reject" => 3,
+        "quarantine" => 2,
+        "none" => 1,
+        _ => 0,
+    };
+
     private async Task LoadAsync()
     {
         _loading = true;
         _error = null;
+
+        // Cleared so navigating between domains does not show the previous
+        // domain's record beside this one's reports.
+        _dns = null;
+        _dnsPending = true;
 
         if (!Db.Exists) { _loading = false; return; }
 

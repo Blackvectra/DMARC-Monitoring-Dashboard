@@ -27,6 +27,11 @@ builder.Services.AddScoped<OnboardingService>();
 builder.Services.AddScoped<ImportUiService>();
 builder.Services.AddScoped<ReportUiService>();
 
+// Shared, because it caches: a page opened twice in a minute should not ask
+// the resolver twice. Reading DNS is also the only thing here that reaches
+// outside the machine, so it is the one service whose slowness can be seen.
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.DnsLookup());
+
 var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())

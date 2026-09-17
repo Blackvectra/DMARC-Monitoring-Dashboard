@@ -359,9 +359,12 @@ public static class DnsHygiene
             return;
         }
 
-        var tags = ParseTags(published.DmarcRecord);
+        // The same parser the domain page uses, so the page and the check
+        // cannot disagree about what a record says.
+        var record = DmarcRecord.Parse(published.DmarcRecord);
+        if (!record.IsValid) { return; }
 
-        if (!tags.ContainsKey("rua"))
+        if (record.Rua.Length == 0)
         {
             findings.Add(new HygieneFinding
             {
@@ -374,8 +377,9 @@ public static class DnsHygiene
             });
         }
 
-        if (tags.TryGetValue("pct", out var pct) && int.TryParse(pct, out var percent) && percent < 100)
+        if (record.Percent < 100)
         {
+            var percent = record.Percent;
             findings.Add(new HygieneFinding
             {
                 Severity = HygieneSeverity.Weakness,
@@ -391,9 +395,10 @@ public static class DnsHygiene
         // sp matters because subdomains inherit p only when sp is absent, and
         // an explicit weaker sp is a hole somebody opened deliberately and
         // then forgot.
-        if (tags.TryGetValue("sp", out var sp) && tags.TryGetValue("p", out var p)
-            && Strength(sp) < Strength(p))
+        if (record.SubdomainPolicy.Length > 0 && Strength(record.SubdomainPolicy) < Strength(record.Policy))
         {
+            var sp = record.SubdomainPolicy;
+            var p = record.Policy;
             findings.Add(new HygieneFinding
             {
                 Severity = HygieneSeverity.Weakness,
@@ -453,22 +458,6 @@ public static class DnsHygiene
     }
 
     // ---- helpers -------------------------------------------------------------
-
-    /// <summary>Splits a DMARC record into its tags. Tolerant of spacing, as records in the wild are.</summary>
-    private static Dictionary<string, string> ParseTags(string record)
-    {
-        var tags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var part in record.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            var equals = part.IndexOf('=', StringComparison.Ordinal);
-            if (equals <= 0) { continue; }
-
-            tags[part[..equals].Trim()] = part[(equals + 1)..].Trim();
-        }
-
-        return tags;
-    }
 
     private static int Strength(string policy) => policy.ToLowerInvariant() switch
     {
