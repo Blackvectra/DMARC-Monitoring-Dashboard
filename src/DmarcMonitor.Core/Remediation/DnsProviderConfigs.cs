@@ -148,6 +148,16 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
         return removed;
     }
 
+    /// <summary>Records that the provider was just tried, and how it went.</summary>
+    public async Task MarkVerifiedAsync(string configId, string? error, CancellationToken ct = default)
+    {
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+        await ExecAsync(db,
+            "UPDATE dns_provider_configs SET last_verified_at = $now, last_error = $err, updated_at = $now WHERE id = $id", ct,
+            ("$now", Iso(DateTimeOffset.UtcNow)), ("$err", (object?)error ?? DBNull.Value), ("$id", configId)).ConfigureAwait(false);
+    }
+
     /// <summary>Every configured provider, for the settings page. Refs only; never a secret.</summary>
     public async Task<IReadOnlyList<DnsProviderConfig>> ListAsync(CancellationToken ct = default)
     {

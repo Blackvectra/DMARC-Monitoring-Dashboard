@@ -1,0 +1,323 @@
+@page "/fix"
+@using DmarcMonitor.Core.Remediation
+@using DmarcMonitor.Web.Data
+@using Microsoft.AspNetCore.Components.Authorization
+@inject RemediationUiService Fixes
+@inject ReportStoreConnection Db
+@inject AuthenticationStateProvider Auth
+@rendermode InteractiveServer
+
+<PageTitle>Fix — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Fix</h1>
+        <p class="sub">What the product would change in each customer's DNS, and the button that does it.
+           Nothing is written without a reason, and every write is recorded and appears on the client's
+           report under "what we did".</p>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty">
+        <h2>No database yet</h2>
+        <p>Nothing has been imported, so there is nothing to fix.</p>
+    </div>
+}
+else if (_domains is null)
+{
+    <p class="muted">Reading what each domain publishes… this asks DNS for every domain, so it takes a moment.</p>
+}
+else if (_error is not null)
+{
+    <div class="empty">
+        <h2>Could not plan</h2>
+        <p>@_error</p>
+    </div>
+}
+else
+{
+    @if (_message is not null)
+    {
+        <section class="callout @(_messageIsError ? "urgent" : "fine")">
+            <h2>@_message</h2>
+        </section>
+    }
+
+    @if (!_domains.Any(d => d.CanApply))
+    {
+        <section class="callout act">
+            <h2>No DNS provider is configured, so fixes can be shown but not applied</h2>
+            <p>Add one under Settings. Until then each fix below says what to publish by hand.</p>
+        </section>
+    }
+
+    @foreach (var d in _domains)
+    {
+        <section class="domain-fix">
+            <h2>
+                <a href="/domains/@d.Domain">@d.Domain</a>
+                <span class="muted"> — @d.ClientName</span>
+                @if (d.CurrentPolicy.Length > 0)
+                {
+                    <code class="pill">p=@d.CurrentPolicy</code>
+                }
+                <span class="muted provider">via @d.ProviderName</span>
+            </h2>
+
+            @if (d.Published.LookupFailed)
+            {
+                <p class="bad">DNS could not be read for this domain. Nothing is planned from a failed read.</p>
+            }
+            else
+            {
+                @if (d.Triage is { } t && t.Headline.Length > 0)
+                {
+                    <p class="sub">The reports say: @t.Headline</p>
+                }
+
+                @if (d.ProviderError is not null)
+                {
+                    <p class="bad">@d.ProviderError</p>
+                }
+
+                @if (d.ReadyFor is { } next && next != d.CurrentPolicy && !d.Plans.Any(p => p.Type == ChangeType.DmarcPolicy && p.Summary.Contains("Move ", StringComparison.Ordinal)))
+                {
+                    <div class="form-row">
+                        <button class="primary" @onclick="() => PlanPolicyAsync(d.Domain, next)">Plan the move to p=@next</button>
+                    </div>
+                }
+                else if (d.CurrentPolicy is "none" or "quarantine" && !d.Plans.Any(p => p.Summary.Contains("Move ", StringComparison.Ordinal)))
+                {
+                    <div class="form-row">
+                        <select @bind="_policyChoice[d.Domain]">
+                            <option value="">Move to…</option>
+                            @if (d.CurrentPolicy == "none") { <option value="quarantine">p=quarantine</option> }
+                            <option value="reject">p=reject</option>
+                        </select>
+                        <button class="primary" disabled="@string.IsNullOrEmpty(_policyChoice.GetValueOrDefault(d.Domain))"
+                                @onclick="() => PlanPolicyAsync(d.Domain, _policyChoice.GetValueOrDefault(d.Domain))">Plan it</button>
+                    </div>
+                }
+
+                @if (d.Plans.Count == 0)
+                {
+                    <p class="muted">Nothing to fix.</p>
+                }
+
+                @foreach (var plan in d.Plans)
+                {
+                    var key = Key(plan);
+                    <div class="plan @(plan.IsSafe ? "" : "refused")">
+                        <p class="plan-summary">
+                            @if (!plan.IsSafe)
+                            {
+                                <strong>Refused.</strong>
+                            }
+                            @(plan.IsSafe ? plan.Summary : plan.Blockers[0])
+                        </p>
+                        @if (plan.IsSafe && !plan.IsNoop)
+                        {
+                            <table class="triage diff">
+                                <tbody>
+                                    <tr><td>Record</td><td><code>@plan.RecordName</code> @plan.RecordType</td></tr>
+                                    <tr><td>Before</td><td><code>@(plan.CurrentValue.Length == 0 ? "(nothing)" : plan.CurrentValue)</code></td></tr>
+                                    <tr><td>After</td><td><code>@plan.ProposedValue</code></td></tr>
+                                </tbody>
+                            </table>
+                            @foreach (var w in plan.Warnings)
+                            {
+                                <p class="sub">Note: @w</p>
+                            }
+                            @if (d.CanApply)
+                            {
+                                <div class="form-row">
+                                    <input class="wide" placeholder="Reason, written for the customer's report"
+                                           @bind="_reasons[key]" @bind:event="oninput" />
+                                    <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_reasons.GetValueOrDefault(key)))"
+                                            @onclick="() => ApplyAsync(plan)">Apply</button>
+                                </div>
+                            }
+                            else
+                            {
+                                <p class="sub">No DNS API for this zone. Publish it by hand, then it will show as done next time this page loads.</p>
+                            }
+                        }
+                    </div>
+                }
+            }
+        </section>
+    }
+
+    <section>
+        <h2>What has been changed</h2>
+        @if (_history is null || _history.Count == 0)
+        {
+            <p class="muted">Nothing has been applied yet.</p>
+        }
+        else
+        {
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>When</th>
+                        <th>Domain</th>
+                        <th>Change</th>
+                        <th>By</th>
+                        <th>State</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var c in _history)
+                    {
+                        <tr>
+                            <td>@c.AppliedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                            <td>@c.Domain</td>
+                            <td>
+                                <code>@c.RecordName</code><br />
+                                <span class="muted">before:</span> <code>@(c.PreviousValue ?? "(nothing)")</code><br />
+                                <span class="muted">after:</span> <code>@(c.NewValue ?? "(removed)")</code><br />
+                                <span class="sub">@c.Reason</span>
+                            </td>
+                            <td>@c.AppliedBy<br /><span class="muted">@c.Provider</span></td>
+                            <td>
+                                @if (c.RolledBackAt is not null)
+                                {
+                                    <span class="muted">rolled back @c.RolledBackAt.Value.ToString("yyyy-MM-dd"): @c.RollbackReason</span>
+                                }
+                                else if (c.IsPropagated)
+                                {
+                                    <span class="good">live</span>
+                                }
+                                else
+                                {
+                                    <span class="muted">accepted, not yet seen in DNS</span>
+                                }
+                            </td>
+                            <td>
+                                @if (c.RolledBackAt is null)
+                                {
+                                    <div class="form-row">
+                                        <input placeholder="Why" @bind="_rollbackReasons[c.Id]" @bind:event="oninput" />
+                                        <button disabled="@(_busy || string.IsNullOrWhiteSpace(_rollbackReasons.GetValueOrDefault(c.Id)))"
+                                                @onclick="() => RollBackAsync(c.Id)">Roll back</button>
+                                    </div>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </section>
+}
+
+@code {
+    private List<DomainFixes>? _domains;
+    private IReadOnlyList<AppliedChange>? _history;
+    private string? _error;
+    private string? _message;
+    private bool _messageIsError;
+    private bool _busy;
+
+    private readonly Dictionary<string, string> _reasons = new();
+    private readonly Dictionary<string, string> _rollbackReasons = new();
+    private readonly Dictionary<string, string> _policyChoice = new();
+
+    private static string Key(ChangePlan plan) => plan.RecordName + "|" + plan.ProposedValue;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // DNS is read after the first paint, as on the domain page, so the
+        // page appears at once and fills in rather than hanging on a lookup.
+        if (!firstRender || !Db.Exists) { return; }
+
+        await LoadAsync();
+        StateHasChanged();
+    }
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        try
+        {
+            _domains = [.. await Fixes.PlanAllAsync()];
+            _history = await Fixes.HistoryAsync();
+        }
+        catch (Exception ex)
+        {
+            _domains = [];
+            _error = ex.Message;
+        }
+    }
+
+    private async Task PlanPolicyAsync(string domain, string? policy)
+    {
+        if (_domains is null || string.IsNullOrEmpty(policy)) { return; }
+
+        var at = _domains.FindIndex(d => d.Domain == domain);
+        if (at < 0) { return; }
+
+        _domains[at] = await Fixes.PlanAsync(domain, _domains[at].Triage, policy);
+    }
+
+    private async Task<string> WhoAsync()
+    {
+        var state = await Auth.GetAuthenticationStateAsync();
+        return state.User.Identity?.Name ?? Environment.UserName;
+    }
+
+    private async Task ApplyAsync(ChangePlan plan)
+    {
+        var reason = _reasons.GetValueOrDefault(Key(plan))?.Trim();
+        if (string.IsNullOrEmpty(reason)) { return; }
+
+        _busy = true;
+        try
+        {
+            var outcome = await Fixes.ApplyAsync(plan, await WhoAsync(), reason);
+            Set(outcome.Message, isError: !outcome.Applied);
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task RollBackAsync(string changeId)
+    {
+        var reason = _rollbackReasons.GetValueOrDefault(changeId)?.Trim();
+        if (string.IsNullOrEmpty(reason)) { return; }
+
+        _busy = true;
+        try
+        {
+            var outcome = await Fixes.RollBackAsync(changeId, await WhoAsync(), reason);
+            Set(outcome.Message, isError: !outcome.Applied);
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await LoadAsync();
+    }
+
+    private void Set(string message, bool isError)
+    {
+        _message = message;
+        _messageIsError = isError;
+    }
+}

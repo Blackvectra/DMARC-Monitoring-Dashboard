@@ -71,7 +71,16 @@ public sealed record AppliedChange(
 public sealed class RemediationService(string databasePath, DnsLookup? lookup = null)
 {
     private readonly string _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
-    private readonly DnsLookup _lookup = lookup ?? new DnsLookup();
+
+    // Its own resolver, with no cache. The page's shared lookup caches for
+    // the record's TTL, which is exactly the window this polls across: one
+    // "not yet" answer would be repeated from cache until the poll gave up.
+    private readonly DnsLookup _lookup = lookup ?? new DnsLookup(new DnsClient.LookupClient(new DnsClient.LookupClientOptions
+    {
+        Timeout = TimeSpan.FromSeconds(5),
+        Retries = 2,
+        UseCache = false,
+    }));
 
     /// <summary>Applies a plan, or shows what applying it would do.</summary>
     /// <param name="confirm">Required to write anything. Absent, this is a dry run.</param>
