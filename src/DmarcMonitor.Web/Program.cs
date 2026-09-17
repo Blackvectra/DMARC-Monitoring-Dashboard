@@ -17,9 +17,9 @@ builder.AddAppAuthentication();
 var dbPath = Path.GetFullPath(builder.Configuration["Database:Path"] ?? "dmarc.db");
 builder.Services.AddSingleton(new DatabaseInfo(dbPath));
 builder.Services.AddSingleton<ReportStoreConnection>();
-builder.Services.AddScoped<TriageService>();
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Rollout.TriageService(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Intelligence.CorrelationService(dbPath));
-builder.Services.AddScoped<DomainDetailService>();
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Domains.DomainDetailService(dbPath));
 
 // The one write path a page has. See OnboardingService for why it is an
 // exception to the read-only rule rather than a loosening of it.

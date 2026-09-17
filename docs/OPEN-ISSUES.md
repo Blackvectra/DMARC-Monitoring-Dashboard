@@ -55,24 +55,27 @@ dataset.**
 
 ---
 
-## 2. `TriageService` and `DomainDetailService` have no tests
+## 2. Nothing checks the pages themselves
 
-**Area** `src/DmarcMonitor.Web/Data/`
-**Severity** Medium. Both classify or rank, and neither is covered.
+**Area** `src/DmarcMonitor.Web/Components/Pages/`
+**Severity** Low-to-medium. The logic behind the pages is covered; the markup
+is not.
 
-`CorrelationService` moved to `src/DmarcMonitor.Core/Intelligence/` and now has
-seven tests, including one that fails against the exact regression that
-cleared a genuine forger. The two services still in Web do not.
+All three source classifiers and both fleet views now live in Core with tests:
+`CorrelationService`, `TriageService`, `DomainDetailService`, plus the report
+builder, the narrative and the renderer. Between them they cover every
+judgement the product makes about a sending source.
 
-`DomainDetailService` carries the same three-bucket rule as the client report
-(own sending path / third-party signing as itself / impersonation) and was
-fixed at the same time, on inspection rather than on a failing test.
-`TriageService` decides the order an operator reads the fleet in.
+What is left uncovered is the Razor: a renamed property, a broken `@bind`, or
+a page that throws on an empty database would all compile and all pass the
+suite. They were caught today by driving the app with curl and Playwright by
+hand, which does not survive into next week.
 
-**How to fix.** Same move: both take `ReportStoreConnection`, which is a Web
-type, and both would work against a database path exactly as
-`CorrelationService` now does. Ranking and classification are domain logic and
-belong in Core where they can be tested; the Web project keeps the pages.
+**How to fix.** A small `bunit` project over the pages, or a handful of
+Playwright checks that load each route against a seeded database and assert on
+one sentence. The route list is short enough to be worth doing exhaustively:
+`/`, `/domains`, `/domains/{name}`, `/clients`, `/import`, `/sources`,
+`/reports`, `/settings`.
 
 ## 3. The web app is read-only about its own configuration
 

@@ -1,8 +1,9 @@
 using System.Globalization;
 using DmarcMonitor.Core.Intelligence;
 using DmarcMonitor.Core.Rollout;
+using Microsoft.Data.Sqlite;
 
-namespace DmarcMonitor.Web.Data;
+namespace DmarcMonitor.Core.Domains;
 
 /// <summary>One sending source, as seen for a single domain.</summary>
 public sealed record DomainSource
@@ -109,9 +110,13 @@ public sealed record DomainDetail
 /// one large join: a domain with no sources still has to render its policy and
 /// its reporters, and a join would collapse those rows away.
 /// </summary>
-public sealed class DomainDetailService(ReportStoreConnection connection)
+public sealed class DomainDetailService(string databasePath)
 {
-    private readonly ReportStoreConnection _connection = connection;
+    private readonly string _connectionString = new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadOnly,
+    }.ToString();
 
     public async Task<DomainDetail?> GetAsync(string domain, int days = 30, CancellationToken ct = default)
     {
@@ -121,7 +126,8 @@ public sealed class DomainDetailService(ReportStoreConnection connection)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = await _connection.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
 
         string domainId, clientName, clientSlug;
         DateTimeOffset? baseline;
@@ -192,18 +198,25 @@ public sealed class DomainDetailService(ReportStoreConnection connection)
     }
 
     private static async Task<(string Policy, string Sub, int Pct, DateTimeOffset? Last)> PolicyAsync(
-        Microsoft.Data.Sqlite.SqliteConnection db, string domainId, CancellationToken ct)
+        SqliteConnection db, string domainId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
 
         // The most recent report wins. An older one describes a policy that
         // may since have been changed, which is the thing an operator is most
         // often checking on this page.
+        //
+        // received_at breaks the tie, because date_end alone does not:
+        // receivers send several reports covering the same window, and during
+        // a rollout two of them can disagree about the policy. Without a
+        // tie-break SQLite picks whichever it likes, so the page can show a
+        // policy that was superseded hours ago and be right again on the next
+        // refresh, which is the hardest kind of wrong to notice.
         command.CommandText = """
             SELECT policy_p, COALESCE(policy_sp, ''), COALESCE(policy_pct, 100), date_end
             FROM aggregate_reports
             WHERE domain_id = $domain
-            ORDER BY date_end DESC
+            ORDER BY date_end DESC, received_at DESC
             LIMIT 1
             """;
         command.Parameters.AddWithValue("$domain", domainId);
@@ -219,7 +232,7 @@ public sealed class DomainDetailService(ReportStoreConnection connection)
     }
 
     private static async Task<(long Messages, long Passing)> TotalsAsync(
-        Microsoft.Data.Sqlite.SqliteConnection db, string domainId, string since, CancellationToken ct)
+        SqliteConnection db, string domainId, string since, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -237,7 +250,7 @@ public sealed class DomainDetailService(ReportStoreConnection connection)
     }
 
     private static async Task<List<DomainSource>> SourcesAsync(
-        Microsoft.Data.Sqlite.SqliteConnection db, string domainId, string since, CancellationToken ct)
+        SqliteConnection db, string domainId, string since, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -285,7 +298,7 @@ public sealed class DomainDetailService(ReportStoreConnection connection)
     }
 
     private static async Task<List<DomainReporter>> ReportersAsync(
-        Microsoft.Data.Sqlite.SqliteConnection db, string domainId, string since, CancellationToken ct)
+        SqliteConnection db, string domainId, string since, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
 
