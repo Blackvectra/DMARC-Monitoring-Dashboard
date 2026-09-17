@@ -217,6 +217,18 @@ CREATE TABLE domains (
     policy_target           TEXT NOT NULL DEFAULT 'reject'
                             CHECK (policy_target IN ('none','quarantine','reject')),
 
+    -- The deliberate baseline window for the CURRENT stage.
+    --
+    -- Without these, a domain sitting at p=none looks identical whether it is
+    -- on day three of an intentional two-week baseline or has been forgotten
+    -- for eight months. Those need opposite responses, and a tool reporting
+    -- both as "needs work" trains an operator to ignore the ones that do.
+    --
+    -- Set when a stage begins and again on every advance, because the question
+    -- is always "how long at THIS policy", never "how long since onboarding".
+    baseline_started_at     TEXT,
+    baseline_days           INTEGER NOT NULL DEFAULT 14,
+
     -- Denormalized current state, refreshed on each DNS snapshot. Lets the
     -- client list render without touching dns_snapshots.
     current_policy          TEXT,
@@ -312,9 +324,17 @@ CREATE TABLE aggregate_records (
     is_subdomain        INTEGER NOT NULL DEFAULT 0,
 
     -- <auth_results>
+    --
+    -- The RESULT is stored alongside the domain, not just the domain. A source
+    -- forging a signature as its victim produces <dkim><domain>victim.com
+    -- </domain><result>fail</result></dkim>, so keeping only the domain makes a
+    -- forgery attempt indistinguishable from the victim's own misconfigured
+    -- service. That inverts the advice an operator is given.
     dkim_domain         TEXT,
     dkim_selector       TEXT,
+    dkim_auth_result    TEXT,                          -- pass/fail/none/policy...
     spf_domain          TEXT,
+    spf_auth_result     TEXT,
 
     -- Resolved at ingest, denormalized so sender rollups don't need a join
     sender_id           TEXT REFERENCES senders(id) ON DELETE SET NULL
@@ -434,9 +454,20 @@ CREATE TABLE tls_reports (
 
     policy_type         TEXT,                          -- sts / tlsa / no-policy-found
     policy_domain       TEXT,
+
+    -- MTA-STS mode AS THE RECEIVER FETCHED IT, not whatever DNS says today.
+    -- This is the field that decides whether TLS was actually enforced during
+    -- the window: 'testing' means the receiver reported failures and then
+    -- delivered over plaintext anyway. A domain can sit in testing for years,
+    -- generate perfectly clean reports, and be no better protected than one
+    -- with no policy at all. Without this column that distinction is lost and
+    -- every report looks like success.
+    policy_mode         TEXT CHECK (policy_mode IN ('unknown','none','testing','enforce')),
+
     total_success       INTEGER NOT NULL DEFAULT 0,
     total_failure       INTEGER NOT NULL DEFAULT 0,
 
+    source_message_id   TEXT,                          -- Graph message id, for provenance
     raw_hash            TEXT NOT NULL,
     received_at         TEXT NOT NULL,
     ingested_at         TEXT NOT NULL,
@@ -859,6 +890,69 @@ CREATE TABLE spf_flatten_state (
 CREATE INDEX ix_flatten_due ON spf_flatten_state(refresh_by) WHERE is_stale = 0;
 
 
+
+-- ============================================================================
+--  THREAT INTELLIGENCE
+-- ============================================================================
+
+-- What this operator has learned about sources impersonating their clients.
+--
+-- This is the asset an MSP accumulates that a single-tenant tool cannot. Every
+-- client's reports contribute to it, and what is learned from one client
+-- protects every other, including clients onboarded next year who were never
+-- exposed to the source at all.
+--
+-- Derived from aggregate_records and refreshed, NOT hand-maintained: a list
+-- somebody has to remember to update is a list that goes stale and then gets
+-- distrusted. The one thing a human supplies is the classification, because
+-- deciding that a source is a client's own marketing platform rather than an
+-- attacker is a judgement, and getting it wrong in either direction is
+-- expensive.
+CREATE TABLE threat_indicators (
+    id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+
+    indicator_type      TEXT NOT NULL
+                        CHECK (indicator_type IN ('ip','domain','selector')),
+    value               TEXT NOT NULL,
+
+    first_seen          TEXT NOT NULL,
+    last_seen           TEXT NOT NULL,
+
+    -- Reach. client_count is the number that matters: one client is noise,
+    -- several unrelated ones is somebody working through a list.
+    client_count        INTEGER NOT NULL DEFAULT 0,
+    domain_count        INTEGER NOT NULL DEFAULT 0,
+    message_count       INTEGER NOT NULL DEFAULT 0,
+
+    -- Whether it ever authenticated for ANY domain. A source that has never
+    -- authenticated anything anywhere is behaving differently from a real
+    -- service somebody set up unaligned.
+    ever_authenticated  INTEGER NOT NULL DEFAULT 0,
+
+    -- Tried to sign AS a victim domain and failed. This is the strongest
+    -- single signal in the dataset: a misconfigured sender signs as itself,
+    -- while a forger signs as the domain it is pretending to be.
+    attempted_forgery   INTEGER NOT NULL DEFAULT 0,
+    forged_selectors    TEXT,                          -- comma-separated, evidence
+
+    -- Supplied by a human, and the reason this table is worth keeping.
+    -- Classify a source once and every client benefits, forever.
+    classification      TEXT NOT NULL DEFAULT 'suspected'
+                        CHECK (classification IN ('suspected','confirmed_malicious','known_good','ignored')),
+    classified_by       TEXT,
+    classified_at       TEXT,
+    notes               TEXT,
+
+    updated_at          TEXT NOT NULL,
+
+    UNIQUE(tenant_id, indicator_type, value)
+);
+
+CREATE INDEX ix_indicators_reach ON threat_indicators(tenant_id, client_count DESC, message_count DESC);
+CREATE INDEX ix_indicators_class ON threat_indicators(tenant_id, classification);
+
+
 -- ============================================================================
 --  SCHEMA VERSIONING
 -- ============================================================================
@@ -875,6 +969,14 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0002', datetime('now'), 'DNS remediation: provider configs, change plans, applied changes, SPF flatten state');
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0003', datetime('now'), 'Tenant layer: tenants table, tenant_id on every scoped table, per-tenant uniqueness');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0004', datetime('now'), 'TLS reports: record the MTA-STS mode in force, so testing is distinguishable from enforce, plus source message provenance');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0005', datetime('now'), 'Aggregate records: keep the raw SPF and DKIM auth RESULTS, so a forged signature is distinguishable from a misconfigured sender');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0006', datetime('now'), 'Threat indicators: what this operator has learned about sources impersonating their clients, so knowledge from one client protects all of them');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0007', datetime('now'), 'Domains: record the deliberate baseline window per policy stage, so a planned rollout is distinguishable from a neglected domain');
 
 
 -- ============================================================================

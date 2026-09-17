@@ -1,0 +1,148 @@
+@page "/"
+@using DmarcMonitor.Web.Data
+@inject TriageService Triage
+@inject ReportStoreConnection Db
+@rendermode InteractiveServer
+
+<PageTitle>Triage — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Triage</h1>
+        <p class="sub">Every domain, worst first. Not an average — an average across thirteen domains
+           hides the one that is broken.</p>
+    </div>
+    <div class="head-actions">
+        <label>
+            Window
+            <select @bind="_days" @bind:after="LoadAsync">
+                <option value="7">7 days</option>
+                <option value="14">14 days</option>
+                <option value="30">30 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty">
+        <h2>No database yet</h2>
+        <p>Nothing has been ingested. Create the database and run an ingest:</p>
+        <pre>dmarc init-db --db @Db.Path
+dmarc ingest --mailbox DMARC@@nrgtechservices.com --fallback DMARC@@nrgtechservices.com --dry-run</pre>
+        <p class="muted">Looking for: <code>@System.IO.Path.GetFullPath(Db.Path)</code></p>
+    </div>
+}
+else if (_rows is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_error is not null)
+{
+    <div class="empty">
+        <h2>Could not read the database</h2>
+        <p>@_error</p>
+    </div>
+}
+else if (_rows.Count == 0)
+{
+    <div class="empty">
+        <h2>No domains yet</h2>
+        <p>The database exists but holds no domains. Run an ingest once reports have arrived.</p>
+    </div>
+}
+else
+{
+    <div class="counts">
+        @foreach (var level in new[] { TriageLevel.Urgent, TriageLevel.Act, TriageLevel.Watch, TriageLevel.OnTrack, TriageLevel.Fine })
+        {
+            var n = _rows.Count(r => r.Level == level);
+            @if (n > 0)
+            {
+                <span class="count @Css(level)">@n @Label(level)</span>
+            }
+        }
+    </div>
+
+    <table class="triage">
+        <thead>
+            <tr>
+                <th></th>
+                <th>Domain</th>
+                <th>Client</th>
+                <th>Policy</th>
+                <th class="num">Messages</th>
+                <th class="num">Passing</th>
+                <th>What needs doing</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in _rows)
+            {
+                <tr class="@Css(row.Level)">
+                    <td><span class="pip @Css(row.Level)" title="@Label(row.Level)"></span></td>
+                    <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
+                    <td class="muted">@row.ClientName</td>
+                    <td><code>p=@row.Policy</code></td>
+                    <td class="num">@row.Messages.ToString("N0")</td>
+                    <td class="num">
+                        @if (row.Messages > 0)
+                        {
+                            <span class="@(row.PassRate < 95 ? "bad" : "good")">@row.PassRate%</span>
+                        }
+                        else
+                        {
+                            <span class="muted">—</span>
+                        }
+                    </td>
+                    <td>@row.Headline</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private IReadOnlyList<DomainTriage>? _rows;
+    private string? _error;
+    private int _days = 14;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        if (!Db.Exists) { _rows = Array.Empty<DomainTriage>(); return; }
+
+        try
+        {
+            _rows = await Triage.GetAsync(_days);
+        }
+        catch (Exception ex)
+        {
+            // Rendering an empty table for a broken database would read as
+            // "nothing is wrong", which is the opposite of the truth.
+            _rows = Array.Empty<DomainTriage>();
+            _error = ex.Message;
+        }
+    }
+
+    private static string Css(TriageLevel level) => level switch
+    {
+        TriageLevel.Urgent => "urgent",
+        TriageLevel.Act => "act",
+        TriageLevel.Watch => "watch",
+        TriageLevel.OnTrack => "ontrack",
+        _ => "fine",
+    };
+
+    private static string Label(TriageLevel level) => level switch
+    {
+        TriageLevel.Urgent => "losing mail",
+        TriageLevel.Act => "needs work",
+        TriageLevel.Watch => "worth a look",
+        TriageLevel.OnTrack => "rollout on track",
+        _ => "fine",
+    };
+}

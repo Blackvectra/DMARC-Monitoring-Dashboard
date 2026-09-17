@@ -1,0 +1,40 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DmarcMonitor.Core", "DmarcMonitor.Core\DmarcMonitor.Core.csproj", "{B425EFB9-53D4-469D-932A-F5CB89500025}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DmarcMonitor.Core.Tests", "DmarcMonitor.Core.Tests\DmarcMonitor.Core.Tests.csproj", "{03E7DB75-6657-46BD-8C77-5331475110DE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DmarcMonitor.Cli", "DmarcMonitor.Cli\DmarcMonitor.Cli.csproj", "{BCC62C49-930A-4530-8F3F-2126FAB307BD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DmarcMonitor.Web", "DmarcMonitor.Web\DmarcMonitor.Web.csproj", "{E1067E26-2D69-4DBF-8427-ADAADBEDD609}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B425EFB9-53D4-469D-932A-F5CB89500025}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B425EFB9-53D4-469D-932A-F5CB89500025}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B425EFB9-53D4-469D-932A-F5CB89500025}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B425EFB9-53D4-469D-932A-F5CB89500025}.Release|Any CPU.Build.0 = Release|Any CPU
+		{03E7DB75-6657-46BD-8C77-5331475110DE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{03E7DB75-6657-46BD-8C77-5331475110DE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{03E7DB75-6657-46BD-8C77-5331475110DE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{03E7DB75-6657-46BD-8C77-5331475110DE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BCC62C49-930A-4530-8F3F-2126FAB307BD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BCC62C49-930A-4530-8F3F-2126FAB307BD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BCC62C49-930A-4530-8F3F-2126FAB307BD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BCC62C49-930A-4530-8F3F-2126FAB307BD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E1067E26-2D69-4DBF-8427-ADAADBEDD609}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E1067E26-2D69-4DBF-8427-ADAADBEDD609}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E1067E26-2D69-4DBF-8427-ADAADBEDD609}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E1067E26-2D69-4DBF-8427-ADAADBEDD609}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
