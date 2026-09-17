@@ -216,6 +216,85 @@ public sealed class RolloutAssessmentTests
         Assert.Equal(expected, verdict.Level);
     }
 
+    // ---- mail being lost while the rate looks healthy -------------------------
+
+    [Fact]
+    public void AnEnforcingDomainStillLosingMailIsNeverSilent()
+    {
+        // nrgtechservices.com on the live data: 2,364 messages, 98.2% passing,
+        // p=reject. That is 42 messages refused outright, and the row said
+        // nothing at all because the pass rate cleared the threshold. Silence
+        // reads as nothing happening, and noticing this is what an MSP is
+        // being paid for.
+        var verdict = RolloutAssessment.Assess(
+            State(policy: "reject", messages: 2364, passing: 2322, failingSources: 6));
+
+        Assert.NotEqual(TriageLevel.Fine, verdict.Level);
+        Assert.False(string.IsNullOrWhiteSpace(verdict.Headline));
+        Assert.Contains("42 message(s)", verdict.Headline, StringComparison.Ordinal);
+        Assert.Contains("refused outright", verdict.Headline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SaysTheCountRatherThanLeavingItAsAPercentage()
+    {
+        // "98.2% passing" is not something anybody acts on. "42 refused" is.
+        var verdict = RolloutAssessment.Assess(
+            State(policy: "reject", messages: 2364, passing: 2322, failingSources: 6));
+
+        Assert.Contains("42", verdict.Headline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QuarantiningIsNotCalledCleanWhileMailIsBeingJunked()
+    {
+        // bmcedc.com on the live data: 95.8% passing, which cleared the
+        // threshold, and 86 messages went to junk. "Quarantining cleanly" is
+        // a claim the numbers do not support.
+        var verdict = RolloutAssessment.Assess(
+            State(policy: "quarantine", messages: 2067, passing: 1981, failingSources: 30));
+
+        Assert.DoesNotContain("cleanly", verdict.Headline, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("86 message(s)", verdict.Headline, StringComparison.Ordinal);
+        Assert.Contains("sent to junk", verdict.Headline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AdvancingIsPresentedAsADecisionWhileAnythingIsStillFailing()
+    {
+        // Moving that domain to p=reject turns 86 junked messages into 86
+        // bounced ones. That is a choice somebody should make deliberately,
+        // not a formality the page recommends.
+        var verdict = RolloutAssessment.Assess(
+            State(policy: "quarantine", messages: 2067, passing: 1981, failingSources: 30));
+
+        Assert.Contains("would be refused instead", verdict.Headline, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnEnforcingDomainWithNothingFailingStaysQuiet()
+    {
+        // The other side of it: a page that talks about every domain is a
+        // page nobody reads.
+        var verdict = RolloutAssessment.Assess(
+            State(policy: "reject", messages: 5000, passing: 5000, target: "reject"));
+
+        Assert.Equal(TriageLevel.Fine, verdict.Level);
+        Assert.Empty(verdict.Headline);
+    }
+
+    [Fact]
+    public void SilenceNamesBothCausesRatherThanBlamingTheCustomersDns()
+    {
+        // Today proved the point: four domains looked as though their records
+        // had been removed, and collection had stopped instead. Naming only
+        // the customer's DNS sends an operator to the wrong place.
+        var verdict = RolloutAssessment.Assess(State(lastReportDaysAgo: 61));
+
+        Assert.Contains("collection stopped", verdict.Headline, StringComparison.Ordinal);
+        Assert.Contains("record changed", verdict.Headline, StringComparison.Ordinal);
+    }
+
     // ---- guards -------------------------------------------------------------
 
     [Fact]

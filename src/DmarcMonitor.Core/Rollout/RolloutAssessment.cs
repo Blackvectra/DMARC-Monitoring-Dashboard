@@ -104,7 +104,8 @@ public static class RolloutAssessment
             return new RolloutVerdict
             {
                 Level = TriageLevel.Act,
-                Headline = $"No reports for {(int)silentFor.TotalDays} days. The DMARC record may have been changed or removed.",
+                Headline = $"No reports for {(int)silentFor.TotalDays} days. Either the DMARC record changed, "
+                         + "or collection stopped. Check both: one is the customer's DNS, the other is ours.",
             };
         }
 
@@ -165,12 +166,39 @@ public static class RolloutAssessment
             };
         }
 
+        // Enforcing, above the healthy threshold, and STILL losing mail.
+        //
+        // This was silent, and silence reads as nothing happening. A domain at
+        // p=reject on 98.2% is refusing every one of the remaining 1.8%
+        // outright: the customer's mail is bouncing and nobody is told,
+        // because the pass rate looks good. An MSP is paid to notice exactly
+        // that, so it says the count rather than the percentage - "42
+        // refused" is actionable in a way that "98.2% passing" is not.
+        if (state.IsEnforcing && state.Failing > 0)
+        {
+            var what = state.Policy == "reject" ? "refused outright" : "sent to junk";
+
+            // Advancing to reject hardens junked mail into bounced mail, so
+            // "ready to advance" is a decision while anything is still
+            // failing, not a formality.
+            var next = state.Policy == "quarantine" && state.PolicyTarget == "reject"
+                ? " At p=reject they would be refused instead, so confirm none of them are the customer's before advancing."
+                : " Worth confirming none of them were the customer's.";
+
+            return new RolloutVerdict
+            {
+                Level = TriageLevel.Watch,
+                Headline = $"p={state.Policy} at {state.PassRate}% passing. {state.Failing:N0} message(s) were "
+                         + $"{what}.{next}",
+            };
+        }
+
         if (state.Policy == "quarantine" && state.PolicyTarget == "reject")
         {
             return new RolloutVerdict
             {
                 Level = TriageLevel.Watch,
-                Headline = "Quarantining cleanly. Ready to move to p=reject.",
+                Headline = "Quarantining with nothing failing. Ready to move to p=reject.",
             };
         }
 
