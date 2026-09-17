@@ -45,10 +45,23 @@ public static class ImportCommand
             .ToList();
 
         int stored = 0, duplicates = 0, skipped = 0, failed = 0;
+        var seen = 0;
+
+        // A folder exported from a real mailbox is hundreds of files, and a run
+        // that prints nothing until it finishes is indistinguishable from one
+        // that has hung. Every hundred is often enough to show movement without
+        // burying the errors, which are the lines actually worth reading.
+        const int ProgressEvery = 100;
 
         foreach (var file in files)
         {
             ct.ThrowIfCancellationRequested();
+
+            seen++;
+            if (seen % ProgressEvery == 0)
+            {
+                Console.WriteLine($"  {seen} of {files.Count} read, {stored} stored");
+            }
 
             byte[] bytes;
             try { bytes = await File.ReadAllBytesAsync(file, ct).ConfigureAwait(false); }
