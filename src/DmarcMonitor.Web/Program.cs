@@ -1,3 +1,4 @@
+using DmarcMonitor.Web;
 using DmarcMonitor.Web.Auth;
 using DmarcMonitor.Web.Components;
 using DmarcMonitor.Web.Data;
@@ -47,18 +48,16 @@ app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
 if (AuthSetup.IsEntraConfigured(app.Configuration))
 {
-    logger.LogInformation("Sign-in: Microsoft Entra.");
+    StartupLog.SignInEntra(logger);
 }
 else if (AuthSetup.LocalModeAllowedRemotely(app.Configuration))
 {
-    logger.LogWarning(
-        "Sign-in: NONE. Local trial mode is serving every address because Auth:AllowLocalModeRemotely is set. "
-        + "Anyone who can reach this port can read every customer's mail data.");
+    StartupLog.SignInNoneRemote(logger);
 }
 else
 {
-    logger.LogWarning("Sign-in: NONE (local trial mode). Only this machine can reach it.");
+    StartupLog.SignInNoneLocal(logger);
 }
-logger.LogInformation("Database: {Path}", dbPath);
+StartupLog.Database(logger, dbPath);
 
 await app.RunAsync();
