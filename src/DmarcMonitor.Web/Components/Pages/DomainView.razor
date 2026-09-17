@@ -1,0 +1,325 @@
+@page "/domains/{Domain}"
+@using DmarcMonitor.Core.Rollout
+@using DmarcMonitor.Web.Data
+@inject DomainDetailService Detail
+@inject ReportStoreConnection Db
+@rendermode InteractiveServer
+
+<PageTitle>@Domain — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <p class="crumb"><a href="">Triage</a> / @Domain</p>
+        <h1>@Domain</h1>
+        @if (_detail is not null)
+        {
+            <p class="sub">@_detail.ClientName</p>
+        }
+    </div>
+    <div class="head-actions">
+        <label>
+            Window
+            <select @bind="_days" @bind:after="LoadAsync">
+                <option value="7">7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty">
+        <h2>No database yet</h2>
+        <p>Nothing has been ingested.</p>
+    </div>
+}
+else if (_loading)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_error is not null)
+{
+    <div class="empty">
+        <h2>Could not read the database</h2>
+        <p>@_error</p>
+    </div>
+}
+else if (_detail is null)
+{
+    @* Not an error page. A domain nobody has reported on yet is a normal
+       state during onboarding, and the useful thing is to say what would
+       make it appear. *@
+    <div class="empty">
+        <h2>Nothing stored for @Domain</h2>
+        <p>No reports have been received for this domain, so there is nothing to show yet.</p>
+        <p class="muted">
+            Either the DMARC record has no <code>rua</code> address pointing here, or it was published
+            too recently for the first reports to arrive. Receivers send daily.
+        </p>
+    </div>
+}
+else
+{
+    <section class="callout @Css(_detail.Level)">
+        <h2>@(string.IsNullOrEmpty(_detail.Headline) ? "Nothing needs doing." : _detail.Headline)</h2>
+        <p>@Explain(_detail)</p>
+    </section>
+
+    <div class="figures">
+        <div class="figure">
+            <span class="figure-n">@_detail.Messages.ToString("N0")</span>
+            <span class="figure-l">messages</span>
+        </div>
+        <div class="figure">
+            <span class="figure-n @(_detail.Messages > 0 && _detail.PassRate < 95 ? "bad" : "good")">
+                @(_detail.Messages > 0 ? $"{_detail.PassRate}%" : "—")
+            </span>
+            <span class="figure-l">authenticated</span>
+        </div>
+        <div class="figure">
+            <span class="figure-n">p=@_detail.Policy</span>
+            <span class="figure-l">
+                @if (_detail.Pct < 100)
+                {
+                    @* pct applies the policy to a SAMPLE. A domain at p=reject
+                       with pct=20 is not rejecting four fifths of its failures,
+                       and reading the policy alone would say otherwise. *@
+                    <span>on @_detail.Pct% of mail</span>
+                }
+                else
+                {
+                    <span>policy</span>
+                }
+            </span>
+        </div>
+        <div class="figure">
+            <span class="figure-n">@_detail.Sources.Count</span>
+            <span class="figure-l">sending sources</span>
+        </div>
+    </div>
+
+    @if (_detail.Impersonating.Count > 0)
+    {
+        <section>
+            <h2>Sending as @Domain without authenticating</h2>
+            <p class="sub">Proved nothing when they failed. Either a service nobody recorded, or somebody
+               sending as this domain.</p>
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th class="num">Sent</th>
+                        <th class="num">Failed</th>
+                        <th class="num">Other clients</th>
+                        <th>Last seen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in _detail.Impersonating)
+                    {
+                        <tr class="@(s.OtherClients > 0 ? "urgent" : "act")">
+                            <td><code>@s.SourceIp</code></td>
+                            <td class="num">@s.Messages.ToString("N0")</td>
+                            <td class="num">@s.Failing.ToString("N0")</td>
+                            <td class="num">
+                                @if (s.OtherClients > 0)
+                                {
+                                    <strong class="bad">@s.OtherClients</strong>
+                                }
+                                else
+                                {
+                                    <span class="muted">—</span>
+                                }
+                            </td>
+                            <td class="muted">@Ago(s.LastSeen)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+
+    @if (_detail.Misconfigured.Count > 0)
+    {
+        <section>
+            <h2>This domain's own mail, failing</h2>
+            <p class="sub">Real services, signing as themselves rather than as @Domain. This is mail
+               being lost, and it is the work to do before enforcing.</p>
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th class="num">Sent</th>
+                        <th class="num">Failed</th>
+                        <th>Signs as</th>
+                        <th>Last seen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in _detail.Misconfigured)
+                    {
+                        <tr class="act">
+                            <td><code>@s.SourceIp</code></td>
+                            <td class="num">@s.Messages.ToString("N0")</td>
+                            <td class="num">@s.Failing.ToString("N0")</td>
+                            <td><code>@s.AuthenticatedFor</code></td>
+                            <td class="muted">@Ago(s.LastSeen)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+
+    @if (_detail.Clean.Count > 0)
+    {
+        <section>
+            <h2>Authenticating cleanly</h2>
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th class="num">Messages</th>
+                        <th>Last seen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in _detail.Clean.Take(_showAllClean ? int.MaxValue : 10))
+                    {
+                        <tr class="fine">
+                            <td><code>@s.SourceIp</code></td>
+                            <td class="num">@s.Messages.ToString("N0")</td>
+                            <td class="muted">@Ago(s.LastSeen)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+            @if (_detail.Clean.Count > 10 && !_showAllClean)
+            {
+                <p><button class="linkish" @onclick="() => _showAllClean = true">
+                    Show the other @(_detail.Clean.Count - 10)
+                </button></p>
+            }
+        </section>
+    }
+
+    <section>
+        <h2>Who is reporting</h2>
+        <p class="sub">A clean pass rate heard from one receiver is a partial picture, not a verdict.</p>
+        @if (_detail.Reporters.Count == 0)
+        {
+            <p class="muted">No reports in this window.</p>
+        }
+        else
+        {
+            <table class="triage">
+                <thead>
+                    <tr><th>Receiver</th><th class="num">Reports</th><th>Last</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in _detail.Reporters)
+                    {
+                        <tr>
+                            <td>@r.OrgName</td>
+                            <td class="num">@r.Reports</td>
+                            <td class="muted">@Ago(r.LastReport)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </section>
+}
+
+@code {
+    [Parameter] public string Domain { get; set; } = "";
+
+    private DomainDetail? _detail;
+    private string? _error;
+    private bool _loading = true;
+    private bool _showAllClean;
+    private int _days = 30;
+
+    protected override Task OnParametersSetAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        if (!Db.Exists) { _loading = false; return; }
+
+        try
+        {
+            _detail = await Detail.GetAsync(Domain, _days);
+        }
+        catch (Exception ex)
+        {
+            // Rendering an empty page for a broken database would read as
+            // "this domain is quiet", which is the opposite of the truth.
+            _detail = null;
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    /// <summary>
+    /// The sentence under the headline: what the current policy actually does
+    /// to failing mail, rather than restating the policy string.
+    /// </summary>
+    private static string Explain(DomainDetail d)
+    {
+        var failing = d.Failing;
+
+        var effect = d.Policy switch
+        {
+            "reject" => $"Mail failing authentication is refused outright{Sample(d)}.",
+            "quarantine" => $"Mail failing authentication is sent to junk{Sample(d)}.",
+            _ => "Nothing is being blocked: at p=none a receiver delivers failing mail as normal and "
+               + "only reports on it.",
+        };
+
+        if (failing == 0)
+        {
+            return effect + " Nothing failed in this window.";
+        }
+
+        return effect + $" {failing:N0} message(s) failed here, from "
+             + $"{d.Impersonating.Count} unauthenticated source(s) and {d.Misconfigured.Count} "
+             + "service(s) signing as themselves.";
+    }
+
+    /// <summary>
+    /// pct is the tag operators forget. A domain at p=reject with pct=20 looks
+    /// enforcing everywhere it is summarised, and is not.
+    /// </summary>
+    private static string Sample(DomainDetail d) =>
+        d.Pct < 100 ? $", but only for {d.Pct}% of it - the rest is delivered" : "";
+
+    private static string Ago(DateTimeOffset? when)
+    {
+        if (when is null) { return "—"; }
+
+        var days = (int)(DateTimeOffset.UtcNow - when.Value).TotalDays;
+        return days switch
+        {
+            <= 0 => "today",
+            1 => "yesterday",
+            _ => $"{days} days ago",
+        };
+    }
+
+    private static string Css(TriageLevel level) => level switch
+    {
+        TriageLevel.Urgent => "urgent",
+        TriageLevel.Act => "act",
+        TriageLevel.Watch => "watch",
+        TriageLevel.OnTrack => "ontrack",
+        _ => "fine",
+    };
+}
