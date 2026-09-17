@@ -68,6 +68,19 @@ public sealed record DomainDetail
     public long Failing => Messages - Passing;
     public DateTimeOffset? LastReport { get; init; }
 
+    /// <summary>
+    /// Messages the receiver overrode - forwarded, or its own local policy.
+    /// </summary>
+    /// <remarks>
+    /// Counted in Messages but deliberately absent from the source tables,
+    /// because a mailing list breaking authentication is expected and would
+    /// bury the findings that matter. That makes the tables sum to less than
+    /// the headline, which on the live data is 7,970 against 8,018 for one
+    /// domain. Unexplained, that gap reads as a bug in the arithmetic, so the
+    /// page states it.
+    /// </remarks>
+    public long OverriddenMessages { get; init; }
+
     public IReadOnlyList<DomainSource> Sources { get; init; } = [];
     public IReadOnlyList<DomainReporter> Reporters { get; init; } = [];
 
@@ -157,7 +170,7 @@ public sealed class DomainDetailService(string databasePath)
         }
 
         var (policy, subPolicy, pct, lastReport) = await PolicyAsync(db, domainId, ct).ConfigureAwait(false);
-        var (messages, passing) = await TotalsAsync(db, domainId, since, ct).ConfigureAwait(false);
+        var (messages, passing, overridden) = await TotalsAsync(db, domainId, since, ct).ConfigureAwait(false);
         var sources = await SourcesAsync(db, domainId, since, ct).ConfigureAwait(false);
         var reporters = await ReportersAsync(db, domainId, since, ct).ConfigureAwait(false);
 
@@ -174,6 +187,7 @@ public sealed class DomainDetailService(string databasePath)
             BaselineDays = baselineDays,
             Messages = messages,
             Passing = passing,
+            OverriddenMessages = overridden,
             LastReport = lastReport,
             Sources = sources,
             Reporters = reporters,
@@ -231,13 +245,19 @@ public sealed class DomainDetailService(string databasePath)
             reader.IsDBNull(3) ? null : ParseDate(reader.GetString(3)));
     }
 
-    private static async Task<(long Messages, long Passing)> TotalsAsync(
+    private static async Task<(long Messages, long Passing, long Overridden)> TotalsAsync(
         SqliteConnection db, string domainId, string since, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
+
+        // The overridden count comes from the same pass as the total, so the
+        // figure explaining the gap cannot itself be computed over a different
+        // set of rows from the gap it explains.
         command.CommandText = """
             SELECT COALESCE(SUM(message_count), 0),
-                   COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0)
+                   COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
+                   COALESCE(SUM(CASE WHEN override_reason IS NOT NULL AND override_reason <> ''
+                                     THEN message_count END), 0)
             FROM aggregate_records
             WHERE domain_id = $domain AND date_begin >= $since
             """;
@@ -245,8 +265,8 @@ public sealed class DomainDetailService(string databasePath)
         command.Parameters.AddWithValue("$since", since);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0); }
-        return (reader.GetInt64(0), reader.GetInt64(1));
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0, 0); }
+        return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
     }
 
     private static async Task<List<DomainSource>> SourcesAsync(

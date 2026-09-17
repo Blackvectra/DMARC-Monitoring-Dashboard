@@ -10,72 +10,87 @@ says, not in whether it runs, and only real mail flows expose them.**
 
 ---
 
-## 1. The export is missing months of reports
+## 1. Ingest has never been run against a real mailbox
 
-**Area** `tools/Export-DMARCAttachments.ps1`
-**Severity** Blocks trusting any number the product reports.
+**Area** `src/DmarcMonitor.Core/Graph/`, `src/DmarcMonitor.Cli/Commands/IngestCommand.cs`
+**Severity** High. It is the whole collection path in production and no line of
+it has touched Exchange.
 
-Six of ten folders exported right up to the current day. Four stopped dead
-part way through their history:
+`dmarc ingest` reads the shared mailbox through Microsoft Graph: it walks the
+child folders a mail rule sorts reports into, carries the folder name through
+for attribution, stores what it parses, and moves each message out so it is
+not read twice. `GraphMailboxClient`, `GraphThrottleHandler` and the
+move-after-handover ordering are all unit tested against a fake mailbox and
+have never spoken to a real one.
 
-| domain | last report exported | gap |
-|---|---|---|
-| dunncountynd.gov | 2026-05-12 | 128 days |
-| redriverrc.com | 2026-06-03 | 106 days |
-| mortonnd.gov | 2026-07-17 | 62 days |
-| mcleanelectric.com | nothing at all | — |
+Untested against reality, in rough order of how likely they are to bite:
 
-Morton is provably still reporting: reports dated 2026-09-14 to 09-16 were
-supplied by hand from the same mailbox while the export contains nothing after
-17 July. So this is the export losing data, not the monitoring stopping.
+- **Throttling.** Graph returns 429 with `Retry-After` under load. The handler
+  honours it in tests; a mailbox with thousands of messages is where that gets
+  exercised for the first time.
+- **Folder names with a backslash.** The live mailbox has folders literally
+  named `DMARC\bmcedc.com`. Graph addresses folders by id, so this should be
+  irrelevant, but nothing has proved it.
+- **The move.** A message is filed only after its reports are stored, so a
+  crash re-reads rather than loses. The duplicate check should make the second
+  read harmless. Untested outside the fake.
+- **Attachment size and shape.** Large or unusual attachments come back
+  differently from Graph than the fake produces.
 
-**Most likely cause, already fixed but unconfirmed.** `Attachment.FileName`
-throws for some attachment kinds rather than returning empty. Under
-`$ErrorActionPreference = 'Stop'` that ended the whole run part way through a
-folder, and Outlook hands items back oldest-first, so a folder would keep its
-early history and lose everything after the bad item. That is exactly the
-shape of the four failures.
-
-**How to confirm.** Re-run version `2026-09-17.4` or later, which prints its
-version on startup and now accounts for every message it did not export:
-
-```
-DMARC_bmcedc.com                         2       90
-    88 attachment(s) skipped, not a report type: .msg
-```
-
-Four causes produce four different lines, and each needs a different fix:
-`.msg`/`.eml` means reports are forwarded and nested inside another message
-and need extracting; "had no attachment at all" means cached-mode
-header-only sync; "could not be read from Outlook" means MAPI is refusing
-items; an unexpected extension is a one-line change to `$Extensions`.
-
-**Until this is re-run, every figure in the product is computed on a partial
-dataset.**
+**How to fix.** An app registration in the tenant with `Mail.ReadWrite` as an
+*application* permission, admin consent, a certificate, and an application
+access policy restricting it to the one shared mailbox so it cannot read
+anything else. Then `--dry-run` first: it parses and reports without writing
+or moving anything, so the first run against a live mailbox is safe.
 
 ---
 
-## 2. Nothing checks the pages themselves
+## 1a. The Outlook exporter is a stopgap, not the collection path
 
-**Area** `src/DmarcMonitor.Web/Components/Pages/`
-**Severity** Low-to-medium. The logic behind the pages is covered; the markup
-is not.
+**Area** `tools/Export-DMARCAttachments.ps1`
+**Severity** Low, now that its role is clear.
 
-All three source classifiers and both fleet views now live in Core with tests:
-`CorrelationService`, `TriageService`, `DomainDetailService`, plus the report
-builder, the narrative and the renderer. Between them they cover every
-judgement the product makes about a sending source.
+It exists to get a pile of reports off a desktop without an app registration,
+which is how the 1,687-report dataset reached testing. It is not how the
+product collects mail and never was, so its bugs do not block anything the
+product does.
 
-What is left uncovered is the Razor: a renamed property, a broken `@bind`, or
-a page that throws on an empty database would all compile and all pass the
-suite. They were caught today by driving the app with curl and Playwright by
-hand, which does not survive into next week.
+It did truncate four folders in the live export — two months for
+`mortonnd.gov`, three for `redriverrc.com`, everything for
+`mcleanelectric.com` — almost certainly because `Attachment.FileName` throws
+for some attachment kinds and, under `$ErrorActionPreference = 'Stop'`, ended
+the run part way through a folder. Outlook hands items back oldest-first,
+which is why each affected folder kept its early history and lost the rest.
+That is fixed in version `2026-09-17.4`, and the script now accounts for every
+message it did not export, but confirming it only matters if somebody needs
+the export path again.
 
-**How to fix.** A small `bunit` project over the pages, or a handful of
-Playwright checks that load each route against a seeded database and assert on
-one sentence. The route list is short enough to be worth doing exhaustively:
-`/`, `/domains`, `/domains/{name}`, `/clients`, `/import`, `/sources`,
-`/reports`, `/settings`.
+**What this does mean:** the ten-domain dataset used for testing is partial, so
+figures quoted from it are lower bounds. Ingest against the live mailbox would
+collect the lot.
+
+---
+
+## 2. The pages are checked, the browser is not
+
+**Area** `src/DmarcMonitor.Web.Tests/`
+**Severity** Low.
+
+Every route now loads in a test: the real application in process, over real
+HTTP, through the real authentication pipeline, against a seeded database.
+They assert one sentence per page, so they fail when a page breaks and stay
+quiet when it is restyled. Twenty-eight of them, and reinstating the triage
+silence turns two red.
+
+What they do not exercise is anything needing a browser: the interactive half
+of Blazor. Pressing Import, choosing a client from the dropdown, and typing a
+name into the client form all go through a SignalR circuit these tests never
+open. The services behind each of those are covered in Core, so what is
+untested is the wiring between the control and the handler.
+
+**How to fix, when it is worth it.** Playwright against a seeded instance,
+driving the three forms. The handlers are already tested, so this only needs
+to prove the buttons reach them.
 
 ## 3. The web app is read-only about its own configuration
 
@@ -121,50 +136,101 @@ both restore identically.
 
 ---
 
-## 5. Corpus gaps
+## 5. The DNS check is weaker without a database than it needs to be
 
-**Area** `src/DmarcMonitor.Core.Tests/Fixtures/`
-**Severity** Medium. These are the report shapes we have never parsed.
+**Area** `src/DmarcMonitor.Core/Dns/DnsLookup.cs`
+**Severity** Low, and it undercuts the use it was built for.
 
-- **No forensic/RUF reports at all.** The parser exists; nothing has exercised
-  it against a real one.
-- **No TLS reports with failures.** Every TLS fixture is a clean day, so the
-  failure wording has never been seen.
-- **No `<reason>` policy overrides.** Forwarders and mailing lists produce
-  these constantly in the wild, and the code excludes overridden rows from
-  intelligence on the assumption they are noise. That assumption is untested.
-- **Receivers never seen:** Proofpoint, Barracuda, Fastmail, ProtonMail, Zoho,
-  GoDaddy, Rackspace, and any non-Western provider.
+`dmarc check --domain x` with no database is meant to answer "what is wrong
+with this prospect's email setup" before they are a customer. Two of its
+findings cannot fire in that mode:
 
-**How to fix.** Collect from the re-run export (issue 1), which will have
-roughly three more months of traffic, and add the unusual ones as fixtures.
+- **MTA-STS mode** comes from TLS reports, so a prospect's policy shows as
+  published and never as *testing*, which is the interesting state. The mode is
+  also in the policy file at
+  `https://mta-sts.<domain>/.well-known/mta-sts.txt`, which is one HTTPS GET
+  and would make this work standalone.
+- **Unused includes** need observed sending, so there is nothing to match
+  against. That one is unavoidable and correct: with no evidence the honest
+  answer is silence.
 
----
+Checked against nrgtechservices.com, which has MTA-STS in testing mode: with
+`--db` the check reports it, without `--db` it says "nothing to change".
 
-## 6. Distribution
-
-**Area** `src/DmarcMonitor.Cli/`, release tooling
-**Severity** Medium. Nobody can run this without a git checkout and an SDK.
-
-`dmarc.exe` now builds self-contained and carries the schema internally, so it
-works on a bare machine:
-
-```
-dotnet publish src/DmarcMonitor.Cli -c Release -r win-x64 --self-contained \
-  -p:PublishSingleFile=true -o out
-```
-
-**What is missing.** No release workflow produces that artifact, so there is
-nothing to download. `e_sqlite3.dll` also lands beside the exe rather than
-inside it — add `-p:IncludeNativeLibrariesForSelfExtract=true` and confirm
-SQLite still loads, because that flag has broken native loading before.
-
-The web app has no published form at all: no service definition, no
-`appsettings` template, no note on where the database should live on a server.
+**How to fix.** Fetch the policy file when there is no observed mode, and treat
+a fetch failure as unknown rather than absent - the same rule the DNS lookups
+already follow.
 
 ---
 
-## 7. Smaller things
+## 6. Data parsed and stored, then never used
+
+**Area** `src/DmarcMonitor.Core/Aggregate/`, `src/DmarcMonitor.Core/Storage/`
+**Severity** Low. Nothing is wrong; something useful is sitting unused.
+
+`envelope_from` is parsed, stored on every record, and never read back out.
+On the live corpus 14,937 of 20,465 records carry one, and it is what makes a
+sender identifiable:
+
+| envelope_from | what it is |
+|---|---|
+| `bounce.myngp.com` | NGP VAN, 7,889 messages for one client |
+| `em318306.nrgtechservices.com` | SendGrid |
+| `psm.knowbe4.com` | KnowBe4 security-awareness training |
+
+"Signed as `training.knowbe4.com`" is harder to act on than "bounces to
+`psm.knowbe4.com`", and the report currently shows only the former.
+
+**How to fix.** Carry it onto `ReportSource` from the failing rows, the same
+way `AuthenticatedFor` is, and show it beside "signed as" in the table of the
+client's own mail that is at risk.
+
+One value needs handling first: 933 messages carry an `envelope_from` of
+`<>`, the null return path used for bounces and delivery notifications. It
+survives `NormaliseDomain` unchanged and would render literally. Dormant while
+nothing reads the field; visible the moment something does.
+
+`discovery_method` and `testing` arrive in DMARCbis reports and are ignored.
+Neither is worth storing yet.
+
+### Corpus gaps, revisited
+
+The earlier version of this section guessed. Measured against all 1,687
+reports:
+
+- **Policy overrides: present after all.** 40 of them, 23 `forwarded` and 17
+  `local_policy`. The claim that there were none was wrong, and finding them
+  is what exposed the totals-versus-tables gap.
+- **TLS reports: 35, all MTA-STS, no failures.** The guess was right. The
+  useful part turned out to be the mode rather than the failures: two domains
+  publish in `testing`, which the report now says.
+- **DMARCbis: already arriving.** Four reports use the
+  `urn:ietf:params:xml:ns:dmarc-2.0` namespace and parse correctly.
+- **Still absent:** forensic/RUF reports, any TLS failure, and receivers
+  outside the eight seen (Proofpoint, Barracuda, Fastmail, ProtonMail, Zoho,
+  GoDaddy, Rackspace, non-Western providers).
+
+## 7. Nothing has been released yet
+
+**Area** `.github/workflows/release.yml`
+**Severity** Low, now that the workflow exists but has never run.
+
+`dmarc` publishes as a genuinely single file - schema compiled in, SQLite's
+native library bundled rather than sitting beside it - and the workflow proves
+it on every build by copying the binary into an empty directory and making it
+create a database there. That check is the point: a missing embedded schema or
+an unbundled native library both look fine until somebody copies the exe
+somewhere on its own, which is the first thing anybody does.
+
+Both the Windows and Linux jobs, and the web bundle, are untried: the workflow
+has not been triggered. Tag a version or run it manually and see.
+
+The web app is not self-contained and needs the ASP.NET Core 8 runtime on the
+host. That is a deliberate trade - a self-contained web bundle is several
+hundred megabytes - but it means "copy one file and run it" is true of the CLI
+and not of the app.
+
+## 8. Smaller things
 
 | area | what | how |
 |---|---|---|

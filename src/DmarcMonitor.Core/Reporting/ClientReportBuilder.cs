@@ -51,6 +51,7 @@ public sealed class ClientReportBuilder(string databasePath)
             Messages = current.Messages,
             Passing = current.Passing,
             Failing = current.Messages - current.Passing,
+            OverriddenMessages = current.Overridden,
             PreviousMessages = previous.Messages,
             PreviousPassing = previous.Passing,
         };
@@ -86,13 +87,20 @@ public sealed class ClientReportBuilder(string databasePath)
         return (reader.GetString(0), reader.GetString(1));
     }
 
-    private static async Task<(long Messages, long Passing)> GetTotalsAsync(
+    private static async Task<(long Messages, long Passing, long Overridden)> GetTotalsAsync(
         SqliteConnection db, string clientId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT COALESCE(SUM(message_count), 0),
-                   COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0)
+                   COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
+                   -- Forwarded and receiver-overridden traffic is counted here
+                   -- and left out of the source tables on purpose, so the
+                   -- tables sum to less than this. Carried alongside so the
+                   -- report can say so rather than leaving a client to notice
+                   -- the arithmetic not working.
+                   COALESCE(SUM(CASE WHEN override_reason IS NOT NULL AND override_reason <> ''
+                                     THEN message_count END), 0)
             FROM aggregate_records
             WHERE client_id = $client AND date_begin >= $from AND date_begin <= $to
             """;
@@ -101,8 +109,8 @@ public sealed class ClientReportBuilder(string databasePath)
         command.Parameters.AddWithValue("$to", Iso(to));
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0); }
-        return (reader.GetInt64(0), reader.GetInt64(1));
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0, 0); }
+        return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
     }
 
     private static async Task<List<ReportDomainHealth>> GetDomainHealthAsync(
@@ -116,11 +124,17 @@ public sealed class ClientReportBuilder(string databasePath)
             SELECT d.name,
                    COALESCE(SUM(r.message_count), 0),
                    COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
-                   (SELECT ar.policy_p    FROM aggregate_reports ar WHERE ar.domain_id = d.id ORDER BY ar.date_end DESC LIMIT 1),
-                   (SELECT ar.policy_sp   FROM aggregate_reports ar WHERE ar.domain_id = d.id ORDER BY ar.date_end DESC LIMIT 1),
-                   (SELECT ar.policy_pct  FROM aggregate_reports ar WHERE ar.domain_id = d.id ORDER BY ar.date_end DESC LIMIT 1),
-                   (SELECT ar.policy_adkim FROM aggregate_reports ar WHERE ar.domain_id = d.id ORDER BY ar.date_end DESC LIMIT 1),
-                   (SELECT t.policy_mode  FROM tls_reports t WHERE t.domain_id = d.id ORDER BY t.date_end DESC LIMIT 1)
+                   -- The policy AS AT THE END OF THE PERIOD, not today's.
+                   -- Without the date bound a report for May describes the
+                   -- policy in September: regenerate an old month after a
+                   -- domain has advanced and it claims the domain was already
+                   -- protected when it was not. A report is a statement about
+                   -- a period and must not borrow facts from after it.
+                   (SELECT ar.policy_p    FROM aggregate_reports ar WHERE ar.domain_id = d.id AND ar.date_end <= $to ORDER BY ar.date_end DESC LIMIT 1),
+                   (SELECT ar.policy_sp   FROM aggregate_reports ar WHERE ar.domain_id = d.id AND ar.date_end <= $to ORDER BY ar.date_end DESC LIMIT 1),
+                   (SELECT ar.policy_pct  FROM aggregate_reports ar WHERE ar.domain_id = d.id AND ar.date_end <= $to ORDER BY ar.date_end DESC LIMIT 1),
+                   (SELECT ar.policy_adkim FROM aggregate_reports ar WHERE ar.domain_id = d.id AND ar.date_end <= $to ORDER BY ar.date_end DESC LIMIT 1),
+                   (SELECT t.policy_mode  FROM tls_reports t WHERE t.domain_id = d.id AND t.date_end <= $to ORDER BY t.date_end DESC LIMIT 1)
             FROM domains d
             LEFT JOIN aggregate_records r
                    ON r.domain_id = d.id AND r.date_begin >= $from AND r.date_begin <= $to
@@ -142,6 +156,11 @@ public sealed class ClientReportBuilder(string databasePath)
                 Domain = reader.GetString(0),
                 Messages = reader.GetInt64(1),
                 Passing = reader.GetInt64(2),
+                // Null means no report reached us at or before this period,
+                // so nothing is known about the policy then. Defaulting to
+                // "none" would assert the domain was unprotected, which is a
+                // claim rather than an absence.
+                PolicyKnown = !reader.IsDBNull(3),
                 Policy = reader.IsDBNull(3) ? "none" : reader.GetString(3),
                 SubdomainPolicy = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 Pct = reader.IsDBNull(5) ? 100 : reader.GetInt32(5),

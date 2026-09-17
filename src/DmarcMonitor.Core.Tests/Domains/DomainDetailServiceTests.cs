@@ -50,6 +50,25 @@ public sealed class DomainDetailServiceTests : IDisposable
           </record>
         """;
 
+    /// <summary>A row the receiving provider overrode, as a mailing list produces.</summary>
+    private static string ForwardedRow(string ip, int count, string domain) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>none</disposition><dkim>fail</dkim><spf>fail</spf>
+                <reason><type>forwarded</type><comment>mailing list</comment></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{domain}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{domain}</domain><result>fail</result></dkim>
+              <spf><domain>{domain}</domain><result>fail</result></spf>
+            </auth_results>
+          </record>
+        """;
+
     private async Task StoreAsync(string domain, string policy, params string[] rows) =>
         await StoreAsync(domain, policy, daysAgo: 2, rows);
 
@@ -143,6 +162,43 @@ public sealed class DomainDetailServiceTests : IDisposable
 
         Assert.Equal(3, all.Count);
         Assert.Equal(all.Count, all.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public async Task ExplainsTheGapBetweenTheHeadlineAndTheSourceTables()
+    {
+        // Forwarded and receiver-overridden traffic is deliberately kept out
+        // of the source tables - a mailing list breaking authentication is
+        // expected and buries the findings that matter - but it is still
+        // counted in the total. On the live data that is 7,970 against 8,018
+        // for one domain, and an unexplained 48 reads as broken arithmetic.
+        await StoreAsync("acme.com", "reject",
+            Row("192.0.2.25", 100, "pass", "acme.com", "acme.com", "pass"),
+            ForwardedRow("192.0.2.50", 48, "acme.com"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Equal(148, detail!.Messages);
+        Assert.Equal(48, detail.OverriddenMessages);
+
+        // And the source tables really do leave it out, or there would be
+        // nothing to explain.
+        var listed = detail.Clean.Concat(detail.Misconfigured).Concat(detail.Impersonating)
+            .Sum(s => s.Messages);
+        Assert.Equal(detail.Messages - detail.OverriddenMessages, listed);
+    }
+
+    [Fact]
+    public async Task SaysNothingAboutOverridesWhenThereAreNone()
+    {
+        await StoreAsync("acme.com", "reject",
+            Row("192.0.2.25", 100, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Equal(0, detail!.OverriddenMessages);
     }
 
     // ---- the verdict ---------------------------------------------------------

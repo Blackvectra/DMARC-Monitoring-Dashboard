@@ -48,6 +48,7 @@ public static class ClientReportRenderer
         Misconfigured(html, report);
         Legitimate(html, report);
         Changes(html, report);
+        Overridden(html, report);
         Footer(html, report);
 
         html.Append("</main>\n</body>\n</html>\n");
@@ -101,12 +102,14 @@ public static class ClientReportRenderer
 
         foreach (var d in report.Domains)
         {
-            var status = d.Policy switch
-            {
-                "reject" => "Protected - failing mail is refused",
-                "quarantine" => "Protected - failing mail goes to junk",
-                _ => "Monitoring only - not yet protected",
-            };
+            var status = !d.PolicyKnown
+                ? "Not known - no reports had reached us by then"
+                : d.Policy switch
+                {
+                    "reject" => "Protected - failing mail is refused",
+                    "quarantine" => "Protected - failing mail goes to junk",
+                    _ => "Monitoring only - not yet protected",
+                };
 
             // A domain that sent nothing has no percentage worth printing; 0%
             // would read as total failure rather than as no mail.
@@ -123,7 +126,38 @@ public static class ClientReportRenderer
                 """);
         }
 
-        html.Append("    </tbody>\n  </table>\n</section>\n\n");
+        html.Append("    </tbody>\n  </table>\n");
+        TransportSecurity(html, report);
+        html.Append("</section>\n\n");
+    }
+
+    /// <summary>
+    /// MTA-STS announced but not enforced.
+    /// </summary>
+    /// <remarks>
+    /// Parsed and stored since the TLS reports were first read, and never put
+    /// in front of anybody. A domain in testing mode publishes a policy and a
+    /// receiver honours none of it: mail is delivered over a connection that
+    /// does not match and the failure is merely reported. The domain looks
+    /// protected in transit and is not, which is precisely the gap this
+    /// product exists to close.
+    /// </remarks>
+    private static void TransportSecurity(StringBuilder html, ClientReport report)
+    {
+        var testing = report.Domains
+            .Where(d => string.Equals(d.MtaStsMode, "Testing", StringComparison.OrdinalIgnoreCase))
+            .Select(d => d.Domain)
+            .ToList();
+
+        if (testing.Count == 0) { return; }
+
+        html.Append(CultureInfo.InvariantCulture, $"""
+              <p class="note"><strong>Transport security is not yet switched on.</strong>
+              {E(string.Join(", ", testing))} publishes an MTA-STS policy in <em>testing</em> mode, which
+              means receiving providers report on connections that do not match it but still deliver the
+              mail. Moving to enforcing mode is what makes it take effect.</p>
+
+            """);
     }
 
     private static void Impersonation(StringBuilder html, ClientReport report)
@@ -310,6 +344,31 @@ public static class ClientReportRenderer
         }
 
         html.Append("    </tbody>\n  </table>\n</section>\n\n");
+    }
+
+    /// <summary>
+    /// Why the tables do not add up to the headline.
+    /// </summary>
+    /// <remarks>
+    /// A client who totals the source tables and finds them short of the
+    /// figure at the top has found something that looks like an error. It is
+    /// not, and the difference is worth naming rather than hiding: forwarded
+    /// mail breaking authentication is normal and is not a sender anybody
+    /// should act on.
+    /// </remarks>
+    private static void Overridden(StringBuilder html, ClientReport report)
+    {
+        if (report.OverriddenMessages <= 0) { return; }
+
+        html.Append(CultureInfo.InvariantCulture, $"""
+            <section>
+              <p class="note">The tables above leave out {N(report.OverriddenMessages)} message(s) that the
+              receiving provider handled under its own rules - usually mail forwarded by a mailing list,
+              which breaks the checks in a way that is expected and not worth acting on. They are counted
+              in the {N(report.Messages)} at the top.</p>
+            </section>
+
+            """);
     }
 
     private static void Footer(StringBuilder html, ClientReport report) =>

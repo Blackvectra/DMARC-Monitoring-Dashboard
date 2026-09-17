@@ -213,6 +213,43 @@ public sealed class ClientReportRendererTests
     }
 
     [Fact]
+    public void SaysWhenTransportSecurityIsAnnouncedButNotEnforced()
+    {
+        // Parsed and stored from the first TLS report read, and never shown to
+        // anybody until real data made it obvious: two live domains publish
+        // MTA-STS in testing mode, where a receiver reports a mismatched
+        // connection and delivers the mail anyway. The domain looks protected
+        // in transit and is not.
+        var html = ClientReportRenderer.ToHtml(Report(domains:
+        [
+            new ReportDomainHealth
+            {
+                Domain = "acme.com", Policy = "reject",
+                Messages = 100, Passing = 100, MtaStsMode = "Testing",
+            },
+        ]));
+
+        Assert.Contains("Transport security is not yet switched on", html, StringComparison.Ordinal);
+        Assert.Contains("testing", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SaysNothingAboutTransportSecurityWhenItIsEnforcing()
+    {
+        // A report that comments on everything is a report nobody finishes.
+        var html = ClientReportRenderer.ToHtml(Report(domains:
+        [
+            new ReportDomainHealth
+            {
+                Domain = "acme.com", Policy = "reject",
+                Messages = 100, Passing = 100, MtaStsMode = "Enforce",
+            },
+        ]));
+
+        Assert.DoesNotContain("Transport security", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RejectsANullReport() =>
         Assert.Throws<ArgumentNullException>(() => ClientReportRenderer.ToHtml(null!));
 }

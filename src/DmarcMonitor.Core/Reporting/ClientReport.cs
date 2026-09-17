@@ -81,6 +81,18 @@ public sealed record ReportChange
 public sealed record ReportDomainHealth
 {
     public required string Domain { get; init; }
+
+    /// <summary>
+    /// False when no report reached us at or before this period.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from p=none. One says the domain was published without
+    /// protection, the other says nobody told us either way, and printing the
+    /// first when the second is true puts a claim in a customer's report that
+    /// nothing supports.
+    /// </remarks>
+    public bool PolicyKnown { get; init; } = true;
+
     public string Policy { get; init; } = "none";
     public string SubdomainPolicy { get; init; } = "";
     public int Pct { get; init; } = 100;
@@ -114,6 +126,18 @@ public sealed record ClientReport
     public long Messages { get; init; }
     public long Passing { get; init; }
     public long Failing { get; init; }
+
+    /// <summary>
+    /// Messages the receiving provider overrode: forwarded, or its own policy.
+    /// </summary>
+    /// <remarks>
+    /// Counted in Messages and deliberately absent from the source tables,
+    /// because a mailing list breaking authentication is expected behaviour
+    /// rather than a finding. That makes the tables sum to less than the
+    /// headline, and a client who adds them up and finds a gap has no way to
+    /// know it was deliberate.
+    /// </remarks>
+    public long OverriddenMessages { get; init; }
 
     public long PreviousMessages { get; init; }
     public long PreviousPassing { get; init; }

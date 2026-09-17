@@ -107,7 +107,7 @@
                 <td>Provider name</td>
                 <td>
                     <code>@ReportUi.ProviderName</code>
-                    @if (Configuration["Reporting:ProviderName"] is null or "")
+                    @if (!ReportUi.IsProviderNameSet)
                     {
                         <span class="muted"> — not set, so reports say this literally.
                             Set <code>Reporting:ProviderName</code>.</span>

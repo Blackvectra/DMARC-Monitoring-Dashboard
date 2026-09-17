@@ -59,8 +59,20 @@ else
             </select>
             <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open</a>
         </div>
-        <p class="sub">Reported as “@ReportUi.ProviderName”. Set <code>Reporting:ProviderName</code> in
-           configuration to change it everywhere at once.</p>
+        @if (ReportUi.IsProviderNameSet)
+        {
+            <p class="sub">Reported as “@ReportUi.ProviderName”.</p>
+        }
+        else
+        {
+            @* This is the page somebody opens a report from and sends it. A
+               document going to a customer signed "your IT provider" is worth
+               stopping for, not a footnote. *@
+            <p class="sub warn-inline">
+                Reports will be signed “@ReportUi.ProviderName”, literally, because
+                <code>Reporting:ProviderName</code> is not set. Set it before sending anything.
+            </p>
+        }
     </section>
 
     @if (_preview is not null)

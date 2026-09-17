@@ -19,7 +19,18 @@ public sealed class ReportUiService(DatabaseInfo database, IConfiguration config
 
     /// <summary>How the provider names itself in reports. One place, not one per run.</summary>
     public string ProviderName =>
-        _configuration["Reporting:ProviderName"] is { Length: > 0 } name ? name : "your IT provider";
+        IsProviderNameSet ? _configuration["Reporting:ProviderName"]! : "your IT provider";
+
+    /// <summary>
+    /// False when reports would go out signed with the placeholder.
+    /// </summary>
+    /// <remarks>
+    /// Worth asking separately rather than comparing the name against the
+    /// default string in two places: the page that sends reports needs to warn,
+    /// and the settings page needs to say it is unset.
+    /// </remarks>
+    public bool IsProviderNameSet =>
+        _configuration["Reporting:ProviderName"] is { Length: > 0 };
 
     public Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(CancellationToken ct = default) =>
         _builder.GetClientsAsync(ct);

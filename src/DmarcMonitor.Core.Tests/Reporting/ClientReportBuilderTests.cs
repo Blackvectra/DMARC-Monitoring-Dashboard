@@ -82,6 +82,21 @@ public sealed class ClientReportBuilderTests : IDisposable
           </record>
         """;
 
+    /// <summary>Stores a report dated into a given month of 2026.</summary>
+    private async Task StoreAsync(string xml, int month)
+    {
+        var begin = new DateTimeOffset(2026, month, 15, 0, 0, 0, TimeSpan.Zero);
+        xml = System.Text.RegularExpressions.Regex.Replace(
+            xml,
+            @"<date_range><begin>\d+</begin><end>\d+</end></date_range>",
+            $"<date_range><begin>{begin.ToUnixTimeSeconds()}</begin>"
+            + $"<end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range>");
+
+        var parsed = AggregateReportParser.Parse(xml);
+        Assert.True(parsed.Success, parsed.Error);
+        await _store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
     private async Task<ClientReport> BuildAsync(string xml)
     {
         var parsed = AggregateReportParser.Parse(xml);
@@ -191,6 +206,61 @@ public sealed class ClientReportBuilderTests : IDisposable
 
         Assert.Equal(all.Count, all.Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(3, all.Count);
+    }
+
+    // ---- a report describes its period, and nothing after it ------------------
+
+    [Fact]
+    public async Task ReportsThePolicyAsItWasThenRatherThanAsItIsNow()
+    {
+        // A domain that advanced from none to reject in September must not
+        // have its May report claim it was protected in May. Regenerating an
+        // old month is exactly when this bites, and the wrongness is invisible
+        // - the number looks plausible and flatters the provider.
+        await StoreAsync(Xml("acme.com", "none",
+            Row("192.0.2.25", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), month: 5);
+        await StoreAsync(Xml("acme.com", "reject",
+            Row("192.0.2.25", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), month: 9);
+
+        var slug = await _store.CreateClientAsync("Acme Corp");
+        await _store.AssignDomainAsync("acme.com", slug!);
+
+        var may = await new ClientReportBuilder(_dbPath).BuildAsync(slug!, ReportPeriod.ForMonth(2026, 5));
+        var september = await new ClientReportBuilder(_dbPath).BuildAsync(slug!, ReportPeriod.ForMonth(2026, 9));
+
+        Assert.Equal("none", Assert.Single(may!.Domains).Policy);
+        Assert.Equal("reject", Assert.Single(september!.Domains).Policy);
+    }
+
+    [Fact]
+    public async Task SaysThePolicyIsNotKnownRatherThanAssumingItWasUnprotected()
+    {
+        // Nothing had reached us by May. "p=none" would assert the domain was
+        // published without protection; the truth is that nobody told us.
+        await StoreAsync(Xml("acme.com", "quarantine",
+            Row("192.0.2.25", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), month: 9);
+
+        var slug = await _store.CreateClientAsync("Acme Corp");
+        await _store.AssignDomainAsync("acme.com", slug!);
+
+        var may = await new ClientReportBuilder(_dbPath).BuildAsync(slug!, ReportPeriod.ForMonth(2026, 5));
+
+        var domain = Assert.Single(may!.Domains);
+        Assert.False(domain.PolicyKnown);
+    }
+
+    [Fact]
+    public async Task APeriodWithReportsKnowsItsPolicy()
+    {
+        await StoreAsync(Xml("acme.com", "quarantine",
+            Row("192.0.2.25", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), month: 9);
+
+        var slug = await _store.CreateClientAsync("Acme Corp");
+        await _store.AssignDomainAsync("acme.com", slug!);
+
+        var september = await new ClientReportBuilder(_dbPath).BuildAsync(slug!, ReportPeriod.ForMonth(2026, 9));
+
+        Assert.True(Assert.Single(september!.Domains).PolicyKnown);
     }
 
     // ---- totals --------------------------------------------------------------
