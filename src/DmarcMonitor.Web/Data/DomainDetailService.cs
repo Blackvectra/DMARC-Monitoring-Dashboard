@@ -74,11 +74,27 @@ public sealed record DomainDetail
     public IReadOnlyList<DomainSource> Clean =>
         [.. Sources.Where(s => s.IsClean).OrderByDescending(s => s.Messages)];
 
+    /// <summary>
+    /// Real senders losing this domain's mail: its own paths that break
+    /// sometimes, and third-party services signing as themselves.
+    /// </summary>
     public IReadOnlyList<DomainSource> Misconfigured =>
-        [.. Sources.Where(s => !s.IsClean && s.Authenticated).OrderByDescending(s => s.Failing)];
+        [.. Sources.Where(s => !s.IsClean && (s.Passing > 0 || s.Authenticated))
+                   .OrderByDescending(s => s.Failing)];
 
+    /// <summary>
+    /// Sources that have never once sent authenticated mail for this domain.
+    /// </summary>
+    /// <remarks>
+    /// Passing even once is the thing a forger cannot do, so it outranks what
+    /// any single failing row looks like. Without that, a gateway signing on
+    /// the customer's behalf - which breaks a share of its own signatures in
+    /// transit - lands here, and the page accuses the customer's own
+    /// infrastructure of impersonating them.
+    /// </remarks>
     public IReadOnlyList<DomainSource> Impersonating =>
-        [.. Sources.Where(s => !s.IsClean && !s.Authenticated).OrderByDescending(s => s.Failing)];
+        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated)
+                   .OrderByDescending(s => s.Failing)];
 
     public TriageLevel Level { get; init; } = TriageLevel.Fine;
     public string Headline { get; init; } = "";

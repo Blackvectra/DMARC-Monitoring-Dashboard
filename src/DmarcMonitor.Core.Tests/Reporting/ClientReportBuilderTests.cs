@@ -105,21 +105,37 @@ public sealed class ClientReportBuilderTests : IDisposable
     // ---- the distinction the product exists to make --------------------------
 
     [Fact]
-    public async Task ASourceThatAuthenticatesMostlyAndFailsUnprovenIsNotCalledMisconfigured()
+    public async Task ASourceThatHasEverPassedIsTheClientsOwnMailPath()
     {
-        // Taken from real data: four rows pass, one fails having proved
-        // nothing. Judging the source on all five rows labels it a service of
-        // the client's own that needs correcting, and the message nobody could
-        // account for turns into a maintenance note.
+        // This test previously asserted the opposite, on the reasoning that
+        // the failing row proved nothing so the source must be impersonating.
+        // The live data settled it: 35.174.145.124 is a mail gateway carrying
+        // these customers' outbound, and it both signs successfully and breaks
+        // its own signatures in transit for every one of them. Passing even
+        // once is the thing a forger cannot do, so it decides the bucket.
         var report = await BuildAsync(Xml("acme.com", "none",
             Row("35.174.145.124", 11, "pass", "acme.com", "acme.com", "pass", "acme.com", "fail"),
             Row("35.174.145.124", 1, "fail", "acme.com", "acme.com", "fail", "acme.com", "fail")));
 
-        var source = Assert.Single(report.ImpersonatingSources);
+        var source = Assert.Single(report.MisconfiguredSources);
         Assert.Equal("35.174.145.124", source.SourceIp);
         Assert.Equal(1, source.Failing);
         Assert.Equal(12, source.Messages);
-        Assert.Empty(report.MisconfiguredSources);
+        Assert.Empty(report.ImpersonatingSources);
+    }
+
+    [Fact]
+    public async Task ARelayIsNotAccusedEvenWhenItBreaksFarMoreOftenThanItWorks()
+    {
+        // dmvwrr.com in the live data: 113 signatures passed, 239 broke, one
+        // address. The report put all 239 under "who tried to send mail as
+        // you" and told the client somebody was sending as them 177 times.
+        var report = await BuildAsync(Xml("acme.com", "none",
+            Row("35.174.145.124", 113, "pass", "acme.com", "acme.com", "pass", "acme.com", "fail"),
+            Row("35.174.145.124", 239, "fail", "acme.com", "acme.com", "fail", "acme.com", "fail")));
+
+        Assert.Empty(report.ImpersonatingSources);
+        Assert.Single(report.MisconfiguredSources);
     }
 
     [Fact]
