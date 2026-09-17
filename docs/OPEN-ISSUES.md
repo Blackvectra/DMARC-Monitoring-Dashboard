@@ -74,29 +74,24 @@ type, and both would work against a database path exactly as
 `CorrelationService` now does. Ranking and classification are domain logic and
 belong in Core where they can be tested; the Web project keeps the pages.
 
-## 3. Two nav links still 404
+## 3. The web app is read-only about its own configuration
 
-**Area** `src/DmarcMonitor.Web/Components/Layout/MainLayout.razor`
-**Severity** Medium. A sidebar advertising pages that do not exist reads as an
-unfinished product on first contact.
+**Area** `src/DmarcMonitor.Web/Components/Pages/Settings.razor`
+**Severity** Low.
 
-Working: Triage (`/`), Domains (`/domains`), a domain (`/domains/{name}`),
-Clients (`/clients`), Import (`/import`), Sources (`/sources`).
+Every sidebar link now resolves: Triage, Domains, a domain, Clients, Import,
+Sources, Reports, Settings. Reports previews a client's month and opens the
+real document through the same renderer the CLI uses, so the two cannot drift.
 
-Missing: **Reports**, **Settings**.
+Settings shows what the instance is configured to do but cannot change any of
+it. That is deliberate for now - a form writing to appsettings.json becomes a
+second source of truth that disagrees with the file after a restart - but the
+provider name in particular is something an operator will want to set without
+editing a file on the server.
 
-**How to fix.**
-
-- `Reports` — pick a client and a month, generate with the existing
-  `ClientReportBuilder` + `ClientReportRenderer`, and offer the HTML as a
-  download. The CLI path (`dmarc report`) already does all of this; the page
-  needs the same call plus a file result. Do not reimplement the renderer.
-- `Settings` — read-only to begin with: database path, whether Entra sign-in
-  is configured, the provider name used on reports, the default window. The
-  value is answering "is sign-in actually on", which an operator currently
-  cannot tell except from a banner.
-
----
+**How to fix, when it is worth it.** A small writable configuration store
+(a table in the existing database, read at startup with the file as the
+default) rather than rewriting appsettings.json.
 
 ## 4. Local builds cannot reproduce CI's analyzer set
 

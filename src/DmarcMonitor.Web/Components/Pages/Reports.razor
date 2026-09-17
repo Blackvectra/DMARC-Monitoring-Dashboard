@@ -1,0 +1,171 @@
+@page "/reports"
+@using DmarcMonitor.Core.Reporting
+@using DmarcMonitor.Web.Data
+@inject ReportUiService ReportUi
+@inject ReportStoreConnection Db
+@rendermode InteractiveServer
+
+<PageTitle>Reports — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Reports</h1>
+        <p class="sub">The monthly report a client receives. One self-contained file: it opens with no
+           network and prints to PDF, because that is what happens to it after you send it.</p>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty">
+        <h2>No database yet</h2>
+        <p>Nothing has been imported.</p>
+    </div>
+}
+else if (_clients is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_error is not null)
+{
+    <div class="empty">
+        <h2>Could not read the database</h2>
+        <p>@_error</p>
+    </div>
+}
+else if (_clients.Count == 0)
+{
+    <div class="empty">
+        <h2>No clients yet</h2>
+        <p>Domains arrive under Unassigned. <a href="clients">Assign them to a client</a> and they can
+           be reported on.</p>
+    </div>
+}
+else
+{
+    <section>
+        <div class="form-row">
+            <select @bind="_slug" @bind:after="PreviewAsync">
+                @foreach (var c in _clients)
+                {
+                    <option value="@c.Slug">@c.Name</option>
+                }
+            </select>
+            <select @bind="_month" @bind:after="PreviewAsync">
+                @foreach (var m in ReportUiService.RecentMonths())
+                {
+                    <option value="@m.Value">@m.Label</option>
+                }
+            </select>
+            <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open</a>
+        </div>
+        <p class="sub">Reported as “@ReportUi.ProviderName”. Set <code>Reporting:ProviderName</code> in
+           configuration to change it everywhere at once.</p>
+    </section>
+
+    @if (_preview is not null)
+    {
+        <section class="callout @(_preview.Messages == 0 ? "act" : "fine")">
+            <h2>@_summary?.Headline</h2>
+            @foreach (var point in _summary?.Points ?? [])
+            {
+                <p>@point</p>
+            }
+        </section>
+
+        <div class="figures">
+            <div class="figure">
+                <span class="figure-n">@_preview.Messages.ToString("N0")</span>
+                <span class="figure-l">messages</span>
+            </div>
+            <div class="figure">
+                <span class="figure-n @(_preview.Messages > 0 && _preview.PassRate < 95 ? "bad" : "good")">
+                    @(_preview.Messages > 0 ? $"{_preview.PassRate}%" : "—")
+                </span>
+                <span class="figure-l">authenticated</span>
+            </div>
+            <div class="figure">
+                <span class="figure-n">@_preview.ImpersonatingSources.Count</span>
+                <span class="figure-l">sending as them</span>
+            </div>
+            <div class="figure">
+                <span class="figure-n">@_preview.MisconfiguredSources.Count</span>
+                <span class="figure-l">own mail failing</span>
+            </div>
+        </div>
+    }
+    else if (_checked)
+    {
+        <div class="empty">
+            <h2>Nothing stored for that month</h2>
+            <p>A report would still be produced and would say so, which is worth sending: silence from a
+               monitoring provider is indistinguishable from a provider that stopped.</p>
+        </div>
+    }
+}
+
+@code {
+    private IReadOnlyList<(string Slug, string Name)>? _clients;
+    private ClientReport? _preview;
+    private ReportSummary? _summary;
+    private string? _error;
+    private bool _checked;
+
+    private string _slug = "";
+    private string _month = ReportUiService.RecentMonths()[0].Value;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Db.Exists) { _clients = []; return; }
+
+        try
+        {
+            // Unassigned is a worklist, not a customer; a report addressed to
+            // it is a document nobody can send.
+            _clients = [.. (await ReportUi.GetClientsAsync())
+                .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)];
+
+            if (_clients.Count > 0)
+            {
+                _slug = _clients[0].Slug;
+                await PreviewAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _clients = [];
+            _error = ex.Message;
+        }
+    }
+
+    private async Task PreviewAsync()
+    {
+        _checked = false;
+        _preview = null;
+        _summary = null;
+
+        if (string.IsNullOrEmpty(_slug)) { return; }
+
+        try
+        {
+            ReportUiService.TryParseMonth(_month, out var period);
+            var report = await ReportUi.BuildAsync(_slug, period);
+
+            // A month with no data still produces a report; the preview just
+            // has nothing to show, which is a different thing from failing.
+            if (report is { Messages: > 0 })
+            {
+                _preview = report;
+                _summary = ReportNarrative.Summarise(report);
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _checked = true;
+        }
+    }
+}
