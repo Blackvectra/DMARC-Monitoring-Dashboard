@@ -129,6 +129,28 @@ jobs:
           path: testresults.xml
           if-no-files-found: warn
 
+  dotnet:
+    name: .NET
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore src/DmarcMonitor.sln
+
+      # Warnings are errors in Directory.Build.props. The point of moving off
+      # PowerShell is that a whole class of bug fails the build rather than
+      # surviving to be found by a test somebody remembered to write.
+      - name: Build
+        run: dotnet build src/DmarcMonitor.sln --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test src/DmarcMonitor.sln --no-build --configuration Release --verbosity normal
+
   schema:
     name: SQLite schema
     runs-on: ubuntu-latest

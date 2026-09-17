@@ -1,0 +1,11 @@
+# .NET build output
+src/**/bin/
+src/**/obj/
+*.user
+
+# Local working directories (reports, state, logs) must never be committed:
+# they contain customer mail metadata.
+WorkingDir/
+Reports/
+State/
+Logs/
