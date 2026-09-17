@@ -126,6 +126,10 @@ public static class Program
                 --fallback <address>   Shared address, for domains not yet migrated.
                 --max <n>              Messages per run. Default: 500
                 --dry-run              Parse and report, write nothing, move nothing.
+                                     Safe against a live mailbox. See
+                                     docs/INGEST-SETUP.md for the app registration,
+                                     and read the part about restricting it to one
+                                     mailbox before the first run.
 
             EXAMPLES
               dmarc explain report.xml

@@ -10,48 +10,64 @@ says, not in whether it runs, and only real mail flows expose them.**
 
 ---
 
-## 1. The export is missing months of reports
+## 1. Ingest has never been run against a real mailbox
+
+**Area** `src/DmarcMonitor.Core/Graph/`, `src/DmarcMonitor.Cli/Commands/IngestCommand.cs`
+**Severity** High. It is the whole collection path in production and no line of
+it has touched Exchange.
+
+`dmarc ingest` reads the shared mailbox through Microsoft Graph: it walks the
+child folders a mail rule sorts reports into, carries the folder name through
+for attribution, stores what it parses, and moves each message out so it is
+not read twice. `GraphMailboxClient`, `GraphThrottleHandler` and the
+move-after-handover ordering are all unit tested against a fake mailbox and
+have never spoken to a real one.
+
+Untested against reality, in rough order of how likely they are to bite:
+
+- **Throttling.** Graph returns 429 with `Retry-After` under load. The handler
+  honours it in tests; a mailbox with thousands of messages is where that gets
+  exercised for the first time.
+- **Folder names with a backslash.** The live mailbox has folders literally
+  named `DMARC\bmcedc.com`. Graph addresses folders by id, so this should be
+  irrelevant, but nothing has proved it.
+- **The move.** A message is filed only after its reports are stored, so a
+  crash re-reads rather than loses. The duplicate check should make the second
+  read harmless. Untested outside the fake.
+- **Attachment size and shape.** Large or unusual attachments come back
+  differently from Graph than the fake produces.
+
+**How to fix.** An app registration in the tenant with `Mail.ReadWrite` as an
+*application* permission, admin consent, a certificate, and an application
+access policy restricting it to the one shared mailbox so it cannot read
+anything else. Then `--dry-run` first: it parses and reports without writing
+or moving anything, so the first run against a live mailbox is safe.
+
+---
+
+## 1a. The Outlook exporter is a stopgap, not the collection path
 
 **Area** `tools/Export-DMARCAttachments.ps1`
-**Severity** Blocks trusting any number the product reports.
+**Severity** Low, now that its role is clear.
 
-Six of ten folders exported right up to the current day. Four stopped dead
-part way through their history:
+It exists to get a pile of reports off a desktop without an app registration,
+which is how the 1,687-report dataset reached testing. It is not how the
+product collects mail and never was, so its bugs do not block anything the
+product does.
 
-| domain | last report exported | gap |
-|---|---|---|
-| dunncountynd.gov | 2026-05-12 | 128 days |
-| redriverrc.com | 2026-06-03 | 106 days |
-| mortonnd.gov | 2026-07-17 | 62 days |
-| mcleanelectric.com | nothing at all | — |
+It did truncate four folders in the live export — two months for
+`mortonnd.gov`, three for `redriverrc.com`, everything for
+`mcleanelectric.com` — almost certainly because `Attachment.FileName` throws
+for some attachment kinds and, under `$ErrorActionPreference = 'Stop'`, ended
+the run part way through a folder. Outlook hands items back oldest-first,
+which is why each affected folder kept its early history and lost the rest.
+That is fixed in version `2026-09-17.4`, and the script now accounts for every
+message it did not export, but confirming it only matters if somebody needs
+the export path again.
 
-Morton is provably still reporting: reports dated 2026-09-14 to 09-16 were
-supplied by hand from the same mailbox while the export contains nothing after
-17 July. So this is the export losing data, not the monitoring stopping.
-
-**Most likely cause, already fixed but unconfirmed.** `Attachment.FileName`
-throws for some attachment kinds rather than returning empty. Under
-`$ErrorActionPreference = 'Stop'` that ended the whole run part way through a
-folder, and Outlook hands items back oldest-first, so a folder would keep its
-early history and lose everything after the bad item. That is exactly the
-shape of the four failures.
-
-**How to confirm.** Re-run version `2026-09-17.4` or later, which prints its
-version on startup and now accounts for every message it did not export:
-
-```
-DMARC_bmcedc.com                         2       90
-    88 attachment(s) skipped, not a report type: .msg
-```
-
-Four causes produce four different lines, and each needs a different fix:
-`.msg`/`.eml` means reports are forwarded and nested inside another message
-and need extracting; "had no attachment at all" means cached-mode
-header-only sync; "could not be read from Outlook" means MAPI is refusing
-items; an unexpected extension is a one-line change to `$Extensions`.
-
-**Until this is re-run, every figure in the product is computed on a partial
-dataset.**
+**What this does mean:** the ten-domain dataset used for testing is partial, so
+figures quoted from it are lower bounds. Ingest against the live mailbox would
+collect the lot.
 
 ---
 
