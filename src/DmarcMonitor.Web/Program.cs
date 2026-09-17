@@ -18,6 +18,7 @@ builder.Services.AddSingleton(new DatabaseInfo(dbPath));
 builder.Services.AddSingleton<ReportStoreConnection>();
 builder.Services.AddScoped<TriageService>();
 builder.Services.AddScoped<CorrelationService>();
+builder.Services.AddScoped<DomainDetailService>();
 
 var app = builder.Build();
 
