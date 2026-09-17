@@ -92,3 +92,13 @@ else
 StartupLog.Database(logger, dbPath);
 
 await app.RunAsync();
+
+/// <summary>
+/// Exists so the test host can start this application in process.
+/// </summary>
+/// <remarks>
+/// Top-level statements generate an internal Program class, which
+/// WebApplicationFactory cannot reach. Declaring it partial and public is the
+/// documented way to make the app testable without changing how it runs.
+/// </remarks>
+public partial class Program;

@@ -71,27 +71,26 @@ collect the lot.
 
 ---
 
-## 2. Nothing checks the pages themselves
+## 2. The pages are checked, the browser is not
 
-**Area** `src/DmarcMonitor.Web/Components/Pages/`
-**Severity** Low-to-medium. The logic behind the pages is covered; the markup
-is not.
+**Area** `src/DmarcMonitor.Web.Tests/`
+**Severity** Low.
 
-All three source classifiers and both fleet views now live in Core with tests:
-`CorrelationService`, `TriageService`, `DomainDetailService`, plus the report
-builder, the narrative and the renderer. Between them they cover every
-judgement the product makes about a sending source.
+Every route now loads in a test: the real application in process, over real
+HTTP, through the real authentication pipeline, against a seeded database.
+They assert one sentence per page, so they fail when a page breaks and stay
+quiet when it is restyled. Twenty-eight of them, and reinstating the triage
+silence turns two red.
 
-What is left uncovered is the Razor: a renamed property, a broken `@bind`, or
-a page that throws on an empty database would all compile and all pass the
-suite. They were caught today by driving the app with curl and Playwright by
-hand, which does not survive into next week.
+What they do not exercise is anything needing a browser: the interactive half
+of Blazor. Pressing Import, choosing a client from the dropdown, and typing a
+name into the client form all go through a SignalR circuit these tests never
+open. The services behind each of those are covered in Core, so what is
+untested is the wiring between the control and the handler.
 
-**How to fix.** A small `bunit` project over the pages, or a handful of
-Playwright checks that load each route against a seeded database and assert on
-one sentence. The route list is short enough to be worth doing exhaustively:
-`/`, `/domains`, `/domains/{name}`, `/clients`, `/import`, `/sources`,
-`/reports`, `/settings`.
+**How to fix, when it is worth it.** Playwright against a seeded instance,
+driving the three forms. The handlers are already tested, so this only needs
+to prove the buttons reach them.
 
 ## 3. The web app is read-only about its own configuration
 
