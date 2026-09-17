@@ -182,6 +182,50 @@ public sealed class GraphMailboxClient : IMailboxClient
         return created;
     }
 
+    public async Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(
+        string folderName, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(folderName);
+
+        var folderId = await EnsureFolderAsync(folderName, cancellationToken).ConfigureAwait(false);
+        var uri = $"{UserBase}/mailFolders/{Uri.EscapeDataString(folderId)}/childFolders"
+                + "?$select=id,displayName,childFolderCount,totalItemCount&$top=100";
+
+        var results = new List<MailFolder>();
+
+        while (!string.IsNullOrEmpty(uri))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            using var doc = await GetJsonAsync(uri, cancellationToken).ConfigureAwait(false);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("value", out var values) && values.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in values.EnumerateArray())
+                {
+                    var id = Str(item, "id");
+                    var name = Str(item, "displayName");
+                    if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name)) { continue; }
+
+                    results.Add(new MailFolder
+                    {
+                        Id = id,
+                        Name = name,
+                        ChildFolderCount = (int)Num(item, "childFolderCount"),
+                        TotalItemCount = (int)Num(item, "totalItemCount"),
+                    });
+                }
+            }
+
+            uri = root.TryGetProperty("@odata.nextLink", out var next) && next.ValueKind == JsonValueKind.String
+                ? next.GetString() ?? ""
+                : "";
+        }
+
+        return results;
+    }
+
     private async Task<string?> FindFolderAsync(string folderName, CancellationToken ct)
     {
         // OData string literals escape a single quote by doubling it. Without

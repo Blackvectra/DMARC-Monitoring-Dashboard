@@ -294,4 +294,7 @@ internal sealed class ReadOnlyMailbox(IMailboxClient inner) : IMailboxClient
     /// <summary>Returns the name unchanged rather than creating anything.</summary>
     public Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default) =>
         Task.FromResult(folderName);
+
+    public Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderName, CancellationToken cancellationToken = default) =>
+        _inner.GetChildFoldersAsync(folderName, cancellationToken);
 }

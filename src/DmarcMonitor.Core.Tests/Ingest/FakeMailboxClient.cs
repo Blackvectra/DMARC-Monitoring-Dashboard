@@ -45,13 +45,17 @@ public sealed class FakeMailboxClient : IMailboxClient
         string folder,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        foreach (var m in _messages.Where(m => !Moved.ContainsKey(m.Id)).OrderBy(m => m.ReceivedAt))
+        foreach (var m in _messages.Where(m => !Moved.ContainsKey(m.Id) && FolderMatches(m, folder)).OrderBy(m => m.ReceivedAt))
         {
             cancellationToken.ThrowIfCancellationRequested();
             yield return m;
             await Task.Yield();
         }
     }
+
+    /// <summary>A message with no folder set belongs to whatever folder is being read.</summary>
+    private static bool FolderMatches(MailMessage m, string folder) =>
+        string.IsNullOrEmpty(m.FolderName) || string.Equals(m.FolderName, folder, StringComparison.OrdinalIgnoreCase);
 
     public Task<IReadOnlyList<MailAttachment>> GetAttachmentsAsync(string messageId, CancellationToken cancellationToken = default)
     {
@@ -74,6 +78,15 @@ public sealed class FakeMailboxClient : IMailboxClient
         }
         Moved[messageId] = destinationFolderId;
         return Task.CompletedTask;
+    }
+
+    /// <summary>Folders inside a parent, keyed by parent name.</summary>
+    public Dictionary<string, List<MailFolder>> ChildFolders { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderName, CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<MailFolder> result = ChildFolders.TryGetValue(folderName, out var list) ? list : [];
+        return Task.FromResult(result);
     }
 
     public Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default)

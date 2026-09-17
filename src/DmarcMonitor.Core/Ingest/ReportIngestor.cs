@@ -29,6 +29,17 @@ public sealed record IngestOptions
     /// <summary>The subdomain per-domain report addresses are issued under.</summary>
     public string ReportingDomain { get; init; } = "";
 
+    /// <summary>
+    /// Also read folders inside the source folder.
+    /// </summary>
+    /// <remarks>
+    /// Sorting reports into a folder per domain with a mail rule is how an MSP
+    /// normally organises a shared dmarc@ mailbox. Without this, reading
+    /// "DMARC" finds nothing while hundreds of reports sit one level below,
+    /// and nothing says so.
+    /// </remarks>
+    public bool IncludeChildFolders { get; init; } = true;
+
     /// <summary>Optional shared address, for deployments not yet using per-domain addressing.</summary>
     public string? FallbackAddress { get; init; }
 
@@ -151,18 +162,51 @@ public sealed class ReportIngestor
         // normal case, not an exceptional one. Throwing here would discard
         // every report processed before the deadline and leave their messages
         // moved out of the source folder, so they would never be seen again.
+        // The source folder, plus any folder inside it. A mail rule sorting by
+        // domain puts everything one level down, so reading only the parent
+        // would find nothing and say nothing.
+        var folders = new List<string> { _options.SourceFolder };
+        if (_options.IncludeChildFolders)
+        {
+            try
+            {
+                foreach (var child in await _mailbox.GetChildFoldersAsync(_options.SourceFolder, cancellationToken).ConfigureAwait(false))
+                {
+                    folders.Add(child.Name);
+                }
+            }
+            catch (OperationCanceledException) { stoppedEarly = true; }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // Not fatal: the parent folder is still read. But it is
+                // recorded, because silently reading one folder when there are
+                // twelve is exactly the failure this option exists to prevent.
+                errors.Add($"Could not list folders inside '{_options.SourceFolder}': {ex.Message}");
+            }
+        }
+
         try
         {
-        await foreach (var message in _mailbox.GetMessagesAsync(_options.SourceFolder, cancellationToken).ConfigureAwait(false))
+        foreach (var folder in folders)
+        {
+        if (read >= _options.MaxMessages || stoppedEarly) { break; }
+        await foreach (var message in _mailbox.GetMessagesAsync(folder, cancellationToken).ConfigureAwait(false))
         {
             if (cancellationToken.IsCancellationRequested) { stoppedEarly = true; break; }
             if (read >= _options.MaxMessages) { stoppedEarly = true; break; }
             read++;
 
+            // Carry the folder through: a message read from DMARC\acme.com
+            // knows which folder it came from even when the client did not
+            // set it.
+            var located = string.IsNullOrEmpty(message.FolderName)
+                ? message with { FolderName = folder }
+                : message;
+
             List<IngestedReport> fromThisMessage;
             try
             {
-                fromThisMessage = await ProcessMessageAsync(message, cancellationToken).ConfigureAwait(false);
+                fromThisMessage = await ProcessMessageAsync(located, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -201,6 +245,7 @@ public sealed class ReportIngestor
                 // when this message is read again next run.
                 errors.Add($"{message.Id}: could not be filed: {ex.Message}");
             }
+        }
         }
         }
         catch (OperationCanceledException)
@@ -387,6 +432,17 @@ public sealed class ReportIngestor
     private AttributionResult Attribute(MailMessage message, string reportDomain)
     {
         AttributionResult? best = null;
+
+        // The folder comes first, below only a per-domain address. An operator
+        // whose mail rule sorted this into DMARC\acme.com has made a claim
+        // about ownership that the sender could not influence, which is worth
+        // more than the domain named inside a file anybody can send.
+        var byFolder = FolderAttribution.Attribute(message.FolderName, reportDomain);
+        if (byFolder is not null)
+        {
+            if (byFolder.Outcome == AttributionOutcome.FolderMismatch) { return byFolder; }
+            best = byFolder;
+        }
 
         foreach (var to in message.ToAddresses)
         {

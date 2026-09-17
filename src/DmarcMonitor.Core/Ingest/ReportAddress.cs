@@ -161,6 +161,20 @@ public enum AttributionOutcome
     /// Attribution rests on the report's own contents, which is weaker.
     /// </summary>
     FallbackAddress,
+
+    /// <summary>
+    /// Attributed by the folder an operator's mail rule sorted it into, and
+    /// the report agrees. As trustworthy as a per-domain address, because the
+    /// claim was made by the operator rather than by the sender.
+    /// </summary>
+    FolderName,
+
+    /// <summary>
+    /// The folder names one domain and the report claims another. Either the
+    /// mail rule is wrong, or something is filing fabricated reports into a
+    /// customer's folder.
+    /// </summary>
+    FolderMismatch,
 }
 
 public sealed record AttributionResult
@@ -176,10 +190,100 @@ public sealed record AttributionResult
     public string Reason { get; init; } = "";
 
     /// <summary>Whether the report should be stored against a customer.</summary>
-    public bool ShouldIngest => Outcome is AttributionOutcome.Attributed or AttributionOutcome.FallbackAddress;
+    public bool ShouldIngest => Outcome is
+        AttributionOutcome.Attributed or
+        AttributionOutcome.FolderName or
+        AttributionOutcome.FallbackAddress;
 
     /// <summary>Whether somebody should look at this rather than it being filed quietly.</summary>
-    public bool IsSuspicious => Outcome == AttributionOutcome.DomainMismatch;
+    public bool IsSuspicious => Outcome is
+        AttributionOutcome.DomainMismatch or
+        AttributionOutcome.FolderMismatch;
+}
+
+/// <summary>
+/// Attributes a report by the folder a mail rule sorted it into.
+/// </summary>
+/// <remarks>
+/// An MSP with a shared dmarc@ mailbox almost always sorts reports into a
+/// folder per domain. That folder name is a claim about ownership made by the
+/// operator, not by whoever sent the mail, which is what makes it worth
+/// trusting: an attacker can put anything in a report, but cannot choose
+/// which folder somebody else's rule files it into.
+/// </remarks>
+public static class FolderAttribution
+{
+    /// <summary>
+    /// Whether a folder name looks like a domain rather than an ordinary
+    /// folder such as Inbox or Archive.
+    /// </summary>
+    public static bool LooksLikeDomain(string? folderName)
+    {
+        if (string.IsNullOrWhiteSpace(folderName)) { return false; }
+
+        var name = folderName.Trim().TrimEnd('.');
+        if (!name.Contains('.', StringComparison.Ordinal)) { return false; }
+        if (name.StartsWith('.') || name.EndsWith('.')) { return false; }
+        if (name.Contains(' ', StringComparison.Ordinal)) { return false; }
+
+        foreach (var label in name.Split('.'))
+        {
+            if (label.Length == 0) { return false; }
+            foreach (var c in label)
+            {
+                if (!char.IsAsciiLetterOrDigit(c) && c != '-') { return false; }
+            }
+        }
+
+        // A trailing label of digits is an IP address, not a domain.
+        var last = name[(name.LastIndexOf('.') + 1)..];
+        return last.Length >= 2 && !last.All(char.IsAsciiDigit);
+    }
+
+    /// <summary>
+    /// Attributes by folder, or returns null when the folder says nothing.
+    /// </summary>
+    public static AttributionResult? Attribute(string? folderName, string reportDomain)
+    {
+        if (!LooksLikeDomain(folderName)) { return null; }
+
+        var folder = folderName!.Trim().TrimEnd('.').ToLowerInvariant();
+        var claimed = (reportDomain ?? "").Trim().TrimEnd('.').ToLowerInvariant();
+
+        if (string.IsNullOrEmpty(claimed))
+        {
+            return new AttributionResult
+            {
+                Outcome = AttributionOutcome.FolderMismatch,
+                Domain = folder,
+                Reason = $"Filed in the folder for {folder}, but the report names no domain at all.",
+            };
+        }
+
+        // Same rule as per-domain addressing: a subdomain's reports belong
+        // under the parent, but not the other way round.
+        var agrees = string.Equals(claimed, folder, StringComparison.Ordinal)
+                  || claimed.EndsWith('.' + folder, StringComparison.Ordinal);
+
+        if (agrees)
+        {
+            return new AttributionResult
+            {
+                Outcome = AttributionOutcome.FolderName,
+                Domain = folder,
+                Reason = $"Filed by a mail rule into the folder for {folder}, and the report agrees.",
+            };
+        }
+
+        return new AttributionResult
+        {
+            Outcome = AttributionOutcome.FolderMismatch,
+            Domain = folder,
+            Reason = $"Filed in the folder for {folder} but the report is about {claimed}. "
+                   + "Either the mail rule is matching too broadly, or something is filing reports "
+                   + "for one domain into another customer's folder.",
+        };
+    }
 }
 
 /// <summary>

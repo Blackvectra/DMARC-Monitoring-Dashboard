@@ -1,0 +1,48 @@
+@inherits LayoutComponentBase
+@inject IConfiguration Configuration
+
+<div class="app">
+    <nav class="sidebar">
+        <div class="brand">
+            <span class="brand-mark">DM</span>
+            <span class="brand-name">DMARC Monitor</span>
+        </div>
+
+        <NavLink class="nav-item" href="" Match="NavLinkMatch.All">Triage</NavLink>
+        <NavLink class="nav-item" href="domains">Domains</NavLink>
+        <NavLink class="nav-item" href="clients">Clients</NavLink>
+        <NavLink class="nav-item" href="sources">Sources</NavLink>
+        <NavLink class="nav-item" href="reports">Reports</NavLink>
+        <NavLink class="nav-item" href="settings">Settings</NavLink>
+
+        <div class="sidebar-foot">
+            <AuthorizeView>
+                <Authorized>
+                    <div class="who">@context.User.Identity?.Name</div>
+                    @if (EntraConfigured)
+                    {
+                        <a class="signout" href="MicrosoftIdentity/Account/SignOut">Sign out</a>
+                    }
+                </Authorized>
+            </AuthorizeView>
+        </div>
+    </nav>
+
+    <main>
+        @if (!EntraConfigured)
+        {
+            @* Said on every page, not just at startup. An operator who cannot
+               tell whether sign-in is on has no way to notice that it is not. *@
+            <div class="banner-warn">
+                <strong>Local trial mode — no sign-in.</strong>
+                Only this machine can reach it. Configure <code>AzureAd</code> in
+                <code>appsettings.json</code> to turn on Microsoft sign-in.
+            </div>
+        }
+        @Body
+    </main>
+</div>
+
+@code {
+    private bool EntraConfigured => DmarcMonitor.Web.Auth.AuthSetup.IsEntraConfigured(Configuration);
+}
