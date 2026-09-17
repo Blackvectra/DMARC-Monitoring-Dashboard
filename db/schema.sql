@@ -434,9 +434,20 @@ CREATE TABLE tls_reports (
 
     policy_type         TEXT,                          -- sts / tlsa / no-policy-found
     policy_domain       TEXT,
+
+    -- MTA-STS mode AS THE RECEIVER FETCHED IT, not whatever DNS says today.
+    -- This is the field that decides whether TLS was actually enforced during
+    -- the window: 'testing' means the receiver reported failures and then
+    -- delivered over plaintext anyway. A domain can sit in testing for years,
+    -- generate perfectly clean reports, and be no better protected than one
+    -- with no policy at all. Without this column that distinction is lost and
+    -- every report looks like success.
+    policy_mode         TEXT CHECK (policy_mode IN ('unknown','none','testing','enforce')),
+
     total_success       INTEGER NOT NULL DEFAULT 0,
     total_failure       INTEGER NOT NULL DEFAULT 0,
 
+    source_message_id   TEXT,                          -- Graph message id, for provenance
     raw_hash            TEXT NOT NULL,
     received_at         TEXT NOT NULL,
     ingested_at         TEXT NOT NULL,
@@ -875,6 +886,8 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0002', datetime('now'), 'DNS remediation: provider configs, change plans, applied changes, SPF flatten state');
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0003', datetime('now'), 'Tenant layer: tenants table, tenant_id on every scoped table, per-tenant uniqueness');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0004', datetime('now'), 'TLS reports: record the MTA-STS mode in force, so testing is distinguishable from enforce, plus source message provenance');
 
 
 -- ============================================================================
