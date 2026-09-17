@@ -14,7 +14,8 @@
 .PARAMETER Folder
     The folder to export, as its name appears in Outlook. Leave it out to
     export the whole mailbox, which is usually what you want for a mailbox
-    that exists only to receive reports.
+    that exists only to receive reports. Doing that requires -Mailbox, so a
+    missing argument cannot end up dumping the operator's own mail.
 
 .PARAMETER List
     Show the folder tree and exit, without exporting anything. Use this when
@@ -57,6 +58,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Printed on every run. A copy sitting in Downloads looks identical to the
+# current one until it fails on a parameter it does not have, so the run says
+# which copy it is before it does anything else.
+$scriptVersion = '2026-09-17.3'
+Write-Host ""
+Write-Host "Export-DMARCAttachments $scriptVersion" -ForegroundColor DarkGray
 
 # ---- connect --------------------------------------------------------------
 
@@ -134,9 +142,33 @@ $source = $null
 $foundIn = ''
 
 if (-not $Folder) {
-    # No folder named, so take the whole mailbox. Exporting everything is the
-    # sensible default for a mailbox whose only purpose is receiving reports,
-    # and it avoids having to guess at a folder name that varies per operator.
+    # No folder named, so take the whole mailbox. That is right for a mailbox
+    # whose only purpose is receiving reports, and wrong for a person's own
+    # mailbox, so it is only allowed once the mailbox has been named: without
+    # -Mailbox this would walk whichever store Outlook happens to list first,
+    # which is the operator's own, and write their attachments to disk.
+    if (-not $Mailbox) {
+        Write-Host ""
+        Write-Host "Refusing to export a whole mailbox without being told which one." -ForegroundColor Red
+        Write-Host "Whichever mailbox Outlook lists first is usually your own, and this would"
+        Write-Host "write every attachment in it to disk."
+        Write-Host ""
+        Write-Host "Mailboxes currently available:"
+        foreach ($s in $stores) { Write-Host "    $($s.Name)" }
+        Write-Host ""
+        Write-Host 'Re-run with -Mailbox "<name>" (quote it if it contains a space), or name a -Folder.' -ForegroundColor DarkGray
+        exit 1
+    }
+
+    if ($stores.Count -gt 1) {
+        Write-Host ""
+        Write-Host "'$Mailbox' matches more than one mailbox:" -ForegroundColor Red
+        foreach ($s in $stores) { Write-Host "    $($s.Name)" }
+        Write-Host ""
+        Write-Host "Use a longer name that picks out just one." -ForegroundColor DarkGray
+        exit 1
+    }
+
     $source = $stores[0]
     $foundIn = $stores[0].Name
 } else {
