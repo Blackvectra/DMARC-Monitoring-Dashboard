@@ -126,7 +126,38 @@ public static class ClientReportRenderer
                 """);
         }
 
-        html.Append("    </tbody>\n  </table>\n</section>\n\n");
+        html.Append("    </tbody>\n  </table>\n");
+        TransportSecurity(html, report);
+        html.Append("</section>\n\n");
+    }
+
+    /// <summary>
+    /// MTA-STS announced but not enforced.
+    /// </summary>
+    /// <remarks>
+    /// Parsed and stored since the TLS reports were first read, and never put
+    /// in front of anybody. A domain in testing mode publishes a policy and a
+    /// receiver honours none of it: mail is delivered over a connection that
+    /// does not match and the failure is merely reported. The domain looks
+    /// protected in transit and is not, which is precisely the gap this
+    /// product exists to close.
+    /// </remarks>
+    private static void TransportSecurity(StringBuilder html, ClientReport report)
+    {
+        var testing = report.Domains
+            .Where(d => string.Equals(d.MtaStsMode, "Testing", StringComparison.OrdinalIgnoreCase))
+            .Select(d => d.Domain)
+            .ToList();
+
+        if (testing.Count == 0) { return; }
+
+        html.Append(CultureInfo.InvariantCulture, $"""
+              <p class="note"><strong>Transport security is not yet switched on.</strong>
+              {E(string.Join(", ", testing))} publishes an MTA-STS policy in <em>testing</em> mode, which
+              means receiving providers report on connections that do not match it but still deliver the
+              mail. Moving to enforcing mode is what makes it take effect.</p>
+
+            """);
     }
 
     private static void Impersonation(StringBuilder html, ClientReport report)
