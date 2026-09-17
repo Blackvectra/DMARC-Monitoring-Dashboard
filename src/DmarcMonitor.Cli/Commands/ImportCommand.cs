@@ -39,74 +39,20 @@ public static class ImportCommand
             return 69;
         }
 
-        var files = Directory
-            .EnumerateFiles(folder, "*", SearchOption.AllDirectories)
-            .OrderBy(f => f, StringComparer.Ordinal)
-            .ToList();
+        // The same importer the browser uses. Two implementations of this
+        // would drift, and "it worked from the terminal" is a support question
+        // nobody can answer.
+        var progress = new Progress<int>(n => Console.WriteLine($"  {n} file(s) read"));
+        var result = await new FolderImporter(store).ImportAsync(folder, progress, ct).ConfigureAwait(false);
 
-        int stored = 0, duplicates = 0, skipped = 0, failed = 0;
-        var seen = 0;
+        foreach (var error in result.Errors) { Console.Error.WriteLine($"  {error}"); }
 
-        // A folder exported from a real mailbox is hundreds of files, and a run
-        // that prints nothing until it finishes is indistinguishable from one
-        // that has hung. Every hundred is often enough to show movement without
-        // burying the errors, which are the lines actually worth reading.
-        const int ProgressEvery = 100;
-
-        foreach (var file in files)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            seen++;
-            if (seen % ProgressEvery == 0)
-            {
-                Console.WriteLine($"  {seen} of {files.Count} read, {stored} stored");
-            }
-
-            byte[] bytes;
-            try { bytes = await File.ReadAllBytesAsync(file, ct).ConfigureAwait(false); }
-            catch (IOException ex) { Console.Error.WriteLine($"  {Path.GetFileName(file)}: {ex.Message}"); failed++; continue; }
-
-            var extracted = ReportAttachment.Extract(Path.GetFileName(file), bytes);
-            if (extracted.Count == 0) { skipped++; continue; }
-
-            foreach (var report in extracted)
-            {
-                try
-                {
-                    string? id = null;
-
-                    if (report.Kind == ReportKind.DmarcAggregate)
-                    {
-                        var parsed = AggregateReportParser.Parse(report.Content);
-                        if (!parsed.Success) { Console.Error.WriteLine($"  {report.FileName}: {parsed.Error}"); failed++; continue; }
-                        id = await store.SaveAggregateAsync(parsed.Report!, report.Content, null, ct).ConfigureAwait(false);
-                    }
-                    else if (report.Kind == ReportKind.TlsRpt)
-                    {
-                        var parsed = TlsReportParser.Parse(report.Content);
-                        if (!parsed.Success) { Console.Error.WriteLine($"  {report.FileName}: {parsed.Error}"); failed++; continue; }
-                        id = await store.SaveTlsAsync(parsed.Report!, report.Content, null, ct).ConfigureAwait(false);
-                    }
-
-                    // A null id means the database refused it as a duplicate,
-                    // which is the expected outcome of importing a folder twice
-                    // and is not an error.
-                    if (id is not null) { stored++; } else { duplicates++; }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    Console.Error.WriteLine($"  {report.FileName}: {ex.Message}");
-                    failed++;
-                }
-            }
-        }
-
-        Console.WriteLine($"  files seen      {files.Count}");
-        Console.WriteLine($"  reports stored  {stored}");
-        if (duplicates > 0) { Console.WriteLine($"  already stored  {duplicates}"); }
-        if (skipped > 0) { Console.WriteLine($"  not reports     {skipped}"); }
-        if (failed > 0) { Console.WriteLine($"  failed          {failed}"); }
+        Console.WriteLine($"  files seen      {result.FilesSeen}");
+        Console.WriteLine($"  reports stored  {result.Stored}");
+        if (result.AlreadyStored > 0) { Console.WriteLine($"  already stored  {result.AlreadyStored}"); }
+        if (result.NotReports > 0) { Console.WriteLine($"  not reports     {result.NotReports}"); }
+        if (result.Failed > 0) { Console.WriteLine($"  failed          {result.Failed}"); }
+        if (result.StoppedEarly) { Console.WriteLine("  stopped early; run it again to carry on"); }
 
         var unassigned = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
         if (unassigned.Count > 0)
@@ -116,6 +62,6 @@ public static class ImportCommand
             foreach (var d in unassigned) { Console.WriteLine($"    {d}"); }
         }
 
-        return failed > 0 ? 1 : 0;
+        return result.Failed > 0 ? 1 : 0;
     }
 }

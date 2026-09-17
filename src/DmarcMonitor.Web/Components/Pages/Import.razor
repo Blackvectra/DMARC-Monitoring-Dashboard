@@ -1,0 +1,196 @@
+@page "/import"
+@using DmarcMonitor.Core.Ingest
+@using DmarcMonitor.Web.Data
+@inject ImportUiService Importer
+@inject ReportStoreConnection Db
+@rendermode InteractiveServer
+
+<PageTitle>Import — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Import a folder</h1>
+        <p class="sub">Point this at the folder the exporter wrote. Subfolders are included, so a
+           mailbox exported per domain comes in as it stands. Importing the same folder twice is
+           safe: reports already stored are recognised and skipped.</p>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty">
+        <h2>No database yet</h2>
+        <p>Create it first, then come back:</p>
+        <pre>dmarc init-db --db @Db.Path</pre>
+    </div>
+}
+else
+{
+    <section>
+        <div class="form-row">
+            <input class="wide" placeholder="C:\dmarc-export" @bind="_folder" @bind:event="oninput"
+                   disabled="@_running" />
+            <button class="primary" disabled="@(_running || string.IsNullOrWhiteSpace(_folder))"
+                    @onclick="RunAsync">
+                @(_running ? "Importing…" : "Import")
+            </button>
+            @if (_running)
+            {
+                <button class="linkish" @onclick="Cancel">Stop</button>
+            }
+        </div>
+
+        @if (_running && _filesRead > 0)
+        {
+            <p class="sub">@_filesRead file(s) read…</p>
+        }
+
+        <p class="sub">
+            The folder is read by the service, not uploaded from your machine, so it must be a path
+            this server can see.
+        </p>
+    </section>
+
+    @if (_problem is not null)
+    {
+        <section class="callout urgent">
+            <h2>@_problem</h2>
+        </section>
+    }
+
+    @if (_result is not null)
+    {
+        <section class="callout @(_result.Stored > 0 ? "fine" : "watch")">
+            <h2>@Summary(_result)</h2>
+            @if (_result.StoppedEarly)
+            {
+                <p>Stopped before the end. Everything read so far is stored; run it again to carry on
+                   from where it left off.</p>
+            }
+        </section>
+
+        <div class="figures">
+            <div class="figure">
+                <span class="figure-n">@_result.FilesSeen.ToString("N0")</span>
+                <span class="figure-l">files read</span>
+            </div>
+            <div class="figure">
+                <span class="figure-n good">@_result.Stored.ToString("N0")</span>
+                <span class="figure-l">reports stored</span>
+            </div>
+            <div class="figure">
+                <span class="figure-n">@_result.AlreadyStored.ToString("N0")</span>
+                <span class="figure-l">already had</span>
+            </div>
+            <div class="figure">
+                <span class="figure-n">@_result.NotReports.ToString("N0")</span>
+                <span class="figure-l">not reports</span>
+            </div>
+            @if (_result.Failed > 0)
+            {
+                <div class="figure">
+                    <span class="figure-n bad">@_result.Failed.ToString("N0")</span>
+                    <span class="figure-l">failed</span>
+                </div>
+            }
+        </div>
+
+        @if (_result.Errors.Count > 0)
+        {
+            <section>
+                <h2>What failed</h2>
+                <ul class="errors">
+                    @foreach (var error in _result.Errors)
+                    {
+                        <li>@error</li>
+                    }
+                </ul>
+                @if (_result.Failed > _result.Errors.Count)
+                {
+                    <p class="sub">and @(_result.Failed - _result.Errors.Count) more.</p>
+                }
+            </section>
+        }
+
+        @if (_unassigned.Count > 0)
+        {
+            <section class="callout act">
+                <h2>@_unassigned.Count domain(s) are not assigned to a client</h2>
+                <p>They will not appear on anybody's report until they are.
+                   <a href="clients">Assign them now</a>.</p>
+            </section>
+        }
+    }
+}
+
+@code {
+    private string _folder = "";
+    private bool _running;
+    private int _filesRead;
+    private ImportResult? _result;
+    private string? _problem;
+    private IReadOnlyList<string> _unassigned = [];
+    private CancellationTokenSource? _cts;
+
+    private async Task RunAsync()
+    {
+        var folder = _folder.Trim();
+        if (folder.Length == 0) { return; }
+
+        _problem = null;
+        _result = null;
+        _filesRead = 0;
+
+        if (!Directory.Exists(folder))
+        {
+            // Named plainly rather than as an exception: a path typed for the
+            // wrong machine is the most likely mistake on this page.
+            _problem = $"There is no folder at {folder} on the machine running this service.";
+            return;
+        }
+
+        _running = true;
+        _cts = new CancellationTokenSource();
+
+        try
+        {
+            var progress = new Progress<int>(n =>
+            {
+                _filesRead = n;
+                InvokeAsync(StateHasChanged);
+            });
+
+            _result = await Importer.ImportAsync(folder, progress, _cts.Token);
+            _unassigned = await Importer.GetUnassignedDomainsAsync();
+        }
+        catch (Exception ex)
+        {
+            _problem = ex.Message;
+        }
+        finally
+        {
+            _running = false;
+            _cts?.Dispose();
+            _cts = null;
+        }
+    }
+
+    private void Cancel() => _cts?.Cancel();
+
+    private static string Summary(ImportResult r)
+    {
+        if (r.Stored == 0 && r.AlreadyStored > 0)
+        {
+            return "Nothing new: every report in that folder was already stored.";
+        }
+
+        if (r.Stored == 0)
+        {
+            return r.FilesSeen == 0
+                ? "That folder is empty."
+                : "No reports found. The files there are not DMARC or TLS reports this can read.";
+        }
+
+        return $"Stored {r.Stored:N0} report(s).";
+    }
+}

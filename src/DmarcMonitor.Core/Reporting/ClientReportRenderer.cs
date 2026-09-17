@@ -196,6 +196,15 @@ public static class ClientReportRenderer
 
         foreach (var s in sources)
         {
+            // Two different things sit in this table. A third-party service
+            // names the domain it signs as; one of the client's own paths
+            // signs as the client and simply breaks sometimes, and has no
+            // other domain to name. An empty cell there reads as missing data
+            // rather than as the answer.
+            var signedAs = s.Authenticated
+                ? $"""<td class="mono">{E(s.AuthenticatedFor)}</td>"""
+                : """<td class="muted">your own sending path, signature broken in transit</td>""";
+
             // Both figures, because "1 at risk" on its own reads as a service
             // that sent one message rather than one that mostly works.
             html.Append(CultureInfo.InvariantCulture, $"""
@@ -203,7 +212,7 @@ public static class ClientReportRenderer
                       <td class="mono">{E(s.SourceIp)}</td>
                       <td class="n">{N(s.Messages)}</td>
                       <td class="n">{N(s.Failing)}</td>
-                      <td class="mono">{E(s.AuthenticatedFor)}</td>
+                      {signedAs}
                     </tr>
 
                 """);

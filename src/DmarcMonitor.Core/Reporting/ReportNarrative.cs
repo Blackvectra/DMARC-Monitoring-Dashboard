@@ -70,13 +70,19 @@ public static class ReportNarrative
 
         if (impersonating.Count > 0)
         {
-            var blocked = report.MessagesActedOn;
+            // No second figure in this sentence. It used to finish with the
+            // count of everything acted on across every enforcing domain,
+            // introduced as "of those" - which includes the client's OWN
+            // misconfigured mail, so the report read "210 of those" directly
+            // after naming 137. A number larger than the one it claims to be
+            // part of is the kind of thing a client spots immediately, and
+            // then nothing else in the document is believed.
             points.Add(
                 $"{Count(impersonating.Sum(s => s.Failing))} message(s) from {impersonating.Count} source(s) "
                 + "were sent by someone who is not you and could not prove otherwise"
-                + (blocked > 0
-                    ? $". Because your domains enforce DMARC, {Count(blocked)} of those were refused or sent to junk "
-                      + "by the receiving mail provider rather than landing in an inbox."
+                + (report.Domains.Any(d => d.IsEnforcing)
+                    ? ". Because your domains enforce DMARC, they were refused or sent to junk by the "
+                      + "receiving mail provider rather than landing in an inbox."
                     : ". Your domains are not yet enforcing, so these were delivered normally."));
 
             var shared = impersonating.Where(s => s.OtherClientsAffected > 0).ToList();

@@ -11,4 +11,14 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      db/schema.sql stays the readable source of truth in the repository; this
+      compiles a copy in so a published binary can create a database on a
+      machine with no checkout. LogicalName pins the resource name, so moving
+      the file does not silently change the lookup in DatabaseSchema.
+    -->
+    <EmbeddedResource Include="..\..\db\schema.sql" LogicalName="schema.sql" />
+  </ItemGroup>
+
 </Project>

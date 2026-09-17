@@ -8,13 +8,19 @@ public static class InitDbCommand
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
-        var schemaPath = Args.Value(args, "--schema") ?? FindSchema();
 
-        if (schemaPath is null || !File.Exists(schemaPath))
+        // A named --schema is an explicit instruction and must not be silently
+        // replaced by the built-in copy: somebody pointing at a file is
+        // usually testing a change to it, and quietly using a different
+        // schema would be the hardest kind of bug to see.
+        var schemaPath = Args.Value(args, "--schema");
+        if (schemaPath is not null && !File.Exists(schemaPath))
         {
-            Console.Error.WriteLine("Could not find db/schema.sql. Point at it with --schema <path>.");
+            Console.Error.WriteLine($"No schema file at {schemaPath}.");
             return 66;
         }
+
+        schemaPath ??= FindSchema();
 
         // Refuse rather than overwrite. Re-running the schema against a
         // populated database would fail partway through and leave it in an
@@ -33,7 +39,11 @@ public static class InitDbCommand
             return 73;   // EX_CANTCREAT
         }
 
-        var schema = await File.ReadAllTextAsync(schemaPath, ct).ConfigureAwait(false);
+        // No file anywhere means this is a published binary rather than a
+        // checkout, and the compiled-in copy is the right answer.
+        var schema = schemaPath is null
+            ? DatabaseSchema.Sql
+            : await File.ReadAllTextAsync(schemaPath, ct).ConfigureAwait(false);
 
         try
         {

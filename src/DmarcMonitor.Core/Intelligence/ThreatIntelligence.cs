@@ -28,8 +28,15 @@ public sealed record ThreatIndicator
     public DateTimeOffset LastSeen { get; init; }
 
     public int ClientCount { get; init; }
-    public int DomainCount { get; init; }
     public long MessageCount { get; init; }
+
+    /// <summary>
+    /// How many domains this was seen against. Derived from the names rather
+    /// than stored beside them, so a headline saying "3 domain(s)" cannot sit
+    /// above a list of four - which is what happened when the count came from
+    /// a windowed aggregate and the names came from an unwindowed lookup.
+    /// </summary>
+    public int DomainCount => Domains.Count;
 
     public bool EverAuthenticated { get; init; }
 
@@ -101,10 +108,28 @@ public enum IndicatorConfidence { NotAThreat, Low, Medium, High, Confirmed }
 /// <summary>Fleet-wide numbers, for the operator rather than for a client.</summary>
 public sealed record FleetSummary
 {
+    /// <summary>
+    /// How many days the message figures cover.
+    /// </summary>
+    /// <remarks>
+    /// The counts of clients and domains are current, while the message totals
+    /// are windowed. Printing both without saying which is which invites an
+    /// operator to reconcile them against each other and find they do not add
+    /// up, so the window travels with the numbers.
+    /// </remarks>
+    public int WindowDays { get; init; } = 30;
+
     public int Clients { get; init; }
     public int Domains { get; init; }
     public int DomainsEnforcing { get; init; }
     public int DomainsAtNone { get; init; }
+    /// <summary>
+    /// Domains not heard from recently, whether they ever were.
+    /// </summary>
+    /// <remarks>
+    /// The same threshold the triage list uses, so the headline and the list
+    /// cannot disagree about whether a domain has gone quiet.
+    /// </remarks>
     public int DomainsSilent { get; init; }
 
     public long Messages { get; init; }
@@ -186,7 +211,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
             INSERT INTO threat_indicators
               (id, tenant_id, indicator_type, value, first_seen, last_seen,
                client_count, domain_count, message_count,
-               ever_authenticated, attempted_forgery, forged_selectors, updated_at)
+               ever_authenticated, attempted_forgery, forged_selectors, domains, updated_at)
             SELECT
               lower(hex(randomblob(16))),
               r.tenant_id,
@@ -199,14 +224,37 @@ public sealed class ThreatIntelligenceService(string databasePath)
               SUM(r.message_count),
               MAX(CASE WHEN r.dkim_auth_result = 'pass' OR r.spf_auth_result = 'pass' THEN 1 ELSE 0 END),
               -- Forgery: signed AS the domain it was sending as, and failed.
+              -- Forgery: signed AS the domain it was sending as, failed, and
+              -- has NEVER signed successfully for that domain from this
+              -- address. The last clause is what keeps a relay out of it. A
+              -- mail gateway carrying a customer's own outbound signs as the
+              -- customer and breaks a proportion of its own signatures in
+              -- transit, which looks identical to forgery row by row. Judged
+              -- on the whole address, the two separate cleanly: a relay also
+              -- produces passing signatures for that same domain, and a
+              -- forger never does.
               MAX(CASE WHEN r.dkim_auth_result = 'fail'
                         AND r.dkim_domain IS NOT NULL
-                        AND r.dkim_domain = r.header_from THEN 1 ELSE 0 END),
+                        AND r.dkim_domain = r.header_from
+                        AND NOT EXISTS (
+                              SELECT 1 FROM aggregate_records ok
+                               WHERE ok.source_ip = r.source_ip
+                                 AND ok.dkim_domain = r.dkim_domain
+                                 AND ok.dkim_auth_result = 'pass')
+                       THEN 1 ELSE 0 END),
               GROUP_CONCAT(DISTINCT CASE WHEN r.dkim_auth_result = 'fail'
                                           AND r.dkim_domain = r.header_from
+                                          AND NOT EXISTS (
+                                                SELECT 1 FROM aggregate_records ok
+                                                 WHERE ok.source_ip = r.source_ip
+                                                   AND ok.dkim_domain = r.dkim_domain
+                                                   AND ok.dkim_auth_result = 'pass')
                                          THEN r.dkim_selector END),
+              -- Same pass, same window, same rows as domain_count above.
+              GROUP_CONCAT(DISTINCT d.name),
               $now
             FROM aggregate_records r
+            JOIN domains d ON d.id = r.domain_id
             WHERE r.dmarc_result = 'fail'
               AND r.date_begin >= $since
               AND (r.override_reason IS NULL OR r.override_reason = '')
@@ -220,6 +268,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
               ever_authenticated= excluded.ever_authenticated,
               attempted_forgery = excluded.attempted_forgery,
               forged_selectors  = excluded.forged_selectors,
+              domains           = excluded.domains,
               updated_at        = excluded.updated_at
             -- classification, classified_by, classified_at and notes are NOT
             -- touched: a human's judgement must survive a refresh.
@@ -244,10 +293,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
             SELECT i.value, i.indicator_type, i.first_seen, i.last_seen,
                    i.client_count, i.domain_count, i.message_count,
                    i.ever_authenticated, i.attempted_forgery, i.forged_selectors,
-                   i.classification, COALESCE(i.notes, ''),
-                   (SELECT GROUP_CONCAT(DISTINCT d.name)
-                      FROM aggregate_records r JOIN domains d ON d.id = r.domain_id
-                     WHERE r.source_ip = i.value AND r.dmarc_result = 'fail')
+                   i.classification, COALESCE(i.notes, ''), i.domains
             FROM threat_indicators i
             {(includeDismissed ? "" : "WHERE i.classification NOT IN ('known_good','ignored')")}
             ORDER BY i.attempted_forgery DESC, i.client_count DESC, i.message_count DESC
@@ -265,7 +311,6 @@ public sealed class ThreatIntelligenceService(string databasePath)
                 FirstSeen = ParseDate(reader.GetString(2)),
                 LastSeen = ParseDate(reader.GetString(3)),
                 ClientCount = reader.GetInt32(4),
-                DomainCount = reader.GetInt32(5),
                 MessageCount = reader.GetInt64(6),
                 EverAuthenticated = reader.GetInt32(7) == 1,
                 AttemptedForgery = reader.GetInt32(8) == 1,
@@ -313,7 +358,10 @@ public sealed class ThreatIntelligenceService(string databasePath)
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT
-              (SELECT COUNT(*) FROM clients WHERE deleted_at IS NULL),
+              -- Unassigned is where domains wait to be onboarded, not a
+              -- customer. Counting it inflates the number an operator would
+              -- quote, and it is the one client that can never be billed.
+              (SELECT COUNT(*) FROM clients WHERE deleted_at IS NULL AND slug <> 'unassigned'),
               (SELECT COUNT(*) FROM domains WHERE deleted_at IS NULL AND is_active = 1),
               (SELECT COUNT(*) FROM (
                  SELECT d.id, (SELECT ar.policy_p FROM aggregate_reports ar
@@ -325,9 +373,16 @@ public sealed class ThreatIntelligenceService(string databasePath)
                                 WHERE ar.domain_id = d.id ORDER BY ar.date_end DESC LIMIT 1) AS p
                    FROM domains d WHERE d.deleted_at IS NULL AND d.is_active = 1)
                 WHERE p = 'none'),
+              -- Silent means "has stopped being reported on", not "never
+              -- was". Counting only the latter said 0 while five of ten
+              -- domains had not been heard from for between 14 and 128 days,
+              -- so the headline read as calm while half the fleet had gone
+              -- dark. A domain that never reported still counts: its last
+              -- report is missing rather than merely old.
               (SELECT COUNT(*) FROM domains d
                 WHERE d.deleted_at IS NULL AND d.is_active = 1
-                  AND NOT EXISTS (SELECT 1 FROM aggregate_reports ar WHERE ar.domain_id = d.id)),
+                  AND COALESCE((SELECT MAX(ar.date_end) FROM aggregate_reports ar
+                                 WHERE ar.domain_id = d.id), '') < $silentBefore),
               (SELECT COALESCE(SUM(message_count), 0) FROM aggregate_records WHERE date_begin >= $since),
               (SELECT COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0)
                  FROM aggregate_records WHERE date_begin >= $since),
@@ -338,6 +393,9 @@ public sealed class ThreatIntelligenceService(string databasePath)
               (SELECT COUNT(*) FROM threat_indicators WHERE attempted_forgery = 1 AND classification NOT IN ('known_good','ignored'))
             """;
         command.Parameters.AddWithValue("$since", since);
+        command.Parameters.AddWithValue(
+            "$silentBefore",
+            Iso(DateTimeOffset.UtcNow.AddDays(-Rollout.RolloutAssessment.SilentDays)));
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return new FleetSummary(); }
@@ -347,6 +405,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
 
         return new FleetSummary
         {
+            WindowDays = days,
             Clients = reader.GetInt32(0),
             Domains = reader.GetInt32(1),
             DomainsEnforcing = reader.GetInt32(2),

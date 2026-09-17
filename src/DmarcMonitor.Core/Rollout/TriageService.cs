@@ -1,11 +1,7 @@
 using System.Globalization;
-using DmarcMonitor.Core.Rollout;
 using Microsoft.Data.Sqlite;
 
-namespace DmarcMonitor.Web.Data;
-
-/// <summary>Where the SQLite file is, so pages can say so when it is empty.</summary>
-public sealed record DatabaseInfo(string Path);
+namespace DmarcMonitor.Core.Rollout;
 
 public sealed record DomainTriage
 {
@@ -56,9 +52,16 @@ public sealed record DomainTriage
 /// So this ranks rather than averages, and every row carries the one next
 /// action rather than a number to interpret.
 /// </summary>
-public sealed class TriageService(ReportStoreConnection connection)
+public sealed class TriageService(string databasePath)
 {
-    private readonly ReportStoreConnection _connection = connection;
+    // Its own read-only connection, like the rest of Core. Ranking the fleet
+    // is domain logic, not presentation: it decides what an operator looks at
+    // first, which is too load-bearing to sit where it cannot be tested.
+    private readonly string _connectionString = new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadOnly,
+    }.ToString();
 
     /// <param name="days">Window to judge on. Long enough to be stable, short enough to be current.</param>
     public async Task<IReadOnlyList<DomainTriage>> GetAsync(int days = 14, CancellationToken ct = default)
@@ -66,7 +69,8 @@ public sealed class TriageService(ReportStoreConnection connection)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = await _connection.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         // Left join so a domain with no reports still appears. A domain that

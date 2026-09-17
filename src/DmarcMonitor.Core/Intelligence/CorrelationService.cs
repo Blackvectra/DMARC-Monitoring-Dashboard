@@ -1,6 +1,7 @@
 using System.Globalization;
+using Microsoft.Data.Sqlite;
 
-namespace DmarcMonitor.Web.Data;
+namespace DmarcMonitor.Core.Intelligence;
 
 /// <summary>A sending source seen failing authentication, possibly across several clients.</summary>
 public sealed record FailingSource
@@ -23,6 +24,22 @@ public sealed record FailingSource
     /// </remarks>
     public IReadOnlyList<string> AuthenticatedFor { get; init; } = [];
 
+    /// <summary>
+    /// How many of the domains it fails against it has also passed for.
+    /// </summary>
+    public int DomainsAlsoPassed { get; init; }
+
+    /// <summary>
+    /// A real sending path for every domain it touches.
+    /// </summary>
+    /// <remarks>
+    /// Passing is the thing a forger cannot do, since it does not hold the
+    /// signing key - but only for the domain it passed FOR. Requiring every
+    /// domain keeps an address that genuinely carries one client from being
+    /// cleared of forging the rest, which is what a fleet-wide test did.
+    /// </remarks>
+    public bool IsOwnSendingPath => DomainCount > 0 && DomainsAlsoPassed >= DomainCount;
+
     public int DomainCount => Domains.Count;
     public int ClientCount => Clients.Count;
 
@@ -37,7 +54,11 @@ public sealed record FailingSource
     /// client's invoices.
     /// </summary>
     public SourceVerdict Verdict =>
-        !AuthenticatedNothing ? SourceVerdict.Misconfigured
+        // Being a real sending path outranks what any individual failing row
+        // looks like. Judging on the failing rows alone put a customer's own
+        // relay under cross-client impersonation against seven of their
+        // clients.
+        IsOwnSendingPath || !AuthenticatedNothing ? SourceVerdict.Misconfigured
         : IsCrossClient ? SourceVerdict.CrossClientImpersonation
         : SourceVerdict.Unauthenticated;
 }
@@ -66,9 +87,19 @@ public enum SourceVerdict
 /// while the same source against three unrelated clients is somebody running a
 /// campaign.
 /// </summary>
-public sealed class CorrelationService(ReportStoreConnection connection)
+public sealed class CorrelationService(string databasePath)
 {
-    private readonly ReportStoreConnection _connection = connection;
+    // Opens its own read-only connection, like the other services in Core.
+    // Living here rather than beside the page is the point: this classifies a
+    // sending source, which is the same judgement the client report and the
+    // intelligence make, and the three disagreeing about one address is how
+    // the worst bug of the day was found. A rule this load-bearing belongs
+    // where it can be tested.
+    private readonly string _connectionString = new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadOnly,
+    }.ToString();
 
     public async Task<IReadOnlyList<FailingSource>> GetFailingSourcesAsync(
         int days = 30, int limit = 200, CancellationToken ct = default)
@@ -76,7 +107,8 @@ public sealed class CorrelationService(ReportStoreConnection connection)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = await _connection.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         // Overrides are excluded. A mailing list or forwarder breaking
@@ -92,7 +124,23 @@ public sealed class CorrelationService(ReportStoreConnection connection)
               GROUP_CONCAT(DISTINCT
                 CASE WHEN r.spf_auth_result = 'pass' THEN COALESCE(r.spf_domain, '') ELSE '' END
                 || '|' ||
-                CASE WHEN r.dkim_auth_result = 'pass' THEN COALESCE(r.dkim_domain, '') ELSE '' END) AS auth
+                CASE WHEN r.dkim_auth_result = 'pass' THEN COALESCE(r.dkim_domain, '') ELSE '' END) AS auth,
+              -- How many of the domains this address is failing against it
+              -- has ALSO passed for. Per domain, not fleet-wide: 3.231.237.226
+              -- passed twice for one client and signs as three others it has
+              -- never passed for, and a fleet-wide test cleared it entirely.
+              -- Only the failing rows are selected above, so without this the
+              -- query cannot tell a customer's own gateway - which signs for
+              -- them and breaks a share of its signatures in transit - from
+              -- somebody sending as them.
+              (SELECT COUNT(DISTINCT f.domain_id)
+                 FROM aggregate_records f
+                WHERE f.source_ip = r.source_ip
+                  AND f.dmarc_result = 'fail'
+                  AND EXISTS (SELECT 1 FROM aggregate_records p
+                               WHERE p.source_ip = f.source_ip
+                                 AND p.domain_id = f.domain_id
+                                 AND p.dmarc_result = 'pass')) AS domains_also_passed
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             JOIN clients c ON c.id = r.client_id
@@ -130,6 +178,7 @@ public sealed class CorrelationService(ReportStoreConnection connection)
                 Clients = clients,
                 LastSeen = lastSeen,
                 AuthenticatedFor = ParseAuthDomains(reader.IsDBNull(5) ? "" : reader.GetString(5)),
+                DomainsAlsoPassed = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
             });
         }
 

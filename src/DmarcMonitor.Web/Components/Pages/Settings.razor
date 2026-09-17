@@ -1,0 +1,133 @@
+@page "/settings"
+@using DmarcMonitor.Web.Auth
+@using DmarcMonitor.Web.Data
+@inject IConfiguration Configuration
+@inject ReportStoreConnection Db
+@inject ReportUiService ReportUi
+
+<PageTitle>Settings — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Settings</h1>
+        <p class="sub">What this instance is actually configured to do. Read-only: these come from
+           appsettings.json and the environment, so changing them here would be a second source of
+           truth that disagrees with the file after the next restart.</p>
+    </div>
+</header>
+
+@if (!EntraConfigured)
+{
+    @* The one thing on this page worth interrupting somebody for. *@
+    <section class="callout @(LocalModeRemote ? "urgent" : "act")">
+        <h2>@(LocalModeRemote ? "Serving every address with no sign-in" : "No sign-in (local trial mode)")</h2>
+        <p>
+            @if (LocalModeRemote)
+            {
+                <span>
+                    <code>Auth:AllowLocalModeRemotely</code> is set, so anyone who can reach this port can
+                    read every customer's mail data. Turn it off, or configure Microsoft sign-in, before
+                    this is reachable from anywhere but this machine.
+                </span>
+            }
+            else
+            {
+                <span>
+                    Only this machine can reach it. That is fine for a trial and not fine for a shared
+                    install: configure <code>AzureAd</code> to turn on Microsoft sign-in.
+                </span>
+            }
+        </p>
+    </section>
+}
+
+<section>
+    <h2>Sign-in</h2>
+    <table class="triage">
+        <tbody>
+            <tr>
+                <td>Method</td>
+                <td>@(EntraConfigured ? "Microsoft Entra" : "None (local trial mode)")</td>
+            </tr>
+            @if (EntraConfigured)
+            {
+                <tr><td>Tenant</td><td><code>@Show("AzureAd:TenantId")</code></td></tr>
+                <tr><td>Application</td><td><code>@Show("AzureAd:ClientId")</code></td></tr>
+            }
+            else
+            {
+                <tr>
+                    <td>Reachable from</td>
+                    <td>@(LocalModeRemote ? "any address" : "this machine only")</td>
+                </tr>
+            }
+            <tr>
+                <td>Signed in as</td>
+                <td>
+                    <AuthorizeView>
+                        <Authorized>@context.User.Identity?.Name</Authorized>
+                        <NotAuthorized><span class="muted">nobody</span></NotAuthorized>
+                    </AuthorizeView>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</section>
+
+<section>
+    <h2>Database</h2>
+    <table class="triage">
+        <tbody>
+            <tr><td>Path</td><td><code>@Db.Path</code></td></tr>
+            <tr>
+                <td>Present</td>
+                <td>
+                    @if (Db.Exists)
+                    {
+                        <span class="good">yes</span>
+                    }
+                    else
+                    {
+                        @* Absolute path, because "dmarc.db" sends somebody
+                           looking in whichever directory they happen to be in. *@
+                        <span class="bad">no — nothing has been imported yet</span>
+                    }
+                </td>
+            </tr>
+            <tr><td>Opened</td><td>read-only, except onboarding and import</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<section>
+    <h2>Reports</h2>
+    <table class="triage">
+        <tbody>
+            <tr>
+                <td>Provider name</td>
+                <td>
+                    <code>@ReportUi.ProviderName</code>
+                    @if (Configuration["Reporting:ProviderName"] is null or "")
+                    {
+                        <span class="muted"> — not set, so reports say this literally.
+                            Set <code>Reporting:ProviderName</code>.</span>
+                    }
+                </td>
+            </tr>
+            <tr><td>Period</td><td>the last complete calendar month</td></tr>
+        </tbody>
+    </table>
+</section>
+
+@code {
+    private bool EntraConfigured => AuthSetup.IsEntraConfigured(Configuration);
+    private bool LocalModeRemote => AuthSetup.LocalModeAllowedRemotely(Configuration);
+
+    /// <summary>
+    /// Never renders a secret. Identifiers are fine to show and are what an
+    /// operator is checking; a client secret on a settings page is a secret in
+    /// a screenshot in a support ticket.
+    /// </summary>
+    private string Show(string key) =>
+        Configuration[key] is { Length: > 0 } value ? value : "not set";
+}

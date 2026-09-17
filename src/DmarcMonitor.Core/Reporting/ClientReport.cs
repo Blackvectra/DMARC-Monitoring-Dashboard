@@ -130,24 +130,37 @@ public sealed record ClientReport
     /// Sources with nothing failing at all.
     /// </summary>
     /// <remarks>
-    /// Deliberately excludes the misconfigured ones, even though those are
-    /// also the client's own mail. The three buckets go into three tables in
-    /// the report, and a source appearing in two of them with two different
+    /// Deliberately excludes the failing ones, even though those are also the
+    /// client's own mail. The three buckets go into three tables in the
+    /// report, and a source appearing in two of them with two different
     /// message counts reads as a contradiction rather than as nuance.
     /// </remarks>
     public IReadOnlyList<ReportSource> LegitimateSources =>
         [.. Sources.Where(s => s.IsClean).OrderByDescending(s => s.Messages)];
 
     /// <summary>
-    /// Sources that authenticated nothing at all. Either a service nobody
-    /// recorded, or somebody sending as the client.
+    /// Sources that have never once sent authenticated mail for this client.
     /// </summary>
+    /// <remarks>
+    /// A source that has EVER passed for the domain is the client's own mail
+    /// path, whatever a particular failing row looks like: a mail gateway
+    /// signing on the customer's behalf breaks a share of its own signatures
+    /// in transit, and those rows prove nothing on their own. Judging them
+    /// individually put a customer's own relay under "who tried to send mail
+    /// as you" with 177 messages against it - the report accusing the client's
+    /// own infrastructure. Passing even once is the thing a forger cannot do.
+    /// </remarks>
     public IReadOnlyList<ReportSource> ImpersonatingSources =>
-        [.. Sources.Where(s => !s.IsClean && !s.Authenticated).OrderByDescending(s => s.Failing)];
+        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated)
+                   .OrderByDescending(s => s.Failing)];
 
-    /// <summary>Sources that are real services set up unaligned, so mail of theirs is being lost.</summary>
+    /// <summary>
+    /// Real senders losing the client's mail: the client's own paths that
+    /// break sometimes, and third-party services signing as themselves.
+    /// </summary>
     public IReadOnlyList<ReportSource> MisconfiguredSources =>
-        [.. Sources.Where(s => !s.IsClean && s.Authenticated).OrderByDescending(s => s.Failing)];
+        [.. Sources.Where(s => !s.IsClean && (s.Passing > 0 || s.Authenticated))
+                   .OrderByDescending(s => s.Failing)];
 
     /// <summary>
     /// The number that answers "what am I paying for". Messages that failed
