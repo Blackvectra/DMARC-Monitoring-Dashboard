@@ -100,11 +100,18 @@ else
                     <th>Client</th>
                     <th>Slug</th>
                     <th class="num">Domains</th>
-                    <th class="num">Messages</th>
+                    @* Every message ever stored, not the window the triage
+                       list uses. Two pages showing "messages" with different
+                       scopes and no labels is how somebody concludes one of
+                       them is broken. *@
+                    <th class="num">Messages (all time)</th>
                 </tr>
             </thead>
             <tbody>
-                @foreach (var c in _clients)
+                @* Unassigned is shown only while it holds something. An empty
+                   bucket listed among the customers reads as an eleventh
+                   client that nobody can bill. *@
+                @foreach (var c in _clients.Where(c => c.Slug != ReportStore.UnassignedClientSlug || c.Domains > 0))
                 {
                     var unassigned = c.Slug == ReportStore.UnassignedClientSlug;
                     <tr class="@(unassigned && c.Domains > 0 ? "act" : "")">
