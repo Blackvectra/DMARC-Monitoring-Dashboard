@@ -33,7 +33,7 @@ public static class DnsCommand
 
         return action switch
         {
-            "list" => await ListAsync(configs, secrets, ct).ConfigureAwait(false),
+            "list" => await ListAsync(configs, ct).ConfigureAwait(false),
             "set" => await SetAsync(configs, rest, ct).ConfigureAwait(false),
             "remove" => await RemoveAsync(configs, rest, ct).ConfigureAwait(false),
             "test" => await TestAsync(configs, rest, ct).ConfigureAwait(false),
@@ -41,10 +41,10 @@ public static class DnsCommand
         };
     }
 
-    private static async Task<int> ListAsync(DnsProviderConfigs configs, ISecretStore secrets, CancellationToken ct)
+    private static async Task<int> ListAsync(DnsProviderConfigs configs, CancellationToken ct)
     {
         Console.WriteLine();
-        Console.WriteLine($"  Secrets: {secrets.Description}");
+        Console.WriteLine($"  Secrets: {configs.Secrets.Description}");
         Console.WriteLine();
 
         var all = await configs.ListAsync(ct).ConfigureAwait(false);
