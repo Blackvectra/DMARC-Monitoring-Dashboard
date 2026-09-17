@@ -713,7 +713,8 @@ $markers
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0">
                             <Button x:Name="btnRefreshDNS" Content="Refresh" Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,8,0"/>
                             <Button x:Name="btnInspectSPF" Content="SPF + DKIM Inspector" Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,8,0"/>
-                            <Button x:Name="btnSilentCheck" Content="Silent Failure Check" Style="{StaticResource Btn2}" Padding="10,4"/>
+                            <Button x:Name="btnSilentCheck" Content="Silent Failure Check" Style="{StaticResource Btn2}" Padding="10,4" Margin="0,0,8,0"/>
+                            <Button x:Name="btnFlatten" Content="Flatten SPF..." Style="{StaticResource Btn2}" Padding="10,4"/>
                             <TextBlock x:Name="txtDNSCount" Foreground="#484F58" FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0"/>
                         </StackPanel>
                     </Border>
@@ -839,7 +840,7 @@ $markers
 $reader = New-Object System.Xml.XmlNodeReader $mainXaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-foreach ($n in @('bannerModule','bannerCert','txtCertBanner','btnInstallModule','btnRun','btnRefresh','btnSettings','btnSchedule','btnExport','btnGenReport','btnClearLog','txtLog','txtStatus','txtLastRun','txtRunStatus','txtMailboxLabel','txtPSBadge','lbDomains','txtDomainSearch','tabMain','wbOverview','wbSenders','wbTrend','wbGeoMap','wbSPF','dgDMARC','cmbDMARCResult','cmbFailReason','txtDMARCIP','btnDMARCFilter','btnDMARCReset','txtDMARCCount','dgTLS','cmbTLSResult','btnTLSFilter','btnTLSReset','txtTLSCount','dgSources','cmbSrcStatus','cmbSrcService','btnApprove','btnUnapprove','btnAuthorize','btnRefreshSources','txtSourceCount','txtSourceCrumb','dgDNS','btnRefreshDNS','btnInspectSPF','btnSilentCheck','txtDNSCount','dgRUF','btnRefreshRUF','txtRUFCount','cmbTrendPeriod','btnRefreshTrend','dgProtocol','btnRefreshProtocol','txtProtocolCount','dgDrift','cmbDriftType','btnRefreshDrift','txtDriftCount')) {
+foreach ($n in @('bannerModule','bannerCert','txtCertBanner','btnInstallModule','btnRun','btnRefresh','btnSettings','btnSchedule','btnExport','btnGenReport','btnClearLog','txtLog','txtStatus','txtLastRun','txtRunStatus','txtMailboxLabel','txtPSBadge','lbDomains','txtDomainSearch','tabMain','wbOverview','wbSenders','wbTrend','wbGeoMap','wbSPF','dgDMARC','cmbDMARCResult','cmbFailReason','txtDMARCIP','btnDMARCFilter','btnDMARCReset','txtDMARCCount','dgTLS','cmbTLSResult','btnTLSFilter','btnTLSReset','txtTLSCount','dgSources','cmbSrcStatus','cmbSrcService','btnApprove','btnUnapprove','btnAuthorize','btnRefreshSources','txtSourceCount','txtSourceCrumb','dgDNS','btnRefreshDNS','btnInspectSPF','btnSilentCheck','btnFlatten','txtDNSCount','dgRUF','btnRefreshRUF','txtRUFCount','cmbTrendPeriod','btnRefreshTrend','dgProtocol','btnRefreshProtocol','txtProtocolCount','dgDrift','cmbDriftType','btnRefreshDrift','txtDriftCount')) {
     Set-Variable -Name $n -Value $window.FindName($n) -Scope Script
 }
 $txtPSBadge.Text = "PS$($script:PSVer)"
@@ -1220,6 +1221,183 @@ $authBlock
     })
     $win.FindName('btnClose').Add_Click({ $win.Close() })
     $win.ShowDialog() | Out-Null
+}
+
+function Show-SPFFlattenPlan {
+    <#
+        Plans a flattened SPF record for the selected domain and offers to
+        publish it.
+
+        Flattening copies another provider's IP list into the customer's own
+        zone. That buys lookup headroom and takes on a standing obligation:
+        when the provider adds ranges, mail from them starts failing SPF until
+        the record is re-flattened. So the dialog leads with whether it is
+        worth doing at all, not just whether it is safe, and an unrecommended
+        flatten needs a deliberate second click.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Domain,
+        $Owner
+    )
+
+    if (-not (Test-Path $script:RemediationScript)) {
+        [System.Windows.MessageBox]::Show("Invoke-DNSRemediation.ps1 not found.", "Missing", "OK", "Warning") | Out-Null
+        return
+    }
+
+    # The live record, not whatever the last ingest happened to store: the
+    # plan is only meaningful against what is published right now.
+    $currentSpf = ''
+    try {
+        $dns = Resolve-DnsName -Name $Domain -Type TXT -EA Stop
+        $rec = $dns | Where-Object { $_.Strings -match 'v=spf1' } | Select-Object -First 1
+        if ($rec) { $currentSpf = ($rec.Strings -join '') }
+    } catch { $txtLog.AppendText("[WARN] Could not read live SPF for $Domain`: $_`n") }
+
+    if ([string]::IsNullOrWhiteSpace($currentSpf)) {
+        [System.Windows.MessageBox]::Show("$Domain publishes no SPF record, so there is nothing to flatten.", "No SPF record", "OK", "Information") | Out-Null
+        return
+    }
+
+    $txtLog.AppendText("[INFO] Resolving the include chain for $Domain...`n"); $txtLog.ScrollToEnd()
+
+    $plan = $null
+    try {
+        . $script:RemediationScript
+        $plan = New-SPFFlattenPlan -Domain $Domain -CurrentRecord $currentSpf
+    } catch {
+        [System.Windows.MessageBox]::Show("Could not build a flatten plan: $_", "Plan failed", "OK", "Error") | Out-Null
+        return
+    }
+
+    if ($plan.Action -eq 'none' -and @($plan.Blockers).Count -eq 0) {
+        [System.Windows.MessageBox]::Show($plan.Summary, "Nothing to flatten", "OK", "Information") | Out-Null
+        return
+    }
+
+    $cfg      = Get-AllSettings
+    $provCfg  = $null
+    $provInfo = $null
+    try {
+        if ($cfg.WorkingDir) { $provCfg = Get-DNSProviderConfig -WorkingDir $cfg.WorkingDir -Domain $Domain }
+        $provInfo = New-DNSProviderFromConfig -ProviderConfig $provCfg
+    } catch { $txtLog.AppendText("[WARN] Provider lookup: $_`n") }
+
+    $canApply = ($null -ne $provInfo) -and $provInfo.IsAutomatic -and $plan.IsSafe
+
+    $statusColor = if (-not $plan.IsSafe) { '#F85149' } elseif ($plan.IsRecommended) { '#3FB950' } else { '#D29922' }
+    $statusText  = if (-not $plan.IsSafe) { 'REFUSED' } elseif ($plan.IsRecommended) { 'RECOMMENDED' } else { 'NOT RECOMMENDED' }
+
+    $blockHtml = ''
+    if (@($plan.Blockers).Count -gt 0) {
+        $items = (@($plan.Blockers) | ForEach-Object { "<li>$(HtmlEnc $_)</li>" }) -join ''
+        $blockHtml = "<h3 style='color:#F85149;font-size:13px;margin:14px 0 6px'>Blockers</h3><ul style='color:#FFA198;font-size:12px;line-height:1.7;padding-left:18px'>$items</ul>"
+    }
+    $warnHtml = ''
+    if (@($plan.Warnings).Count -gt 0) {
+        $items = (@($plan.Warnings) | ForEach-Object { "<li>$(HtmlEnc $_)</li>" }) -join ''
+        $warnHtml = "<h3 style='color:#D29922;font-size:13px;margin:14px 0 6px'>Before you do this</h3><ul style='color:#E3B341;font-size:12px;line-height:1.7;padding-left:18px'>$items</ul>"
+    }
+    $fromHtml = ''
+    if (@($plan.FlattenedFrom).Count -gt 0) {
+        $items = (@($plan.FlattenedFrom) | ForEach-Object { "<li>$(HtmlEnc $_)</li>" }) -join ''
+        $fromHtml = "<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>Inlined from</h3><ul style='color:#8B949E;font-size:12px;line-height:1.7;padding-left:18px'>$items</ul>"
+    }
+    $keptHtml = ''
+    if (@($plan.PreservedTerms).Count -gt 0) {
+        $items = (@($plan.PreservedTerms) | ForEach-Object { "<li><code>$(HtmlEnc $_)</code> &mdash; resolves against the sending host at evaluation time, so inlining it would narrow who is authorized</li>" }) -join ''
+        $keptHtml = "<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>Kept as-is</h3><ul style='color:#8B949E;font-size:12px;line-height:1.7;padding-left:18px'>$items</ul>"
+    }
+    $diffHtml = if ($plan.NewValue) { @"
+<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>Before</h3>
+<div style='font-family:Consolas,monospace;background:#2D1A1A;border-left:3px solid #F85149;padding:10px;color:#FFA198;font-size:12px;word-break:break-all'>$(HtmlEnc $plan.CurrentValue)</div>
+<h3 style='color:#E6EDF3;font-size:13px;margin:14px 0 6px'>After</h3>
+<div style='font-family:Consolas,monospace;background:#12261E;border-left:3px solid #3FB950;padding:10px;color:#7EE787;font-size:12px;word-break:break-all'>$(HtmlEnc $plan.NewValue)</div>
+<div style='color:#6E7681;font-size:11px;margin-top:5px'>$($plan.NewValue.Length) characters</div>
+"@ } else { '' }
+
+    $pubText = if (-not $plan.IsSafe) {
+        'This plan is refused, so it cannot be published.'
+    } elseif ($canApply) {
+        "$($provInfo.Reason) Re-flatten by $($plan.RefreshBy)."
+    } else {
+        $r = if ($provInfo) { $provInfo.Reason } else { 'No DNS provider is configured for this domain yet.' }
+        "$r Copy the After value into the TXT record for $Domain."
+    }
+
+    $body = @"
+<div style='display:inline-block;background:$statusColor;color:#fff;padding:3px 12px;border-radius:12px;font-size:11px;font-weight:bold;margin-bottom:12px'>$statusText</div>
+<div style='color:#CDD9E5;font-size:13px;margin-bottom:8px'>$(HtmlEnc $plan.Summary)</div>
+<div style='color:#8B949E;font-size:12px;line-height:1.6;margin-bottom:10px'>$(HtmlEnc $plan.Recommendation)</div>
+<div style='color:#6E7681;font-size:12px'>DNS lookups: <b style='color:#E6EDF3'>$($plan.LookupsBefore)</b> &rarr; <b style='color:#E6EDF3'>$($plan.LookupsAfter)</b> of 10 (RFC 7208)</div>
+$diffHtml
+$blockHtml
+$warnHtml
+$fromHtml
+$keptHtml
+<h3 style='color:#E6EDF3;font-size:13px;margin:16px 0 6px'>Publishing</h3>
+<div style='color:#8B949E;font-size:12px;line-height:1.6'>$(HtmlEnc $pubText)</div>
+"@
+
+    $xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Flatten SPF" Height="640" Width="780" Background="#0D1117" WindowStartupLocation="CenterOwner">
+  <Grid>
+    <Grid.RowDefinitions><RowDefinition Height="56"/><RowDefinition Height="*"/><RowDefinition Height="50"/></Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,0,0,1">
+      <StackPanel Margin="20,9">
+        <TextBlock Foreground="#E6EDF3" FontSize="15" FontWeight="SemiBold" Text="Flatten SPF record"/>
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,3,0,0" Text="$([System.Net.WebUtility]::HtmlEncode($Domain))"/>
+      </StackPanel>
+    </Border>
+    <WebBrowser Grid.Row="1" x:Name="wbFlat"/>
+    <Border Grid.Row="2" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,1,0,0">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="20,8">
+        <Button x:Name="btnFlatCopy" Content="Copy New Record" Width="150" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D" Margin="0,0,8,0"/>
+        <Button x:Name="btnFlatApply" Content="Apply to DNS" Width="120" Height="28" Background="#238636" Foreground="#FFFFFF" BorderBrush="#2EA043" Margin="0,0,8,0" IsEnabled="$(if ($canApply) { 'True' } else { 'False' })"/>
+        <Button x:Name="btnFlatClose" Content="Close" Width="80" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D"/>
+      </StackPanel>
+    </Border>
+  </Grid>
+</Window>
+"@
+
+    $fw = [Windows.Markup.XamlReader]::Parse($xaml)
+    if ($Owner) { $fw.Owner = $Owner }
+    $wbFlat = $fw.FindName('wbFlat')
+    Set-WBSilent $wbFlat
+    $tmp = [System.IO.Path]::GetTempPath() + "dmarcmonitor_flatten.html"
+    "<!DOCTYPE html><html><head><meta http-equiv='X-UA-Compatible' content='IE=edge'><meta charset='UTF-8'><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0D1117;color:#E6EDF3;font-family:Segoe UI,Arial;padding:18px;overflow-y:auto;line-height:1.5}code{background:#21262D;padding:1px 4px;border-radius:3px}</style></head><body>$body</body></html>" |
+        Set-Content $tmp -Encoding UTF8
+    $wbFlat.Navigate("file:///$($tmp.Replace('\','/'))")
+
+    $newVal = $plan.NewValue
+    $fw.FindName('btnFlatCopy').Add_Click({
+        if ($newVal) {
+            try { Set-Clipboard -Value $newVal; $txtStatus.Text = 'Flattened SPF record copied'; $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen } catch {}
+        }
+    }.GetNewClosure())
+
+    $fw.FindName('btnFlatApply').Add_Click({
+        # An unrecommended flatten is safe but usually not worth it, so it
+        # takes a deliberate extra confirmation rather than being blocked
+        # outright: an operator adding five senders next week has a reason.
+        if (-not $plan.IsRecommended) {
+            $ask = [System.Windows.MessageBox]::Show(
+                "$($plan.Recommendation)`n`nFlatten anyway?",
+                "Not recommended", "YesNo", "Warning")
+            if ($ask -ne 'Yes') { return }
+        }
+        $confirm = [System.Windows.MessageBox]::Show(
+            "Publish the flattened record to $Domain now?`n`nThis copies $($plan.FlattenedFrom.Count) provider IP list(s) into your zone. Re-flatten by $($plan.RefreshBy) or mail from newly-added ranges will start failing.`n`nAfter:`n$($plan.NewValue)",
+            "Confirm DNS change", "YesNo", "Warning")
+        if ($confirm -ne 'Yes') { return }
+        Invoke-DNSPlanApply -Plan $plan -ProviderInfo $provInfo -Domain $Domain -Window $fw
+    }.GetNewClosure())
+
+    $fw.FindName('btnFlatClose').Add_Click({ $fw.Close() }.GetNewClosure())
+    $fw.ShowDialog() | Out-Null
 }
 
 function Show-DNSProviderDialog {
@@ -2377,6 +2555,13 @@ $cmbSrcStatus.Add_SelectionChanged({ Refresh-Sources })
 $btnRefreshDNS.Add_Click({ Refresh-DNSHealth })
 $btnInspectSPF.Add_Click({ Invoke-SPFInspection })
 $btnSilentCheck.Add_Click({ Invoke-SilentFailureCheck })
+$btnFlatten.Add_Click({
+    if ($script:SelectedDomain -eq "All Domains") {
+        [System.Windows.MessageBox]::Show("Select a specific domain in the sidebar first.", "Domain Required", "OK", "Information") | Out-Null
+        return
+    }
+    Show-SPFFlattenPlan -Domain $script:SelectedDomain -Owner $window
+})
 $btnRefreshRUF.Add_Click({ Refresh-RUFData })
 $btnRefreshTrend.Add_Click({ Refresh-TrendChart })
 $cmbTrendPeriod.Add_SelectionChanged({ Refresh-TrendChart })
