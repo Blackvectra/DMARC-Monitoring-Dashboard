@@ -47,8 +47,9 @@ public static class ReportNarrative
                 Points =
                 [
                     "Receiving mail providers send these reports daily, so a month with none usually means "
-                        + "the DMARC record has been changed or removed, or a domain has stopped sending mail.",
-                    $"{Opening(report.ProviderName)} is looking into it. No action is needed from you.",
+                        + "one of three things: the DMARC record was changed or removed, the domain stopped "
+                        + "sending mail, or the collection on our side stopped.",
+                    $"{Opening(report.ProviderName)} is checking all three. No action is needed from you.",
                 ],
             };
         }

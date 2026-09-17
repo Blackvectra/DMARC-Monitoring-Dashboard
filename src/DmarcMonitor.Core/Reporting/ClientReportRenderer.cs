@@ -102,12 +102,14 @@ public static class ClientReportRenderer
 
         foreach (var d in report.Domains)
         {
-            var status = d.Policy switch
-            {
-                "reject" => "Protected - failing mail is refused",
-                "quarantine" => "Protected - failing mail goes to junk",
-                _ => "Monitoring only - not yet protected",
-            };
+            var status = !d.PolicyKnown
+                ? "Not known - no reports had reached us by then"
+                : d.Policy switch
+                {
+                    "reject" => "Protected - failing mail is refused",
+                    "quarantine" => "Protected - failing mail goes to junk",
+                    _ => "Monitoring only - not yet protected",
+                };
 
             // A domain that sent nothing has no percentage worth printing; 0%
             // would read as total failure rather than as no mail.

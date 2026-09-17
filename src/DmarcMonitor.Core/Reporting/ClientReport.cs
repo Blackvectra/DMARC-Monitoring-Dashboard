@@ -81,6 +81,18 @@ public sealed record ReportChange
 public sealed record ReportDomainHealth
 {
     public required string Domain { get; init; }
+
+    /// <summary>
+    /// False when no report reached us at or before this period.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from p=none. One says the domain was published without
+    /// protection, the other says nobody told us either way, and printing the
+    /// first when the second is true puts a claim in a customer's report that
+    /// nothing supports.
+    /// </remarks>
+    public bool PolicyKnown { get; init; } = true;
+
     public string Policy { get; init; } = "none";
     public string SubdomainPolicy { get; init; } = "";
     public int Pct { get; init; } = 100;
