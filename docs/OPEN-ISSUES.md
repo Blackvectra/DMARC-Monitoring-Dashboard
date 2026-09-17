@@ -136,25 +136,52 @@ both restore identically.
 
 ---
 
-## 5. Corpus gaps
+## 5. Data parsed and stored, then never used
 
-**Area** `src/DmarcMonitor.Core.Tests/Fixtures/`
-**Severity** Medium. These are the report shapes we have never parsed.
+**Area** `src/DmarcMonitor.Core/Aggregate/`, `src/DmarcMonitor.Core/Storage/`
+**Severity** Low. Nothing is wrong; something useful is sitting unused.
 
-- **No forensic/RUF reports at all.** The parser exists; nothing has exercised
-  it against a real one.
-- **No TLS reports with failures.** Every TLS fixture is a clean day, so the
-  failure wording has never been seen.
-- **No `<reason>` policy overrides.** Forwarders and mailing lists produce
-  these constantly in the wild, and the code excludes overridden rows from
-  intelligence on the assumption they are noise. That assumption is untested.
-- **Receivers never seen:** Proofpoint, Barracuda, Fastmail, ProtonMail, Zoho,
-  GoDaddy, Rackspace, and any non-Western provider.
+`envelope_from` is parsed, stored on every record, and never read back out.
+On the live corpus 14,937 of 20,465 records carry one, and it is what makes a
+sender identifiable:
 
-**How to fix.** Collect from the re-run export (issue 1), which will have
-roughly three more months of traffic, and add the unusual ones as fixtures.
+| envelope_from | what it is |
+|---|---|
+| `bounce.myngp.com` | NGP VAN, 7,889 messages for one client |
+| `em318306.nrgtechservices.com` | SendGrid |
+| `psm.knowbe4.com` | KnowBe4 security-awareness training |
 
----
+"Signed as `training.knowbe4.com`" is harder to act on than "bounces to
+`psm.knowbe4.com`", and the report currently shows only the former.
+
+**How to fix.** Carry it onto `ReportSource` from the failing rows, the same
+way `AuthenticatedFor` is, and show it beside "signed as" in the table of the
+client's own mail that is at risk.
+
+One value needs handling first: 933 messages carry an `envelope_from` of
+`<>`, the null return path used for bounces and delivery notifications. It
+survives `NormaliseDomain` unchanged and would render literally. Dormant while
+nothing reads the field; visible the moment something does.
+
+`discovery_method` and `testing` arrive in DMARCbis reports and are ignored.
+Neither is worth storing yet.
+
+### Corpus gaps, revisited
+
+The earlier version of this section guessed. Measured against all 1,687
+reports:
+
+- **Policy overrides: present after all.** 40 of them, 23 `forwarded` and 17
+  `local_policy`. The claim that there were none was wrong, and finding them
+  is what exposed the totals-versus-tables gap.
+- **TLS reports: 35, all MTA-STS, no failures.** The guess was right. The
+  useful part turned out to be the mode rather than the failures: two domains
+  publish in `testing`, which the report now says.
+- **DMARCbis: already arriving.** Four reports use the
+  `urn:ietf:params:xml:ns:dmarc-2.0` namespace and parse correctly.
+- **Still absent:** forensic/RUF reports, any TLS failure, and receivers
+  outside the eight seen (Proofpoint, Barracuda, Fastmail, ProtonMail, Zoho,
+  GoDaddy, Rackspace, non-Western providers).
 
 ## 6. Nothing has been released yet
 
