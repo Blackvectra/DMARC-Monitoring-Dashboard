@@ -217,11 +217,31 @@ public sealed class ThreatIntelligenceService(string databasePath)
               SUM(r.message_count),
               MAX(CASE WHEN r.dkim_auth_result = 'pass' OR r.spf_auth_result = 'pass' THEN 1 ELSE 0 END),
               -- Forgery: signed AS the domain it was sending as, and failed.
+              -- Forgery: signed AS the domain it was sending as, failed, and
+              -- has NEVER signed successfully for that domain from this
+              -- address. The last clause is what keeps a relay out of it. A
+              -- mail gateway carrying a customer's own outbound signs as the
+              -- customer and breaks a proportion of its own signatures in
+              -- transit, which looks identical to forgery row by row. Judged
+              -- on the whole address, the two separate cleanly: a relay also
+              -- produces passing signatures for that same domain, and a
+              -- forger never does.
               MAX(CASE WHEN r.dkim_auth_result = 'fail'
                         AND r.dkim_domain IS NOT NULL
-                        AND r.dkim_domain = r.header_from THEN 1 ELSE 0 END),
+                        AND r.dkim_domain = r.header_from
+                        AND NOT EXISTS (
+                              SELECT 1 FROM aggregate_records ok
+                               WHERE ok.source_ip = r.source_ip
+                                 AND ok.dkim_domain = r.dkim_domain
+                                 AND ok.dkim_auth_result = 'pass')
+                       THEN 1 ELSE 0 END),
               GROUP_CONCAT(DISTINCT CASE WHEN r.dkim_auth_result = 'fail'
                                           AND r.dkim_domain = r.header_from
+                                          AND NOT EXISTS (
+                                                SELECT 1 FROM aggregate_records ok
+                                                 WHERE ok.source_ip = r.source_ip
+                                                   AND ok.dkim_domain = r.dkim_domain
+                                                   AND ok.dkim_auth_result = 'pass')
                                          THEN r.dkim_selector END),
               -- Same pass, same window, same rows as domain_count above.
               GROUP_CONCAT(DISTINCT d.name),
