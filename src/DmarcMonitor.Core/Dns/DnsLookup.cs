@@ -1,0 +1,178 @@
+using DnsClient;
+using DnsClient.Protocol;
+
+namespace DmarcMonitor.Core.Dns;
+
+/// <summary>
+/// Reads the records a domain actually publishes.
+///
+/// Separate from DnsHygiene so the judging is pure and the network is not:
+/// every rule can be tested against every combination without a resolver, and
+/// this part only has to fetch and be honest about failing.
+///
+/// Being honest about failing is the point. A timeout looks exactly like an
+/// absent record, and an operator told "no DMARC record" for a domain that has
+/// one will publish a second over the top of it.
+/// </summary>
+public sealed class DnsLookup(ILookupClient? client = null)
+{
+    private readonly ILookupClient _client = client ?? new LookupClient(new LookupClientOptions
+    {
+        // A resolver that hangs holds up a run over a whole book of clients.
+        Timeout = TimeSpan.FromSeconds(5),
+        Retries = 2,
+        UseCache = true,
+    });
+
+    public async Task<PublishedRecords> ReadAsync(string domain, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+
+        var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
+
+        try
+        {
+            var apex = await TxtAsync(name, ct).ConfigureAwait(false);
+            var dmarc = await TxtAsync($"_dmarc.{name}", ct).ConfigureAwait(false);
+            var mtaSts = await TxtAsync($"_mta-sts.{name}", ct).ConfigureAwait(false);
+            var tlsRpt = await TxtAsync($"_smtp._tls.{name}", ct).ConfigureAwait(false);
+
+            // Only TXT records that declare themselves SPF count. An apex
+            // holds verification tokens for half a dozen services and none of
+            // them is an SPF record.
+            var spf = apex
+                .Where(t => t.TrimStart().StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var dead = spf.Count > 0
+                ? await DeadIncludesAsync(spf[0], ct).ConfigureAwait(false)
+                : [];
+
+            // The real cost, not the count of terms in this record. An include
+            // spends a lookup and then spends whatever its own record spends,
+            // so a record with four terms can cost far more than four.
+            //
+            // Measured rather than assumed: the large providers vary. Today
+            // spf.protection.outlook.com is a flat list of ip4 and ip6 terms
+            // and costs one, where it used to nest several includes. That is
+            // exactly why this resolves the tree instead of applying a table
+            // of known providers, which would be wrong the month after it was
+            // written.
+            var lookups = spf.Count > 0
+                ? await CountLookupsAsync(spf[0], new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0, ct)
+                    .ConfigureAwait(false)
+                : 0;
+
+            return new PublishedRecords
+            {
+                Domain = name,
+                SpfRecords = spf,
+                DmarcRecord = dmarc.FirstOrDefault(t => t.TrimStart().StartsWith("v=DMARC1", StringComparison.OrdinalIgnoreCase)),
+                MtaStsRecord = mtaSts.FirstOrDefault(t => t.TrimStart().StartsWith("v=STSv1", StringComparison.OrdinalIgnoreCase)),
+                TlsRptRecord = tlsRpt.FirstOrDefault(t => t.TrimStart().StartsWith("v=TLSRPTv1", StringComparison.OrdinalIgnoreCase)),
+                DeadIncludes = dead,
+                SpfLookups = lookups,
+            };
+        }
+        catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
+        {
+            // Absence and failure are different answers and must not be
+            // returned as the same one.
+            return new PublishedRecords { Domain = name, LookupFailed = true };
+        }
+    }
+
+    /// <summary>
+    /// Include targets that resolve to no SPF record.
+    /// </summary>
+    /// <remarks>
+    /// One level only. Following the whole tree would need the full
+    /// evaluation, and a wrong answer here tells somebody to delete an include
+    /// that authorises their mail. One level catches the common case - a
+    /// provider retired, the include left behind - without guessing.
+    /// </remarks>
+    private async Task<List<string>> DeadIncludesAsync(string spfRecord, CancellationToken ct)
+    {
+        var dead = new List<string>();
+
+        foreach (var term in SpfRecord.Parse(spfRecord).Terms)
+        {
+            if (term.Name != "include" || term.Value.Length == 0) { continue; }
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                var txt = await TxtAsync(term.Value, ct).ConfigureAwait(false);
+                if (!txt.Any(t => t.TrimStart().StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase)))
+                {
+                    dead.Add(term.Value);
+                }
+            }
+            catch (DnsResponseException)
+            {
+                // A lookup that errored is not proof the include is dead, and
+                // recommending its removal on that basis could break mail.
+            }
+        }
+
+        return dead;
+    }
+
+    /// <summary>
+    /// Every DNS lookup evaluating this record costs, following includes.
+    /// </summary>
+    /// <remarks>
+    /// Depth-capped and cycle-guarded, because a record that includes itself
+    /// exists in the wild and this must terminate on it rather than count to
+    /// infinity. A lookup that fails stops that branch: counting an
+    /// unreachable include as free would understate the total, and
+    /// overstating it would have somebody delete a working include.
+    /// </remarks>
+    private async Task<int> CountLookupsAsync(
+        string spfRecord, HashSet<string> visited, int depth, CancellationToken ct)
+    {
+        // RFC 7208 caps evaluation depth as well as lookup count. Beyond this
+        // the record is already broken by any measure.
+        if (depth > 10) { return 0; }
+
+        var total = 0;
+
+        foreach (var term in SpfRecord.Parse(spfRecord).Terms)
+        {
+            if (!term.CostsALookup) { continue; }
+            ct.ThrowIfCancellationRequested();
+
+            total++;
+
+            if (term.Name is not ("include" or "redirect") || term.Value.Length == 0) { continue; }
+            if (!visited.Add(term.Value)) { continue; }
+
+            try
+            {
+                var txt = await TxtAsync(term.Value, ct).ConfigureAwait(false);
+                var nested = txt.FirstOrDefault(t => t.TrimStart().StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase));
+                if (nested is not null)
+                {
+                    total += await CountLookupsAsync(nested, visited, depth + 1, ct).ConfigureAwait(false);
+                }
+            }
+            catch (DnsResponseException)
+            {
+                // Unreachable: the term is still counted, its children are not.
+            }
+        }
+
+        return total;
+    }
+
+    private async Task<List<string>> TxtAsync(string name, CancellationToken ct)
+    {
+        var response = await _client.QueryAsync(name, QueryType.TXT, cancellationToken: ct).ConfigureAwait(false);
+
+        // A TXT record longer than 255 characters arrives as several strings
+        // that must be joined with nothing between them. Long SPF records and
+        // DKIM keys are routinely split this way, and joining with a space
+        // corrupts them.
+        return [.. response.Answers.TxtRecords().Select(r => string.Concat(r.Text))];
+    }
+}

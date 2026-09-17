@@ -39,6 +39,7 @@ public static class Program
                 "import" => await ImportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "client" => await ClientCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "report" => await ReportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "check" => await CheckCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
@@ -109,6 +110,15 @@ public static class Program
                 --provider <n>   How to name yourself in the report.
                 --db <path>      Database file. Default: dmarc.db
 
+              check              Read what a domain publishes in DNS and say what is wrong
+                                 with it: SPF lookup limit, dead includes, a record that
+                                 authorises everybody, a policy applied to only part of the
+                                 mail, MTA-STS announced but not enforced. Needs no database,
+                                 so it works on a prospect's domain.
+                --domain <d>     One domain.
+                --all            Every domain in the database.
+                --db <path>      Database file. Default: dmarc.db
+
               intel              Refresh and show what has been learned about sources
                                  impersonating clients, across every domain watched.
                 --db <path>      Database file. Default: dmarc.db
@@ -138,6 +148,7 @@ public static class Program
               dmarc import --from C:\dmarc-export
               dmarc client add --name "Morton, ND"
               dmarc client assign --domain mortonnd.gov --client morton-nd
+              dmarc check --domain example.com
               dmarc ingest --mailbox dmarc@example.com --dry-run
             """);
         return 0;
