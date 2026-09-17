@@ -88,6 +88,20 @@ public sealed record ObservedSending
 
     /// <summary>Messages seen in the window, so a silent domain is not judged on nothing.</summary>
     public long Messages { get; init; }
+
+    /// <summary>
+    /// Days of reports actually held for this domain.
+    /// </summary>
+    /// <remarks>
+    /// The real span, not a configured window. It decides whether "nothing has
+    /// been seen" means anything at all: two days of reports say nothing about
+    /// a service that bills monthly, and quoting a fixed thirty days over two
+    /// days of evidence would be inventing the evidence.
+    /// </remarks>
+    public int WindowDays { get; init; }
+
+    /// <summary>What each include in the SPF record is for, and whether it has sent.</summary>
+    public IReadOnlyList<IncludeUsage> Includes { get; init; } = [];
 }
 
 /// <summary>
@@ -109,6 +123,17 @@ public static class DnsHygiene
 
     /// <summary>Close enough to the cliff that the next include pushes it over.</summary>
     public const int SpfLookupWarnAt = 8;
+
+    /// <summary>
+    /// Reports needed before silence from an include means anything.
+    /// </summary>
+    /// <remarks>
+    /// A full month, because the services that sit in an SPF record and send
+    /// rarely - accounting, payroll, an annual renewal notice - are exactly
+    /// the ones somebody would wrongly delete. Below this the honest finding
+    /// is no finding.
+    /// </remarks>
+    public const int MinimumDaysToJudgeAnInclude = 30;
 
     public static IReadOnlyList<HygieneFinding> Assess(PublishedRecords published, ObservedSending observed)
     {
@@ -135,6 +160,7 @@ public static class DnsHygiene
         var findings = new List<HygieneFinding>();
 
         Spf(findings, published);
+        Includes(findings, observed);
         Dmarc(findings, published);
         TransportSecurity(findings, published, observed);
 
@@ -270,6 +296,46 @@ public static class DnsHygiene
                         + "it is slow, unreliable, and some receivers ignore it.",
                 Fix = "Replace it with the addresses or includes for the services that actually send.",
                 Reference = "RFC 7208 §5.5",
+            });
+        }
+    }
+
+    /// <summary>
+    /// What each include is for, and whether anything has come from it.
+    /// </summary>
+    /// <remarks>
+    /// The one finding here that must never become an instruction. A service
+    /// can be real and legitimately quiet: accounting software that sends at
+    /// quarter end, a payroll provider that sends monthly, a backup alerting
+    /// system that has had nothing to report. Thirty days of silence from any
+    /// of those is normal, and an operator who deletes the include on that
+    /// basis breaks the mail that matters most precisely when it is next sent.
+    ///
+    /// So this states the evidence and the window, names the service, and
+    /// leaves the decision with somebody who knows whether the business still
+    /// uses it. It also counts against the reports rather than against DNS: an
+    /// include seen sending is proven in use, which is the direction of this
+    /// check that CAN be relied on.
+    /// </remarks>
+    private static void Includes(List<HygieneFinding> findings, ObservedSending observed)
+    {
+        // Not enough history to say anything. Silence over a fortnight is
+        // what a monthly service looks like.
+        if (observed.WindowDays < MinimumDaysToJudgeAnInclude) { return; }
+
+        foreach (var include in observed.Includes.Where(i => i.Unused && !i.ResolvedNothing))
+        {
+            findings.Add(new HygieneFinding
+            {
+                Severity = HygieneSeverity.Tidy,
+                Record = "SPF",
+                Problem = $"include:{include.Target} ({include.Service}) authorises "
+                        + $"{include.Ranges.Count} address range(s) and no mail has been seen from any of "
+                        + $"them in the {observed.WindowDays} days of reports held. It still costs a DNS lookup.",
+                Fix = $"Confirm the business no longer uses {include.Service} before removing it. Plenty "
+                    + "of services send monthly or at quarter end, so this is evidence rather than an "
+                    + "instruction, and the safe order is to ask first and edit second.",
+                Reference = "RFC 7208 §4.6.4",
             });
         }
     }

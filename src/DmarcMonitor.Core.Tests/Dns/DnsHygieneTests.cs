@@ -32,8 +32,27 @@ public sealed class DnsHygieneTests
             LookupFailed = failed,
         };
 
-    private static ObservedSending Observed(string mode = "Enforce", bool tls = true) =>
-        new() { MtaStsMode = mode, TlsReportsArriving = tls, Messages = 1000 };
+    private static ObservedSending Observed(
+        string mode = "Enforce",
+        bool tls = true,
+        int windowDays = 90,
+        IReadOnlyList<IncludeUsage>? includes = null) =>
+        new()
+        {
+            MtaStsMode = mode,
+            TlsReportsArriving = tls,
+            Messages = 1000,
+            WindowDays = windowDays,
+            Includes = includes ?? [],
+        };
+
+    private static IncludeUsage Include(string target, long messages, int ranges = 4) => new()
+    {
+        Target = target,
+        Messages = messages,
+        Ranges = [.. Enumerable.Range(0, ranges).Select(i =>
+            new AuthorisedRange(System.Net.IPNetwork.Parse($"192.0.{i}.0/24")))],
+    };
 
     private static IReadOnlyList<HygieneFinding> Assess(
         PublishedRecords? p = null, ObservedSending? o = null) =>
@@ -184,6 +203,78 @@ public sealed class DnsHygieneTests
         var findings = Assess(Published(spf: ["v=spf1 ptr -all"]));
 
         Assert.Contains(findings, f => f.Problem.Contains("ptr mechanism", StringComparison.Ordinal));
+    }
+
+    // ---- includes: evidence, never an instruction -----------------------------
+
+    [Fact]
+    public void AnIncludeNothingHasComeFromIsRaisedWithTheRealSpanOfEvidence()
+    {
+        var findings = Assess(o: Observed(windowDays: 43, includes: [Include("_spf.intacct.com", 0)]));
+
+        var f = Assert.Single(findings, x => x.Problem.Contains("_spf.intacct.com", StringComparison.Ordinal));
+        Assert.Equal(HygieneSeverity.Tidy, f.Severity);
+        Assert.Contains("43 days of reports held", f.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ItNeverTellsAnybodyToDeleteAnInclude()
+    {
+        // The finding that could break a business's mail if it were phrased as
+        // an instruction. A quiet include is evidence to check, not a verdict.
+        var findings = Assess(o: Observed(windowDays: 90, includes: [Include("_spf.intacct.com", 0)]));
+
+        var f = Assert.Single(findings, x => x.Problem.Contains("_spf.intacct.com", StringComparison.Ordinal));
+        Assert.Contains("Confirm the business no longer uses", f.Fix, StringComparison.Ordinal);
+        Assert.Contains("evidence rather than an instruction", f.Fix, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remove include", f.Fix, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(17)]
+    [InlineData(29)]
+    public void SaysNothingAboutAnIncludeOnTooLittleHistory(int days)
+    {
+        // Two live domains hold 17 and 2 days. A service that bills monthly
+        // has sent nothing in either, and saying so would be inventing the
+        // evidence rather than reporting it.
+        var findings = Assess(o: Observed(windowDays: days, includes: [Include("_spf.intacct.com", 0)]));
+
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("_spf.intacct.com", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnIncludeThatIsCarryingMailIsNotMentioned()
+    {
+        var findings = Assess(o: Observed(
+            windowDays: 90,
+            includes: [Include("spf.protection.outlook.com", 4_000)]));
+
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("spf.protection.outlook.com", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnIncludeThatResolvedToNothingIsLeftToTheDeadIncludeCheck()
+    {
+        // Zero ranges means it was never resolved, not that it is unused.
+        // Reporting it here as "no mail seen" would be a second finding about
+        // the same thing, worded as though it had been measured.
+        var findings = Assess(o: Observed(windowDays: 90, includes: [Include("gone.example", 0, ranges: 0)]));
+
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("no mail has been seen", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void NamesTheServiceSoSomebodyKnowsWhatTheyAreBeingAskedAbout()
+    {
+        // "_spf.intacct.com" is not a question a business owner can answer.
+        // "intacct.com" is.
+        var findings = Assess(o: Observed(windowDays: 90, includes: [Include("_spf.intacct.com", 0)]));
+
+        Assert.Contains("(intacct.com)",
+            Assert.Single(findings, f => f.Problem.Contains("_spf.intacct", StringComparison.Ordinal)).Problem,
+            StringComparison.Ordinal);
     }
 
     // ---- DMARC ----------------------------------------------------------------

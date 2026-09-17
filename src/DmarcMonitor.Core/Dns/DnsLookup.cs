@@ -1,3 +1,4 @@
+using System.Net;
 using DnsClient;
 using DnsClient.Protocol;
 
@@ -163,6 +164,84 @@ public sealed class DnsLookup(ILookupClient? client = null)
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// The address ranges an include ends up authorising, includes followed.
+    /// </summary>
+    /// <remarks>
+    /// Only the ip4 and ip6 terms, because those are the ones an observed
+    /// sending address can be tested against. An a or mx term authorises
+    /// whatever those names resolve to today, which is a moving target and
+    /// deliberately not followed: a range missed here shows as "no mail seen",
+    /// and the finding that produces is worded so that absence is never
+    /// treated as permission to delete anything.
+    /// </remarks>
+    public async Task<IReadOnlyList<AuthorisedRange>> RangesAsync(
+        string includeTarget, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(includeTarget);
+
+        var ranges = new List<AuthorisedRange>();
+        await CollectAsync(includeTarget, ranges, new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0, ct)
+            .ConfigureAwait(false);
+
+        return ranges;
+    }
+
+    private async Task CollectAsync(
+        string target, List<AuthorisedRange> into, HashSet<string> visited, int depth, CancellationToken ct)
+    {
+        if (depth > 10 || !visited.Add(target)) { return; }
+
+        string? record;
+        try
+        {
+            var txt = await TxtAsync(target, ct).ConfigureAwait(false);
+            record = txt.FirstOrDefault(t => t.TrimStart().StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (DnsResponseException)
+        {
+            return;
+        }
+
+        if (record is null) { return; }
+
+        foreach (var term in SpfRecord.Parse(record).Terms)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            switch (term.Name)
+            {
+                case "ip4" or "ip6" when TryNetwork(term.Value, out var network):
+                    into.Add(new AuthorisedRange(network));
+                    break;
+
+                case "include" or "redirect" when term.Value.Length > 0:
+                    await CollectAsync(term.Value, into, visited, depth + 1, ct).ConfigureAwait(false);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Parses an ip4/ip6 value, which may or may not carry a prefix length.</summary>
+    private static bool TryNetwork(string value, out IPNetwork network)
+    {
+        network = default;
+        if (value.Length == 0) { return false; }
+
+        // A bare address is a single host, which IPNetwork expresses as a full
+        // length prefix. Without this every ip4:192.0.2.1 term is dropped, and
+        // dropping ranges makes an include look unused.
+        if (!value.Contains('/', StringComparison.Ordinal))
+        {
+            if (!IPAddress.TryParse(value, out var single)) { return false; }
+            var bits = single.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? 128 : 32;
+            network = new IPNetwork(single, bits);
+            return true;
+        }
+
+        return IPNetwork.TryParse(value, out network);
     }
 
     private async Task<List<string>> TxtAsync(string name, CancellationToken ct)

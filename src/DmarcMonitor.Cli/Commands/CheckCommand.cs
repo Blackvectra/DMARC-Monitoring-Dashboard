@@ -1,3 +1,4 @@
+using System.Net;
 using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
@@ -67,6 +68,18 @@ public static class CheckCommand
 
             var published = await lookup.ReadAsync(domain, ct).ConfigureAwait(false);
             var seen = observed.TryGetValue(domain, out var o) ? o : new ObservedSending();
+
+            // Resolve each include to the addresses it authorises and match
+            // them against what has actually sent. Only attempted with a
+            // database: with no reports there is nothing to match against, and
+            // calling an include unused on no evidence is the worst answer
+            // this command could give.
+            if (File.Exists(dbPath))
+            {
+                var (includes, days) = await UsageAsync(lookup, published, dbPath, domain, ct).ConfigureAwait(false);
+                seen = seen with { Includes = includes, WindowDays = days };
+            }
+
             var findings = DnsHygiene.Assess(published, seen);
 
             Console.WriteLine();
@@ -99,6 +112,98 @@ public static class CheckCommand
 
         // Breaking findings exit non-zero so this can gate a pipeline.
         return worst >= (int)HygieneSeverity.Breaking ? 1 : 0;
+    }
+
+    /// <summary>
+    /// What each include authorises, and how much of it has been used.
+    /// </summary>
+    /// <remarks>
+    /// Matched by address rather than by name, because that is the only link
+    /// there is: a report says mail came from 40.107.1.2, never that it came
+    /// from Microsoft. Resolving the include to its ranges and testing
+    /// membership is what turns "this address sent" into "this include is
+    /// carrying mail".
+    /// </remarks>
+    private static async Task<(List<IncludeUsage> Usage, int Days)> UsageAsync(
+        DnsLookup lookup, PublishedRecords published, string dbPath, string domain, CancellationToken ct)
+    {
+        var usage = new List<IncludeUsage>();
+        if (published.SpfRecords.Count == 0) { return (usage, 0); }
+
+        var (sources, days) = await SourcesAsync(dbPath, domain, ct).ConfigureAwait(false);
+        _ = days;
+
+        foreach (var term in SpfRecord.Parse(published.SpfRecords[0]).Terms)
+        {
+            if (term.Name != "include" || term.Value.Length == 0) { continue; }
+            ct.ThrowIfCancellationRequested();
+
+            var ranges = await lookup.RangesAsync(term.Value, ct).ConfigureAwait(false);
+
+            long messages = 0;
+            DateTimeOffset? last = null;
+
+            foreach (var (address, count, seen) in sources)
+            {
+                if (!ranges.Any(r => r.Network.Contains(address))) { continue; }
+
+                messages += count;
+                if (seen > last) { last = seen; }
+            }
+
+            usage.Add(new IncludeUsage
+            {
+                Target = term.Value,
+                Ranges = ranges,
+                Messages = messages,
+                LastSeen = last,
+            });
+        }
+
+        return (usage, days);
+    }
+
+    /// <summary>
+    /// Every address seen sending for this domain, and how many days of
+    /// reports that is drawn from.
+    /// </summary>
+    private static async Task<(List<(IPAddress Address, long Count, DateTimeOffset Seen)> Sources, int Days)>
+        SourcesAsync(string dbPath, string domain, CancellationToken ct)
+    {
+        var sources = new List<(IPAddress, long, DateTimeOffset)>();
+
+        await using var db = new SqliteConnection(
+            new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ToString());
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT r.source_ip, SUM(r.message_count), MAX(r.date_begin) "
+                            + "FROM aggregate_records r JOIN domains d ON d.id = r.domain_id "
+                            + "WHERE d.name = $domain GROUP BY r.source_ip";
+        command.Parameters.AddWithValue("$domain", domain);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            // A report can carry an address this cannot parse. Skipping it
+            // understates an include's use, which is the safe direction: it
+            // produces a "check this" rather than a false all-clear.
+            if (!IPAddress.TryParse(reader.GetString(0), out var address)) { continue; }
+
+            var seen = DateTime.TryParse(reader.GetString(2), out var when)
+                ? new DateTimeOffset(DateTime.SpecifyKind(when, DateTimeKind.Utc))
+                : DateTimeOffset.MinValue;
+
+            sources.Add((address, reader.GetInt64(1), seen));
+        }
+
+        // The real span, so a claim about silence is backed by however much
+        // history there actually is rather than by a constant.
+        var days = sources.Count == 0
+            ? 0
+            : (int)(sources.Max(s => s.Item3) - sources.Min(s => s.Item3)).TotalDays + 1;
+
+        return (sources, days);
     }
 
     private static async Task<(List<string>, Dictionary<string, ObservedSending>)> FromDatabaseAsync(
