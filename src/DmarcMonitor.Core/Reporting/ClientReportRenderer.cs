@@ -48,6 +48,7 @@ public static class ClientReportRenderer
         Misconfigured(html, report);
         Legitimate(html, report);
         Changes(html, report);
+        Overridden(html, report);
         Footer(html, report);
 
         html.Append("</main>\n</body>\n</html>\n");
@@ -310,6 +311,31 @@ public static class ClientReportRenderer
         }
 
         html.Append("    </tbody>\n  </table>\n</section>\n\n");
+    }
+
+    /// <summary>
+    /// Why the tables do not add up to the headline.
+    /// </summary>
+    /// <remarks>
+    /// A client who totals the source tables and finds them short of the
+    /// figure at the top has found something that looks like an error. It is
+    /// not, and the difference is worth naming rather than hiding: forwarded
+    /// mail breaking authentication is normal and is not a sender anybody
+    /// should act on.
+    /// </remarks>
+    private static void Overridden(StringBuilder html, ClientReport report)
+    {
+        if (report.OverriddenMessages <= 0) { return; }
+
+        html.Append(CultureInfo.InvariantCulture, $"""
+            <section>
+              <p class="note">The tables above leave out {N(report.OverriddenMessages)} message(s) that the
+              receiving provider handled under its own rules - usually mail forwarded by a mailing list,
+              which breaks the checks in a way that is expected and not worth acting on. They are counted
+              in the {N(report.Messages)} at the top.</p>
+            </section>
+
+            """);
     }
 
     private static void Footer(StringBuilder html, ClientReport report) =>

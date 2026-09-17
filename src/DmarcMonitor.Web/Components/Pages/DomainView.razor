@@ -206,6 +206,18 @@ else
         </section>
     }
 
+    @if (_detail.OverriddenMessages > 0)
+    {
+        @* The source tables above sum to less than the headline, because
+           forwarded and receiver-overridden traffic is left out of them on
+           purpose. Unexplained that gap reads as arithmetic going wrong. *@
+        <p class="sub">
+            The tables above leave out @_detail.OverriddenMessages.ToString("N0") message(s) the receiving
+            provider overrode - forwarded mail, or its own local policy. Those are counted in the
+            @_detail.Messages.ToString("N0") above but are not a sending source worth acting on.
+        </p>
+    }
+
     <section>
         <h2>Who is reporting</h2>
         <p class="sub">A clean pass rate heard from one receiver is a partial picture, not a verdict.</p>

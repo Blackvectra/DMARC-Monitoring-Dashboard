@@ -115,6 +115,18 @@ public sealed record ClientReport
     public long Passing { get; init; }
     public long Failing { get; init; }
 
+    /// <summary>
+    /// Messages the receiving provider overrode: forwarded, or its own policy.
+    /// </summary>
+    /// <remarks>
+    /// Counted in Messages and deliberately absent from the source tables,
+    /// because a mailing list breaking authentication is expected behaviour
+    /// rather than a finding. That makes the tables sum to less than the
+    /// headline, and a client who adds them up and finds a gap has no way to
+    /// know it was deliberate.
+    /// </remarks>
+    public long OverriddenMessages { get; init; }
+
     public long PreviousMessages { get; init; }
     public long PreviousPassing { get; init; }
 

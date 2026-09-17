@@ -51,6 +51,7 @@ public sealed class ClientReportBuilder(string databasePath)
             Messages = current.Messages,
             Passing = current.Passing,
             Failing = current.Messages - current.Passing,
+            OverriddenMessages = current.Overridden,
             PreviousMessages = previous.Messages,
             PreviousPassing = previous.Passing,
         };
@@ -86,13 +87,20 @@ public sealed class ClientReportBuilder(string databasePath)
         return (reader.GetString(0), reader.GetString(1));
     }
 
-    private static async Task<(long Messages, long Passing)> GetTotalsAsync(
+    private static async Task<(long Messages, long Passing, long Overridden)> GetTotalsAsync(
         SqliteConnection db, string clientId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT COALESCE(SUM(message_count), 0),
-                   COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0)
+                   COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
+                   -- Forwarded and receiver-overridden traffic is counted here
+                   -- and left out of the source tables on purpose, so the
+                   -- tables sum to less than this. Carried alongside so the
+                   -- report can say so rather than leaving a client to notice
+                   -- the arithmetic not working.
+                   COALESCE(SUM(CASE WHEN override_reason IS NOT NULL AND override_reason <> ''
+                                     THEN message_count END), 0)
             FROM aggregate_records
             WHERE client_id = $client AND date_begin >= $from AND date_begin <= $to
             """;
@@ -101,8 +109,8 @@ public sealed class ClientReportBuilder(string databasePath)
         command.Parameters.AddWithValue("$to", Iso(to));
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0); }
-        return (reader.GetInt64(0), reader.GetInt64(1));
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0, 0); }
+        return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
     }
 
     private static async Task<List<ReportDomainHealth>> GetDomainHealthAsync(
