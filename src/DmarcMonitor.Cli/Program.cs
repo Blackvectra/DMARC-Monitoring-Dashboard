@@ -37,6 +37,7 @@ public static class Program
                 "init-db" => await InitDbCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "ingest" => await IngestCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "import" => await ImportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
             };
@@ -81,6 +82,12 @@ public static class Program
                                  works on an archive or on files somebody sent you.
                 --from <folder>  Folder to read, including subfolders.
                 --db <path>      Database file. Default: dmarc.db
+
+              intel              Refresh and show what has been learned about sources
+                                 impersonating clients, across every domain watched.
+                --db <path>      Database file. Default: dmarc.db
+                --export         Print confirmed and high-confidence indicators only,
+                                 one per line, for a firewall or SIEM.
 
               ingest             Read the reporting mailbox and store what arrives.
                 --db <path>            Database file. Default: dmarc.db

@@ -878,6 +878,69 @@ CREATE TABLE spf_flatten_state (
 CREATE INDEX ix_flatten_due ON spf_flatten_state(refresh_by) WHERE is_stale = 0;
 
 
+
+-- ============================================================================
+--  THREAT INTELLIGENCE
+-- ============================================================================
+
+-- What this operator has learned about sources impersonating their clients.
+--
+-- This is the asset an MSP accumulates that a single-tenant tool cannot. Every
+-- client's reports contribute to it, and what is learned from one client
+-- protects every other, including clients onboarded next year who were never
+-- exposed to the source at all.
+--
+-- Derived from aggregate_records and refreshed, NOT hand-maintained: a list
+-- somebody has to remember to update is a list that goes stale and then gets
+-- distrusted. The one thing a human supplies is the classification, because
+-- deciding that a source is a client's own marketing platform rather than an
+-- attacker is a judgement, and getting it wrong in either direction is
+-- expensive.
+CREATE TABLE threat_indicators (
+    id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+
+    indicator_type      TEXT NOT NULL
+                        CHECK (indicator_type IN ('ip','domain','selector')),
+    value               TEXT NOT NULL,
+
+    first_seen          TEXT NOT NULL,
+    last_seen           TEXT NOT NULL,
+
+    -- Reach. client_count is the number that matters: one client is noise,
+    -- several unrelated ones is somebody working through a list.
+    client_count        INTEGER NOT NULL DEFAULT 0,
+    domain_count        INTEGER NOT NULL DEFAULT 0,
+    message_count       INTEGER NOT NULL DEFAULT 0,
+
+    -- Whether it ever authenticated for ANY domain. A source that has never
+    -- authenticated anything anywhere is behaving differently from a real
+    -- service somebody set up unaligned.
+    ever_authenticated  INTEGER NOT NULL DEFAULT 0,
+
+    -- Tried to sign AS a victim domain and failed. This is the strongest
+    -- single signal in the dataset: a misconfigured sender signs as itself,
+    -- while a forger signs as the domain it is pretending to be.
+    attempted_forgery   INTEGER NOT NULL DEFAULT 0,
+    forged_selectors    TEXT,                          -- comma-separated, evidence
+
+    -- Supplied by a human, and the reason this table is worth keeping.
+    -- Classify a source once and every client benefits, forever.
+    classification      TEXT NOT NULL DEFAULT 'suspected'
+                        CHECK (classification IN ('suspected','confirmed_malicious','known_good','ignored')),
+    classified_by       TEXT,
+    classified_at       TEXT,
+    notes               TEXT,
+
+    updated_at          TEXT NOT NULL,
+
+    UNIQUE(tenant_id, indicator_type, value)
+);
+
+CREATE INDEX ix_indicators_reach ON threat_indicators(tenant_id, client_count DESC, message_count DESC);
+CREATE INDEX ix_indicators_class ON threat_indicators(tenant_id, classification);
+
+
 -- ============================================================================
 --  SCHEMA VERSIONING
 -- ============================================================================
@@ -898,6 +961,8 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0004', datetime('now'), 'TLS reports: record the MTA-STS mode in force, so testing is distinguishable from enforce, plus source message provenance');
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0005', datetime('now'), 'Aggregate records: keep the raw SPF and DKIM auth RESULTS, so a forged signature is distinguishable from a misconfigured sender');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0006', datetime('now'), 'Threat indicators: what this operator has learned about sources impersonating their clients, so knowledge from one client protects all of them');
 
 
 -- ============================================================================

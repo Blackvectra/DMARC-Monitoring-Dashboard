@@ -46,6 +46,11 @@ public sealed class CorpusTests
         { "ibd-mimecast-aggregate.xml", "ibdinteriors.com" },
         { "ibd-entoutlook-a-aggregate.xml", "ibdinteriors.com" },
         { "ibd-entoutlook-b-aggregate.xml", "ibdinteriors.com" },
+        { "mor-google-aggregate.xml", "mortonnd.gov" },
+        { "mor-entoutlook-a-aggregate.xml", "mortonnd.gov" },
+        { "mor-entoutlook-b-aggregate.xml", "mortonnd.gov" },
+        { "mor-outlookcom-a-aggregate.xml", "mortonnd.gov" },
+        { "mor-outlookcom-b-aggregate.xml", "mortonnd.gov" },
     };
 
     private static string Fixture(string name) =>
@@ -176,7 +181,7 @@ public sealed class CorpusTests
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        Assert.True(domains.Count >= 6, $"expected several client domains, got: {string.Join(", ", domains)}");
+        Assert.True(domains.Count >= 7, $"expected several client domains, got: {string.Join(", ", domains)}");
     }
 
     [Fact]
@@ -220,6 +225,13 @@ public sealed class CorpusTests
         foreach (var ip in new[] { "107.173.31.196", "35.174.145.124", "3.132.222.232" })
         {
             Assert.Contains(crossClient, kv => kv.Key == ip && kv.Value.Count >= 2);
+        }
+
+        // Two of them reach a third domain, including a government one that is
+        // still at p=none and therefore delivering the forged mail.
+        foreach (var ip in new[] { "35.174.145.124", "3.132.222.232" })
+        {
+            Assert.Contains(crossClient, kv => kv.Key == ip && kv.Value.Count >= 3);
         }
     }
 
