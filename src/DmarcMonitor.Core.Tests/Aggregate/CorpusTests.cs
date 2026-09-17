@@ -13,9 +13,9 @@ namespace DmarcMonitor.Core.Tests.Aggregate;
 /// says they should.
 ///
 /// Receivers so far: google.com, Enterprise Outlook, Outlook.com, Yahoo
-/// (covering yahoo.com, aol.com, rocketmail.com and att.net), gosecure.net
-/// and Mimecast. Client domains: nrgtechservices.com, rivercityboats.com,
-/// lcdgroup.org and wahpeton.com.
+/// (covering yahoo.com, aol.com, rocketmail.com and att.net), gosecure.net,
+/// Mimecast and comcast.net. Client domains: nrgtechservices.com,
+/// rivercityboats.com, lcdgroup.org, wahpeton.com and dmvwrr.com.
 /// </summary>
 public sealed class CorpusTests
 {
@@ -34,6 +34,11 @@ public sealed class CorpusTests
         { "lcd-outlookcom-aggregate.xml", "lcdgroup.org" },
         { "lcd-yahoo-aggregate.xml", "lcdgroup.org" },
         { "wahpeton-google-aggregate.xml", "wahpeton.com" },
+        { "dmv-google-aggregate.xml", "dmvwrr.com" },
+        { "dmv-outlookcom-aggregate.xml", "dmvwrr.com" },
+        { "dmv-comcast-aggregate.xml", "dmvwrr.com" },
+        { "dmv-mimecast-aggregate.xml", "dmvwrr.com" },
+        { "dmv-yahoo-aggregate.xml", "dmvwrr.com" },
     };
 
     private static string Fixture(string name) =>
@@ -153,7 +158,7 @@ public sealed class CorpusTests
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        Assert.True(reporters.Count >= 5, $"expected several distinct receivers, got: {string.Join(", ", reporters)}");
+        Assert.True(reporters.Count >= 7, $"expected several distinct receivers, got: {string.Join(", ", reporters)}");
     }
 
     [Fact]
@@ -164,7 +169,7 @@ public sealed class CorpusTests
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        Assert.True(domains.Count >= 4, $"expected several client domains, got: {string.Join(", ", domains)}");
+        Assert.True(domains.Count >= 5, $"expected several client domains, got: {string.Join(", ", domains)}");
     }
 
     [Fact]
