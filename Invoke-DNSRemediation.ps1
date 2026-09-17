@@ -1054,15 +1054,28 @@ function New-SPFFlattenPlan {
         still counted.
 
         Refuses to produce a record that would not actually help, or that
-        would exceed the length limit. Flattening a record that is already
-        under the cap is reported as unnecessary rather than performed, since
-        the maintenance burden is only worth taking on when it buys something.
+        would exceed the length limit.
+
+        IsSafe and IsRecommended are deliberately separate. IsSafe means
+        publishing this will not break mail. IsRecommended means it is worth
+        doing at all: flattening freezes a third party's IP list into your
+        zone, so a record comfortably under the lookup cap gains nothing and
+        takes on a permanent staleness risk. Folding that judgement into
+        IsSafe would refuse a change that is perfectly safe, and an operator
+        who knows they are about to add five senders has a real reason to
+        flatten early.
+
+    .PARAMETER RecommendAtLookups
+        The lookup count at or above which flattening is worth its
+        maintenance burden. Defaults to 8, matching the point at which DNS
+        health already warns that a record is approaching the cap of 10.
     #>
     param(
         [Parameter(Mandatory)] [string]$Domain,
         [Parameter(Mandatory)] [string]$CurrentRecord,
         [scriptblock]$Resolver,
-        [int]$RefreshDays = 30
+        [int]$RefreshDays = 30,
+        [int]$RecommendAtLookups = 8
     )
 
     $plan = [PSCustomObject]@{
@@ -1078,6 +1091,9 @@ function New-SPFFlattenPlan {
         PreservedTerms  = [System.Collections.Generic.List[string]]::new()
         RefreshBy       = (Get-Date).AddDays($RefreshDays).ToString('yyyy-MM-dd')
         IsSafe          = $false
+        # Worth doing, as opposed to merely harmless. See the note above.
+        IsRecommended   = $false
+        Recommendation  = ''
         Blockers        = [System.Collections.Generic.List[string]]::new()
         Warnings        = [System.Collections.Generic.List[string]]::new()
         Summary         = ''
@@ -1150,6 +1166,24 @@ function New-SPFFlattenPlan {
 
     $plan.IsSafe = ($plan.Blockers.Count -eq 0)
     $plan.Warnings.Add("Flattened records are a point-in-time snapshot. Re-run flattening by $($plan.RefreshBy) or mail from newly-added provider ranges will start failing.")
+
+    # Worth doing? Safe and worth doing are different questions.
+    if (-not $plan.IsSafe) {
+        $plan.IsRecommended  = $false
+        $plan.Recommendation = 'Not applicable: this plan is refused.'
+    } elseif ($plan.LookupsBefore -lt $RecommendAtLookups) {
+        $plan.IsRecommended  = $false
+        $plan.Recommendation =
+            "Not recommended: this record uses $($plan.LookupsBefore) of $script:SPFMaxLookups lookups, " +
+            "comfortably under the cap. Flattening would copy another provider's IP list into your zone and " +
+            "commit you to re-running it whenever they change, in exchange for headroom you are not short of. " +
+            "Worth doing at $RecommendAtLookups or more, or ahead of adding several senders at once."
+    } else {
+        $plan.IsRecommended  = $true
+        $plan.Recommendation =
+            "Recommended: at $($plan.LookupsBefore) of $script:SPFMaxLookups lookups this record is close enough " +
+            "to the cap that one more sender would break it. Flattening buys real headroom."
+    }
 
     $plan.Summary = if ($plan.IsSafe) {
         "Flatten ${Domain}: $($plan.LookupsBefore) -> $($plan.LookupsAfter) lookups, $($allIPs.Count) ranges inlined from $($plan.FlattenedFrom.Count) include(s)"

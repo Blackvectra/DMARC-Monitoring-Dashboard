@@ -79,7 +79,12 @@ Describe 'event handlers' {
             ForEach-Object { $_.Groups[1].Value })
         $called = @([regex]::Matches($script:Text, '\$\w+\.Add_Click\(\{\s*([\w-]+)[\s\}]') |
             ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
-        $missing = @($called | Where-Object { $_ -notin $defined -and -not (Get-Command $_ -EA SilentlyContinue) })
+        # A handler with an inline body starts with a keyword, not a call. The
+        # check exists to catch a typo'd function name, so keywords are not it.
+        $keywords = @('if','foreach','for','while','do','switch','try','param','return','function')
+        $missing = @($called | Where-Object {
+            $_ -notin $keywords -and $_ -notin $defined -and -not (Get-Command $_ -EA SilentlyContinue)
+        })
         $missing | Should -BeNullOrEmpty -Because "handler targets an undefined function: $($missing -join ', ')"
     }
 }
@@ -191,6 +196,61 @@ Describe 'the publish path calls the remediation API that exists' {
 
     It 'only enables Apply for a safe, non-noop plan with an automatic provider' {
         $script:Text | Should -Match '\$canApply\s*=\s*\(\$null -ne \$provInfo\) -and \$provInfo\.IsAutomatic -and \$plan\.IsSafe -and \(-not \$plan\.IsNoOp\)'
+    }
+}
+
+Describe 'SPF flattening is reachable and honest about its cost' {
+
+    It 'declares and binds the button' {
+        $script:Declared | Should -Contain 'btnFlatten'
+        $script:Bound    | Should -Contain 'btnFlatten'
+    }
+
+    It 'defines the dialog it opens' {
+        $script:Text | Should -Match '(?m)^function\s+Show-SPFFlattenPlan'
+    }
+
+    It 'requires a specific domain rather than flattening the whole estate' {
+        $script:Text | Should -Match 'Show-SPFFlattenPlan[\s\S]{0,400}?Domain Required|Domain Required[\s\S]{0,400}?Show-SPFFlattenPlan'
+    }
+
+    It 'plans against the live record, not stored state' {
+        # A plan built from a stale ingest could inline ranges that are no
+        # longer what the domain publishes.
+        $script:Text | Should -Match 'Show-SPFFlattenPlan[\s\S]*?Resolve-DnsName -Name \$Domain -Type TXT'
+    }
+
+    It 'reads IsRecommended, not just IsSafe' {
+        # Safe and worth-doing are different questions; gating only on IsSafe
+        # would happily flatten a healthy record.
+        $script:Text | Should -Match '\$plan\.IsRecommended'
+    }
+
+    It 'makes an unrecommended flatten take a deliberate extra confirmation' {
+        $script:Text | Should -Match 'Not recommended'
+        $script:Text | Should -Match 'Flatten anyway'
+    }
+
+    It 'shows the re-flatten deadline before publishing' {
+        # The standing obligation flattening creates. Hiding it is how a
+        # customer discovers it months later as unexplained delivery failure.
+        $script:Text | Should -Match '\$\(\$plan\.RefreshBy\)'
+    }
+
+    It 'surfaces the staleness warning in the dialog body' {
+        $script:Text | Should -Match 'Before you do this'
+    }
+
+    It 'explains why a preserved term was not inlined' {
+        $script:Text | Should -Match 'resolves against the sending host at evaluation time'
+    }
+
+    It 'reuses the audited apply path rather than writing DNS itself' {
+        $script:Text | Should -Match 'btnFlatApply[\s\S]*?Invoke-DNSPlanApply -Plan \$plan'
+    }
+
+    It 'confirms before touching live DNS' {
+        $script:Text | Should -Match 'btnFlatApply[\s\S]*?Confirm DNS change'
     }
 }
 
