@@ -269,11 +269,11 @@ public sealed class ReportIngestor
     /// the thing worth looking at is not buried in the processed folder.
     /// </summary>
     private static string ChooseDestination(
-        IReadOnlyList<IngestedReport> reports, string processed, string unrecognised, string quarantine)
+        List<IngestedReport> reports, string processed, string unrecognised, string quarantine)
     {
-        if (reports.Any(r => r.Outcome == IngestOutcome.Quarantined)) { return quarantine; }
+        if (reports.Exists(r => r.Outcome == IngestOutcome.Quarantined)) { return quarantine; }
         if (reports.Count == 0) { return unrecognised; }
-        if (reports.All(r => r.Outcome == IngestOutcome.Unrecognised)) { return unrecognised; }
+        if (reports.TrueForAll(r => r.Outcome == IngestOutcome.Unrecognised)) { return unrecognised; }
         return processed;
     }
 
