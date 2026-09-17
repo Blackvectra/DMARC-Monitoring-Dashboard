@@ -218,6 +218,47 @@ public sealed class ThreatIntelligenceTests : IDisposable
         Assert.Equal(IndicatorConfidence.NotAThreat, indicator.Confidence);
     }
 
+    // ---- the fleet headline --------------------------------------------------
+
+    [Fact]
+    public async Task ADomainThatHasStoppedReportingCountsAsSilent()
+    {
+        // Counting only domains that NEVER reported said 0 silent while five
+        // of ten had not been heard from for between 14 and 128 days. An
+        // operator reading that headline is told the fleet is fine at exactly
+        // the moment monitoring has stopped for half of it.
+        await StoreOldAsync("gone-quiet.com", daysAgo: 60);
+        await StoreAsync("healthy.com", Row("192.0.2.25", 10, "pass", "healthy.com", "healthy.com", "pass"));
+
+        var summary = await new ThreatIntelligenceService(_dbPath).GetFleetSummaryAsync();
+
+        Assert.Equal(2, summary.Domains);
+        Assert.Equal(1, summary.DomainsSilent);
+    }
+
+    /// <summary>Stores a report dated in the past, for the silence tests.</summary>
+    private async Task StoreOldAsync(string domain, int daysAgo)
+    {
+        var begin = DateTimeOffset.UtcNow.AddDays(-daysAgo);
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata>
+                <org_name>test.example</org_name>
+                <report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
+                            <end>{begin.AddDays(1).ToUnixTimeSeconds()}</end></date_range>
+              </report_metadata>
+              <policy_published><domain>{domain}</domain><p>none</p><pct>100</pct></policy_published>
+              {Row("192.0.2.25", 5, "pass", domain, domain, "pass")}
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        Assert.True(parsed.Success, parsed.Error);
+        await _store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
     [Fact]
     public async Task AClassifiedSourceIsHiddenFromTheDefaultList()
     {

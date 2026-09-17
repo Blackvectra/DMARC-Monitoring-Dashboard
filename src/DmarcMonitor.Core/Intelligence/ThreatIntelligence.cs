@@ -123,6 +123,13 @@ public sealed record FleetSummary
     public int Domains { get; init; }
     public int DomainsEnforcing { get; init; }
     public int DomainsAtNone { get; init; }
+    /// <summary>
+    /// Domains not heard from recently, whether they ever were.
+    /// </summary>
+    /// <remarks>
+    /// The same threshold the triage list uses, so the headline and the list
+    /// cannot disagree about whether a domain has gone quiet.
+    /// </remarks>
     public int DomainsSilent { get; init; }
 
     public long Messages { get; init; }
@@ -366,9 +373,16 @@ public sealed class ThreatIntelligenceService(string databasePath)
                                 WHERE ar.domain_id = d.id ORDER BY ar.date_end DESC LIMIT 1) AS p
                    FROM domains d WHERE d.deleted_at IS NULL AND d.is_active = 1)
                 WHERE p = 'none'),
+              -- Silent means "has stopped being reported on", not "never
+              -- was". Counting only the latter said 0 while five of ten
+              -- domains had not been heard from for between 14 and 128 days,
+              -- so the headline read as calm while half the fleet had gone
+              -- dark. A domain that never reported still counts: its last
+              -- report is missing rather than merely old.
               (SELECT COUNT(*) FROM domains d
                 WHERE d.deleted_at IS NULL AND d.is_active = 1
-                  AND NOT EXISTS (SELECT 1 FROM aggregate_reports ar WHERE ar.domain_id = d.id)),
+                  AND COALESCE((SELECT MAX(ar.date_end) FROM aggregate_reports ar
+                                 WHERE ar.domain_id = d.id), '') < $silentBefore),
               (SELECT COALESCE(SUM(message_count), 0) FROM aggregate_records WHERE date_begin >= $since),
               (SELECT COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0)
                  FROM aggregate_records WHERE date_begin >= $since),
@@ -379,6 +393,9 @@ public sealed class ThreatIntelligenceService(string databasePath)
               (SELECT COUNT(*) FROM threat_indicators WHERE attempted_forgery = 1 AND classification NOT IN ('known_good','ignored'))
             """;
         command.Parameters.AddWithValue("$since", since);
+        command.Parameters.AddWithValue(
+            "$silentBefore",
+            Iso(DateTimeOffset.UtcNow.AddDays(-Rollout.RolloutAssessment.SilentDays)));
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return new FleetSummary(); }
