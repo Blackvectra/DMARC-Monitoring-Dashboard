@@ -15,7 +15,8 @@ namespace DmarcMonitor.Core.Tests.Aggregate;
 /// Receivers so far: google.com, Enterprise Outlook, Outlook.com, Yahoo
 /// (covering yahoo.com, aol.com, rocketmail.com and att.net), gosecure.net,
 /// Mimecast and comcast.net. Client domains: nrgtechservices.com,
-/// rivercityboats.com, lcdgroup.org, wahpeton.com and dmvwrr.com.
+/// rivercityboats.com, lcdgroup.org, wahpeton.com, dmvwrr.com and
+/// ibdinteriors.com.
 /// </summary>
 public sealed class CorpusTests
 {
@@ -40,6 +41,11 @@ public sealed class CorpusTests
         { "dmv-mimecast-aggregate.xml", "dmvwrr.com" },
         { "dmv-yahoo-aggregate.xml", "dmvwrr.com" },
         { "dmv-entoutlook-aggregate.xml", "dmvwrr.com" },
+        { "ibd-google-aggregate.xml", "ibdinteriors.com" },
+        { "ibd-yahoo-aggregate.xml", "ibdinteriors.com" },
+        { "ibd-mimecast-aggregate.xml", "ibdinteriors.com" },
+        { "ibd-entoutlook-a-aggregate.xml", "ibdinteriors.com" },
+        { "ibd-entoutlook-b-aggregate.xml", "ibdinteriors.com" },
     };
 
     private static string Fixture(string name) =>
@@ -170,7 +176,7 @@ public sealed class CorpusTests
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        Assert.True(domains.Count >= 5, $"expected several client domains, got: {string.Join(", ", domains)}");
+        Assert.True(domains.Count >= 6, $"expected several client domains, got: {string.Join(", ", domains)}");
     }
 
     [Fact]
@@ -204,8 +210,17 @@ public sealed class CorpusTests
 
         var crossClient = failingByIp.Where(kv => kv.Value.Count > 1).ToList();
 
-        Assert.NotEmpty(crossClient);
-        Assert.Contains(crossClient, kv => kv.Key == "107.173.31.196" && kv.Value.Count >= 2);
+        // Three distinct sources, each against two unrelated client domains.
+        // One would be coincidence; three is somebody working through a list,
+        // and 35.174.145.124 additionally attempted a FORGED DKIM signature as
+        // dmvwrr.com with selector1, which is deliberate rather than sloppy.
+        Assert.True(crossClient.Count >= 3,
+            $"expected several cross-client sources, got: {string.Join(", ", crossClient.Select(kv => kv.Key))}");
+
+        foreach (var ip in new[] { "107.173.31.196", "35.174.145.124", "3.132.222.232" })
+        {
+            Assert.Contains(crossClient, kv => kv.Key == ip && kv.Value.Count >= 2);
+        }
     }
 
     [Fact]
