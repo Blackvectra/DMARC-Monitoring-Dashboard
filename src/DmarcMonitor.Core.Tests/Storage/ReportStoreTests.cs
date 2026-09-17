@@ -229,6 +229,51 @@ public sealed class ReportStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task KeepsTheAuthResultAlongsideTheDomainItWasFor()
+    {
+        // The bug real data found. 35.174.145.124 attempts a DKIM signature AS
+        // dmvwrr.com with selector1, and it FAILS: a forgery attempt. Storing
+        // only the domain made that indistinguishable from dmvwrr.com's own
+        // misconfigured service, so the correlation view would have told an
+        // operator to go and fix a sender that was never theirs.
+        await _store.SaveAggregateAsync(Aggregate("dmv-entoutlook-aggregate.xml"), "raw");
+
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT dkim_domain, dkim_auth_result
+            FROM aggregate_records
+            WHERE source_ip = '35.174.145.124' AND dkim_domain IS NOT NULL
+            LIMIT 1
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync(), "the forged-signature record should be stored");
+
+        Assert.Equal("dmvwrr.com", reader.GetString(0));
+        Assert.Equal("fail", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task StoresAPassingAuthResultInPreferenceToAFailingOne()
+    {
+        // gosecure.net sends three SPF results for one message: two passing
+        // for other domains and one failing for this one. Taking the first
+        // would record the failure and lose the fact that anything passed.
+        await _store.SaveAggregateAsync(Aggregate("gosecure-aggregate.xml"), "raw");
+
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT spf_domain, spf_auth_result FROM aggregate_records LIMIT 1";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+
+        Assert.Equal("pass", reader.GetString(1));
+        Assert.NotEqual("nrgtechservices.com", reader.GetString(0));   // the failing one
+    }
+
+    [Fact]
     public void RejectsAnEmptyDatabasePath()
     {
         Assert.Throws<ArgumentException>(() => new ReportStore("  "));

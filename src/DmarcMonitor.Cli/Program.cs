@@ -36,6 +36,7 @@ public static class Program
                 "explain" => await ExplainCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "init-db" => await InitDbCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "ingest" => await IngestCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "import" => await ImportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
             };
@@ -75,6 +76,11 @@ public static class Program
               init-db            Create the SQLite database.
                 --db <path>      Database file. Default: dmarc.db
                 --schema <path>  Schema file. Default: db/schema.sql
+
+              import             Import report files from a folder. Needs no mailbox, so it
+                                 works on an archive or on files somebody sent you.
+                --from <folder>  Folder to read, including subfolders.
+                --db <path>      Database file. Default: dmarc.db
 
               ingest             Read the reporting mailbox and store what arrives.
                 --db <path>            Database file. Default: dmarc.db

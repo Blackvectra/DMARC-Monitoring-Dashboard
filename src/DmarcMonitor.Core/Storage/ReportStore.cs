@@ -190,14 +190,14 @@ public sealed class ReportStore
                    disposition, dkim_result, spf_result, dmarc_result, fail_reason,
                    override_reason, override_comment,
                    header_from, envelope_from, envelope_to, is_subdomain,
-                   dkim_domain, dkim_selector, spf_domain)
+                   dkim_domain, dkim_selector, dkim_auth_result, spf_domain, spf_auth_result)
                 VALUES
                   ($report, $tenant, $client, $domain, $begin,
                    $ip, $ipv, $count,
                    $disp, $dkim, $spf, $dmarc, $fail,
                    $orType, $orComment,
                    $hfrom, $efrom, $eto, $isSub,
-                   $dkimDomain, $dkimSelector, $spfDomain)
+                   $dkimDomain, $dkimSelector, $dkimAuth, $spfDomain, $spfAuth)
                 """;
             command.Parameters.AddWithValue("$report", reportId);
             command.Parameters.AddWithValue("$tenant", ids.TenantId);
@@ -223,11 +223,22 @@ public sealed class ReportStore
             command.Parameters.AddWithValue("$eto", Nullable(record.EnvelopeTo));
             command.Parameters.AddWithValue("$isSub", IsSubdomain(record.HeaderFrom, report.Policy.Domain) ? 1 : 0);
 
-            // Store the first auth result of each kind. The full set stays in
-            // the raw report; this is the denormalised copy the queries use.
-            command.Parameters.AddWithValue("$dkimDomain", record.DkimResults.Count > 0 ? record.DkimResults[0].Domain : (object)DBNull.Value);
-            command.Parameters.AddWithValue("$dkimSelector", record.DkimResults.Count > 0 ? Nullable(record.DkimResults[0].Selector) : DBNull.Value);
-            command.Parameters.AddWithValue("$spfDomain", record.SpfResults.Count > 0 ? record.SpfResults[0].Domain : (object)DBNull.Value);
+            // Prefer an auth result that PASSED, falling back to the first.
+            // A record can carry several, and taking index zero would report a
+            // failed check while a successful one sat beside it.
+            var dkim = PreferPassing(record.DkimResults);
+            var spf = PreferPassing(record.SpfResults);
+
+            // The RESULT travels with the domain. A source forging a signature
+            // as its victim produces domain=victim.com with result=fail, so
+            // storing only the domain makes a forgery indistinguishable from
+            // the victim's own misconfigured service, which inverts the advice
+            // an operator is given.
+            command.Parameters.AddWithValue("$dkimDomain", dkim is null ? DBNull.Value : dkim.Domain);
+            command.Parameters.AddWithValue("$dkimSelector", dkim is null ? DBNull.Value : Nullable(dkim.Selector));
+            command.Parameters.AddWithValue("$dkimAuth", dkim is null ? DBNull.Value : Nullable(dkim.Result));
+            command.Parameters.AddWithValue("$spfDomain", spf is null ? DBNull.Value : spf.Domain);
+            command.Parameters.AddWithValue("$spfAuth", spf is null ? DBNull.Value : Nullable(spf.Result));
 
             await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
@@ -415,6 +426,22 @@ public sealed class ReportStore
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The auth result worth storing: one that passed if there is one,
+    /// otherwise the first. A record can carry several, and taking index zero
+    /// would record a failed check while a successful one sat beside it.
+    /// </summary>
+    private static AuthResult? PreferPassing(IReadOnlyList<AuthResult> results)
+    {
+        if (results.Count == 0) { return null; }
+
+        for (var i = 0; i < results.Count; i++)
+        {
+            if (results[i].IsPass) { return results[i]; }
+        }
+        return results[0];
     }
 
     /// <summary>Which half of DMARC failed, matching the prototype's vocabulary.</summary>

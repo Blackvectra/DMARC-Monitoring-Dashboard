@@ -13,6 +13,7 @@ var dbPath = builder.Configuration["Database:Path"] ?? "dmarc.db";
 builder.Services.AddSingleton(new DatabaseInfo(dbPath));
 builder.Services.AddSingleton<ReportStoreConnection>();
 builder.Services.AddScoped<TriageService>();
+builder.Services.AddScoped<CorrelationService>();
 
 var app = builder.Build();
 

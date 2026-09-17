@@ -312,9 +312,17 @@ CREATE TABLE aggregate_records (
     is_subdomain        INTEGER NOT NULL DEFAULT 0,
 
     -- <auth_results>
+    --
+    -- The RESULT is stored alongside the domain, not just the domain. A source
+    -- forging a signature as its victim produces <dkim><domain>victim.com
+    -- </domain><result>fail</result></dkim>, so keeping only the domain makes a
+    -- forgery attempt indistinguishable from the victim's own misconfigured
+    -- service. That inverts the advice an operator is given.
     dkim_domain         TEXT,
     dkim_selector       TEXT,
+    dkim_auth_result    TEXT,                          -- pass/fail/none/policy...
     spf_domain          TEXT,
+    spf_auth_result     TEXT,
 
     -- Resolved at ingest, denormalized so sender rollups don't need a join
     sender_id           TEXT REFERENCES senders(id) ON DELETE SET NULL
@@ -888,6 +896,8 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0003', datetime('now'), 'Tenant layer: tenants table, tenant_id on every scoped table, per-tenant uniqueness');
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0004', datetime('now'), 'TLS reports: record the MTA-STS mode in force, so testing is distinguishable from enforce, plus source message provenance');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0005', datetime('now'), 'Aggregate records: keep the raw SPF and DKIM auth RESULTS, so a forged signature is distinguishable from a misconfigured sender');
 
 
 -- ============================================================================
