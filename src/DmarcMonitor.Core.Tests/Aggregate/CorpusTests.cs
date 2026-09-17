@@ -39,6 +39,7 @@ public sealed class CorpusTests
         { "dmv-comcast-aggregate.xml", "dmvwrr.com" },
         { "dmv-mimecast-aggregate.xml", "dmvwrr.com" },
         { "dmv-yahoo-aggregate.xml", "dmvwrr.com" },
+        { "dmv-entoutlook-aggregate.xml", "dmvwrr.com" },
     };
 
     private static string Fixture(string name) =>
@@ -170,6 +171,41 @@ public sealed class CorpusTests
             .ToList();
 
         Assert.True(domains.Count >= 5, $"expected several client domains, got: {string.Join(", ", domains)}");
+    }
+
+    [Fact]
+    public void TheSameSourceIsSeenFailingAcrossMoreThanOneClientDomain()
+    {
+        // 107.173.31.196 authenticates nothing while sending as both
+        // dmvwrr.com and nrgtechservices.com: two unrelated businesses that
+        // happen to share a provider.
+        //
+        // This is the shape of finding only a multi-client platform can make.
+        // A single-tenant tool shows each domain owner their own reports and
+        // has no way to notice the same source is working through several
+        // companies. Pinned here because it is a real correlation in real
+        // data, and because any future change to how sources are read must
+        // keep it visible.
+        var failingByIp = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+
+        foreach (var row in EveryAggregateReport)
+        {
+            var report = Parse((string)row[0]);
+            foreach (var record in report.Records.Where(r => !r.IsDmarcPass && !r.WasOverridden))
+            {
+                if (!failingByIp.TryGetValue(record.SourceIp, out var domains))
+                {
+                    domains = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    failingByIp[record.SourceIp] = domains;
+                }
+                domains.Add(report.Policy.Domain);
+            }
+        }
+
+        var crossClient = failingByIp.Where(kv => kv.Value.Count > 1).ToList();
+
+        Assert.NotEmpty(crossClient);
+        Assert.Contains(crossClient, kv => kv.Key == "107.173.31.196" && kv.Value.Count >= 2);
     }
 
     [Fact]
