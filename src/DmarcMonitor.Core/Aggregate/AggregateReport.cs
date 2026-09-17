@@ -47,6 +47,19 @@ public sealed record PolicyPublished
 
     public AlignmentMode Adkim { get; init; } = AlignmentMode.Relaxed;
     public AlignmentMode Aspf { get; init; } = AlignmentMode.Relaxed;
+
+    /// <summary>
+    /// RFC 9091 policy for NON-EXISTENT subdomains. Google reports this and
+    /// it is worth surfacing: a domain can be at p=reject while subdomains
+    /// that were never registered stay wide open for impersonation.
+    /// </summary>
+    public DmarcPolicy? Np { get; init; }
+
+    /// <summary>
+    /// Forensic reporting options, verbatim. Outlook reports fo=1. Kept as
+    /// text because the tag is a colon-separated set, not a single value.
+    /// </summary>
+    public string Fo { get; init; } = "";
 }
 
 public enum DmarcPolicy { None, Quarantine, Reject }
@@ -139,6 +152,14 @@ public sealed record AuthResult
 
     /// <summary>DKIM only: the selector that signed.</summary>
     public string Selector { get; init; } = "";
+
+    /// <summary>
+    /// SPF only: which identity was checked, "mfrom" or "helo". Outlook
+    /// reports it. A helo-scoped pass does not contribute to DMARC alignment,
+    /// so keeping the scope is what lets an explanation be accurate rather
+    /// than merely confident.
+    /// </summary>
+    public string Scope { get; init; } = "";
 
     public bool IsPass => string.Equals(Result, "pass", StringComparison.OrdinalIgnoreCase);
 }

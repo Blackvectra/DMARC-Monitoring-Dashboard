@@ -26,4 +26,14 @@
     <ProjectReference Include="..\DmarcMonitor.Core\DmarcMonitor.Core.csproj" />
   </ItemGroup>
 
+  <!--
+    Real reports from real receivers, kept as a permanent regression corpus.
+    Synthetic XML written to match the parser proves almost nothing; these are
+    what Google, Outlook, GoSecure and Microsoft actually sent, including the
+    empty elements and trailing dots that broke the first version.
+  -->
+  <ItemGroup>
+    <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -95,12 +95,14 @@ public static class AggregateReportParser
 
         var policy = new PolicyPublished
         {
-            Domain = domain.Trim().ToLowerInvariant(),
+            Domain = NormaliseDomain(domain),
             P = ParsePolicy(Text(Child(policyEl, "p"))) ?? DmarcPolicy.None,
             Sp = ParsePolicy(Text(Child(policyEl, "sp"))),
             Pct = ParsePct(Text(Child(policyEl, "pct"))),
             Adkim = ParseAlignment(Text(Child(policyEl, "adkim"))),
             Aspf = ParseAlignment(Text(Child(policyEl, "aspf"))),
+            Np = ParsePolicy(Text(Child(policyEl, "np"))),
+            Fo = Text(Child(policyEl, "fo")),
         };
 
         var records = new List<ReportRecord>();
@@ -145,19 +147,28 @@ public static class AggregateReportParser
         var spfResults = new List<AuthResult>();
         foreach (var el in Children(authEl, "spf"))
         {
-            var d = Text(Child(el, "domain"));
-            if (string.IsNullOrWhiteSpace(d)) { continue; }
-            spfResults.Add(new AuthResult { Domain = d.Trim().ToLowerInvariant(), Result = Text(Child(el, "result")) });
+            var d = NormaliseDomain(Text(Child(el, "domain")));
+            if (string.IsNullOrEmpty(d)) { continue; }
+            spfResults.Add(new AuthResult
+            {
+                Domain = d,
+                Result = Text(Child(el, "result")),
+                Scope = Text(Child(el, "scope")),
+            });
         }
 
+        // Receivers really do emit empty <dkim><domain/><result/></dkim>
+        // elements, several per record. Skipping them is not tidying up: an
+        // AuthResult with no domain cannot be aligned against anything and
+        // would show in a report as an unexplained blank row.
         var dkimResults = new List<AuthResult>();
         foreach (var el in Children(authEl, "dkim"))
         {
-            var d = Text(Child(el, "domain"));
-            if (string.IsNullOrWhiteSpace(d)) { continue; }
+            var d = NormaliseDomain(Text(Child(el, "domain")));
+            if (string.IsNullOrEmpty(d)) { continue; }
             dkimResults.Add(new AuthResult
             {
-                Domain = d.Trim().ToLowerInvariant(),
+                Domain = d,
                 Result = Text(Child(el, "result")),
                 Selector = Text(Child(el, "selector")),
             });
@@ -171,9 +182,9 @@ public static class AggregateReportParser
             Dkim = ParseDmarcResult(Text(Child(evalEl, "dkim"))),
             Spf = ParseDmarcResult(Text(Child(evalEl, "spf"))),
             Overrides = overrides,
-            HeaderFrom = Text(Child(identEl, "header_from")).Trim().ToLowerInvariant(),
-            EnvelopeFrom = Text(Child(identEl, "envelope_from")).Trim().ToLowerInvariant(),
-            EnvelopeTo = Text(Child(identEl, "envelope_to")).Trim().ToLowerInvariant(),
+            HeaderFrom = NormaliseDomain(Text(Child(identEl, "header_from"))),
+            EnvelopeFrom = NormaliseDomain(Text(Child(identEl, "envelope_from"))),
+            EnvelopeTo = NormaliseDomain(Text(Child(identEl, "envelope_to"))),
             SpfResults = spfResults,
             DkimResults = dkimResults,
         };
@@ -193,6 +204,20 @@ public static class AggregateReportParser
         parent?.Elements().Where(e => NameIs(e, name)) ?? [];
 
     private static string Text(XElement? el) => el?.Value?.Trim() ?? "";
+
+    /// <summary>
+    /// Lower-cases and strips the root dot.
+    /// </summary>
+    /// <remarks>
+    /// Real reports contain fully-qualified names with a trailing dot:
+    /// gosecure.net sends "nrgtechservices.com." in an spf auth result. Left
+    /// as-is, that never matches "nrgtechservices.com" when alignment is
+    /// checked, so a domain that authenticated for itself would be reported
+    /// as authenticating for somebody else. Found by running the parser
+    /// against real mail rather than against XML written to match it.
+    /// </remarks>
+    private static string NormaliseDomain(string raw) =>
+        raw.Trim().TrimEnd('.').ToLowerInvariant();
 
     // ---- value parsing ------------------------------------------------------
 
