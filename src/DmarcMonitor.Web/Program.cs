@@ -59,6 +59,6 @@ else
 {
     logger.LogWarning("Sign-in: NONE (local trial mode). Only this machine can reach it.");
 }
-logger.LogInformation("Database: {Path}", Path.GetFullPath(dbPath));
+logger.LogInformation("Database: {Path}", dbPath);
 
 await app.RunAsync();
