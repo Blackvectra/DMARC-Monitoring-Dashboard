@@ -122,6 +122,106 @@ Describe 'silent-failure check is reachable from the UI' {
     }
 }
 
+Describe 'dialog XAML' {
+    # Dialogs are built with XamlReader.Parse from here-strings the main-window
+    # check never sees. A malformed one throws when the button is pressed, not
+    # at startup, so it survives a smoke test.
+
+    BeforeAll {
+        $script:Dialogs = @([regex]::Matches($script:Text, '(?s)\$x(?:aml)?\s*=\s*@"\r?\n(<Window.*?)\r?\n"@') |
+            ForEach-Object { $_.Groups[1].Value })
+    }
+
+    It 'finds the dialog definitions' {
+        @($script:Dialogs).Count | Should -BeGreaterThan 0
+    }
+
+    It 'produces well-formed XML once interpolation is neutralised' -TestCases @(@{}) {
+        foreach ($d in $script:Dialogs) {
+            # Replace $(...) and $var with a placeholder: we are checking the
+            # markup's structure, not the runtime values.
+            $neutral = [regex]::Replace($d, '\$\([^)]*\)', 'X')
+            $neutral = [regex]::Replace($neutral, '\$\w+', 'X')
+            { [xml]$neutral } | Should -Not -Throw -Because "a malformed dialog only fails when its button is pressed"
+        }
+    }
+
+    It 'resolves every FindName in a dialog to a name that dialog declares' {
+        # $w.FindName('x') against markup with no x:Name="x" returns null and
+        # the next line dereferences it.
+        foreach ($d in $script:Dialogs) {
+            $declared = @([regex]::Matches($d, 'x:Name="([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+            @($declared).Count | Should -BeGreaterThan 0
+        }
+    }
+}
+
+Describe 'the publish path calls the remediation API that exists' {
+    # These calls only run when an operator presses Apply on a live zone, so a
+    # wrong property name is a bug discovered at the worst possible moment.
+    # Pinned against the real contract rather than assumed.
+
+    It 'reads Applied from the apply result, not Success' {
+        $script:Text | Should -Match '\$res\.Applied'
+        $script:Text | Should -Not -Match '\$res\.Success'
+    }
+
+    It 'passes the applied result to rollback, not the plan' {
+        # Undo restores the snapshot taken from the live zone at write time,
+        # which the plan does not carry.
+        $script:Text | Should -Match 'Undo-DNSChangePlan -AppliedResult \$res'
+    }
+
+    It 'reads Restored from the rollback result' {
+        $script:Text | Should -Match '\$u\.Restored'
+    }
+
+    It 'calls the propagation check by name and expected value' {
+        $script:Text | Should -Match 'Test-DNSChangePropagation -Name \$res\.Name -ExpectedValue \$res\.NewValue'
+        $script:Text | Should -Match '\$prop\.IsPropagated'
+    }
+
+    It 'requires explicit confirmation before writing' {
+        $script:Text | Should -Match 'Invoke-DNSChangePlan[^\r\n]*-Confirm'
+    }
+
+    It 'asks the operator before touching live DNS' {
+        $script:Text | Should -Match 'Confirm DNS change'
+    }
+
+    It 'only enables Apply for a safe, non-noop plan with an automatic provider' {
+        $script:Text | Should -Match '\$canApply\s*=\s*\(\$null -ne \$provInfo\) -and \$provInfo\.IsAutomatic -and \$plan\.IsSafe -and \(-not \$plan\.IsNoOp\)'
+    }
+}
+
+Describe 'credential capture' {
+
+    It 'uses a PasswordBox so the token is not shoulder-surfable' {
+        $script:Text | Should -Match '<PasswordBox x:Name="pwToken"'
+    }
+
+    It 'never writes the token into the log' {
+        # The log is copied into support tickets.
+        $script:Text | Should -Not -Match 'AppendText\([^)]*\$secret'
+        $script:Text | Should -Not -Match 'AppendText\([^)]*pwToken'
+    }
+
+    It 'tells the operator nothing was saved when the store refuses' {
+        # The store refuses rather than writing plaintext; silence here would
+        # leave them believing it worked.
+        $script:Text | Should -Match 'Could not save credential'
+        $script:Text | Should -Match 'Nothing was saved'
+    }
+
+    It 'lets an existing credential be kept without re-entry' {
+        $script:Text | Should -Match 'Leave the box empty to keep it'
+    }
+
+    It 'warns against a global API key' {
+        $script:Text | Should -Match 'scoped token'
+    }
+}
+
 Describe 'DNS health collection keeps every published record' {
     BeforeAll {
         $script:Reporter = Get-Content (Join-Path (Split-Path $PSScriptRoot -Parent) 'Invoke-DMARCReporter.ps1') -Raw

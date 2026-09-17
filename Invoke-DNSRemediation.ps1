@@ -32,6 +32,14 @@
 # Dot-source this file to use the planners; it defines functions only.
 Set-StrictMode -Version Latest
 
+# Secret storage for provider credentials. Loaded here rather than by each
+# caller so that a credential is resolved exactly one way everywhere. Absent,
+# the planners still work and only the automatic-publish path is unavailable,
+# which is the correct degradation: planning needs no credential.
+$script:SecretStoreDir  = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$script:SecretStorePath = Join-Path $script:SecretStoreDir 'Invoke-SecretStore.ps1'
+if (Test-Path $script:SecretStorePath) { . $script:SecretStorePath }
+
 #region SPF record model
 # RFC 7208 limits that make or break a record. Exceeding the lookup cap is a
 # PermError: evaluation stops and every message fails SPF, so the planner
@@ -1373,6 +1381,242 @@ function New-InMemoryDNSProvider {
 }
 #endregion
 
+#region Provider configuration
+# Where a domain's DNS lives, persisted alongside the other state files. The
+# credential is NOT here: the row carries only non-secret coordinates plus an
+# opaque ref into the secret store, matching dns_provider_configs in the
+# schema so this file migrates into the database without reshaping.
+
+function Get-DNSProviderConfigPath {
+    param([Parameter(Mandatory)] [string]$WorkingDir)
+    return (Join-Path $WorkingDir 'State\dns-providers.json')
+}
+
+function ConvertTo-ProviderKey {
+    <#
+    .SYNOPSIS
+        The storage key for a domain. One function, so read and write cannot
+        disagree.
+
+    .DESCRIPTION
+        '*' is the wildcard entry and needs a stable key of its own: naive
+        sanitising maps it to '_', which then does not match a lookup for '*'
+        and leaves the wildcard silently unreachable.
+    #>
+    param([Parameter(Mandatory)] [string]$Domain)
+    if ($Domain -eq '*') { return '__wildcard__' }
+    return ($Domain -replace '[^a-zA-Z0-9_.-]', '_')
+}
+
+function Get-DNSProviderConfig {
+    <#
+    .SYNOPSIS
+        The provider configured for a domain, or $null.
+
+    .DESCRIPTION
+        Falls back to the wildcard entry '*' when the domain has no entry of
+        its own, so an MSP whose whole estate is on one Cloudflare account
+        configures it once rather than per domain.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$WorkingDir,
+        [Parameter(Mandatory)] [string]$Domain
+    )
+    $path = Get-DNSProviderConfigPath -WorkingDir $WorkingDir
+    if (-not (Test-Path $path)) { return $null }
+    try { $store = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if (-not $store.PSObject.Properties['providers']) { return $null }
+
+    $key = ConvertTo-ProviderKey -Domain $Domain
+    if ($store.providers.PSObject.Properties[$key]) { return $store.providers.$key }
+    $wild = ConvertTo-ProviderKey -Domain '*'
+    if ($store.providers.PSObject.Properties[$wild]) { return $store.providers.$wild }
+    return $null
+}
+
+function Get-AllDNSProviderConfigs {
+    param([Parameter(Mandatory)] [string]$WorkingDir)
+    $path = Get-DNSProviderConfigPath -WorkingDir $WorkingDir
+    if (-not (Test-Path $path)) { return @() }
+    try { $store = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return @() }
+    if (-not $store.PSObject.Properties['providers']) { return @() }
+    return @($store.providers.PSObject.Properties | ForEach-Object { $_.Value })
+}
+
+function Set-DNSProviderConfig {
+    <#
+    .SYNOPSIS
+        Saves a domain's provider coordinates and stores its credential.
+
+    .DESCRIPTION
+        The credential goes to the secret store and only its ref is persisted
+        here. On rotation the existing ref is reused, so the config row does
+        not churn and the audit trail stays continuous.
+
+        Nothing is written to either store unless BOTH succeed: a config row
+        pointing at a secret that was never stored reads as "configured" and
+        fails at the provider on every apply.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$WorkingDir,
+        [Parameter(Mandatory)] [string]$Domain,      # '*' for all domains
+        [Parameter(Mandatory)] [ValidateSet('cloudflare','azuredns','manual')] [string]$Provider,
+        [hashtable]$Coordinates = @{},
+        [AllowEmptyString()] [string]$Secret = '',
+        [string]$TenantId = 'local',
+        [string]$Backend = 'dpapi'
+    )
+
+    $path = Get-DNSProviderConfigPath -WorkingDir $WorkingDir
+    $dir  = Split-Path $path -Parent
+    if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+
+    $store = if (Test-Path $path) {
+        try { Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { [PSCustomObject]@{ providers = [PSCustomObject]@{} } }
+    } else { [PSCustomObject]@{ providers = [PSCustomObject]@{} } }
+    if (-not $store.PSObject.Properties['providers']) {
+        $store | Add-Member -NotePropertyName providers -NotePropertyValue ([PSCustomObject]@{}) -Force
+    }
+
+    $key      = ConvertTo-ProviderKey -Domain $Domain
+    $existing = if ($store.providers.PSObject.Properties[$key]) { $store.providers.$key } else { $null }
+
+    # Reuse the existing ref so rotation keeps one identity for this credential.
+    $ref = ''
+    if ($existing -and $existing.PSObject.Properties['credential_ref'] -and (Test-CredentialRefShape -Ref $existing.credential_ref)) {
+        $ref = $existing.credential_ref
+    }
+
+    if ($Provider -ne 'manual' -and -not [string]::IsNullOrEmpty($Secret)) {
+        if (-not $ref) { $ref = New-CredentialRef -TenantId $TenantId -Purpose $Provider }
+        # Throws if the backend is unavailable, before anything is persisted.
+        Set-StoredSecret -Ref $ref -Value $Secret -Backend $Backend
+    } elseif ($Provider -eq 'manual') {
+        $ref = ''
+    }
+
+    $store.providers | Add-Member -NotePropertyName $key -NotePropertyValue ([PSCustomObject]@{
+        domain         = $Domain
+        provider       = $Provider
+        config_json    = ($Coordinates | ConvertTo-Json -Compress)
+        credential_ref = $ref
+        secret_backend = $Backend
+        updated_at     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    }) -Force
+
+    $tmp = "$path.tmp"
+    $store | ConvertTo-Json -Depth 10 | Set-Content -Path $tmp -Encoding UTF8
+    Move-Item -Path $tmp -Destination $path -Force
+    return $store.providers.$key
+}
+
+function Remove-DNSProviderConfig {
+    <#
+    .SYNOPSIS
+        Deletes a domain's provider config AND its stored credential.
+
+    .DESCRIPTION
+        The secret goes first. A credential outliving the row that explained
+        what it was for is one nobody will ever rotate or revoke.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$WorkingDir,
+        [Parameter(Mandatory)] [string]$Domain,
+        [string]$Backend = 'dpapi'
+    )
+    $path = Get-DNSProviderConfigPath -WorkingDir $WorkingDir
+    if (-not (Test-Path $path)) { return }
+    try { $store = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return }
+    if (-not $store.PSObject.Properties['providers']) { return }
+
+    $key = ConvertTo-ProviderKey -Domain $Domain
+    if (-not $store.providers.PSObject.Properties[$key]) { return }
+
+    $entry = $store.providers.$key
+    if ($entry.PSObject.Properties['credential_ref'] -and (Test-CredentialRefShape -Ref $entry.credential_ref)) {
+        $b = if ($entry.PSObject.Properties['secret_backend'] -and $entry.secret_backend) { $entry.secret_backend } else { $Backend }
+        try { Remove-StoredSecret -Ref $entry.credential_ref -Backend $b } catch { }
+    }
+
+    $store.providers.PSObject.Properties.Remove($key)
+    $tmp = "$path.tmp"
+    $store | ConvertTo-Json -Depth 10 | Set-Content -Path $tmp -Encoding UTF8
+    Move-Item -Path $tmp -Destination $path -Force
+}
+
+function New-DNSProviderFromConfig {
+    <#
+    .SYNOPSIS
+        Turns a stored config into a live provider, or explains why it cannot.
+
+    .DESCRIPTION
+        The only bridge between stored configuration and a provider that can
+        write. Returns a result object rather than throwing, because "no
+        provider configured" is the normal state for a client nobody has
+        onboarded and the UI has to say so calmly rather than crash.
+
+        An unconfigured or unusable provider falls back to Manual, never to
+        nothing: the operator still gets the exact record to paste. Degrading
+        to copy-paste is the correct failure mode for a tool that edits
+        production mail routing.
+    #>
+    param(
+        [AllowNull()] $ProviderConfig,
+        [string]$Backend = 'dpapi'
+    )
+
+    $result = [PSCustomObject]@{
+        Provider     = $null
+        IsAutomatic  = $false
+        Reason       = ''
+        ProviderName = 'manual'
+    }
+
+    if (-not (Get-Command Resolve-ProviderCredential -ErrorAction SilentlyContinue)) {
+        $result.Provider = New-ManualDNSProvider
+        $result.Reason   = 'Secret store is unavailable, so changes must be published by hand.'
+        return $result
+    }
+
+    $cred = Resolve-ProviderCredential -ProviderConfig $ProviderConfig -Backend $Backend
+    if ($cred.Provider) { $result.ProviderName = $cred.Provider }
+
+    if (-not $cred.IsConfigured) {
+        $result.Provider = New-ManualDNSProvider
+        $result.Reason   = $cred.Reason
+        return $result
+    }
+
+    if ($cred.Provider -eq 'manual') {
+        $result.Provider = New-ManualDNSProvider
+        $result.Reason   = $cred.Reason
+        return $result
+    }
+
+    # Splatting needs a plain variable; @(...)[0] is array indexing, not splat.
+    $splat = $cred.Arguments
+    try {
+        switch ($cred.Provider) {
+            'cloudflare' { $result.Provider = New-CloudflareDNSProvider @splat }
+            'azuredns'   { $result.Provider = New-AzureDNSProvider      @splat }
+            default {
+                $result.Provider = New-ManualDNSProvider
+                $result.Reason   = "Provider '$($cred.Provider)' cannot publish automatically."
+                return $result
+            }
+        }
+    } catch {
+        $result.Provider = New-ManualDNSProvider
+        $result.Reason   = "The $($cred.Provider) provider could not be initialised: $($_.Exception.Message)"
+        return $result
+    }
+
+    $result.IsAutomatic = $true
+    $result.Reason      = "Changes publish through $($cred.Provider) and are verified afterwards."
+    return $result
+}
+#endregion
+
 #region Apply, verify, rollback
 function Invoke-DNSChangePlan {
     <#
@@ -1641,3 +1885,4 @@ function Write-RemediationAudit {
     return $entry
 }
 #endregion
+
