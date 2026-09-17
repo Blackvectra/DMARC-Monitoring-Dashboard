@@ -715,10 +715,11 @@ CREATE TABLE user_client_access (
 -- ============================================================================
 
 -- Where a client's DNS actually lives, and how we are allowed to touch it.
--- Credentials are NOT stored here: the secret lives DPAPI-encrypted in the
--- registry under the operator's profile, and this row holds only the
--- non-secret coordinates plus a pointer to it. A database file that leaks
--- must not hand over write access to a client's zone.
+-- Credentials are NOT stored here. This row holds only the non-secret
+-- coordinates plus an opaque pointer, and the secret itself lives in whatever
+-- backend tenants.secret_backend names for the owning tenant: DPAPI under the
+-- operator's profile when self-hosted, a KMS when hosted. A database file that
+-- leaks must not hand over write access to a client's zone.
 CREATE TABLE dns_provider_configs (
     id                  TEXT PRIMARY KEY,
     tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -729,7 +730,10 @@ CREATE TABLE dns_provider_configs (
                         CHECK (provider IN ('cloudflare','azuredns','route53','godaddy','manual')),
     -- Non-secret coordinates: Cloudflare zone id, Azure subscription/RG/zone.
     config_json         TEXT,
-    -- Registry value name holding the DPAPI-encrypted token, never the token.
+    -- Opaque pointer minted by New-CredentialRef, never the token itself.
+    -- Shape: dmarc.<tenant>.<purpose>.<random>. Tenant-namespaced so two
+    -- tenants cannot collide, and validated before use because it becomes a
+    -- key in the backend's own namespace.
     credential_ref      TEXT,
 
     is_enabled          INTEGER NOT NULL DEFAULT 1,
