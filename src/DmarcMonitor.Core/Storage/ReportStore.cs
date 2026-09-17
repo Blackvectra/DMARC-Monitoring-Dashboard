@@ -332,6 +332,228 @@ public sealed class ReportStore
         return result;
     }
 
+    /// <summary>A client and how much is filed under it.</summary>
+    public sealed record ClientSummary(string Slug, string Name, int Domains, long Messages);
+
+    /// <summary>Why an assignment did not happen, or that it did.</summary>
+    public enum AssignOutcome
+    {
+        Assigned,
+        DomainNotFound,
+        ClientNotFound,
+        AlreadyAssigned,
+    }
+
+    /// <summary>
+    /// Every table that carries a denormalised client_id alongside a domain_id.
+    ///
+    /// Moving a domain to a client has to move its history too. Updating only
+    /// the domains row would leave every report still filed under Unassigned,
+    /// so the client's own report would come back empty and look like a domain
+    /// that has never sent mail.
+    ///
+    /// Spelled out rather than discovered at run time so the SQL stays
+    /// greppable; ReportStoreAssignmentTests recomputes the set from the live
+    /// schema and fails if a new table appears that is not handled here.
+    /// </summary>
+    public static readonly IReadOnlyList<string> DomainScopedTables =
+    [
+        "aggregate_reports",
+        "aggregate_records",
+        "forensic_reports",
+        "tls_reports",
+        "dns_snapshots",
+        "dns_drift_events",
+        "dkim_selectors",
+        "compliance_scores",
+        "enforcement_assessments",
+        "cousin_domains",
+        "alerts",
+        "dns_provider_configs",
+        "dns_change_plans",
+        "dns_changes",
+        "spf_flatten_state",
+    ];
+
+    /// <summary>Every client, with the Unassigned one included: unbilled work is worth seeing.</summary>
+    public async Task<IReadOnlyList<ClientSummary>> GetClientsAsync(CancellationToken ct = default)
+    {
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+
+        // Left joins throughout: a client onboarded before its first report
+        // still needs to appear, or it looks like the assignment failed.
+        command.CommandText = """
+            SELECT c.slug, c.name,
+                   COUNT(DISTINCT d.id)                  AS domains,
+                   COALESCE(SUM(r.message_count), 0)     AS messages
+            FROM clients c
+            LEFT JOIN domains d ON d.client_id = c.id
+            LEFT JOIN aggregate_records r ON r.domain_id = d.id
+            GROUP BY c.id, c.slug, c.name
+            ORDER BY c.name
+            """;
+
+        var result = new List<ClientSummary>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            result.Add(new ClientSummary(reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3)));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Creates a client. Returns its slug, or null when that slug is taken.
+    /// </summary>
+    public async Task<string?> CreateClientAsync(string name, string? slug = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        var wanted = Slugify(string.IsNullOrWhiteSpace(slug) ? name : slug);
+        if (wanted.Length == 0)
+        {
+            return null;
+        }
+
+        var now = Iso(DateTimeOffset.UtcNow);
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        var tenantId = await EnsureRowAsync(connection, transaction,
+            "SELECT id FROM tenants WHERE slug = $slug",
+            """
+            INSERT INTO tenants (id, name, slug, deployment_mode, status, secret_backend, created_at, updated_at)
+            VALUES ($id, 'Local', $slug, 'self_hosted', 'active', 'dpapi', $now, $now)
+            """,
+            DefaultTenantSlug, now, ct).ConfigureAwait(false);
+
+        await using (var exists = connection.CreateCommand())
+        {
+            exists.Transaction = transaction;
+            exists.CommandText = "SELECT 1 FROM clients WHERE slug = $slug LIMIT 1";
+            exists.Parameters.AddWithValue("$slug", wanted);
+            if (await exists.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null)
+            {
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                return null;
+            }
+        }
+
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO clients (id, tenant_id, name, slug, status, collection_method, created_at, updated_at)
+                VALUES ($id, $tenant, $name, $slug, 'active', 'central_mailbox', $now, $now)
+                """;
+            insert.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+            insert.Parameters.AddWithValue("$tenant", tenantId);
+            insert.Parameters.AddWithValue("$name", name.Trim());
+            insert.Parameters.AddWithValue("$slug", wanted);
+            insert.Parameters.AddWithValue("$now", now);
+            await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        return wanted;
+    }
+
+    /// <summary>
+    /// Files a domain, and everything already stored for it, under a client.
+    /// </summary>
+    public async Task<AssignOutcome> AssignDomainAsync(string domain, string clientSlug, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
+
+        var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var slug = clientSlug.Trim().ToLowerInvariant();
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        string domainId, currentClientId;
+        await using (var lookup = connection.CreateCommand())
+        {
+            lookup.Transaction = transaction;
+            lookup.CommandText = "SELECT id, client_id FROM domains WHERE name = $name LIMIT 1";
+            lookup.Parameters.AddWithValue("$name", name);
+            await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                return AssignOutcome.DomainNotFound;
+            }
+            domainId = reader.GetString(0);
+            currentClientId = reader.GetString(1);
+        }
+
+        string clientId;
+        await using (var lookup = connection.CreateCommand())
+        {
+            lookup.Transaction = transaction;
+            lookup.CommandText = "SELECT id FROM clients WHERE slug = $slug LIMIT 1";
+            lookup.Parameters.AddWithValue("$slug", slug);
+            if (await lookup.ExecuteScalarAsync(ct).ConfigureAwait(false) is not string found)
+            {
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                return AssignOutcome.ClientNotFound;
+            }
+            clientId = found;
+        }
+
+        if (clientId == currentClientId)
+        {
+            await transaction.RollbackAsync(ct).ConfigureAwait(false);
+            return AssignOutcome.AlreadyAssigned;
+        }
+
+        var now = Iso(DateTimeOffset.UtcNow);
+
+        await using (var move = connection.CreateCommand())
+        {
+            move.Transaction = transaction;
+            move.CommandText = "UPDATE domains SET client_id = $client, updated_at = $now WHERE id = $domain";
+            move.Parameters.AddWithValue("$client", clientId);
+            move.Parameters.AddWithValue("$now", now);
+            move.Parameters.AddWithValue("$domain", domainId);
+            await move.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        foreach (var table in DomainScopedTables)
+        {
+            await using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+
+            // The table name is from this constant list, never from a caller,
+            // so there is nothing here to inject; the values stay parameters.
+            update.CommandText = $"UPDATE {table} SET client_id = $client WHERE domain_id = $domain";
+            update.Parameters.AddWithValue("$client", clientId);
+            update.Parameters.AddWithValue("$domain", domainId);
+            await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        return AssignOutcome.Assigned;
+    }
+
+    /// <summary>"Morton, ND" becomes "morton-nd": usable in a filename and a URL.</summary>
+    public static string Slugify(string raw)
+    {
+        ArgumentNullException.ThrowIfNull(raw);
+
+        var builder = new StringBuilder(raw.Length);
+        foreach (var c in raw.Trim().ToLowerInvariant())
+        {
+            if (char.IsAsciiLetterOrDigit(c)) { builder.Append(c); }
+            else if (builder.Length > 0 && builder[^1] != '-') { builder.Append('-'); }
+        }
+
+        return builder.ToString().Trim('-');
+    }
+
     private sealed record DomainIds(string TenantId, string ClientId, string DomainId);
 
     /// <summary>

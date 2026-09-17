@@ -37,6 +37,7 @@ public static class Program
                 "init-db" => await InitDbCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "ingest" => await IngestCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "import" => await ImportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "client" => await ClientCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
@@ -83,6 +84,19 @@ public static class Program
                 --from <folder>  Folder to read, including subfolders.
                 --db <path>      Database file. Default: dmarc.db
 
+              client             Onboarding: turn domains reports arrived for into clients.
+                                 Reports for a domain nobody has onboarded are kept under
+                                 "Unassigned" rather than refused, so this is the worklist.
+                list             Every client, with domains and messages. Names what is
+                                 still unassigned.
+                add              Create a client.
+                  --name <name>  Display name. The slug is derived from it.
+                  --slug <slug>  Override the derived slug.
+                assign           File a domain, and its stored history, under a client.
+                  --domain <d>   Domain as it appears in the reports.
+                  --client <s>   Client slug, from 'dmarc client list'.
+                --db <path>      Database file. Default: dmarc.db
+
               intel              Refresh and show what has been learned about sources
                                  impersonating clients, across every domain watched.
                 --db <path>      Database file. Default: dmarc.db
@@ -105,6 +119,9 @@ public static class Program
               dmarc explain report.xml
               dmarc explain report.json.gz
               dmarc init-db --db /var/dmarc/dmarc.db
+              dmarc import --from C:\dmarc-export
+              dmarc client add --name "Morton, ND"
+              dmarc client assign --domain mortonnd.gov --client morton-nd
               dmarc ingest --mailbox dmarc@example.com --dry-run
             """);
         return 0;
