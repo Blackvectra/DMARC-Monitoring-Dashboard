@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 # Printed on every run. A copy sitting in Downloads looks identical to the
 # current one until it fails on a parameter it does not have, so the run says
 # which copy it is before it does anything else.
-$scriptVersion = '2026-09-17.3'
+$scriptVersion = '2026-09-17.4'
 Write-Host ""
 Write-Host "Export-DMARCAttachments $scriptVersion" -ForegroundColor DarkGray
 
@@ -205,25 +205,56 @@ function Export-Folder {
     $saved = 0
     $items = $MailFolder.Items
 
-    for ($i = 1; $i -le $items.Count; $i++) {
-        try { $item = $items.Item($i) } catch { continue }
+    # Everything this folder declined to export, and why. Without this a folder
+    # that yields 2 files out of 90 messages looks identical to a folder that
+    # only had 2 reports in it, and there is nothing to go on.
+    $unreadable = 0        # the item could not be fetched from Outlook at all
+    $noAttachments = 0     # a message with nothing attached
+    $skippedKinds = @{}    # extension -> count, for attachments that did not match
+
+    $count = $items.Count
+    for ($i = 1; $i -le $count; $i++) {
+        $item = $null
+        try { $item = $items.Item($i) } catch { $unreadable++; continue }
 
         # Calendar items and contacts live in mail folders too and have no
         # attachments worth reading.
-        if ($null -eq $item -or $null -eq $item.Attachments) { continue }
+        if ($null -eq $item) { $unreadable++; continue }
 
-        for ($a = 1; $a -le $item.Attachments.Count; $a++) {
-            $attachment = $item.Attachments.Item($a)
-            $extension = [System.IO.Path]::GetExtension($attachment.FileName)
-            if ($Extensions -notcontains $extension.ToLower()) { continue }
+        $attachmentCount = 0
+        try { $attachmentCount = $item.Attachments.Count } catch { $unreadable++; continue }
+
+        if ($attachmentCount -eq 0) { $noAttachments++; continue }
+
+        for ($a = 1; $a -le $attachmentCount; $a++) {
+            # FileName throws for some attachment kinds rather than returning
+            # empty, and with ErrorActionPreference Stop that ends the whole
+            # run part way through a folder - which looks like a folder that
+            # simply held fewer reports than it does.
+            $attachment = $null
+            $name = $null
+            try {
+                $attachment = $item.Attachments.Item($a)
+                $name = $attachment.FileName
+            } catch {
+                $skippedKinds['(unreadable attachment)'] = 1 + $(if ($skippedKinds.ContainsKey('(unreadable attachment)')) { $skippedKinds['(unreadable attachment)'] } else { 0 })
+                continue
+            }
+
+            $extension = [System.IO.Path]::GetExtension($name)
+            if ($Extensions -notcontains $extension.ToLower()) {
+                $key = if ($extension) { $extension.ToLower() } else { '(no extension)' }
+                $skippedKinds[$key] = 1 + $(if ($skippedKinds.ContainsKey($key)) { $skippedKinds[$key] } else { 0 })
+                continue
+            }
 
             # Receivers reuse file names across days, so a collision is the
             # normal case rather than an oddity. Overwriting would shrink the
             # export without saying so.
-            $target = Join-Path $Destination $attachment.FileName
+            $target = Join-Path $Destination $name
             $n = 1
             while (Test-Path $target) {
-                $base = [System.IO.Path]::GetFileNameWithoutExtension($attachment.FileName)
+                $base = [System.IO.Path]::GetFileNameWithoutExtension($name)
                 $target = Join-Path $Destination "$base($n)$extension"
                 $n++
             }
@@ -232,13 +263,29 @@ function Export-Folder {
                 $attachment.SaveAsFile($target)
                 $saved++
             } catch {
-                Write-Warning "Could not save $($attachment.FileName): $($_.Exception.Message)"
+                Write-Warning "Could not save ${name}: $($_.Exception.Message)"
             }
         }
     }
 
-    if ($saved -gt 0 -or $MailFolder.Folders.Count -eq 0) {
-        Write-Host ("    {0,-36} {1,6}" -f $MailFolder.Name, $saved)
+    if ($saved -gt 0 -or $count -gt 0 -or $MailFolder.Folders.Count -eq 0) {
+        Write-Host ("    {0,-36} {1,6} {2,8}" -f $MailFolder.Name, $saved, $count)
+
+        # Only when the numbers do not line up. A folder whose messages all
+        # produced a report needs no explanation; one that did not is the whole
+        # reason this detail exists.
+        $unexplained = $count - $noAttachments
+        if ($count -gt 0 -and $saved -lt $unexplained) {
+            if ($unreadable -gt 0) {
+                Write-Host ("        {0} message(s) could not be read from Outlook" -f $unreadable) -ForegroundColor Yellow
+            }
+            if ($noAttachments -gt 0) {
+                Write-Host ("        {0} message(s) had no attachment at all" -f $noAttachments) -ForegroundColor DarkGray
+            }
+            foreach ($kind in ($skippedKinds.Keys | Sort-Object)) {
+                Write-Host ("        {0} attachment(s) skipped, not a report type: {1}" -f $skippedKinds[$kind], $kind) -ForegroundColor Yellow
+            }
+        }
     }
     $total = $saved
 
@@ -257,7 +304,7 @@ Write-Host "Mailbox : $foundIn"
 Write-Host "Folder  : $(if ($Folder) { $Folder } else { '(whole mailbox)' })"
 Write-Host "Output  : $OutputPath"
 Write-Host ""
-Write-Host ("    {0,-36} {1,6}" -f 'folder', 'saved') -ForegroundColor DarkGray
+Write-Host ("    {0,-36} {1,6} {2,8}" -f 'folder', 'saved', 'messages') -ForegroundColor DarkGray
 
 $count = Export-Folder -MailFolder $source -Destination $OutputPath
 
