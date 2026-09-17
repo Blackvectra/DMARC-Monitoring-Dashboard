@@ -12,7 +12,13 @@
     they belong to.
 
 .PARAMETER Folder
-    The folder to export, as its name appears in Outlook. Default: DMARC
+    The folder to export, as its name appears in Outlook. Leave it out to
+    export the whole mailbox, which is usually what you want for a mailbox
+    that exists only to receive reports.
+
+.PARAMETER List
+    Show the folder tree and exit, without exporting anything. Use this when
+    a name does not match and you want to see what is actually there.
 
 .PARAMETER OutputPath
     Where to write. Created if it does not exist.
@@ -24,7 +30,13 @@
     any part of the name, so "DMARC" or the full address both work.
 
 .EXAMPLE
-    .\Export-DMARCAttachments.ps1 -OutputPath C:\dmarc-export -Mailbox DMARC@nrgtechservices.com
+    .\Export-DMARCAttachments.ps1 -OutputPath C:\dmarc-export -Mailbox "DMARC Reports"
+    Quote a mailbox name containing a space, or PowerShell reads the second
+    word as the next parameter.
+
+.EXAMPLE
+    .\Export-DMARCAttachments.ps1 -OutputPath C:\x -Mailbox "DMARC Reports" -List
+    Show what folders exist, without exporting.
 
 .EXAMPLE
     .\Export-DMARCAttachments.ps1 -Folder DMARC -OutputPath C:\dmarc-export
@@ -32,9 +44,12 @@
 
 [CmdletBinding()]
 param(
-    [string]$Folder = 'DMARC',
+    # Empty means the whole mailbox. That is the right default for a mailbox
+    # that exists only to receive reports: there is nothing else in it.
+    [string]$Folder = '',
     [Parameter(Mandatory)] [string]$OutputPath,
     [string]$Mailbox,
+    [switch]$List,
 
     # A mailbox also holds signature images and auto-replies. Reports are
     # always one of these, so everything else is skipped rather than written.
@@ -92,18 +107,57 @@ if ($Mailbox) {
     $stores = $matched
 }
 
+function Show-Tree {
+    param($MailFolder, [int]$Depth = 0)
+
+    $count = 0
+    try { $count = $MailFolder.Items.Count } catch { $count = 0 }
+    Write-Host ("    {0}{1}  {2}" -f ('  ' * $Depth), $MailFolder.Name, $(if ($count) { "($count)" } else { '' }))
+
+    # Two levels is enough to see the shape without printing a whole mailbox.
+    if ($Depth -lt 2) {
+        foreach ($child in $MailFolder.Folders) { Show-Tree -MailFolder $child -Depth ($Depth + 1) }
+    }
+}
+
+if ($List) {
+    foreach ($store in $stores) {
+        Write-Host ""
+        Write-Host $store.Name -ForegroundColor Cyan
+        foreach ($child in $store.Folders) { Show-Tree -MailFolder $child -Depth 1 }
+    }
+    Write-Host ""
+    exit 0
+}
+
 $source = $null
 $foundIn = ''
-foreach ($store in $stores) {
-    $source = Find-Folder -Parent $store -Name $Folder
-    if ($source) { $foundIn = $store.Name; break }
+
+if (-not $Folder) {
+    # No folder named, so take the whole mailbox. Exporting everything is the
+    # sensible default for a mailbox whose only purpose is receiving reports,
+    # and it avoids having to guess at a folder name that varies per operator.
+    $source = $stores[0]
+    $foundIn = $stores[0].Name
+} else {
+    foreach ($store in $stores) {
+        $source = Find-Folder -Parent $store -Name $Folder
+        if ($source) { $foundIn = $store.Name; break }
+    }
 }
 
 if (-not $source) {
     Write-Host ""
     Write-Host "No folder called '$Folder' in $(if ($Mailbox) { "'$Mailbox'" } else { 'any open mailbox' })." -ForegroundColor Red
-    Write-Host "Check the name as it appears in Outlook. Mailboxes searched:"
-    foreach ($s in $stores) { Write-Host "    $($s.Name)" }
+    Write-Host ""
+    Write-Host "Folders that DO exist:" -ForegroundColor DarkGray
+    foreach ($store in $stores) {
+        Write-Host ""
+        Write-Host $store.Name -ForegroundColor Cyan
+        foreach ($child in $store.Folders) { Show-Tree -MailFolder $child -Depth 1 }
+    }
+    Write-Host ""
+    Write-Host "Re-run with -Folder <name>, or leave -Folder out to export the whole mailbox." -ForegroundColor DarkGray
     exit 1
 }
 
@@ -168,7 +222,7 @@ function Export-Folder {
 
 Write-Host ""
 Write-Host "Mailbox : $foundIn"
-Write-Host "Folder  : $Folder"
+Write-Host "Folder  : $(if ($Folder) { $Folder } else { '(whole mailbox)' })"
 Write-Host "Output  : $OutputPath"
 Write-Host ""
 Write-Host ("    {0,-36} {1,6}" -f 'folder', 'saved') -ForegroundColor DarkGray
