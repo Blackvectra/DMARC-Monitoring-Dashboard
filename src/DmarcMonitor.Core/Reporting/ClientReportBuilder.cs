@@ -166,9 +166,18 @@ public sealed class ClientReportBuilder(string databasePath)
                    SUM(r.message_count),
                    SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count ELSE 0 END),
                    GROUP_CONCAT(DISTINCT d.name),
+                   -- Only the FAILING rows. This value decides whether the
+                   -- client is told "a service of yours needs correcting" or
+                   -- "somebody sent mail as you", so it has to describe the
+                   -- mail that failed, not the mail that worked. Taken across
+                   -- every row, a source that authenticates legitimately most
+                   -- of the time and fails once with no authentication at all
+                   -- is labelled a misconfigured service of the client's own,
+                   -- and the one message that was actually unprovable
+                   -- disappears into a maintenance note.
                    COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
-                     CASE WHEN r.dkim_auth_result = 'pass' THEN r.dkim_domain
-                          WHEN r.spf_auth_result  = 'pass' THEN r.spf_domain END), ''), ''),
+                     CASE WHEN r.dmarc_result = 'fail' AND r.dkim_auth_result = 'pass' THEN r.dkim_domain
+                          WHEN r.dmarc_result = 'fail' AND r.spf_auth_result  = 'pass' THEN r.spf_domain END), ''), ''),
                    (SELECT COUNT(DISTINCT o.client_id)
                       FROM aggregate_records o
                      WHERE o.source_ip = r.source_ip

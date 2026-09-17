@@ -38,6 +38,7 @@ public static class Program
                 "ingest" => await IngestCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "import" => await ImportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "client" => await ClientCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "report" => await ReportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
@@ -95,6 +96,17 @@ public static class Program
                 assign           File a domain, and its stored history, under a client.
                   --domain <d>   Domain as it appears in the reports.
                   --client <s>   Client slug, from 'dmarc client list'.
+                --db <path>      Database file. Default: dmarc.db
+
+              report             Write the monthly report a client receives, as one
+                                 self-contained HTML file that opens offline and prints.
+                                 Defaults to the month that has ENDED, so running it twice
+                                 in the same month produces the same document.
+                --client <slug>  Client to report on.
+                --all            Every client except Unassigned.
+                --month <yyyy-MM> Month to cover. Default: last complete month.
+                --out <folder>   Where to write. Default: reports
+                --provider <n>   How to name yourself in the report.
                 --db <path>      Database file. Default: dmarc.db
 
               intel              Refresh and show what has been learned about sources

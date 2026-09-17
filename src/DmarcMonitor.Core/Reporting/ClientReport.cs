@@ -126,9 +126,17 @@ public sealed record ClientReport
     /// <summary>True when there is a previous period to compare against at all.</summary>
     public bool HasComparison => PreviousMessages > 0;
 
-    /// <summary>Sources sending legitimately, whether or not they are aligned.</summary>
+    /// <summary>
+    /// Sources with nothing failing at all.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately excludes the misconfigured ones, even though those are
+    /// also the client's own mail. The three buckets go into three tables in
+    /// the report, and a source appearing in two of them with two different
+    /// message counts reads as a contradiction rather than as nuance.
+    /// </remarks>
     public IReadOnlyList<ReportSource> LegitimateSources =>
-        [.. Sources.Where(s => s.IsClean || s.Authenticated).OrderByDescending(s => s.Messages)];
+        [.. Sources.Where(s => s.IsClean).OrderByDescending(s => s.Messages)];
 
     /// <summary>
     /// Sources that authenticated nothing at all. Either a service nobody
