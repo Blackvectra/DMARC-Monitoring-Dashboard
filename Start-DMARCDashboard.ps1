@@ -1222,6 +1222,251 @@ $authBlock
     $win.ShowDialog() | Out-Null
 }
 
+function Show-DNSProviderDialog {
+    <#
+        Captures where a domain's DNS lives and the credential to write it.
+
+        The credential goes straight to the secret store; the dashboard keeps
+        only an opaque ref. The field is a PasswordBox so the token is not
+        shoulder-surfable and does not land in a screenshot of the settings
+        screen.
+
+        Returns $true when something was saved.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Domain,
+        $Owner
+    )
+
+    $cfg = Get-AllSettings
+    if ([string]::IsNullOrWhiteSpace($cfg.WorkingDir)) {
+        [System.Windows.MessageBox]::Show("Set a working directory in Settings first.", "Not Configured", "OK", "Information") | Out-Null
+        return $false
+    }
+    if (-not (Test-Path $script:RemediationScript)) {
+        [System.Windows.MessageBox]::Show("Invoke-DNSRemediation.ps1 not found.", "Missing", "OK", "Warning") | Out-Null
+        return $false
+    }
+    . $script:RemediationScript
+
+    $existing = $null
+    try { $existing = Get-DNSProviderConfig -WorkingDir $cfg.WorkingDir -Domain $Domain } catch {}
+    $exProvider = if ($existing -and $existing.PSObject.Properties['provider']) { $existing.provider } else { 'manual' }
+    $exCoords   = @{}
+    if ($existing -and $existing.PSObject.Properties['config_json'] -and $existing.config_json) {
+        try { (ConvertFrom-Json $existing.config_json).PSObject.Properties | ForEach-Object { $exCoords[$_.Name] = $_.Value } } catch {}
+    }
+    $hasSecret = $false
+    if ($existing -and $existing.PSObject.Properties['credential_ref'] -and $existing.credential_ref) {
+        $b = if ($existing.PSObject.Properties['secret_backend'] -and $existing.secret_backend) { $existing.secret_backend } else { 'dpapi' }
+        try { $hasSecret = Test-StoredSecret -Ref $existing.credential_ref -Backend $b } catch {}
+    }
+
+    $dpapiOk = Test-SecretBackendAvailable -Name 'dpapi'
+    $backendNote = if ($dpapiOk) {
+        'The credential is encrypted with DPAPI to this Windows account on this machine. Another account cannot read it.'
+    } else {
+        'DPAPI is not available here, so no credential can be saved. Automatic publishing needs Windows PowerShell on the machine that runs the tool.'
+    }
+    $secretNote = if ($hasSecret) { 'A credential is already saved. Leave the box empty to keep it.' } else { 'No credential saved yet.' }
+
+    $x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DNS Provider" Height="470" Width="560" Background="#0D1117" WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="44"/>
+    </Grid.RowDefinitions>
+    <StackPanel Grid.Row="0" Margin="0,0,0,12">
+      <TextBlock Foreground="#E6EDF3" FontSize="15" FontWeight="SemiBold" Text="Where does this domain's DNS live?"/>
+      <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap" Text="$([System.Net.WebUtility]::HtmlEncode($Domain))"/>
+    </StackPanel>
+    <StackPanel Grid.Row="1">
+      <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,0,0,4" Text="Provider"/>
+      <ComboBox x:Name="cmbProv" Height="26" Margin="0,0,0,10">
+        <ComboBoxItem Content="manual"/><ComboBoxItem Content="cloudflare"/><ComboBoxItem Content="azuredns"/>
+      </ComboBox>
+
+      <StackPanel x:Name="pnlCf">
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,0,0,4" Text="Cloudflare Zone ID"/>
+        <TextBox x:Name="txtZoneId" Height="26" Margin="0,0,0,10" Background="#0D1117" Foreground="#C9D1D9" BorderBrush="#30363D"/>
+      </StackPanel>
+
+      <StackPanel x:Name="pnlAz">
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,0,0,4" Text="Subscription ID"/>
+        <TextBox x:Name="txtSub" Height="26" Margin="0,0,0,8" Background="#0D1117" Foreground="#C9D1D9" BorderBrush="#30363D"/>
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,0,0,4" Text="Resource Group"/>
+        <TextBox x:Name="txtRg" Height="26" Margin="0,0,0,8" Background="#0D1117" Foreground="#C9D1D9" BorderBrush="#30363D"/>
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,0,0,4" Text="Zone Name"/>
+        <TextBox x:Name="txtZoneName" Height="26" Margin="0,0,0,10" Background="#0D1117" Foreground="#C9D1D9" BorderBrush="#30363D"/>
+      </StackPanel>
+
+      <StackPanel x:Name="pnlSecret">
+        <TextBlock Foreground="#6E7681" FontSize="11" Margin="0,0,0,4" Text="API token"/>
+        <PasswordBox x:Name="pwToken" Height="26" Margin="0,0,0,6" Background="#0D1117" Foreground="#C9D1D9" BorderBrush="#30363D"/>
+        <TextBlock Foreground="#6E7681" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,6" Text="$([System.Net.WebUtility]::HtmlEncode($secretNote))"/>
+        <TextBlock Foreground="#6E7681" FontSize="10" TextWrapping="Wrap" Text="Use a scoped token limited to DNS edit on this zone, never a global API key."/>
+      </StackPanel>
+
+      <TextBlock Foreground="#484F58" FontSize="10" TextWrapping="Wrap" Margin="0,12,0,0" Text="$([System.Net.WebUtility]::HtmlEncode($backendNote))"/>
+    </StackPanel>
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="btnProvRemove" Content="Remove" Width="90" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D" Margin="0,0,8,0"/>
+      <Button x:Name="btnProvSave" Content="Save" Width="90" Height="28" Background="#238636" Foreground="#FFFFFF" BorderBrush="#2EA043" Margin="0,0,8,0"/>
+      <Button x:Name="btnProvCancel" Content="Cancel" Width="80" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D"/>
+    </StackPanel>
+  </Grid>
+</Window>
+"@
+
+    $w = [Windows.Markup.XamlReader]::Parse($x)
+    if ($Owner) { $w.Owner = $Owner }
+
+    $cmbProv = $w.FindName('cmbProv'); $pnlCf = $w.FindName('pnlCf'); $pnlAz = $w.FindName('pnlAz'); $pnlSecret = $w.FindName('pnlSecret')
+    $txtZoneId = $w.FindName('txtZoneId'); $txtSub = $w.FindName('txtSub'); $txtRg = $w.FindName('txtRg'); $txtZoneName = $w.FindName('txtZoneName')
+    $pwToken = $w.FindName('pwToken')
+
+    if ($exCoords.ContainsKey('zoneId'))         { $txtZoneId.Text   = [string]$exCoords['zoneId'] }
+    if ($exCoords.ContainsKey('subscriptionId')) { $txtSub.Text      = [string]$exCoords['subscriptionId'] }
+    if ($exCoords.ContainsKey('resourceGroup'))  { $txtRg.Text       = [string]$exCoords['resourceGroup'] }
+    if ($exCoords.ContainsKey('zoneName'))       { $txtZoneName.Text = [string]$exCoords['zoneName'] }
+
+    $syncPanels = {
+        $sel = if ($cmbProv.SelectedItem) { [string]$cmbProv.SelectedItem.Content } else { 'manual' }
+        $pnlCf.Visibility     = if ($sel -eq 'cloudflare') { 'Visible' } else { 'Collapsed' }
+        $pnlAz.Visibility     = if ($sel -eq 'azuredns')   { 'Visible' } else { 'Collapsed' }
+        $pnlSecret.Visibility = if ($sel -eq 'manual')     { 'Collapsed' } else { 'Visible' }
+    }.GetNewClosure()
+
+    foreach ($i in $cmbProv.Items) { if ([string]$i.Content -eq $exProvider) { $cmbProv.SelectedItem = $i } }
+    if (-not $cmbProv.SelectedItem) { $cmbProv.SelectedIndex = 0 }
+    & $syncPanels
+    $cmbProv.Add_SelectionChanged($syncPanels)
+
+    $script:ProvDialogSaved = $false
+
+    $w.FindName('btnProvSave').Add_Click({
+        $sel = if ($cmbProv.SelectedItem) { [string]$cmbProv.SelectedItem.Content } else { 'manual' }
+        $coords = @{}
+        if ($sel -eq 'cloudflare') {
+            if ([string]::IsNullOrWhiteSpace($txtZoneId.Text)) {
+                [System.Windows.MessageBox]::Show("Cloudflare needs a Zone ID.", "Missing", "OK", "Warning") | Out-Null; return
+            }
+            $coords['zoneId'] = $txtZoneId.Text.Trim()
+        } elseif ($sel -eq 'azuredns') {
+            foreach ($pair in @(@('subscriptionId',$txtSub), @('resourceGroup',$txtRg), @('zoneName',$txtZoneName))) {
+                if ([string]::IsNullOrWhiteSpace($pair[1].Text)) {
+                    [System.Windows.MessageBox]::Show("Azure DNS needs $($pair[0]).", "Missing", "OK", "Warning") | Out-Null; return
+                }
+                $coords[$pair[0]] = $pair[1].Text.Trim()
+            }
+        }
+
+        $secret = $pwToken.Password
+        if ($sel -ne 'manual' -and [string]::IsNullOrEmpty($secret) -and -not $hasSecret) {
+            [System.Windows.MessageBox]::Show("Enter the API token for $sel.", "Missing", "OK", "Warning") | Out-Null; return
+        }
+
+        try {
+            Set-DNSProviderConfig -WorkingDir $cfg.WorkingDir -Domain $Domain -Provider $sel `
+                -Coordinates $coords -Secret $secret | Out-Null
+            $script:ProvDialogSaved = $true
+            $txtLog.AppendText("[SUCCESS] DNS provider for $Domain set to $sel.`n")
+            $w.Close()
+        } catch {
+            # Most often: DPAPI unavailable. The store refuses rather than
+            # writing plaintext, and the operator needs to be told that
+            # nothing was saved.
+            [System.Windows.MessageBox]::Show("Nothing was saved.`n`n$($_.Exception.Message)", "Could not save credential", "OK", "Error") | Out-Null
+        }
+    }.GetNewClosure())
+
+    $w.FindName('btnProvRemove').Add_Click({
+        $c = [System.Windows.MessageBox]::Show("Remove the DNS provider for $Domain and delete its stored credential?", "Confirm", "YesNo", "Warning")
+        if ($c -ne 'Yes') { return }
+        try {
+            Remove-DNSProviderConfig -WorkingDir $cfg.WorkingDir -Domain $Domain
+            $script:ProvDialogSaved = $true
+            $txtLog.AppendText("[INFO] DNS provider for $Domain removed.`n")
+            $w.Close()
+        } catch { [System.Windows.MessageBox]::Show("$($_.Exception.Message)", "Remove failed", "OK", "Error") | Out-Null }
+    }.GetNewClosure())
+
+    $w.FindName('btnProvCancel').Add_Click({ $w.Close() }.GetNewClosure())
+
+    $w.ShowDialog() | Out-Null
+    return $script:ProvDialogSaved
+}
+
+function Invoke-DNSPlanApply {
+    <#
+        Publishes a plan, verifies it, and offers rollback if verification
+        fails.
+
+        Everything dangerous already lives in Invoke-DNSChangePlan: a plan
+        that is not safe is refused with no override, the live value is
+        snapshotted immediately before the write, and nothing is written
+        without -Confirm. This is the UI around it.
+    #>
+    param(
+        [Parameter(Mandatory)] $Plan,
+        [Parameter(Mandatory)] $ProviderInfo,
+        [Parameter(Mandatory)] [string]$Domain,
+        $Window
+    )
+
+    $txtLog.AppendText("[INFO] Publishing DNS change for $Domain...`n"); $txtLog.ScrollToEnd()
+    try {
+        . $script:RemediationScript
+        $res = Invoke-DNSChangePlan -Plan $Plan -Provider $ProviderInfo.Provider -Confirm -AppliedBy $env:USERNAME
+
+        if (-not $res.Applied) {
+            $why = if ($res.Error) { $res.Error } elseif (@($res.Blockers).Count -gt 0) { @($res.Blockers) -join '; ' } else { 'The plan was refused.' }
+            $txtLog.AppendText("[ERROR] DNS change failed: $why`n")
+            [System.Windows.MessageBox]::Show("The change was not published.`n`n$why", "Publish failed", "OK", "Error") | Out-Null
+            return
+        }
+
+        $txtLog.AppendText("[SUCCESS] Published. Verifying propagation...`n")
+        $verified = $false
+        try {
+            $prop = Test-DNSChangePropagation -Name $res.Name -ExpectedValue $res.NewValue -RecordType $res.RecordType
+            $verified = [bool]$prop.IsPropagated
+        } catch { $txtLog.AppendText("[WARN] Propagation check: $_`n") }
+
+        if ($verified) {
+            $txtLog.AppendText("[SUCCESS] Verified live in DNS.`n")
+            $txtStatus.Text = "DNS updated: $Domain"
+            $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen
+            [System.Windows.MessageBox]::Show("Published and verified.`n`n$Domain now serves the new record.", "Done", "OK", "Information") | Out-Null
+            if ($Window) { $Window.Close() }
+            return
+        }
+
+        # Written but not yet visible. Usually TTL, occasionally a real
+        # failure, so the operator decides rather than the tool guessing.
+        $txtLog.AppendText("[WARN] Published but not yet visible in DNS.`n")
+        $undo = [System.Windows.MessageBox]::Show(
+            "The record was written but is not visible in DNS yet.`n`nThis is usually propagation delay. Roll back to the previous value now?",
+            "Not yet visible", "YesNo", "Warning")
+        if ($undo -eq 'Yes') {
+            try {
+                # Takes the APPLIED RESULT, not the plan: the snapshot it
+                # restores was taken from the live zone at write time, which
+                # the plan does not carry.
+                $u = Undo-DNSChangePlan -AppliedResult $res -Provider $ProviderInfo.Provider -Confirm
+                if ($u.Restored) { $txtLog.AppendText("[INFO] Rolled back to: $($u.RestoredTo)`n") }
+                else { $txtLog.AppendText("[ERROR] Rollback failed: $($u.Error)`n") }
+            } catch { $txtLog.AppendText("[ERROR] Rollback failed: $_`n") }
+        }
+    } catch {
+        $txtLog.AppendText("[ERROR] Publish: $_`n")
+        [System.Windows.MessageBox]::Show("$($_.Exception.Message)", "Publish failed", "OK", "Error") | Out-Null
+    }
+    $txtLog.ScrollToEnd()
+}
+
 function Show-DNSFixPlan {
     <#
         Renders a plan produced by Invoke-DNSRemediation for human review.
@@ -1275,6 +1520,33 @@ function Show-DNSFixPlan {
     $statusColor = if ($plan.IsNoOp) { '#6E7681' } elseif ($plan.IsSafe) { '#3FB950' } else { '#F85149' }
     $statusText  = if ($plan.IsNoOp) { 'ALREADY IN PLACE' } elseif ($plan.IsSafe) { 'SAFE TO APPLY' } else { 'REFUSED' }
 
+    # What can actually be published, and why. Resolved once here so the prose
+    # and the button state cannot disagree.
+    $cfg      = Get-AllSettings
+    $provCfg  = $null
+    $provInfo = $null
+    try {
+        if ($cfg.WorkingDir) { $provCfg = Get-DNSProviderConfig -WorkingDir $cfg.WorkingDir -Domain $Domain }
+        $provInfo = New-DNSProviderFromConfig -ProviderConfig $provCfg
+    } catch { $txtLog.AppendText("[WARN] Provider lookup: $_`n") }
+
+    $canApply = ($null -ne $provInfo) -and $provInfo.IsAutomatic -and $plan.IsSafe -and (-not $plan.IsNoOp)
+
+    $pubColor = '#8B949E'
+    $pubText  = ''
+    if ($plan.IsNoOp) {
+        $pubText = 'This record already says what it needs to say. Nothing to publish.'
+    } elseif (-not $plan.IsSafe) {
+        $pubColor = '#FFA198'
+        $pubText  = 'This plan is refused, so it cannot be published. Resolve the blockers above first.'
+    } elseif ($canApply) {
+        $pubColor = '#7EE787'
+        $pubText  = "$($provInfo.Reason) The current value is snapshotted immediately before the write, so this change can be rolled back."
+    } else {
+        $reason = if ($provInfo) { $provInfo.Reason } else { 'No DNS provider is configured for this domain yet.' }
+        $pubText = "$reason Copy the After value into the TXT record for $Domain, or configure a provider to publish, verify and roll back automatically."
+    }
+
     $blockHtml = ''
     if ($plan.Blockers.Count -gt 0) {
         $items = ($plan.Blockers | ForEach-Object { "<li>$(HtmlEnc $_)</li>" }) -join ''
@@ -1301,7 +1573,7 @@ $diffHtml
 $blockHtml
 $warnHtml
 <h3 style='color:#E6EDF3;font-size:13px;margin:16px 0 6px'>Publishing</h3>
-<div style='color:#8B949E;font-size:12px;line-height:1.6'>No DNS provider is configured for this client yet, so nothing can be published from here. Copy the <b>After</b> value into the TXT record for <code style='background:#21262D;padding:1px 4px;border-radius:3px'>$(HtmlEnc $Domain)</code>, or configure a provider to publish, verify and roll back automatically.</div>
+<div style='color:$pubColor;font-size:12px;line-height:1.6'>$(HtmlEnc $pubText)</div>
 "@
 
     $xaml = @"
@@ -1319,7 +1591,9 @@ $warnHtml
     <WebBrowser Grid.Row="1" x:Name="wbPlan"/>
     <Border Grid.Row="2" Background="#161B22" BorderBrush="#30363D" BorderThickness="0,1,0,0">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="20,8">
+        <Button x:Name="btnConfigProvider" Content="Configure Provider..." Width="150" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D" Margin="0,0,8,0"/>
         <Button x:Name="btnCopy" Content="Copy New Record" Width="150" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D" Margin="0,0,8,0"/>
+        <Button x:Name="btnApply" Content="Apply to DNS" Width="120" Height="28" Background="#238636" Foreground="#FFFFFF" BorderBrush="#2EA043" Margin="0,0,8,0" IsEnabled="$(if ($canApply) { 'True' } else { 'False' })"/>
         <Button x:Name="btnPlanClose" Content="Close" Width="80" Height="28" Background="#21262D" Foreground="#CDD9E5" BorderBrush="#30363D"/>
       </StackPanel>
     </Border>
@@ -1342,6 +1616,23 @@ $warnHtml
             try { Set-Clipboard -Value $newValueForCopy; $txtStatus.Text = 'New SPF record copied to clipboard'; $txtStatus.Foreground = [System.Windows.Media.Brushes]::LightGreen } catch {}
         }
     }.GetNewClosure())
+    $pw.FindName('btnConfigProvider').Add_Click({
+        if (Show-DNSProviderDialog -Domain $Domain -Owner $pw) {
+            # Re-plan so the publishing prose and the Apply button reflect the
+            # provider that was just configured, rather than a stale read.
+            $pw.Close()
+            Show-DNSFixPlan -Domain $Domain -IncludeDomain $IncludeDomain -ServiceName $ServiceName -Owner $Owner
+        }
+    }.GetNewClosure())
+
+    $pw.FindName('btnApply').Add_Click({
+        $confirm = [System.Windows.MessageBox]::Show(
+            "Publish this record to $Domain now?`n`nThis edits live DNS for a production mail domain. The current value is snapshotted first so the change can be rolled back.`n`nAfter:`n$($plan.NewValue)",
+            "Confirm DNS change", "YesNo", "Warning")
+        if ($confirm -ne 'Yes') { return }
+        Invoke-DNSPlanApply -Plan $plan -ProviderInfo $provInfo -Domain $Domain -Window $pw
+    }.GetNewClosure())
+
     $pw.FindName('btnPlanClose').Add_Click({ $pw.Close() })
     $pw.ShowDialog() | Out-Null
 }
