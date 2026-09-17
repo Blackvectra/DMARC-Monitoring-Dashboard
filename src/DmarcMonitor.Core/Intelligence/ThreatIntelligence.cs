@@ -28,8 +28,15 @@ public sealed record ThreatIndicator
     public DateTimeOffset LastSeen { get; init; }
 
     public int ClientCount { get; init; }
-    public int DomainCount { get; init; }
     public long MessageCount { get; init; }
+
+    /// <summary>
+    /// How many domains this was seen against. Derived from the names rather
+    /// than stored beside them, so a headline saying "3 domain(s)" cannot sit
+    /// above a list of four - which is what happened when the count came from
+    /// a windowed aggregate and the names came from an unwindowed lookup.
+    /// </summary>
+    public int DomainCount => Domains.Count;
 
     public bool EverAuthenticated { get; init; }
 
@@ -101,6 +108,17 @@ public enum IndicatorConfidence { NotAThreat, Low, Medium, High, Confirmed }
 /// <summary>Fleet-wide numbers, for the operator rather than for a client.</summary>
 public sealed record FleetSummary
 {
+    /// <summary>
+    /// How many days the message figures cover.
+    /// </summary>
+    /// <remarks>
+    /// The counts of clients and domains are current, while the message totals
+    /// are windowed. Printing both without saying which is which invites an
+    /// operator to reconcile them against each other and find they do not add
+    /// up, so the window travels with the numbers.
+    /// </remarks>
+    public int WindowDays { get; init; } = 30;
+
     public int Clients { get; init; }
     public int Domains { get; init; }
     public int DomainsEnforcing { get; init; }
@@ -186,7 +204,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
             INSERT INTO threat_indicators
               (id, tenant_id, indicator_type, value, first_seen, last_seen,
                client_count, domain_count, message_count,
-               ever_authenticated, attempted_forgery, forged_selectors, updated_at)
+               ever_authenticated, attempted_forgery, forged_selectors, domains, updated_at)
             SELECT
               lower(hex(randomblob(16))),
               r.tenant_id,
@@ -205,8 +223,11 @@ public sealed class ThreatIntelligenceService(string databasePath)
               GROUP_CONCAT(DISTINCT CASE WHEN r.dkim_auth_result = 'fail'
                                           AND r.dkim_domain = r.header_from
                                          THEN r.dkim_selector END),
+              -- Same pass, same window, same rows as domain_count above.
+              GROUP_CONCAT(DISTINCT d.name),
               $now
             FROM aggregate_records r
+            JOIN domains d ON d.id = r.domain_id
             WHERE r.dmarc_result = 'fail'
               AND r.date_begin >= $since
               AND (r.override_reason IS NULL OR r.override_reason = '')
@@ -220,6 +241,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
               ever_authenticated= excluded.ever_authenticated,
               attempted_forgery = excluded.attempted_forgery,
               forged_selectors  = excluded.forged_selectors,
+              domains           = excluded.domains,
               updated_at        = excluded.updated_at
             -- classification, classified_by, classified_at and notes are NOT
             -- touched: a human's judgement must survive a refresh.
@@ -244,10 +266,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
             SELECT i.value, i.indicator_type, i.first_seen, i.last_seen,
                    i.client_count, i.domain_count, i.message_count,
                    i.ever_authenticated, i.attempted_forgery, i.forged_selectors,
-                   i.classification, COALESCE(i.notes, ''),
-                   (SELECT GROUP_CONCAT(DISTINCT d.name)
-                      FROM aggregate_records r JOIN domains d ON d.id = r.domain_id
-                     WHERE r.source_ip = i.value AND r.dmarc_result = 'fail')
+                   i.classification, COALESCE(i.notes, ''), i.domains
             FROM threat_indicators i
             {(includeDismissed ? "" : "WHERE i.classification NOT IN ('known_good','ignored')")}
             ORDER BY i.attempted_forgery DESC, i.client_count DESC, i.message_count DESC
@@ -265,7 +284,6 @@ public sealed class ThreatIntelligenceService(string databasePath)
                 FirstSeen = ParseDate(reader.GetString(2)),
                 LastSeen = ParseDate(reader.GetString(3)),
                 ClientCount = reader.GetInt32(4),
-                DomainCount = reader.GetInt32(5),
                 MessageCount = reader.GetInt64(6),
                 EverAuthenticated = reader.GetInt32(7) == 1,
                 AttemptedForgery = reader.GetInt32(8) == 1,
@@ -313,7 +331,10 @@ public sealed class ThreatIntelligenceService(string databasePath)
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT
-              (SELECT COUNT(*) FROM clients WHERE deleted_at IS NULL),
+              -- Unassigned is where domains wait to be onboarded, not a
+              -- customer. Counting it inflates the number an operator would
+              -- quote, and it is the one client that can never be billed.
+              (SELECT COUNT(*) FROM clients WHERE deleted_at IS NULL AND slug <> 'unassigned'),
               (SELECT COUNT(*) FROM domains WHERE deleted_at IS NULL AND is_active = 1),
               (SELECT COUNT(*) FROM (
                  SELECT d.id, (SELECT ar.policy_p FROM aggregate_reports ar
@@ -347,6 +368,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
 
         return new FleetSummary
         {
+            WindowDays = days,
             Clients = reader.GetInt32(0),
             Domains = reader.GetInt32(1),
             DomainsEnforcing = reader.GetInt32(2),

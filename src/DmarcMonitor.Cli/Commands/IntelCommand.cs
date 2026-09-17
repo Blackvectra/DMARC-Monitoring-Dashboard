@@ -29,7 +29,10 @@ public static class IntelCommand
         Console.WriteLine("  FLEET");
         Console.WriteLine($"    clients              {fleet.Clients}");
         Console.WriteLine($"    domains              {fleet.Domains}  ({fleet.DomainsEnforcing} enforcing, {fleet.DomainsAtNone} at p=none, {fleet.DomainsSilent} silent)");
-        Console.WriteLine($"    messages seen        {fleet.Messages:N0}  ({fleet.PassRate}% authenticated)");
+        // The window is named because the two lines above it are current
+        // counts, and a total that cannot be reconciled with them reads as a
+        // bug rather than as a different question.
+        Console.WriteLine($"    messages seen        {fleet.Messages:N0}  ({fleet.PassRate}% authenticated, last {fleet.WindowDays} days)");
         Console.WriteLine($"    enforcement          {fleet.EnforcementRate}% of domains");
         Console.WriteLine();
         Console.WriteLine("  INTELLIGENCE");

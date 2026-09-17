@@ -936,6 +936,14 @@ CREATE TABLE threat_indicators (
     attempted_forgery   INTEGER NOT NULL DEFAULT 0,
     forged_selectors    TEXT,                          -- comma-separated, evidence
 
+    -- The domains this indicator was seen against, recorded in the same pass
+    -- that counts them. Held here rather than looked up when displaying,
+    -- because the count is computed over a window and a separate lookup is
+    -- not: the two then disagree, and a row reading "3 domain(s)" beside a
+    -- list of four is the kind of contradiction that costs a report its
+    -- credibility in front of a customer.
+    domains             TEXT NOT NULL DEFAULT '',        -- comma-separated
+
     -- Supplied by a human, and the reason this table is worth keeping.
     -- Classify a source once and every client benefits, forever.
     classification      TEXT NOT NULL DEFAULT 'suspected'
@@ -977,6 +985,9 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0006', datetime('now'), 'Threat indicators: what this operator has learned about sources impersonating their clients, so knowledge from one client protects all of them');
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0007', datetime('now'), 'Domains: record the deliberate baseline window per policy stage, so a planned rollout is distinguishable from a neglected domain');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0008', datetime('now'), 'Threat indicators: record the domain names alongside the count, so the two cannot disagree');
 
 
 -- ============================================================================
