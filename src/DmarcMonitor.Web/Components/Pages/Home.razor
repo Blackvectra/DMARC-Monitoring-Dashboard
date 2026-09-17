@@ -55,7 +55,7 @@ else if (_rows.Count == 0)
 else
 {
     <div class="counts">
-        @foreach (var level in new[] { TriageLevel.Urgent, TriageLevel.Act, TriageLevel.Watch, TriageLevel.Fine })
+        @foreach (var level in new[] { TriageLevel.Urgent, TriageLevel.Act, TriageLevel.Watch, TriageLevel.OnTrack, TriageLevel.Fine })
         {
             var n = _rows.Count(r => r.Level == level);
             @if (n > 0)
@@ -133,6 +133,7 @@ else
         TriageLevel.Urgent => "urgent",
         TriageLevel.Act => "act",
         TriageLevel.Watch => "watch",
+        TriageLevel.OnTrack => "ontrack",
         _ => "fine",
     };
 
@@ -141,6 +142,7 @@ else
         TriageLevel.Urgent => "losing mail",
         TriageLevel.Act => "needs work",
         TriageLevel.Watch => "worth a look",
+        TriageLevel.OnTrack => "rollout on track",
         _ => "fine",
     };
 }

@@ -217,6 +217,18 @@ CREATE TABLE domains (
     policy_target           TEXT NOT NULL DEFAULT 'reject'
                             CHECK (policy_target IN ('none','quarantine','reject')),
 
+    -- The deliberate baseline window for the CURRENT stage.
+    --
+    -- Without these, a domain sitting at p=none looks identical whether it is
+    -- on day three of an intentional two-week baseline or has been forgotten
+    -- for eight months. Those need opposite responses, and a tool reporting
+    -- both as "needs work" trains an operator to ignore the ones that do.
+    --
+    -- Set when a stage begins and again on every advance, because the question
+    -- is always "how long at THIS policy", never "how long since onboarding".
+    baseline_started_at     TEXT,
+    baseline_days           INTEGER NOT NULL DEFAULT 14,
+
     -- Denormalized current state, refreshed on each DNS snapshot. Lets the
     -- client list render without touching dns_snapshots.
     current_policy          TEXT,
@@ -963,6 +975,8 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0005', datetime('now'), 'Aggregate records: keep the raw SPF and DKIM auth RESULTS, so a forged signature is distinguishable from a misconfigured sender');
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0006', datetime('now'), 'Threat indicators: what this operator has learned about sources impersonating their clients, so knowledge from one client protects all of them');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0007', datetime('now'), 'Domains: record the deliberate baseline window per policy stage, so a planned rollout is distinguishable from a neglected domain');
 
 
 -- ============================================================================

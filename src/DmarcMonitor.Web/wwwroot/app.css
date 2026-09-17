@@ -20,6 +20,7 @@
     --act: #db6d28;
     --watch: #d29922;
     --fine: #3fb950;
+    --ontrack: #58a6ff;   /* a rollout in progress is information, not a warning */
     --link: #58a6ff;
 }
 
@@ -116,6 +117,7 @@ select {
 .count.act    { border-color: var(--act);    color: var(--act); }
 .count.watch  { border-color: var(--watch);  color: var(--watch); }
 .count.fine   { border-color: var(--fine);   color: var(--fine); }
+.count.ontrack{ border-color: var(--ontrack); color: var(--ontrack); }
 
 /* ---- triage table ------------------------------------------------------ */
 
@@ -138,6 +140,7 @@ select {
 .pip.act    { background: var(--act); }
 .pip.watch  { background: var(--watch); }
 .pip.fine   { background: var(--fine); }
+.pip.ontrack{ background: var(--ontrack); }
 
 tr.urgent td:first-child { box-shadow: inset 2px 0 var(--urgent); }
 tr.act    td:first-child { box-shadow: inset 2px 0 var(--act); }
