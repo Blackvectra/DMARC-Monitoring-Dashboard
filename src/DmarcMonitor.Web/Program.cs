@@ -20,6 +20,10 @@ builder.Services.AddScoped<TriageService>();
 builder.Services.AddScoped<CorrelationService>();
 builder.Services.AddScoped<DomainDetailService>();
 
+// The one write path a page has. See OnboardingService for why it is an
+// exception to the read-only rule rather than a loosening of it.
+builder.Services.AddScoped<OnboardingService>();
+
 var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())

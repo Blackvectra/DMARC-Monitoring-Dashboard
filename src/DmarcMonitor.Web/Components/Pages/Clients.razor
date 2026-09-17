@@ -1,0 +1,221 @@
+@page "/clients"
+@using DmarcMonitor.Core.Storage
+@using DmarcMonitor.Web.Data
+@inject OnboardingService Onboarding
+@inject ReportStoreConnection Db
+@rendermode InteractiveServer
+
+<PageTitle>Clients — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Clients</h1>
+        <p class="sub">Reports arrive for domains before anybody gets round to onboarding them, so they
+           are kept under Unassigned rather than refused. That makes Unassigned a worklist.</p>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty">
+        <h2>No database yet</h2>
+        <p>Nothing has been imported.</p>
+        <pre>dmarc init-db --db @Db.Path
+dmarc import --from C:\dmarc-export</pre>
+    </div>
+}
+else if (_clients is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_error is not null)
+{
+    <div class="empty">
+        <h2>Could not read the database</h2>
+        <p>@_error</p>
+    </div>
+}
+else
+{
+    @if (_message is not null)
+    {
+        <section class="callout @(_messageIsError ? "urgent" : "fine")">
+            <h2>@_message</h2>
+        </section>
+    }
+
+    @if (_unassigned.Count > 0)
+    {
+        <section class="callout act">
+            <h2>@_unassigned.Count domain(s) not assigned to a client</h2>
+            <p>Reports are being stored for these, and nobody is being billed for them. They will not
+               appear on a client's report until they are assigned.</p>
+        </section>
+
+        <section>
+            <h2>Assign a domain</h2>
+            <div class="form-row">
+                <select @bind="_assignDomain">
+                    <option value="">Choose a domain…</option>
+                    @foreach (var d in _unassigned)
+                    {
+                        <option value="@d">@d</option>
+                    }
+                </select>
+                <select @bind="_assignClient">
+                    <option value="">Choose a client…</option>
+                    @foreach (var c in _clients.Where(c => c.Slug != ReportStore.UnassignedClientSlug))
+                    {
+                        <option value="@c.Slug">@c.Name</option>
+                    }
+                </select>
+                <button class="primary" disabled="@(!CanAssign)" @onclick="AssignAsync">Assign</button>
+            </div>
+            @if (_clients.Count(c => c.Slug != ReportStore.UnassignedClientSlug) == 0)
+            {
+                <p class="sub">No clients yet. Add one below first.</p>
+            }
+        </section>
+    }
+
+    <section>
+        <h2>Add a client</h2>
+        <div class="form-row">
+            <input placeholder="Client name, e.g. Morton, ND" @bind="_newName" @bind:event="oninput" />
+            <button class="primary" disabled="@string.IsNullOrWhiteSpace(_newName)" @onclick="AddAsync">Add</button>
+        </div>
+        @if (!string.IsNullOrWhiteSpace(_newName))
+        {
+            @* Shown before the click, because the slug ends up in report
+               filenames and cannot be changed afterwards. *@
+            <p class="sub">Will be filed as <code>@ReportStore.Slugify(_newName)</code></p>
+        }
+    </section>
+
+    <section>
+        <h2>Everyone</h2>
+        <table class="triage">
+            <thead>
+                <tr>
+                    <th>Client</th>
+                    <th>Slug</th>
+                    <th class="num">Domains</th>
+                    <th class="num">Messages</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var c in _clients)
+                {
+                    var unassigned = c.Slug == ReportStore.UnassignedClientSlug;
+                    <tr class="@(unassigned && c.Domains > 0 ? "act" : "")">
+                        <td>@c.Name</td>
+                        <td><code>@c.Slug</code></td>
+                        <td class="num">@c.Domains</td>
+                        <td class="num">@c.Messages.ToString("N0")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+}
+
+@code {
+    private IReadOnlyList<ReportStore.ClientSummary>? _clients;
+    private IReadOnlyList<string> _unassigned = [];
+    private string? _error;
+
+    private string? _message;
+    private bool _messageIsError;
+
+    private string _newName = "";
+    private string _assignDomain = "";
+    private string _assignClient = "";
+
+    private bool CanAssign =>
+        !string.IsNullOrWhiteSpace(_assignDomain) && !string.IsNullOrWhiteSpace(_assignClient);
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        if (!Db.Exists) { _clients = []; return; }
+
+        try
+        {
+            _clients = await Onboarding.GetClientsAsync();
+            _unassigned = await Onboarding.GetUnassignedDomainsAsync();
+        }
+        catch (Exception ex)
+        {
+            _clients = [];
+            _unassigned = [];
+            _error = ex.Message;
+        }
+    }
+
+    private async Task AddAsync()
+    {
+        var name = _newName.Trim();
+        if (name.Length == 0) { return; }
+
+        try
+        {
+            var slug = await Onboarding.CreateClientAsync(name);
+            if (slug is null)
+            {
+                // Two reasons, two different fixes, so they are not merged
+                // into one "could not add".
+                var wanted = ReportStore.Slugify(name);
+                Set(wanted.Length == 0
+                    ? $"'{name}' has no letters or digits to build a name from."
+                    : $"A client filed as '{wanted}' already exists.", isError: true);
+            }
+            else
+            {
+                Set($"Added {name}, filed as '{slug}'.", isError: false);
+                _newName = "";
+            }
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task AssignAsync()
+    {
+        if (!CanAssign) { return; }
+
+        try
+        {
+            var outcome = await Onboarding.AssignAsync(_assignDomain, _assignClient);
+            Set(outcome switch
+            {
+                ReportStore.AssignOutcome.Assigned =>
+                    $"{_assignDomain} is now filed under '{_assignClient}', along with everything already stored for it.",
+                ReportStore.AssignOutcome.AlreadyAssigned =>
+                    $"{_assignDomain} was already filed under '{_assignClient}'.",
+                ReportStore.AssignOutcome.DomainNotFound =>
+                    $"No reports have been stored for {_assignDomain}.",
+                _ => $"No client filed as '{_assignClient}'.",
+            }, isError: outcome is not (ReportStore.AssignOutcome.Assigned or ReportStore.AssignOutcome.AlreadyAssigned));
+
+            _assignDomain = "";
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+
+        await LoadAsync();
+    }
+
+    private void Set(string message, bool isError)
+    {
+        _message = message;
+        _messageIsError = isError;
+    }
+}

@@ -186,3 +186,18 @@ section { margin-bottom: 26px; }
     background: none; border: 0; padding: 0; margin-top: 10px;
     color: var(--link); font: inherit; cursor: pointer; text-decoration: underline;
 }
+
+/* ---- forms ------------------------------------------------------------- */
+
+.form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
+.form-row input, .form-row select { min-width: 220px; }
+.form-row input {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 9px; font: inherit;
+}
+button.primary {
+    background: var(--link); color: var(--bg); border: 0; border-radius: 6px;
+    padding: 6px 14px; font: inherit; font-weight: 600; cursor: pointer;
+}
+button.primary:disabled { opacity: .45; cursor: default; }
