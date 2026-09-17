@@ -55,33 +55,24 @@ dataset.**
 
 ---
 
-## 2. `CorrelationService` has no tests
+## 2. `TriageService` and `DomainDetailService` have no tests
 
-**Area** `src/DmarcMonitor.Web/Data/CorrelationService.cs`
-**Severity** High. It is the only one of the three source-classifying code
-paths with no test, and it is where the worst regression of the day happened.
+**Area** `src/DmarcMonitor.Web/Data/`
+**Severity** Medium. Both classify or rank, and neither is covered.
 
-The relay false positive had to be fixed in three places. Two of them —
-`ThreatIntelligence` and `ClientReport` — now have tests that fail without the
-fix. `CorrelationService` does not, and the first attempt at fixing it
-exempted any address that had ever passed anywhere in the fleet, which cleared
-a genuine forger (`3.231.237.226`, which passed twice for one client while
-signing as three others it had never passed for). That was caught only because
-the Sources page and the intelligence disagreed about the same address.
+`CorrelationService` moved to `src/DmarcMonitor.Core/Intelligence/` and now has
+seven tests, including one that fails against the exact regression that
+cleared a genuine forger. The two services still in Web do not.
 
-**How to fix.** Add `src/DmarcMonitor.Core.Tests/` coverage mirroring
-`ThreatIntelligenceTests`:
+`DomainDetailService` carries the same three-bucket rule as the client report
+(own sending path / third-party signing as itself / impersonation) and was
+fixed at the same time, on inspection rather than on a failing test.
+`TriageService` decides the order an operator reads the fleet in.
 
-- a relay passing for every domain it fails against → `Misconfigured`
-- an address passing for one domain and failing on others → still
-  `CrossClientImpersonation`
-- an address that never passes → `Unauthenticated` or
-  `CrossClientImpersonation` by client count
-
-`CorrelationService` currently takes `ReportStoreConnection`, which is a Web
-type. Either move it to Core or give the test a thin connection double.
-
----
+**How to fix.** Same move: both take `ReportStoreConnection`, which is a Web
+type, and both would work against a database path exactly as
+`CorrelationService` now does. Ranking and classification are domain logic and
+belong in Core where they can be tested; the Web project keeps the pages.
 
 ## 3. Two nav links still 404
 

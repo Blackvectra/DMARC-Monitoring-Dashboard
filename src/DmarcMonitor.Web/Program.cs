@@ -17,7 +17,7 @@ var dbPath = Path.GetFullPath(builder.Configuration["Database:Path"] ?? "dmarc.d
 builder.Services.AddSingleton(new DatabaseInfo(dbPath));
 builder.Services.AddSingleton<ReportStoreConnection>();
 builder.Services.AddScoped<TriageService>();
-builder.Services.AddScoped<CorrelationService>();
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Intelligence.CorrelationService(dbPath));
 builder.Services.AddScoped<DomainDetailService>();
 
 // The one write path a page has. See OnboardingService for why it is an

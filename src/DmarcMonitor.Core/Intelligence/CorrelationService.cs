@@ -1,6 +1,7 @@
 using System.Globalization;
+using Microsoft.Data.Sqlite;
 
-namespace DmarcMonitor.Web.Data;
+namespace DmarcMonitor.Core.Intelligence;
 
 /// <summary>A sending source seen failing authentication, possibly across several clients.</summary>
 public sealed record FailingSource
@@ -86,9 +87,19 @@ public enum SourceVerdict
 /// while the same source against three unrelated clients is somebody running a
 /// campaign.
 /// </summary>
-public sealed class CorrelationService(ReportStoreConnection connection)
+public sealed class CorrelationService(string databasePath)
 {
-    private readonly ReportStoreConnection _connection = connection;
+    // Opens its own read-only connection, like the other services in Core.
+    // Living here rather than beside the page is the point: this classifies a
+    // sending source, which is the same judgement the client report and the
+    // intelligence make, and the three disagreeing about one address is how
+    // the worst bug of the day was found. A rule this load-bearing belongs
+    // where it can be tested.
+    private readonly string _connectionString = new SqliteConnectionStringBuilder
+    {
+        DataSource = databasePath,
+        Mode = SqliteOpenMode.ReadOnly,
+    }.ToString();
 
     public async Task<IReadOnlyList<FailingSource>> GetFailingSourcesAsync(
         int days = 30, int limit = 200, CancellationToken ct = default)
@@ -96,7 +107,8 @@ public sealed class CorrelationService(ReportStoreConnection connection)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = await _connection.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         // Overrides are excluded. A mailing list or forwarder breaking
