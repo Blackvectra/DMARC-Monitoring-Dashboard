@@ -7,9 +7,12 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.AddAppAuthentication();
 
-// One database path, resolved once, so a misconfiguration is a startup
-// problem rather than a page that renders empty and looks like no data.
-var dbPath = builder.Configuration["Database:Path"] ?? "dmarc.db";
+// One database path, resolved once to an absolute path, so a misconfiguration
+// is a startup problem rather than a page that renders empty and looks like no
+// data. Absolute matters for what the pages say too: "no database at dmarc.db"
+// sends an operator looking in the wrong directory, because a relative path is
+// resolved against wherever the service happened to be started.
+var dbPath = Path.GetFullPath(builder.Configuration["Database:Path"] ?? "dmarc.db");
 builder.Services.AddSingleton(new DatabaseInfo(dbPath));
 builder.Services.AddSingleton<ReportStoreConnection>();
 builder.Services.AddScoped<TriageService>();
