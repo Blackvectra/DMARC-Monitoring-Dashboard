@@ -146,6 +146,14 @@ else
         SourceVerdict.Unauthenticated =>
             "Authenticated nothing. Either a service nobody recorded, or somebody sending as this domain.",
 
+        // A source that has passed but names no other domain is one of the
+        // client's own sending paths breaking in transit, not a third party
+        // signing as itself. Without this branch the sentence reads
+        // "Authenticated for  rather than the domain it sends as".
+        _ when row.AuthenticatedFor.Count == 0 =>
+            $"Has sent authenticated mail for all {row.DomainCount} of these domains, so it is one of their "
+          + "own sending paths. These failures are signatures broken in transit, not somebody sending as them.",
+
         _ =>
             $"Authenticated for {string.Join(", ", row.AuthenticatedFor)} rather than the domain it sends as. "
           + "Almost always a real service set up with the provider's own domain, not an attack.",
