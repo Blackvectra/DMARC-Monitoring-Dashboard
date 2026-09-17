@@ -1,0 +1,136 @@
+name: Release
+
+# Nothing downloadable existed: the CLI needed a git checkout and an SDK to
+# run at all, which makes the first question anybody asks - "can I try it?" -
+# a half-hour answer. This produces the two things somebody actually installs.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed only to attach files to a release
+
+jobs:
+  cli:
+    name: dmarc.exe (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows is where an MSP runs this. Linux because the eventual
+          # hosted deployment is a container, and finding out it does not
+          # publish there at release time is finding out too late.
+          - { os: windows-latest, rid: win-x64,   exe: dmarc.exe }
+          - { os: ubuntu-latest,  rid: linux-x64, exe: dmarc }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish
+        shell: bash
+        run: |
+          # IncludeNativeLibrariesForSelfExtract puts e_sqlite3 inside the
+          # binary rather than beside it. Without it the exe is not actually
+          # one file, and somebody copies it alone and gets a runtime error
+          # about a missing native library.
+          dotnet publish src/DmarcMonitor.Cli/DmarcMonitor.Cli.csproj \
+            --configuration Release \
+            --runtime ${{ matrix.rid }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:DebugType=none \
+            --output publish/${{ matrix.rid }}
+
+      - name: Prove the single file actually runs on its own
+        shell: bash
+        run: |
+          # The whole point of this job. Copy the binary somewhere with
+          # nothing else in it - no schema file, no native library, no
+          # checkout - and make it create a database. That is the first thing
+          # anybody does with it, and the thing that breaks when the schema is
+          # not embedded or SQLite did not get bundled.
+          mkdir -p smoke
+          cp publish/${{ matrix.rid }}/${{ matrix.exe }} smoke/
+          cd smoke
+
+          ls -la
+          ./${{ matrix.exe }} init-db --db proof.db
+          test -f proof.db || { echo "init-db reported success but wrote no database"; exit 1; }
+
+          # And that it can read a report without a database or configuration.
+          ./${{ matrix.exe }} explain ../src/DmarcMonitor.Core.Tests/Fixtures/google-aggregate.xml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmarc-${{ matrix.rid }}
+          path: publish/${{ matrix.rid }}/${{ matrix.exe }}
+          if-no-files-found: error
+
+  web:
+    name: Web app bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish
+        run: |
+          dotnet publish src/DmarcMonitor.Web/DmarcMonitor.Web.csproj \
+            --configuration Release \
+            --output publish/web
+
+      - name: Check the bundle carries what it needs
+        run: |
+          test -f publish/web/DmarcMonitor.Web.dll || { echo "no web assembly"; exit 1; }
+          test -f publish/web/wwwroot/app.css     || { echo "no stylesheet: pages render unstyled"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmarc-web
+          path: publish/web
+          if-no-files-found: error
+
+  release:
+    name: Attach to the release
+    needs: [cli, web]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package
+        run: |
+          cd artifacts
+          zip -r  ../dmarc-web.zip        dmarc-web
+          mv dmarc-win-x64/dmarc.exe      ../dmarc.exe
+          mv dmarc-linux-x64/dmarc        ../dmarc-linux-x64
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dmarc.exe
+            dmarc-linux-x64
+            dmarc-web.zip
+          body: |
+            `dmarc.exe` runs on its own: no .NET install, no checkout, no
+            schema file beside it. Every build is checked by creating a
+            database in an empty directory before it is published.
+
+            The web bundle needs the ASP.NET Core 8 runtime on the host. See
+            `docs/INGEST-SETUP.md` for the app registration and
+            `docs/OPEN-ISSUES.md` for what is known to be unfinished.

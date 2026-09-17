@@ -157,28 +157,25 @@ roughly three more months of traffic, and add the unusual ones as fixtures.
 
 ---
 
-## 6. Distribution
+## 6. Nothing has been released yet
 
-**Area** `src/DmarcMonitor.Cli/`, release tooling
-**Severity** Medium. Nobody can run this without a git checkout and an SDK.
+**Area** `.github/workflows/release.yml`
+**Severity** Low, now that the workflow exists but has never run.
 
-`dmarc.exe` now builds self-contained and carries the schema internally, so it
-works on a bare machine:
+`dmarc` publishes as a genuinely single file - schema compiled in, SQLite's
+native library bundled rather than sitting beside it - and the workflow proves
+it on every build by copying the binary into an empty directory and making it
+create a database there. That check is the point: a missing embedded schema or
+an unbundled native library both look fine until somebody copies the exe
+somewhere on its own, which is the first thing anybody does.
 
-```
-dotnet publish src/DmarcMonitor.Cli -c Release -r win-x64 --self-contained \
-  -p:PublishSingleFile=true -o out
-```
+Both the Windows and Linux jobs, and the web bundle, are untried: the workflow
+has not been triggered. Tag a version or run it manually and see.
 
-**What is missing.** No release workflow produces that artifact, so there is
-nothing to download. `e_sqlite3.dll` also lands beside the exe rather than
-inside it — add `-p:IncludeNativeLibrariesForSelfExtract=true` and confirm
-SQLite still loads, because that flag has broken native loading before.
-
-The web app has no published form at all: no service definition, no
-`appsettings` template, no note on where the database should live on a server.
-
----
+The web app is not self-contained and needs the ASP.NET Core 8 runtime on the
+host. That is a deliberate trade - a self-contained web bundle is several
+hundred megabytes - but it means "copy one file and run it" is true of the CLI
+and not of the app.
 
 ## 7. Smaller things
 
