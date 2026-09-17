@@ -136,7 +136,34 @@ both restore identically.
 
 ---
 
-## 5. Data parsed and stored, then never used
+## 5. The DNS check is weaker without a database than it needs to be
+
+**Area** `src/DmarcMonitor.Core/Dns/DnsLookup.cs`
+**Severity** Low, and it undercuts the use it was built for.
+
+`dmarc check --domain x` with no database is meant to answer "what is wrong
+with this prospect's email setup" before they are a customer. Two of its
+findings cannot fire in that mode:
+
+- **MTA-STS mode** comes from TLS reports, so a prospect's policy shows as
+  published and never as *testing*, which is the interesting state. The mode is
+  also in the policy file at
+  `https://mta-sts.<domain>/.well-known/mta-sts.txt`, which is one HTTPS GET
+  and would make this work standalone.
+- **Unused includes** need observed sending, so there is nothing to match
+  against. That one is unavoidable and correct: with no evidence the honest
+  answer is silence.
+
+Checked against nrgtechservices.com, which has MTA-STS in testing mode: with
+`--db` the check reports it, without `--db` it says "nothing to change".
+
+**How to fix.** Fetch the policy file when there is no observed mode, and treat
+a fetch failure as unknown rather than absent - the same rule the DNS lookups
+already follow.
+
+---
+
+## 6. Data parsed and stored, then never used
 
 **Area** `src/DmarcMonitor.Core/Aggregate/`, `src/DmarcMonitor.Core/Storage/`
 **Severity** Low. Nothing is wrong; something useful is sitting unused.
@@ -183,7 +210,7 @@ reports:
   outside the eight seen (Proofpoint, Barracuda, Fastmail, ProtonMail, Zoho,
   GoDaddy, Rackspace, non-Western providers).
 
-## 6. Nothing has been released yet
+## 7. Nothing has been released yet
 
 **Area** `.github/workflows/release.yml`
 **Severity** Low, now that the workflow exists but has never run.
@@ -203,7 +230,7 @@ host. That is a deliberate trade - a self-contained web bundle is several
 hundred megabytes - but it means "copy one file and run it" is true of the CLI
 and not of the app.
 
-## 7. Smaller things
+## 8. Smaller things
 
 | area | what | how |
 |---|---|---|
