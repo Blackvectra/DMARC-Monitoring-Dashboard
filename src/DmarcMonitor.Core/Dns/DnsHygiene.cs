@@ -72,6 +72,19 @@ public sealed record PublishedRecords
 
     /// <summary>True when the lookup itself failed, so absence proves nothing.</summary>
     public bool LookupFailed { get; init; }
+
+    /// <summary>
+    /// True when the resolver answered that the name does not exist.
+    /// </summary>
+    /// <remarks>
+    /// A third answer, distinct from both of the others. The lookup did not
+    /// fail and the records are not merely absent: there is no domain. Without
+    /// this the two look identical - an NXDOMAIN returns no answers, just as a
+    /// domain with no TXT records does - and a mistyped customer domain came
+    /// back with a confident list of weaknesses and instructions to publish
+    /// records at an apex that does not exist.
+    /// </remarks>
+    public bool DomainDoesNotExist { get; init; }
 }
 
 /// <summary>What the reports say is actually happening, for cross-referencing.</summary>
@@ -153,6 +166,24 @@ public static class DnsHygiene
                     Record = "DNS",
                     Problem = "The records for this domain could not be read, so nothing below was checked.",
                     Fix = "Check the domain still resolves, then run this again.",
+                },
+            ];
+        }
+
+        // Nor is a domain that does not exist a domain with no records. There
+        // is nothing to publish a record on, and every finding below would be
+        // an instruction to edit a zone nobody owns. For an MSP checking a
+        // customer domain, this is a typo, and saying so is the whole answer.
+        if (published.DomainDoesNotExist)
+        {
+            return
+            [
+                new HygieneFinding
+                {
+                    Severity = HygieneSeverity.Weakness,
+                    Record = "DNS",
+                    Problem = $"There is no domain called {published.Domain}. The resolver says the name does not exist, so nothing below was checked.",
+                    Fix = "Check the spelling. If the domain is new, it may not have been delegated yet.",
                 },
             ];
         }

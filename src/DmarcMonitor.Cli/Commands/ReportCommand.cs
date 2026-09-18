@@ -62,6 +62,16 @@ public static class ReportCommand
             slugs = [slug!];
         }
 
+        // Checked, because Directory.CreateDirectory throws when the path is
+        // an existing file and the exception reached the operator as a stack
+        // trace under a banner saying "This is a bug". Naming a file where a
+        // folder goes is an ordinary typo, not a bug.
+        if (File.Exists(outPath))
+        {
+            Console.Error.WriteLine($"--out names a folder to write the reports into, not a file. {outPath} is a file.");
+            return 66;
+        }
+
         Directory.CreateDirectory(outPath);
 
         var written = 0;

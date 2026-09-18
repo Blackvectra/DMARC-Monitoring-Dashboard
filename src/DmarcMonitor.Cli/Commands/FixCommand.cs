@@ -1,3 +1,4 @@
+using System.Globalization;
 using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Rollout;
@@ -64,6 +65,25 @@ public static class FixCommand
             ? (await new TriageService(dbPath).GetAsync(ct: ct).ConfigureAwait(false)).Select(t => t.Domain).ToList()
             : [domain!.Trim().ToLowerInvariant()];
 
+        // Checked here rather than left to Args.Int, whose silent fallback is
+        // the wrong shape for a safety limit. It returns 100 for anything that
+        // is not a positive integer, so "--pct twentyfive", "--pct 0",
+        // "--pct -5" and a value accidentally split by a space all planned the
+        // change at 100% of failing mail - the opposite of what somebody
+        // typing --pct wants, with nothing printed to say the flag was
+        // dropped. Above 100 it threw instead, and the stack trace reached the
+        // operator under a banner saying "This is a bug".
+        var percent = 100;
+        if (Args.Value(args, "--pct") is { } pctText)
+        {
+            if (!int.TryParse(pctText, NumberStyles.Integer, CultureInfo.InvariantCulture, out percent)
+                || percent is < 1 or > 100)
+            {
+                Console.Error.WriteLine($"--pct takes a whole number from 1 to 100. '{pctText}' is not one.");
+                return 64;
+            }
+        }
+
         var apply = Args.Flag(args, "--apply");
         var reason = Args.Value(args, "--reason") ?? "";
         if (apply && reason.Length == 0)
@@ -76,7 +96,7 @@ public static class FixCommand
         foreach (var d in domains)
         {
             ct.ThrowIfCancellationRequested();
-            worst = Math.Max(worst, await FixDomainAsync(d, args, policy, apply, by, reason, lookup, service, configs, dbPath, ct).ConfigureAwait(false));
+            worst = Math.Max(worst, await FixDomainAsync(d, args, policy, percent, apply, by, reason, lookup, service, configs, dbPath, ct).ConfigureAwait(false));
         }
 
         Console.WriteLine();
@@ -84,7 +104,7 @@ public static class FixCommand
     }
 
     private static async Task<int> FixDomainAsync(
-        string domain, string[] args, string? policy, bool apply, string by, string reason,
+        string domain, string[] args, string? policy, int percent, bool apply, string by, string reason,
         DnsLookup lookup, RemediationService service, DnsProviderConfigs configs, string dbPath, CancellationToken ct)
     {
         Console.WriteLine();
@@ -105,7 +125,7 @@ public static class FixCommand
 
         if (policy is not null)
         {
-            plans.Add(DmarcPolicyPlanner.Advance(domain, published.DmarcRecord, policy, Args.Int(args, "--pct", 100)));
+            plans.Add(DmarcPolicyPlanner.Advance(domain, published.DmarcRecord, policy, percent));
         }
 
         // Without a specific ask, everything that is safe to do on the
@@ -220,9 +240,27 @@ public static class FixCommand
         var record = DmarcRecord.Parse(published.DmarcRecord);
         var live = record.IsValid ? record.Policy.ToLowerInvariant() : "";
 
-        var next = row.Headline.Contains("Ready to move to p=", StringComparison.Ordinal)
-            ? row.Headline[(row.Headline.IndexOf("p=", StringComparison.Ordinal) + 2)..].TrimEnd('.')
-            : null;
+        // Taken from after "Ready to move to p=", not after the first "p=".
+        // The headline reads "p=none with everything authenticating. Ready to
+        // move to p=reject.", so the first "p=" is the CURRENT policy, and the
+        // suggested command came out as
+        //
+        //   dmarc fix --domain x --policy none with everything authenticating. Ready to move to p=reject --apply
+        //
+        // which a shell splits into stray words, binding --policy to "none" -
+        // the policy the domain is already on. Pasting the product's own
+        // instruction answered "[ok] x is already at p=none" and exited 0, so
+        // the operator was told the job was done while the domain stayed
+        // unprotected. It fired on precisely the domains that were ready to
+        // advance, which is the only case this code runs for.
+        const string Marker = "Ready to move to p=";
+        var at = row.Headline.IndexOf(Marker, StringComparison.Ordinal);
+        var next = at < 0 ? null : row.Headline[(at + Marker.Length)..].TrimEnd('.').Trim();
+
+        // And checked, rather than printed on trust. A headline that changes
+        // shape should stop the suggestion, not emit a command that means
+        // something else.
+        if (next is not null && next is not ("none" or "quarantine" or "reject")) { next = null; }
 
         if (next is not null && live != next)
         {

@@ -24,6 +24,12 @@ public sealed class ReportStore
     public const string DefaultTenantSlug = "local";
     public const string UnassignedClientSlug = "unassigned";
 
+    /// <summary>SQLITE_CORRUPT: the file is a database and is damaged.</summary>
+    private const int Corrupt = 11;
+
+    /// <summary>SQLITE_NOTADB: the file is not a database at all.</summary>
+    private const int NotADatabase = 26;
+
     public ReportStore(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
@@ -84,12 +90,25 @@ public sealed class ReportStore
     {
         if (_databasePath is not ":memory:" && !File.Exists(_databasePath)) { return false; }
 
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText =
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('aggregate_reports','tls_reports','domains')";
-        var count = Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture);
-        return count == 3;
+        try
+        {
+            await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('aggregate_reports','tls_reports','domains')";
+            var count = Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture);
+            return count == 3;
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is NotADatabase or Corrupt)
+        {
+            // A file that is not a database is not an exceptional event; it is
+            // somebody pointing --db at the wrong file, which is an ordinary
+            // typo. It used to escape from the WAL pragma in OpenAsync - before
+            // this method could ever return false - and every command printed a
+            // SQLite stack trace under a banner reading "This is a bug",
+            // leaving the one branch written to explain it unreachable.
+            return false;
+        }
     }
 
     /// <summary>

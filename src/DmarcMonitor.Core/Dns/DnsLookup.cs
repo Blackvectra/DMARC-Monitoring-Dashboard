@@ -33,7 +33,18 @@ public sealed class DnsLookup(ILookupClient? client = null)
 
         try
         {
-            var apex = await TxtAsync(name, ct).ConfigureAwait(false);
+            // The apex query answers two questions at once, so this costs no
+            // extra lookup: what TXT records are there, and does the name
+            // exist at all. NXDOMAIN comes back as an empty answer section
+            // exactly like a domain that simply has no TXT records, and
+            // telling those apart is the difference between "publish an SPF
+            // record" and "there is no such domain".
+            var (apex, apexExists) = await TxtAtApexAsync(name, ct).ConfigureAwait(false);
+            if (!apexExists)
+            {
+                return new PublishedRecords { Domain = name, DomainDoesNotExist = true };
+            }
+
             var dmarc = await TxtAsync($"_dmarc.{name}", ct).ConfigureAwait(false);
             var mtaSts = await TxtAsync($"_mta-sts.{name}", ct).ConfigureAwait(false);
             var tlsRpt = await TxtAsync($"_smtp._tls.{name}", ct).ConfigureAwait(false);
@@ -275,6 +286,27 @@ public sealed class DnsLookup(ILookupClient? client = null)
             // reason to refuse rather than as a domain with no mail servers.
             return [];
         }
+    }
+
+    /// <summary>
+    /// The apex TXT records, and whether the name exists at all.
+    /// </summary>
+    /// <remarks>
+    /// Errors are not thrown by this client by default, so an NXDOMAIN
+    /// arrives as an ordinary response carrying the code and no answers. Read
+    /// here rather than inferred from emptiness, which cannot tell a domain
+    /// that does not exist from one that publishes no TXT records.
+    /// </remarks>
+    private async Task<(List<string> Records, bool Exists)> TxtAtApexAsync(string name, CancellationToken ct)
+    {
+        var response = await _client.QueryAsync(name, QueryType.TXT, cancellationToken: ct).ConfigureAwait(false);
+
+        if (response.Header.ResponseCode == DnsHeaderResponseCode.NotExistentDomain)
+        {
+            return ([], false);
+        }
+
+        return ([.. response.Answers.TxtRecords().Select(r => string.Concat(r.Text))], true);
     }
 
     private async Task<List<string>> TxtAsync(string name, CancellationToken ct)

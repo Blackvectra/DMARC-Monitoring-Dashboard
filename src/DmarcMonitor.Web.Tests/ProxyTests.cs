@@ -34,6 +34,11 @@ public sealed class ProxyTests : IClassFixture<UnauthenticatedApp>
     [InlineData("X-Forwarded-Proto", "https")]
     [InlineData("X-Forwarded-Host", "dmarc.example.com")]
     [InlineData("Forwarded", "for=203.0.113.9;proto=https")]
+    // nginx's other convention, and Apache's. A proxy set up with only one of
+    // these and none of the X-Forwarded-* family is unusual but writable in a
+    // few lines, and it used to walk straight past the guard.
+    [InlineData("X-Real-IP", "203.0.113.9")]
+    [InlineData("X-Forwarded-Server", "dmarc.example.com")]
     public async Task RefusesARequestThatCameThroughAProxy(string header, string value)
     {
         // The test host connects over loopback, exactly as a proxy on the same

@@ -143,7 +143,15 @@ public static class AuthSetup
         request.Headers.ContainsKey("X-Forwarded-For")
         || request.Headers.ContainsKey("X-Forwarded-Proto")
         || request.Headers.ContainsKey("X-Forwarded-Host")
-        || request.Headers.ContainsKey("Forwarded");
+        || request.Headers.ContainsKey("Forwarded")
+
+        // nginx's other convention, and Apache's. A proxy configured with
+        // only these and none of the X-Forwarded-* family is unusual but
+        // perfectly possible to write, and it would have walked straight
+        // past the four above while still putting the whole internet in
+        // front of a sign-in that was only ever meant for this machine.
+        || request.Headers.ContainsKey("X-Real-IP")
+        || request.Headers.ContainsKey("X-Forwarded-Server");
 
     /// <summary>Signs the local-mode user in. Only reachable when Entra is not configured.</summary>
     public static void MapLocalSignIn(this WebApplication app)

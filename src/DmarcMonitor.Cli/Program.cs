@@ -31,6 +31,14 @@ public static class Program
             var command = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
             var rest = args.Skip(1).ToArray();
 
+            // Asked what a command does, answer - do not do it. No subcommand
+            // looked for a help request, and the consequences were not all
+            // harmless: `init-db --help` found no value for --db, fell back to
+            // the default, and created a 548 KB database in whatever directory
+            // the person happened to be standing in, exit 0. Somebody asking a
+            // command what it does should never have it happen to them.
+            if (rest.Any(a => a is "--help" or "-h" or "/?")) { return Help(); }
+
             return command switch
             {
                 "explain" => await ExplainCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
