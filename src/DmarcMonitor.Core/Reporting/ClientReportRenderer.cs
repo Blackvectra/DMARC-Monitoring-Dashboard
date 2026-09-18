@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Text;
+using DmarcMonitor.Core.Charting;
 
 namespace DmarcMonitor.Core.Reporting;
 
@@ -43,6 +44,7 @@ public static class ClientReportRenderer
 
         Header(html, report);
         Summary(html, summary);
+        Trend(html, report);
         Domains(html, report);
         Impersonation(html, report);
         Misconfigured(html, report);
@@ -84,6 +86,98 @@ public static class ClientReportRenderer
 
         html.Append("  </ul>\n</section>\n\n");
     }
+
+    /// <summary>
+    /// The month as a picture.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Inline SVG with no script and no external file, like the rest of this
+    /// document: it is mailed, forwarded and printed, and anything fetched
+    /// from elsewhere would arrive as a broken image in a client's inbox.
+    /// </para>
+    /// <para>
+    /// A month's total cannot show the shape of the month. A client whose mail
+    /// was fine until the 14th and half-rejected since reads as "93%
+    /// protected", which is accurate and gives them nothing to act on.
+    /// </para>
+    /// </remarks>
+    private static void Trend(StringBuilder html, ClientReport report)
+    {
+        // Nothing to draw is not a blank panel: a month with no mail at all is
+        // said in words by the summary above, and an empty chart under it
+        // reads as a rendering fault.
+        if (report.Daily.Count == 0 || report.Daily.All(d => d.Messages == 0)) { return; }
+
+        const double w = 640;
+        const double h = 130;
+
+        var totals = report.Daily.Select(d => d.Reported ? (double?)d.Messages : null).ToList();
+        var failing = report.Daily.Select(d => d.Reported ? (double?)d.Failing : null).ToList();
+        var peak = report.Daily.Where(d => d.Reported).Select(d => d.Messages).DefaultIfEmpty(0).Max();
+        var ceiling = peak > 0 ? (double)peak : 1;
+
+        var missing = report.Daily.Count(d => !d.Reported);
+
+        html.Append(CultureInfo.InvariantCulture, $"""
+            <section>
+              <h2>Your mail, day by day</h2>
+              <p class="note">The taller the shape, the more mail you sent that day. The darker band is
+                 mail that failed the checks.</p>
+              <svg class="trend" viewBox="0 0 {N(w)} {N(h)}" role="img"
+                   aria-label="{E($"{report.Messages:N0} messages over {report.Daily.Count} days, {report.PassRate}% protected.")}">
+                <path d="{Chart.Area(totals, w, h, ceiling)}" class="t-total" />
+                <path d="{Chart.Area(failing, w, h, ceiling)}" class="t-fail" />
+                <path d="{Chart.Line(totals, w, h, ceiling)}" class="t-line" />
+                {Dots(totals, w, h, ceiling)}
+              </svg>
+              <p class="axis"><span>{E(report.Daily[0].Day.ToString("d MMM", CultureInfo.InvariantCulture))}</span>
+                 <span>peak {peak:N0} a day</span>
+                 <span>{E(report.Daily[^1].Day.ToString("d MMM", CultureInfo.InvariantCulture))}</span></p>
+
+            """);
+
+        if (missing > 0)
+        {
+            // Said rather than drawn flat. A client who sees a dip wants to
+            // know whether their mail stopped or the reporting did, and those
+            // are very different conversations.
+            html.Append(CultureInfo.InvariantCulture, $"""
+                  <p class="note">{missing} day(s) in this period have no reports at all, so the line
+                     breaks rather than dropping to zero. That usually means the receivers sent nothing,
+                     not that your mail stopped.</p>
+
+                """);
+        }
+
+        html.Append("</section>\n\n");
+    }
+
+    /// <summary>
+    /// Readings with no neighbour, drawn as dots.
+    /// </summary>
+    /// <remarks>
+    /// Without these a client heard from on exactly one day of the month gets
+    /// an empty rectangle where the chart should be. Found on the real data:
+    /// mcleanelectric.com had one reported day in August, so the line was a
+    /// single move with nothing to join to and the area had no width. A blank
+    /// box in a report going to a customer reads as broken software.
+    /// </remarks>
+    private static string Dots(IReadOnlyList<double?> values, double w, double h, double ceiling)
+    {
+        var dots = Chart.IsolatedPoints(values, w, h, ceiling);
+        if (dots.Count == 0) { return ""; }
+
+        var svg = new StringBuilder();
+        foreach (var (x, y) in dots)
+        {
+            svg.Append(CultureInfo.InvariantCulture, $"""<circle cx="{N(x)}" cy="{N(y)}" r="3" class="t-dot" />""");
+        }
+        return svg.ToString();
+    }
+
+    private static string N(double value) =>
+        value.ToString("0.##", CultureInfo.InvariantCulture);
 
     private static void Domains(StringBuilder html, ClientReport report)
     {
@@ -403,6 +497,16 @@ public static class ClientReportRenderer
     private const string Css = """
 
         :root { --ink:#16191d; --muted:#5b6470; --line:#e2e6eb; --ok:#0d7a45; --warn:#9a6400; --bad:#b3261e; }
+
+        /* The chart. Inline SVG with no script and no external file, because
+           this document is mailed, forwarded and printed. */
+        .trend { width:100%; height:130px; display:block; margin:10px 0 4px; }
+        .t-total { fill:#0d7a45; opacity:.14; }
+        .t-fail  { fill:#b3261e; opacity:.32; }
+        .t-line  { fill:none; stroke:#0d7a45; stroke-width:1.5; }
+        .t-dot   { fill:#0d7a45; }
+        .axis { display:flex; justify-content:space-between; gap:10px;
+                font-size:12px; color:var(--muted); margin:0 0 6px; }
         * { box-sizing: border-box; }
         body { margin:0; padding:24px 16px; background:#f6f7f9; color:var(--ink);
                font:16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }

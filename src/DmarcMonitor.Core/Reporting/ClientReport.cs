@@ -123,6 +123,16 @@ public sealed record ClientReport
     public IReadOnlyList<ReportSource> Sources { get; init; } = [];
     public IReadOnlyList<ReportChange> Changes { get; init; } = [];
 
+    /// <summary>
+    /// One point per day of the period, for the chart.
+    /// </summary>
+    /// <remarks>
+    /// A month's total cannot show the shape of the month. A client whose mail
+    /// was fine until the 14th and has been half-rejected since reads as "93%
+    /// protected", which is accurate and tells them nothing they can act on.
+    /// </remarks>
+    public IReadOnlyList<DayPoint> Daily { get; init; } = [];
+
     public long Messages { get; init; }
     public long Passing { get; init; }
     public long Failing { get; init; }

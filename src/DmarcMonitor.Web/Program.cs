@@ -24,6 +24,7 @@ var dbPath = Path.GetFullPath(builder.Configuration["Database:Path"] ?? "dmarc.d
 builder.Services.AddSingleton(new DatabaseInfo(dbPath));
 builder.Services.AddSingleton<ReportStoreConnection>();
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Rollout.TriageService(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Reporting.TimeSeriesService(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Intelligence.CorrelationService(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Domains.DomainDetailService(dbPath));
 

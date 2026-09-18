@@ -1,9 +1,13 @@
 @page "/domains/{Domain}"
+@using DmarcMonitor.Core.Charting
 @using DmarcMonitor.Core.Dns
+@using DmarcMonitor.Core.Reporting
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Core.Domains
+@using DmarcMonitor.Web.Components.Charts
 @using DmarcMonitor.Web.Data
 @inject DomainDetailService Detail
+@inject TimeSeriesService Series
 @inject DnsLookup Dns
 @inject ReportStoreConnection Db
 @rendermode InteractiveServer
@@ -120,6 +124,32 @@ else
         Each link carries its own count, so the shape of the domain is legible
         before following any of them.
     *@
+    @* The shape of the domain over time, which no total can show. A domain
+       that was fine until Tuesday and has been rejecting a third of its mail
+       since reads as "97% passing" in the figures above: true, and useless. *@
+    @if (_series is not null && _series.Count > 0)
+    {
+        <VolumeChart Points="_series" Caption="@($"Mail per day, last {_days} days")" />
+    }
+
+    @if (_detail.Failing > 0)
+    {
+        <div class="chart">
+            <figcaption>What happened to the @_detail.Failing.ToString("N0") message(s) that failed</figcaption>
+            <ProportionBar Slices="@Disposition()"
+                           Empty="Nothing failed in this window." />
+            @if (DeliveredAnyway > 0 && _detail.Policy is "reject" or "quarantine")
+            {
+                @* The number that says how much protection the policy is
+                   actually giving, as opposed to what it claims. *@
+                <p class="sub">
+                    @DeliveredAnyway.ToString("N0") failing message(s) were delivered anyway despite
+                    <code>p=@_detail.Policy</code>@(_detail.Pct < 100 ? $", which is what pct={_detail.Pct} does" : "").
+                </p>
+            }
+        </div>
+    }
+
     <nav class="jump" aria-label="Sections of this page">
         @if (_detail.SigningUnaligned.Count > 0)
         {
@@ -603,7 +633,30 @@ else
     [Parameter] public string Domain { get; set; } = "";
 
     private DomainDetail? _detail;
+    private IReadOnlyList<DayPoint>? _series;
     private PublishedRecords? _dns;
+
+    private long Quarantined => _series?.Sum(p => p.Quarantined) ?? 0;
+    private long Rejected => _series?.Sum(p => p.Rejected) ?? 0;
+
+    /// <summary>
+    /// Failing mail the receivers delivered regardless.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the detail's own total rather than from the series, so the
+    /// three segments always sum to the number printed above them. The two
+    /// queries use slightly different windows and exclusions, and a bar that
+    /// disagrees with the sentence beside it is worse than no bar.
+    /// </remarks>
+    private long DeliveredAnyway => Math.Max(0, (_detail?.Failing ?? 0) - Quarantined - Rejected);
+
+    /// <summary>What the receivers actually did with the mail that failed.</summary>
+    private IReadOnlyList<Slice> Disposition() =>
+    [
+        new Slice("rejected", Rejected, "urgent"),
+        new Slice("quarantined", Quarantined, "watch"),
+        new Slice("delivered anyway", DeliveredAnyway, "dim"),
+    ];
 
     // Starts true, because before anything has been attempted the honest
     // state is "not yet", not "failed". A page rendered before its circuit
@@ -665,9 +718,10 @@ else
         _error = null;
 
         // Cleared so navigating between domains does not show the previous
-        // domain's record beside this one's reports.
+        // domain's record beside this one's reports, nor its chart above them.
         _dns = null;
         _dnsPending = true;
+        _series = null;
 
         if (!Db.Exists) { _loading = false; return; }
 
@@ -681,6 +735,20 @@ else
             // "this domain is quiet", which is the opposite of the truth.
             _detail = null;
             _error = ex.Message;
+            _series = null;
+            _loading = false;
+            return;
+        }
+
+        try
+        {
+            _series = _detail is null ? null : await Series.DomainAsync(_detail.Domain, _days);
+        }
+        catch (Exception)
+        {
+            // The charts are the one part of this page that can be dropped
+            // without misleading anybody. The evidence below them is the page.
+            _series = null;
         }
         finally
         {

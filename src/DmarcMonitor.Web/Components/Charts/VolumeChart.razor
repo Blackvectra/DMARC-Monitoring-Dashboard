@@ -1,0 +1,133 @@
+@using DmarcMonitor.Core.Charting
+@using DmarcMonitor.Core.Reporting
+
+@*
+    Mail per day, passing and failing, with the pass rate over the top.
+
+    Inline SVG, drawn on the server. This product is installed on somebody
+    else's server, often one that cannot reach the internet, so a chart that
+    fetches a script from a CDN is a chart that does not draw. The same markup
+    goes into the client report, which is mailed and printed, where no script
+    runs at all.
+
+    Colour is never the only signal: the figures under the chart repeat every
+    number it shows, and the axis labels give the range.
+*@
+
+@if (Points.Count == 0)
+{
+    <p class="muted">No data for this window.</p>
+}
+else if (Points.All(p => !p.Reported))
+{
+    @* Found by looking at a real domain that stopped being reported on in
+       June: every day was a gap, so the chart drew nothing and rendered as an
+       empty box, which reads as a broken component rather than as the finding
+       it is. *@
+    <p class="muted">
+        No reports at all in the last @Points.Count days, so there is nothing to plot.
+        Either no mail was sent, or the reports have stopped arriving.
+    </p>
+}
+else
+{
+    <figure class="chart">
+        @if (!string.IsNullOrEmpty(Caption))
+        {
+            <figcaption>@Caption</figcaption>
+        }
+
+        <svg viewBox="0 0 @W @H" class="chart-svg" role="img" preserveAspectRatio="none"
+             aria-label="@Describe()">
+            @* Gridlines first, so the data sits on top of them. *@
+            @foreach (var f in new[] { 0.0, 0.5, 1.0 })
+            {
+                <line x1="0" x2="@W" y1="@(H * f)" y2="@(H * f)" class="grid" />
+            }
+
+            @* Total volume as an area, with the failing part drawn over it:
+               two areas rather than a stack, because a stacked band whose
+               lower edge moves makes the upper band unreadable. *@
+            <path d="@Chart.Area(Totals, W, H, Ceiling)" class="fill-total" />
+            <path d="@Chart.Area(Failing, W, H, Ceiling)" class="fill-fail" />
+            <path d="@Chart.Line(Totals, W, H, Ceiling)" class="line-total" />
+
+            @* A day with nothing either side of it draws no line, so it is
+               marked instead of vanishing. *@
+            @foreach (var (x, y) in Chart.IsolatedPoints(Totals, W, H, Ceiling))
+            {
+                <circle cx="@x" cy="@y" r="2.5" class="lone-point" />
+            }
+
+            @* Unreported days marked on the baseline. Without this an absent
+               stretch looks like a quiet week rather than a collection
+               failure, which is the more dangerous of the two. *@
+            @foreach (var (point, i) in Points.Select((p, i) => (p, i)))
+            {
+                @if (!point.Reported)
+                {
+                    <rect x="@(Chart.X(i, Points.Count, W) - 1)" y="@(H - 2)" width="2" height="2"
+                          class="no-report" />
+                }
+            }
+        </svg>
+
+        <div class="chart-axis">
+            <span>@Points[0].Day.ToString("d MMM")</span>
+            <span class="muted">peak @Ceiling.ToString("N0") / day</span>
+            <span>@Points[^1].Day.ToString("d MMM")</span>
+        </div>
+
+        @* Every number the picture shows, written out. A chart nobody can read
+           in greyscale still has to be readable. *@
+        <div class="chart-legend">
+            <span class="key key-total">@Total.ToString("N0") messages</span>
+            <span class="key key-fail">@Failed.ToString("N0") failing</span>
+            @if (Unreported > 0)
+            {
+                <span class="key key-gap">@Unreported day(s) with no report</span>
+            }
+        </div>
+    </figure>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<DayPoint> Points { get; set; } = [];
+    [Parameter] public string Caption { get; set; } = "";
+
+    private const double W = 600;
+    private const double H = 120;
+
+    private double?[] Totals => [.. Points.Select(p => p.Reported ? (double?)p.Messages : null)];
+    private double?[] Failing => [.. Points.Select(p => p.Reported ? (double?)p.Failing : null)];
+
+    private long Total => Points.Sum(p => p.Messages);
+    private long Failed => Points.Sum(p => p.Failing);
+    private int Unreported => Points.Count(p => !p.Reported);
+
+    /// <summary>
+    /// One scale for both series, so the failing area is readable against the
+    /// total rather than each being scaled to its own maximum.
+    /// </summary>
+    /// <remarks>
+    /// Never zero: a domain that sent nothing all window is a real thing, and
+    /// dividing by it would put NaN in a path attribute, which renders as an
+    /// empty chart with nothing logged anywhere.
+    /// </remarks>
+    private double Ceiling
+    {
+        get
+        {
+            var peak = Points.Where(p => p.Reported).Select(p => p.Messages).DefaultIfEmpty(0).Max();
+            return peak > 0 ? peak : 1;
+        }
+    }
+
+    /// <summary>The whole chart in a sentence, for anyone not looking at it.</summary>
+    private string Describe()
+    {
+        var rate = Total == 0 ? 0 : Math.Round((Total - Failed) * 100.0 / Total, 1);
+        var gaps = Unreported > 0 ? $", with {Unreported} day(s) nobody reported on" : "";
+        return $"{Total:N0} messages over {Points.Count} days, {rate}% authenticating{gaps}.";
+    }
+}

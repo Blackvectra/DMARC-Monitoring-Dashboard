@@ -1,0 +1,52 @@
+@using DmarcMonitor.Core.Charting
+@using DmarcMonitor.Core.Reporting
+
+@*
+    A domain's shape, small enough to sit in a table row.
+
+    The point is comparison down a column: eighteen rows of these show at a
+    glance which domains are steady, which are growing and which fell off a
+    cliff last Tuesday. A number cannot do that, and a full chart per row
+    would be a page nobody scrolls.
+
+    It carries no axis on purpose. At this size an axis is unreadable, and a
+    sparkline that implies precision it does not have is worse than one
+    obviously read as a shape.
+*@
+
+<svg viewBox="0 0 @W @H" class="spark" role="img" aria-label="@Describe()" preserveAspectRatio="none">
+    <path d="@Chart.Area(Values, W, H)" class="spark-fill" />
+    <path d="@Chart.Line(Values, W, H)" class="spark-line" />
+    @* A reading with nothing either side of it draws no line at all, so the
+       cell came out blank and looked exactly like a domain with no data.
+       A domain heard from once in a fortnight is worth seeing. *@
+    @foreach (var (x, y) in Chart.IsolatedPoints(Values, W, H))
+    {
+        <circle cx="@x" cy="@y" r="1.6" class="spark-dot" />
+    }
+</svg>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<DayPoint> Points { get; set; } = [];
+
+    /// <summary>What to plot: volume by default, or the pass rate.</summary>
+    [Parameter] public bool PassRate { get; set; }
+
+    private const double W = 80;
+    private const double H = 20;
+
+    private double?[] Values =>
+        PassRate
+            ? [.. Points.Select(p => p.PassRate)]
+            : [.. Points.Select(p => p.Reported ? (double?)p.Messages : null)];
+
+    private string Describe()
+    {
+        var known = Values.Where(v => v is not null).Select(v => v!.Value).ToList();
+        if (known.Count == 0) { return "No data."; }
+
+        return PassRate
+            ? $"Pass rate over {Points.Count} days, from {known.Min()}% to {known.Max()}%."
+            : $"Volume over {Points.Count} days, peaking at {known.Max():N0} messages in a day.";
+    }
+}

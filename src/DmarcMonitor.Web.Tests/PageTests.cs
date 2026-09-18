@@ -154,6 +154,48 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task TriageDrawsTheEstateRatherThanOnlyTabulatingIt()
+    {
+        // A table of totals cannot show that the estate lost a third of its
+        // volume on Tuesday.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("chart-svg", html, StringComparison.Ordinal);
+        Assert.Contains("class=\"spark\"", html, StringComparison.Ordinal);
+        Assert.Contains("proportion-bar", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NoChartEmitsANumberTheBrowserCannotParse()
+    {
+        // NaN or Infinity in a path attribute renders as an empty chart with
+        // nothing logged anywhere, which is the hardest kind of wrong to spot.
+        foreach (var route in new[] { "/", "/domains/acme.com", "/domains/signed.example" })
+        {
+            var html = await Client().GetStringAsync(route);
+
+            Assert.DoesNotContain("NaN", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("Infinity", html, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task ChartsNeedNoScriptAndNothingFetchedFromTheInternet()
+    {
+        // This is installed on somebody else's server, often one that cannot
+        // reach the internet. A chart that fetches a library from a CDN is a
+        // chart that does not draw.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.DoesNotContain("cdn.", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("unpkg", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("chart.js", html, StringComparison.OrdinalIgnoreCase);
+
+        // The SVG is in the page, not requested after it loads.
+        Assert.Contains("<svg", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TheShellSeparatesDailyWorkFromSetup()
     {
         // Nine links in one flat list made Triage, which is where every

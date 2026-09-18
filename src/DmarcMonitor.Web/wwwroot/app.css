@@ -296,6 +296,124 @@ section[id] { scroll-margin-top: 16px; }
     section[id] { scroll-margin-top: 60px; }
 }
 
+/* ---- charts ------------------------------------------------------------ */
+
+/*
+    Server-rendered SVG, no library. This is installed on somebody else's
+    server, often one that cannot reach the internet, so a chart that fetches
+    a script from a CDN is a chart that does not draw - and the client report
+    is mailed and printed, where no script runs at all.
+
+    Colour is never the only signal here either: every chart writes out the
+    numbers it draws, and each segment carries its name.
+*/
+.chart {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
+}
+.chart figcaption {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 10px;
+}
+
+/* Height in CSS rather than the viewBox, so the chart can stretch to the
+   panel while the geometry stays in one coordinate system. */
+.chart-svg { width: 100%; height: 120px; display: block; }
+
+.chart-svg .grid { stroke: var(--line-soft); stroke-width: 1; }
+
+.chart-svg .fill-total { fill: var(--ontrack); opacity: .13; }
+.chart-svg .line-total { fill: none; stroke: var(--ontrack); stroke-width: 1.5; }
+.chart-svg .fill-fail  { fill: var(--urgent); opacity: .30; }
+
+/* A day nobody reported on. Marked on the baseline so an absent stretch
+   reads as a collection failure rather than a quiet week. */
+.chart-svg .no-report { fill: var(--dim); }
+
+.chart-axis {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 6px;
+}
+
+.chart-legend, .proportion-keys {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin-top: 10px;
+    font-size: 12px;
+}
+.key { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.key strong { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* The legend swatches repeat the chart's colours, and sit beside a word. */
+.key-total::before, .key-fail::before, .key-gap::before {
+    content: "";
+    width: 9px; height: 9px; border-radius: 2px;
+    display: inline-block;
+}
+.key-total::before { background: var(--ontrack); }
+.key-fail::before  { background: var(--urgent); }
+.key-gap::before   { background: var(--dim); }
+
+/* ---- proportion bar ---------------------------------------------------- */
+
+.proportion-bar {
+    display: flex;
+    height: 10px;
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--line-soft);
+}
+.proportion-bar .seg { display: block; height: 100%; }
+
+/* Named for what they mean, not for a colour. */
+.seg.fine    { background: var(--fine); }
+.seg.watch   { background: var(--watch); }
+.seg.act     { background: var(--act); }
+.seg.urgent  { background: var(--urgent); }
+.seg.ontrack { background: var(--ontrack); }
+.seg.dim     { background: var(--dim); }
+
+.pip.dim { background: var(--dim); }
+
+/* ---- sparkline --------------------------------------------------------- */
+
+/*
+    Sized to sit inside a table cell. The point is comparison down a column:
+    eighteen of these show which domains are steady and which fell off a cliff
+    last Tuesday, which no single number can.
+*/
+.spark { width: 80px; height: 20px; display: block; }
+.spark-fill { fill: var(--ontrack); opacity: .15; }
+.spark-line { fill: none; stroke: var(--ontrack); stroke-width: 1.25; }
+
+/* A reading with nothing either side draws no line, so it is drawn as a dot.
+   Without this the cell is blank and reads as "no data" rather than "heard
+   from once". */
+.spark-dot, .chart-svg .lone-point { fill: var(--ontrack); }
+
+/* The sparkline column is fixed-width so the shapes line up down the page:
+   comparison is the entire point, and shapes at differing widths cannot be
+   compared. */
+.spark-col { width: 90px; }
+
+@media (max-width: 860px) {
+    .chart-svg { height: 90px; }
+
+    /* A sparkline costs 90px of a 390px screen and gives least of any column,
+       since comparison down a column needs several rows in view at once. */
+    .spark-col { display: none; }
+}
+
 /* ---- triage table ------------------------------------------------------ */
 
 .triage { width: 100%; border-collapse: collapse; }
