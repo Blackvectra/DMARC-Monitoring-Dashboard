@@ -43,7 +43,7 @@ public static class ImportCommand
         // would drift, and "it worked from the terminal" is a support question
         // nobody can answer.
         var progress = new Progress<int>(n => Console.WriteLine($"  {n} file(s) read"));
-        var result = await new FolderImporter(store).ImportAsync(folder, progress, ct).ConfigureAwait(false);
+        var result = await new ReportImporter(store).ImportFolderAsync(folder, progress, ct).ConfigureAwait(false);
 
         foreach (var error in result.Errors) { Console.Error.WriteLine($"  {error}"); }
 

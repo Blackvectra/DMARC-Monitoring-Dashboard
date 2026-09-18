@@ -9,10 +9,11 @@
 
 <header class="page-head">
     <div>
-        <h1>Import a folder</h1>
-        <p class="sub">Point this at the folder the exporter wrote. Subfolders are included, so a
-           mailbox exported per domain comes in as it stands. Importing the same folder twice is
-           safe: reports already stored are recognised and skipped.</p>
+        <h1>Import reports</h1>
+        <p class="sub">Drop in whatever you have: a single report somebody forwarded, or a whole
+           mailbox export. Zipped, gzipped or bare, and zips of zips, which is what an export
+           usually is. Importing the same thing twice is safe — reports already stored are
+           recognised and skipped.</p>
     </div>
 </header>
 
@@ -27,28 +28,39 @@
 else
 {
     <section>
-        <div class="form-row">
-            <input class="wide" placeholder="C:\dmarc-export" @bind="_folder" @bind:event="oninput"
-                   disabled="@_running" />
-            <button class="primary" disabled="@(_running || string.IsNullOrWhiteSpace(_folder))"
-                    @onclick="RunAsync">
-                @(_running ? "Importing…" : "Import")
-            </button>
-            @if (_running)
+        @* The file input sits invisibly over the whole panel, so dropping and
+           clicking both work with no script of our own: a file input accepts
+           dropped files natively. *@
+        <div class="dropzone @(_over ? "over" : "") @(_running ? "busy" : "")"
+             @ondragenter="() => _over = true"
+             @ondragleave="() => _over = false"
+             @ondrop="() => _over = false">
+
+            @if (!_running)
             {
-                <button class="linkish" @onclick="Cancel">Stop</button>
+                <InputFile class="dropzone-input" multiple OnChange="UploadAsync" />
             }
+
+            <div class="dropzone-face">
+                @if (_running)
+                {
+                    <strong>Importing…</strong>
+                    <span>@(_filesRead > 0 ? $"{_filesRead:N0} file(s) read so far" : "reading")</span>
+                }
+                else
+                {
+                    <strong>Drop report files here</strong>
+                    <span>or click to choose them</span>
+                }
+            </div>
         </div>
 
-        @if (_running && _filesRead > 0)
+        @if (_running)
         {
-            <p class="sub">@_filesRead file(s) read…</p>
+            <div class="form-row">
+                <button class="linkish" @onclick="Cancel">Stop</button>
+            </div>
         }
-
-        <p class="sub">
-            The folder is read by the service, not uploaded from your machine, so it must be a path
-            this server can see.
-        </p>
     </section>
 
     @if (_problem is not null)
@@ -121,34 +133,77 @@ else
             </section>
         }
     }
+
+    <section>
+        <h2>Or import a folder on the server</h2>
+        <p class="sub">For an export that already lives on this machine, or one too big to upload.
+           The folder is read by the service, not from your computer, so it has to be a path this
+           server can see. Subfolders are included.</p>
+        <div class="form-row">
+            <input class="wide" placeholder="C:\dmarc-export" @bind="_folder" @bind:event="oninput"
+                   disabled="@_running" />
+            <button class="primary" disabled="@(_running || string.IsNullOrWhiteSpace(_folder))"
+                    @onclick="ImportFolderAsync">
+                Import folder
+            </button>
+        </div>
+    </section>
 }
 
 @code {
     private string _folder = "";
     private bool _running;
+    private bool _over;
     private int _filesRead;
     private ImportResult? _result;
     private string? _problem;
     private IReadOnlyList<string> _unassigned = [];
     private CancellationTokenSource? _cts;
 
-    private async Task RunAsync()
+    private async Task UploadAsync(InputFileChangeEventArgs e)
+    {
+        IReadOnlyList<IBrowserFile> files;
+        try
+        {
+            files = e.GetMultipleFiles(ImportUiService.MaxFiles);
+        }
+        catch (InvalidOperationException)
+        {
+            // Thrown when the drop holds more than the cap. Said as a number
+            // and a way forward, not as the framework's own wording.
+            _problem = $"That is more than {ImportUiService.MaxFiles:N0} files at once. "
+                     + "Drop them in batches, or put the folder on the server and import it below.";
+            return;
+        }
+
+        if (files.Count == 0) { return; }
+
+        await RunAsync(
+            (progress, ct) => Importer.ImportUploadsAsync(files, progress, ct));
+    }
+
+    private async Task ImportFolderAsync()
     {
         var folder = _folder.Trim();
         if (folder.Length == 0) { return; }
-
-        _problem = null;
-        _result = null;
-        _filesRead = 0;
 
         if (!Directory.Exists(folder))
         {
             // Named plainly rather than as an exception: a path typed for the
             // wrong machine is the most likely mistake on this page.
             _problem = $"There is no folder at {folder} on the machine running this service.";
+            _result = null;
             return;
         }
 
+        await RunAsync((progress, ct) => Importer.ImportAsync(folder, progress, ct));
+    }
+
+    private async Task RunAsync(Func<IProgress<int>, CancellationToken, Task<ImportResult>> import)
+    {
+        _problem = null;
+        _result = null;
+        _filesRead = 0;
         _running = true;
         _cts = new CancellationTokenSource();
 
@@ -160,8 +215,12 @@ else
                 InvokeAsync(StateHasChanged);
             });
 
-            _result = await Importer.ImportAsync(folder, progress, _cts.Token);
+            _result = await import(progress, _cts.Token);
             _unassigned = await Importer.GetUnassignedDomainsAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopping is a choice somebody made, not a failure.
         }
         catch (Exception ex)
         {
@@ -181,16 +240,18 @@ else
     {
         if (r.Stored == 0 && r.AlreadyStored > 0)
         {
-            return "Nothing new: every report in that folder was already stored.";
+            return $"Nothing new: all {r.AlreadyStored:N0} report(s) were already stored.";
         }
 
         if (r.Stored == 0)
         {
             return r.FilesSeen == 0
-                ? "That folder is empty."
-                : "No reports found. The files there are not DMARC or TLS reports this can read.";
+                ? "Nothing there to read."
+                : "No reports found. Those files are not DMARC or TLS reports this can read.";
         }
 
-        return $"Stored {r.Stored:N0} report(s).";
+        return r.AlreadyStored > 0
+            ? $"Stored {r.Stored:N0} report(s), and recognised {r.AlreadyStored:N0} already held."
+            : $"Stored {r.Stored:N0} report(s).";
     }
 }

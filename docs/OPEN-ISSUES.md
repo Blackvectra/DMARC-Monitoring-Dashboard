@@ -74,7 +74,8 @@ collect the lot.
 ## 2. The pages are checked, the browser is not
 
 **Area** `src/DmarcMonitor.Web.Tests/`
-**Severity** Low.
+**Severity** Medium. This was rated Low until the gap it describes hid a bug
+that made a whole page unusable. See below.
 
 Every route now loads in a test: the real application in process, over real
 HTTP, through the real authentication pipeline, against a seeded database.
@@ -88,9 +89,25 @@ name into the client form all go through a SignalR circuit these tests never
 open. The services behind each of those are covered in Core, so what is
 untested is the wiring between the control and the handler.
 
-**How to fix, when it is worth it.** Playwright against a seeded instance,
-driving the three forms. The handlers are already tested, so this only needs
-to prove the buttons reach them.
+**What it cost.** The Fix page shipped with `@bind` pointing at a dictionary
+indexer (`_reasons[key]`). Binding reads before anything writes, the key is
+absent, and `KeyNotFoundException` is thrown *during render* - which kills the
+circuit. The page then sits showing "Checking what it publishes…" forever,
+with no error anywhere a user can see. Every page test passed throughout,
+because a plain HTTP GET renders the page statically: `OnAfterRenderAsync`
+never runs, the domains never load, and the offending control is never
+rendered. It took driving a real browser to see it, and then it was obvious
+in the server log.
+
+Three controls had the same fault. All three now read through a helper that
+defaults, and the missing key is the normal case rather than an exception.
+
+**How to fix, when it is worth it.** Playwright against a seeded instance, in
+CI. There is a working harness for it now - it is what found the bug above -
+but it lives in a scratch directory rather than in the repository, so nothing
+runs it on a pull request. Moving it in needs a seeded instance CI can start
+and a way to stub DNS, since the pages that matter here are the ones that read
+it.
 
 ## 3. The web app is read-only about its own configuration
 
@@ -234,7 +251,28 @@ host. That is a deliberate trade - a self-contained web bundle is several
 hundred megabytes - but it means "copy one file and run it" is true of the CLI
 and not of the app.
 
-## 9. The apply path has never written to a real zone
+## 9. Uploads are bounded by numbers picked, not measured
+
+**Area** `ReportAttachment`, `ImportUiService`
+**Severity** Low.
+
+Dropping files in the browser works, and was proven on the real thing: the
+1,687-report export imports through the page in one go. The bounds it runs
+under are reasoned rather than measured, though:
+
+- 100 MB per uploaded file, because the file is read into memory whole before
+  it is unpacked. The real export is 1.9 MB, so there is a lot of headroom,
+  but a year of collection for thirty domains has not been tried.
+- 25,000 archive members and 2 GB decompressed per file. Extraction is lazy,
+  so memory holds one report at a time; these bound time and disk, not memory.
+- 5,000 files in one drop.
+
+An operator who exceeds any of them is told which one and what to do instead,
+so the failure is legible. What has not been established is where the real
+limits are: at what size the upload gets slow enough that the folder import
+is the better answer.
+
+## 10. The apply path has never written to a real zone
 
 **Area** `src/DmarcMonitor.Core/Remediation/`, `dmarc fix`, the Fix page
 **Severity** Medium. This is the feature the product exists for, and its

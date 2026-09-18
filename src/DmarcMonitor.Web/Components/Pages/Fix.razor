@@ -1,5 +1,6 @@
 @page "/fix"
 @using DmarcMonitor.Core.Remediation
+@using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Web.Data
 @using Microsoft.AspNetCore.Components.Authorization
 @inject RemediationUiService Fixes
@@ -25,9 +26,9 @@
         <p>Nothing has been imported, so there is nothing to fix.</p>
     </div>
 }
-else if (_domains is null)
+else if (!_loaded)
 {
-    <p class="muted">Reading what each domain publishes… this asks DNS for every domain, so it takes a moment.</p>
+    <p class="muted">Reading what each domain publishes…</p>
 }
 else if (_error is not null)
 {
@@ -45,7 +46,7 @@ else
         </section>
     }
 
-    @if (!_domains.Any(d => d.CanApply))
+    @if (_domains.Count > 0 && !_domains.Values.Any(d => d.CanApply))
     {
         <section class="callout act">
             <h2>No DNS provider is configured, so fixes can be shown but not applied</h2>
@@ -53,20 +54,37 @@ else
         </section>
     }
 
-    @foreach (var d in _domains)
+    @if (_pending > 0)
     {
+        <p class="muted">Reading DNS for @_pending more domain(s)…</p>
+    }
+
+    @foreach (var row in _rows)
+    {
+        var d = _domains.GetValueOrDefault(row.Domain);
+
         <section class="domain-fix">
             <h2>
-                <a href="/domains/@d.Domain">@d.Domain</a>
-                <span class="muted"> — @d.ClientName</span>
-                @if (d.CurrentPolicy.Length > 0)
+                <a href="/domains/@row.Domain">@row.Domain</a>
+                <span class="muted"> — @row.ClientName</span>
+                @if (d is { CurrentPolicy.Length: > 0 })
                 {
                     <code class="pill">p=@d.CurrentPolicy</code>
                 }
-                <span class="muted provider">via @d.ProviderName</span>
+                @if (d is not null)
+                {
+                    <span class="muted provider">via @d.ProviderName</span>
+                }
             </h2>
 
-            @if (d.Published.LookupFailed)
+            @if (d is null)
+            {
+                @* Listed at once and filled in as each answer arrives. Asking
+                   DNS about ten domains takes long enough that a page showing
+                   nothing until the last one reads as broken. *@
+                <p class="muted">Checking what it publishes…</p>
+            }
+            else if (d.Published.LookupFailed)
             {
                 <p class="bad">DNS could not be read for this domain. Nothing is planned from a failed read.</p>
             }
@@ -82,7 +100,13 @@ else
                     <p class="bad">@d.ProviderError</p>
                 }
 
-                @if (d.ReadyFor is { } next && next != d.CurrentPolicy && !d.Plans.Any(p => p.Type == ChangeType.DmarcPolicy && p.Summary.Contains("Move ", StringComparison.Ordinal)))
+                @if (Silent(d))
+                {
+                    @* No reports means no way to see what enforcing would cost,
+                       so the control that enforces is not offered. Fixing the
+                       collection comes first, and the headline above says so. *@
+                }
+                else if (d.ReadyFor is { } next && next != d.CurrentPolicy && !d.Plans.Any(p => p.Type == ChangeType.DmarcPolicy && p.Summary.Contains("Move ", StringComparison.Ordinal)))
                 {
                     <div class="form-row">
                         <button class="primary" @onclick="() => PlanPolicyAsync(d.Domain, next)">Plan the move to p=@next</button>
@@ -91,13 +115,18 @@ else
                 else if (d.CurrentPolicy is "none" or "quarantine" && !d.Plans.Any(p => p.Summary.Contains("Move ", StringComparison.Ordinal)))
                 {
                     <div class="form-row">
-                        <select @bind="_policyChoice[d.Domain]">
+                        @* Read with a default and written explicitly. @bind to a
+                           dictionary indexer reads the key before anything has
+                           written it, which throws during render and takes the
+                           whole circuit down: the page then sits there looking
+                           like it is still loading, forever. *@
+                        <select @bind:get="Choice(d.Domain)" @bind:set="v => _policyChoice[d.Domain] = v ?? string.Empty">
                             <option value="">Move to…</option>
                             @if (d.CurrentPolicy == "none") { <option value="quarantine">p=quarantine</option> }
                             <option value="reject">p=reject</option>
                         </select>
-                        <button class="primary" disabled="@string.IsNullOrEmpty(_policyChoice.GetValueOrDefault(d.Domain))"
-                                @onclick="() => PlanPolicyAsync(d.Domain, _policyChoice.GetValueOrDefault(d.Domain))">Plan it</button>
+                        <button class="primary" disabled="@(Choice(d.Domain).Length == 0)"
+                                @onclick="() => PlanPolicyAsync(d.Domain, Choice(d.Domain))">Plan it</button>
                     </div>
                 }
 
@@ -134,8 +163,9 @@ else
                             {
                                 <div class="form-row">
                                     <input class="wide" placeholder="Reason, written for the customer's report"
-                                           @bind="_reasons[key]" @bind:event="oninput" />
-                                    <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_reasons.GetValueOrDefault(key)))"
+                                           @bind:get="Reason(key)" @bind:set="v => _reasons[key] = v ?? string.Empty"
+                                           @bind:event="oninput" />
+                                    <button class="primary" disabled="@(_busy || Reason(key).Trim().Length == 0)"
                                             @onclick="() => ApplyAsync(plan)">Apply</button>
                                 </div>
                             }
@@ -200,8 +230,11 @@ else
                                 @if (c.RolledBackAt is null)
                                 {
                                     <div class="form-row">
-                                        <input placeholder="Why" @bind="_rollbackReasons[c.Id]" @bind:event="oninput" />
-                                        <button disabled="@(_busy || string.IsNullOrWhiteSpace(_rollbackReasons.GetValueOrDefault(c.Id)))"
+                                        <input placeholder="Why"
+                                               @bind:get="RollbackReason(c.Id)"
+                                               @bind:set="v => _rollbackReasons[c.Id] = v ?? string.Empty"
+                                               @bind:event="oninput" />
+                                        <button disabled="@(_busy || RollbackReason(c.Id).Trim().Length == 0)"
                                                 @onclick="() => RollBackAsync(c.Id)">Roll back</button>
                                     </div>
                                 }
@@ -215,7 +248,10 @@ else
 }
 
 @code {
-    private List<DomainFixes>? _domains;
+    private IReadOnlyList<DomainTriage> _rows = [];
+    private readonly Dictionary<string, DomainFixes> _domains = new(StringComparer.OrdinalIgnoreCase);
+    private int _pending;
+    private bool _loaded;
     private IReadOnlyList<AppliedChange>? _history;
     private string? _error;
     private string? _message;
@@ -228,6 +264,21 @@ else
 
     private static string Key(ChangePlan plan) => plan.RecordName + "|" + plan.ProposedValue;
 
+    // Reading a missing key is the normal case - nothing has been typed yet -
+    // so every read goes through one of these rather than an indexer.
+    /// <summary>
+    /// A domain whose reports have stopped. Advancing one is the change most
+    /// likely to lose mail and the one there is least evidence for.
+    /// </summary>
+    private static bool Silent(DomainFixes d) =>
+        d.Triage is null
+        || d.Triage.LastReport is null
+        || (DateTimeOffset.UtcNow - d.Triage.LastReport.Value).TotalDays > RolloutAssessment.SilentDays;
+
+    private string Choice(string domain) => _policyChoice.GetValueOrDefault(domain, "");
+    private string Reason(string key) => _reasons.GetValueOrDefault(key, "");
+    private string RollbackReason(string changeId) => _rollbackReasons.GetValueOrDefault(changeId, "");
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         // DNS is read after the first paint, as on the domain page, so the
@@ -235,7 +286,6 @@ else
         if (!firstRender || !Db.Exists) { return; }
 
         await LoadAsync();
-        StateHasChanged();
     }
 
     private async Task LoadAsync()
@@ -243,24 +293,47 @@ else
         _error = null;
         try
         {
-            _domains = [.. await Fixes.PlanAllAsync()];
+            // The list first, which is a database read and instant, then the
+            // DNS for each one behind it.
+            _rows = await Fixes.DomainsAsync();
             _history = await Fixes.HistoryAsync();
+            _pending = _rows.Count;
+            _loaded = true;
+            await InvokeAsync(StateHasChanged);
+
+            // A few at a time: one at a time is a minute of staring at a
+            // half-filled page, and all at once is ten simultaneous resolver
+            // conversations from one page load.
+            foreach (var batch in _rows.Chunk(4))
+            {
+                // Off the circuit's dispatcher. Everything in here is network
+                // and database work, and running it on the thread that renders
+                // means the page cannot repaint while it waits - which is the
+                // whole point of filling the list in as answers arrive.
+                var planned = await Task.Run(
+                    () => Task.WhenAll(batch.Select(r => Fixes.PlanAsync(r.Domain, r, null))));
+
+                foreach (var plan in planned) { _domains[plan.Domain] = plan; }
+                _pending -= batch.Length;
+                await InvokeAsync(StateHasChanged);
+            }
         }
         catch (Exception ex)
         {
-            _domains = [];
             _error = ex.Message;
+        }
+        finally
+        {
+            _pending = 0;
+            _loaded = true;
         }
     }
 
     private async Task PlanPolicyAsync(string domain, string? policy)
     {
-        if (_domains is null || string.IsNullOrEmpty(policy)) { return; }
+        if (string.IsNullOrEmpty(policy) || !_domains.TryGetValue(domain, out var current)) { return; }
 
-        var at = _domains.FindIndex(d => d.Domain == domain);
-        if (at < 0) { return; }
-
-        _domains[at] = await Fixes.PlanAsync(domain, _domains[at].Triage, policy);
+        _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, policy);
     }
 
     private async Task<string> WhoAsync()
@@ -271,7 +344,7 @@ else
 
     private async Task ApplyAsync(ChangePlan plan)
     {
-        var reason = _reasons.GetValueOrDefault(Key(plan))?.Trim();
+        var reason = Reason(Key(plan)).Trim();
         if (string.IsNullOrEmpty(reason)) { return; }
 
         _busy = true;
@@ -294,7 +367,7 @@ else
 
     private async Task RollBackAsync(string changeId)
     {
-        var reason = _rollbackReasons.GetValueOrDefault(changeId)?.Trim();
+        var reason = RollbackReason(changeId).Trim();
         if (string.IsNullOrEmpty(reason)) { return; }
 
         _busy = true;
