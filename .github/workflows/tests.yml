@@ -52,7 +52,7 @@ jobs:
           # machine too. A parse error here means the dashboard never opens -
           # exactly the failure mode of PR #7.
           $bad = 0
-          Get-ChildItem -Path . -Filter *.ps1 -File | ForEach-Object {
+          Get-ChildItem -Path ./tools, ./legacy -Filter *.ps1 -File | ForEach-Object {
             $errs = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
               $_.FullName, [ref]$null, [ref]$errs) | Out-Null
@@ -75,7 +75,7 @@ jobs:
           # XML but that WPF rejects at load time takes the whole dashboard
           # down. Full XamlReader.Load needs WPF, so on Linux we can only check
           # well-formedness; Windows gets the real thing.
-          $dash = Get-Content ./Start-DMARCDashboard.ps1 -Raw
+          $dash = Get-Content ./legacy/Start-DMARCDashboard.ps1 -Raw
           $start = $dash.IndexOf('<Window')
           $end   = $dash.IndexOf('</Window>')
           if ($start -lt 0 -or $end -lt 0) { throw 'Could not locate the main window XAML' }
@@ -98,7 +98,7 @@ jobs:
       - name: Validate sender-catalog.json
         shell: pwsh
         run: |
-          $cat = Get-Content ./sender-catalog.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          $cat = Get-Content ./legacy/sender-catalog.json -Raw -Encoding UTF8 | ConvertFrom-Json
           "Catalog $($cat.version): $($cat.services.Count) services"
           foreach ($svc in $cat.services) {
             if (-not $svc.id)   { throw "A service entry is missing an id" }
@@ -113,7 +113,7 @@ jobs:
         shell: pwsh
         run: |
           $cfg = New-PesterConfiguration
-          $cfg.Run.Path        = './tests'
+          $cfg.Run.Path        = @('./tests', './legacy/tests')
           $cfg.Run.Exit        = $true
           $cfg.Output.Verbosity = 'Detailed'
           $cfg.TestResult.Enabled      = $true

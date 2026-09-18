@@ -16,7 +16,10 @@
 #>
 
 BeforeAll {
-    $script:Target = Join-Path (Split-Path $PSScriptRoot -Parent) 'Export-DMARCAttachments.ps1'
+    # The one script kept out of legacy/, at the path docs/OPEN-ISSUES.md
+    # already named for it. A stale earlier revision sat there beside the
+    # live copy at the root; this is the live copy, moved.
+    $script:Target = Join-Path (Split-Path $PSScriptRoot -Parent) 'tools' 'Export-DMARCAttachments.ps1'
 
     # ---- a fake Outlook ------------------------------------------------------
 

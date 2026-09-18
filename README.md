@@ -80,20 +80,27 @@ web bundle. See `.github/workflows/release.yml`.
 
 ---
 
-## The PowerShell scripts
+## The PowerShell
 
-The `.ps1` files in this directory are the original Windows product: a WPF
-desktop dashboard storing its configuration in the Windows Registry. It has
-been **superseded by the .NET application above** and is kept only for
-reference while anything still depends on it.
+Two things remain, in two places, for two different reasons.
 
-It is not what this repository releases and not what `deploy/` installs:
-`release.yml` publishes the .NET CLI and web bundle, and `deploy/update.sh`
-installs the web bundle. Nothing in `src/` or `deploy/` calls a `.ps1` file.
+**`tools/Export-DMARCAttachments.ps1`** is kept and current. It is one file to
+copy onto a machine with Outlook open when there is no other way to get the
+reports out — no repository, no .NET, no app registration. Its tests are in
+`tests/` and run in CI.
 
-Its Pester tests still run in CI, so it is verified, not abandoned — but a new
+**`legacy/`** holds the original Windows product: a WPF desktop dashboard
+storing its configuration in the Windows Registry, with the engine, installer
+and remediation scripts beside it, and its Pester tests under `legacy/tests/`.
+It has been **superseded by the .NET application above** and is kept for
+reference. It is not what this repository releases and not what `deploy/`
+installs: `release.yml` publishes the .NET CLI and web bundle, and
+`deploy/update.sh` installs the web bundle. Nothing in `src/` or `deploy/`
+calls anything in `legacy/`.
+
+Its tests still run in CI, so it is verified, not abandoned — but a new
 installation should follow [docs/RUNNING.md](docs/RUNNING.md), not
-`Install-DMARCMonitor.ps1`.
+`legacy/Install-DMARCMonitor.ps1`.
 
 ## License
 
