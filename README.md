@@ -82,25 +82,32 @@ web bundle. See `.github/workflows/release.yml`.
 
 ## The PowerShell
 
-Two things remain, in two places, for two different reasons.
+Two operator tools and one leftover. The original Windows product — a WPF
+dashboard, its report engine, DNS remediation, client reporting and the rest —
+has been removed: every part of it is **superseded by the .NET application
+above**, which is tested and audited where the PowerShell copies were not.
 
-**`tools/Export-DMARCAttachments.ps1`** is kept and current. It is one file to
-copy onto a machine with Outlook open when there is no other way to get the
-reports out — no repository, no .NET, no app registration. Its tests are in
-`tests/` and run in CI.
+**`tools/`** holds the two scripts worth keeping, because nothing in .NET does
+what they do:
 
-**`legacy/`** holds the original Windows product: a WPF desktop dashboard
-storing its configuration in the Windows Registry, with the engine, installer
-and remediation scripts beside it, and its Pester tests under `legacy/tests/`.
-It has been **superseded by the .NET application above** and is kept for
-reference. It is not what this repository releases and not what `deploy/`
-installs: `release.yml` publishes the .NET CLI and web bundle, and
-`deploy/update.sh` installs the web bundle. Nothing in `src/` or `deploy/`
-calls anything in `legacy/`.
+- **`Export-DMARCAttachments.ps1`** — one file to copy onto a machine with
+  Outlook open when there is no other way to get the reports out. No
+  repository, no .NET, no app registration. Its tests are in `tests/` and run
+  in CI.
+- **`Test-DMARCMailRules.ps1`** — a read-only check of the inbox rules that
+  file reports into per-domain folders: which are switched off, which Exchange
+  has marked as failing, which domains have no rule, and how close the mailbox
+  is to its 256 KB rules quota — the one that looks exactly like "the rule I
+  just made does not work". Needs the ExchangeOnlineManagement module.
 
-Its tests still run in CI, so it is verified, not abandoned — but a new
-installation should follow [docs/RUNNING.md](docs/RUNNING.md), not
-`legacy/Install-DMARCMonitor.ps1`.
+**`legacy/Install-DMARCMonitor.ps1`** is the one file left from the old
+product. Most of it set up the Windows dashboard and is dead; the part that is
+not creates the Entra app registration, uploads the certificate, and applies
+the application access policy that restricts `Mail.ReadWrite` to the one
+mailbox — steps [docs/INGEST-SETUP.md](docs/INGEST-SETUP.md) describes by
+hand. It is kept until that part is either extracted into `tools/` or judged
+unnecessary. A new installation should follow
+[docs/RUNNING.md](docs/RUNNING.md), not `Install-DMARCMonitor.ps1`.
 
 ## License
 
