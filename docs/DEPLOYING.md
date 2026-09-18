@@ -139,7 +139,10 @@ cannot read.
 {
   "Database":  { "Path": "/opt/dmarc/data/dmarc.db" },
   "Secrets":   { "Directory": "/opt/dmarc/data/secrets" },
-  "Reporting": { "ProviderName": "NRG Tech Services" },
+  "Reporting": {
+    "ProviderName": "NRG Tech Services",
+    "TlsReportAddress": "dmarc@nrgtechservices.com"
+  },
 
   "Proxy": { "Behind": true },
 
@@ -151,6 +154,14 @@ cannot read.
   }
 }
 ```
+
+`Reporting.TlsReportAddress` is where TLS-RPT reports are asked to be sent,
+and the Fix page reads it to decide whether to offer publishing a `_smtp._tls`
+record at all. Leave it out and TLS-RPT is simply never planned for any
+domain, with nothing on the page to say why - the alternative would be
+planning a record that points at a mailbox nobody reads. The command line
+takes it per run instead, as `dmarc fix --domain <d> --tls-rpt-to <address>`,
+so this key is what makes the button appear in the UI.
 
 `Proxy.Behind` matters more than it looks. Without it the app sees every
 request as plain HTTP from 127.0.0.1, which breaks sign-in (the redirect it

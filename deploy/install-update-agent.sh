@@ -28,7 +28,15 @@ install -o root -g root -m 0755 "${HERE}/update-agent.sh"  "${ROOT}/deploy/updat
 install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0755 "${ROOT}/data/updates"
 
 install -o root -g root -m 0644 "${HERE}/dmarc-update.service" /etc/systemd/system/
-install -o root -g root -m 0644 "${HERE}/dmarc-update.path"    /etc/systemd/system/
+
+# The path unit names the spool absolutely, and everything else here honours
+# DMARC_ROOT. Installed anywhere but the default that left systemd watching
+# /opt/dmarc while the app wrote somewhere else, so the button did nothing at
+# all and nothing anywhere said why.
+sed "s|/opt/dmarc/data/updates/requested.json|${ROOT}/data/updates/requested.json|" \
+    "${HERE}/dmarc-update.path" > /etc/systemd/system/dmarc-update.path
+chown root:root /etc/systemd/system/dmarc-update.path
+chmod 0644 /etc/systemd/system/dmarc-update.path
 
 systemctl daemon-reload
 systemctl enable --now dmarc-update.path
