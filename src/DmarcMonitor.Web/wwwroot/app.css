@@ -253,3 +253,22 @@ code.wrap { word-break: break-all; white-space: normal; }
 .dropzone-face { pointer-events: none; display: grid; gap: 4px; }
 .dropzone-face strong { font-size: 15px; }
 .dropzone-face span { color: var(--muted); font-size: 13px; }
+
+/* Transport-security records, which exist to be copied into a DNS zone.
+   The name and the value both have to be selectable without catching the
+   prose around them, and a policy file has to keep its line breaks: a sender
+   parses it line by line and CRLF is not decoration. */
+.plan > summary { cursor: pointer; font-weight: 500; }
+.plan > summary::marker { color: var(--muted); }
+.diff code.value { display: block; margin-top: 2px; word-break: break-all; }
+.diff td .sub { margin: 4px 0 0; font-size: 12px; }
+pre.policy {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre;
+}

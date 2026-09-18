@@ -1,4 +1,5 @@
 using DmarcMonitor.Core.Dns;
+using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
 
 namespace DmarcMonitor.Cli.Commands;
@@ -72,12 +73,54 @@ public static class MtaStsCommand
         return 0;
     }
 
+    /// <summary>
+    /// The records to publish, laid out to be read next to a DNS zone.
+    /// </summary>
+    private static void PrintRecords(IReadOnlyList<RecordToPublish> records)
+    {
+        Console.WriteLine("  Records to publish:");
+        Console.WriteLine();
+
+        foreach (var record in records)
+        {
+            Console.WriteLine($"    {record.Name}");
+            Console.WriteLine($"      {record.Type,-6} {record.Value}");
+
+            // Wrapped by hand rather than left to run off the edge of a
+            // terminal, because the reason is the part that stops somebody
+            // publishing these in the wrong order.
+            foreach (var line in Wrap(record.Why, 68))
+            {
+                Console.WriteLine($"      {line}");
+            }
+            Console.WriteLine();
+        }
+    }
+
+    private static IEnumerable<string> Wrap(string text, int width)
+    {
+        var line = new System.Text.StringBuilder();
+        foreach (var word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (line.Length > 0 && line.Length + 1 + word.Length > width)
+            {
+                yield return line.ToString();
+                line.Clear();
+            }
+
+            if (line.Length > 0) { line.Append(' '); }
+            line.Append(word);
+        }
+
+        if (line.Length > 0) { yield return line.ToString(); }
+    }
+
     private static async Task<int> SetAsync(MtaStsStore store, string[] args, CancellationToken ct)
     {
         var domain = Args.Value(args, "--domain");
         if (string.IsNullOrWhiteSpace(domain))
         {
-            return Usage("dmarc mta-sts set --domain <domain> [--mode testing|enforce|none] [--mx <host>]...");
+            return Usage("dmarc mta-sts set --domain <domain> [--mode testing|enforce|none] [--mx <host>]... [--policy-host <host>]");
         }
 
         var mode = (Args.Value(args, "--mode") ?? MtaStsMode.Testing).ToLowerInvariant();
@@ -122,9 +165,21 @@ public static class MtaStsCommand
 
             Console.WriteLine($"Serving a {policy.Mode} policy for {domain}, id {policy.Id}.");
             Console.WriteLine();
-            Console.WriteLine(policy.ToFile().ReplaceLineEndings("\n"));
-            Console.WriteLine($"Point mta-sts.{domain} at this host, then announce it:");
-            Console.WriteLine($"  dmarc fix --domain {domain} --apply --reason \"...\"");
+            Console.WriteLine("  The policy file this app will serve:");
+            foreach (var line in policy.ToFile().ReplaceLineEndings("\n").Split('\n'))
+            {
+                if (line.Length > 0) { Console.WriteLine($"    {line}"); }
+            }
+            Console.WriteLine();
+
+            // The records, as records. "Point mta-sts.<domain> at this host"
+            // named neither the record nor the host, and an operator with a
+            // zone open in another window needs both.
+            PrintRecords(TransportSetup.MtaSts(domain, Args.Value(args, "--policy-host"), policy));
+
+            Console.WriteLine($"  Publish them in that order, then announce it:");
+            Console.WriteLine($"    dmarc fix --domain {domain} --transport --apply --reason \"...\"");
+            Console.WriteLine();
             return 0;
         }
         catch (ArgumentException ex)

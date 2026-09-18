@@ -144,6 +144,8 @@ cannot read.
     "TlsReportAddress": "dmarc@nrgtechservices.com"
   },
 
+  "MtaSts": { "PolicyHost": "dmarc.nextlayersec.ai" },
+
   "Proxy": { "Behind": true },
 
   "AzureAd": {
@@ -162,6 +164,17 @@ domain, with nothing on the page to say why - the alternative would be
 planning a record that points at a mailbox nobody reads. The command line
 takes it per run instead, as `dmarc fix --domain <d> --tls-rpt-to <address>`,
 so this key is what makes the button appear in the UI.
+
+`MtaSts.PolicyHost` is the hostname this instance answers on. MTA-STS has two
+halves: a TXT record at `_mta-sts.<domain>` announcing that a policy exists,
+and the policy file itself, which a sender fetches from
+`https://mta-sts.<domain>/.well-known/mta-sts.txt`. This app serves that file
+for every client from the Host header, so each client's `mta-sts.<domain>` is a
+CNAME pointing here — and that means **this host needs a certificate valid for
+every one of those names**, because a sender will not follow a redirect or
+accept a certificate that does not match. Set this and the Fix page can tell
+you exactly what to publish; leave it empty and it can only say that something
+needs pointing somewhere.
 
 `Proxy.Behind` matters more than it looks. Without it the app sees every
 request as plain HTTP from 127.0.0.1, which breaks sign-in (the redirect it

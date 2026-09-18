@@ -15,6 +15,23 @@ public sealed record DomainFixes(
     bool CanApply,
     string? ProviderError)
 {
+    /// <summary>
+    /// The transport-security records this domain needs, whether or not any
+    /// of them can be applied from here.
+    /// </summary>
+    /// <remarks>
+    /// Separate from Plans, which is what the product would CHANGE. A domain
+    /// with no MTA-STS at all has nothing to change and everything to do, and
+    /// it used to get a page that said nothing whatsoever about it.
+    /// </remarks>
+    public IReadOnlyList<RecordToPublish> TransportRecords { get; init; } = [];
+
+    /// <summary>The policy file behind the CNAME, when there is one to serve.</summary>
+    public string PolicyFile { get; init; } = "";
+
+    /// <summary>True when nobody has said where this instance is reachable.</summary>
+    public bool PolicyHostUnknown { get; init; }
+
     /// <summary>The policy the reports say the domain is ready for, or null.</summary>
     public string? ReadyFor
     {
@@ -75,6 +92,10 @@ public sealed class RemediationUiService(
         var published = await lookup.ReadAsync(domain, ct);
         var plans = new List<ChangePlan>();
 
+        IReadOnlyList<RecordToPublish> transportRecords = [];
+        var policyFile = "";
+        var policyHostUnknown = false;
+
         // Nothing is planned from a failed read: "no record" and "could not
         // read" would plan opposite things.
         if (!published.LookupFailed)
@@ -109,6 +130,38 @@ public sealed class RemediationUiService(
             // a record a sender will accept.
             var known = await _policies.GetAsync(domain, ct);
             var served = await mtaSts.FetchAsync(domain, known?.Id ?? "", ct);
+
+            // The records to publish, independent of whether anything can be
+            // applied. A domain with neither a record nor a served policy is
+            // skipped by the planner below - correctly, there is nothing safe
+            // to change - and that is exactly the domain whose operator needs
+            // to be told what to create.
+            var policyHost = configuration["MtaSts:PolicyHost"];
+            policyHostUnknown = string.IsNullOrWhiteSpace(policyHost);
+
+            if (known is not null)
+            {
+                transportRecords = [.. TransportSetup.MtaSts(domain, policyHost, known)];
+                policyFile = TransportSetup.PolicyFile(known);
+            }
+            else
+            {
+                // No policy has been created, so there is no id to announce
+                // yet and inventing one would have somebody publish a version
+                // number this product does not serve. Only the half that is
+                // knowable is shown.
+                transportRecords =
+                [
+                    .. TransportSetup.MtaSts(domain, policyHost, MtaStsPolicy.ForTesting([], DateTimeOffset.UtcNow))
+                        .Where(r => r.Type == "CNAME"),
+                ];
+            }
+
+            if (configuration["Reporting:TlsReportAddress"] is { Length: > 0 } tlsAddress
+                && string.IsNullOrWhiteSpace(published.TlsRptRecord))
+            {
+                transportRecords = [.. transportRecords, TransportSetup.TlsReporting(domain, tlsAddress)];
+            }
             if (!string.IsNullOrWhiteSpace(published.MtaStsRecord) || served.Reachable)
             {
                 var mx = await lookup.MxAsync(domain, ct);
@@ -135,7 +188,12 @@ public sealed class RemediationUiService(
             providerError = ex.Message;
         }
 
-        return new DomainFixes(domain, triage?.ClientName ?? "", published, triage, plans, providerName, canApply, providerError);
+        return new DomainFixes(domain, triage?.ClientName ?? "", published, triage, plans, providerName, canApply, providerError)
+        {
+            TransportRecords = transportRecords,
+            PolicyFile = policyFile,
+            PolicyHostUnknown = policyHostUnknown,
+        };
     }
 
     public async Task<ApplyOutcome> ApplyAsync(ChangePlan plan, string by, string reason, CancellationToken ct = default)

@@ -152,6 +152,58 @@ else
                     <p class="muted">Nothing to fix.</p>
                 }
 
+                @* Transport security, as records rather than as advice.
+                   A domain with no MTA-STS has nothing to CHANGE, so the
+                   planner above says nothing about it - which left an
+                   operator told "no MTA-STS policy" with no way to find out
+                   what to publish. These are the records themselves. *@
+                @if (d.TransportRecords.Count > 0)
+                {
+                    <details class="plan">
+                        <summary>Transport security — @d.TransportRecords.Count record(s) to publish</summary>
+
+                        @if (d.PolicyHostUnknown && d.TransportRecords.Any(r => r.Type == "CNAME"))
+                        {
+                            <p class="bad">
+                                Nobody has set <code>MtaSts:PolicyHost</code>, so the CNAME target below is a
+                                placeholder. Set it to the hostname this app is reachable on, or the policy
+                                will point somewhere senders cannot fetch it.
+                            </p>
+                        }
+
+                        <table class="triage diff">
+                            <tbody>
+                                @foreach (var record in d.TransportRecords)
+                                {
+                                    <tr>
+                                        <td><code>@record.Name</code></td>
+                                        <td>
+                                            <code>@record.Type</code>
+                                            <code class="value">@record.Value</code>
+                                            <p class="sub">@record.Why</p>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+
+                        @if (d.PolicyFile.Length > 0)
+                        {
+                            <p class="sub">The policy file served at the end of that CNAME:</p>
+                            <pre class="policy">@d.PolicyFile</pre>
+                        }
+                        else if (d.TransportRecords.Any(r => r.Name.StartsWith("mta-sts.", StringComparison.Ordinal)))
+                        {
+                            <p class="sub">
+                                No policy has been created for this domain yet, so there is no version to
+                                announce and the <code>_mta-sts</code> record is not shown — publishing an id
+                                this app does not serve is worse than publishing nothing. Create one first:
+                                <code>dmarc mta-sts set --domain @d.Domain</code>
+                            </p>
+                        }
+                    </details>
+                }
+
                 @foreach (var plan in d.Plans)
                 {
                     var key = Key(plan);
