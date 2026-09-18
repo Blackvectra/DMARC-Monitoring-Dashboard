@@ -106,6 +106,38 @@ public sealed class TransportPlannerTests
     }
 
     [Fact]
+    public void RefusesToAnnounceAPolicyWhoseIdIsMissing()
+    {
+        // The id exists only in the TXT record - RFC 8461 policy files do not
+        // carry it - so a policy built by fetching the file alone has none,
+        // and ToRecord() produced the literal "v=STSv1; id=". Every sender
+        // treats an unparseable record as no MTA-STS policy at all, so
+        // applying it would have switched transport security off for the
+        // domain while the page reported success.
+        //
+        // Both call sites did exactly that, and no test caught it because
+        // every fixture here supplies an id. This is the fixture that does not.
+        var noId = new ServedPolicy(
+            true,
+            new MtaStsPolicy { Mode = MtaStsMode.Testing, Mx = ["*.mail.protection.outlook.com"], Id = "" },
+            null);
+
+        var plan = TransportPlanner.MtaSts("acme.com", null, noId, Microsoft365);
+
+        Assert.False(plan.IsSafe);
+        Assert.Contains(plan.Blockers, b => b.Contains("policy id", StringComparison.Ordinal));
+        Assert.DoesNotContain("id=\"\"", plan.ProposedValue, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("has-a-hyphen")]
+    [InlineData("far too long to be a valid mta sts policy identifier")]
+    public void KnowsWhichIdsASenderWillAccept(string id) =>
+        Assert.False(MtaStsPolicy.IsValidId(id));
+
+    [Fact]
     public void SaysTestingEnforcesNothing()
     {
         var plan = TransportPlanner.MtaSts(

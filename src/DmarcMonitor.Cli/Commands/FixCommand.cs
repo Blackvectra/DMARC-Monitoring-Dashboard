@@ -149,7 +149,7 @@ public static class FixCommand
         // planner checks by fetching it.
         if (!explicitOnly || Args.Flag(args, "--transport"))
         {
-            plans.AddRange(await TransportAsync(domain, published, args, ct).ConfigureAwait(false));
+            plans.AddRange(await TransportAsync(domain, published, args, dbPath, ct).ConfigureAwait(false));
         }
 
         if (policy is null)
@@ -194,7 +194,7 @@ public static class FixCommand
     /// enforcement with the lights off.
     /// </remarks>
     private static async Task<List<ChangePlan>> TransportAsync(
-        string domain, PublishedRecords published, string[] args, CancellationToken ct)
+        string domain, PublishedRecords published, string[] args, string dbPath, CancellationToken ct)
     {
         var plans = new List<ChangePlan>();
 
@@ -211,7 +211,13 @@ public static class FixCommand
 
         // Fetched rather than assumed: the record says a policy exists, only
         // the file says what it is, and a sender reads the file.
-        var served = await new MtaStsFetcher().FetchAsync(domain, ct: ct).ConfigureAwait(false);
+        //
+        // The id, though, is not in the file - RFC 8461 keeps it in the TXT
+        // record alone - so it has to come from this product's own record of
+        // the policy. Fetching without it built "v=STSv1; id=", which no
+        // sender accepts.
+        var known = await new MtaStsStore(dbPath).GetAsync(domain, ct).ConfigureAwait(false);
+        var served = await new MtaStsFetcher().FetchAsync(domain, known?.Id ?? "", ct).ConfigureAwait(false);
         if (!served.Reachable && string.IsNullOrWhiteSpace(published.MtaStsRecord))
         {
             // Nothing published and nothing served is not a fault to plan

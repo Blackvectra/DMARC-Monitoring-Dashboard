@@ -74,6 +74,19 @@ public sealed record MtaStsPolicy
     public static string IdFor(DateTimeOffset when) =>
         when.UtcDateTime.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
 
+    /// <summary>
+    /// Whether an id is one a sender will accept.
+    /// </summary>
+    /// <remarks>
+    /// RFC 8461 §3.1: one to thirty-two alphanumeric characters. Worth
+    /// checking rather than assuming, because the id cannot be read back out
+    /// of the policy file - it exists only in the TXT record - so any code
+    /// path that builds a record without being given one produces
+    /// "v=STSv1; id=", which every sender treats as no policy at all.
+    /// </remarks>
+    public static bool IsValidId(string? id) =>
+        id is { Length: > 0 and <= 32 } && id.All(char.IsLetterOrDigit);
+
     /// <summary>The file, exactly as it must be served.</summary>
     /// <remarks>
     /// CRLF line endings, because RFC 8461 §3.2 says so. Plenty of parsers

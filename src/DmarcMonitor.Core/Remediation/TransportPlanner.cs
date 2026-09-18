@@ -128,6 +128,22 @@ public static class TransportPlanner
         var blockers = new List<string>();
         var warnings = new List<string>();
 
+        // The id lives in the TXT record, never in the policy file, so it
+        // cannot be recovered by fetching the file - and when nothing supplied
+        // it, ToRecord() produced the literal "v=STSv1; id=". That is not a
+        // valid record: RFC 8461 §3.1 requires 1 to 32 alphanumeric
+        // characters, and a sender that cannot parse the TXT record treats the
+        // domain as having no MTA-STS policy at all. Publishing it would have
+        // switched transport security off for the domain while the page
+        // reported the change as applied.
+        if (!MtaStsPolicy.IsValidId(policy.Id))
+        {
+            blockers.Add(
+                $"The policy id for {domain} is missing, so the record to announce it cannot be built. "
+                + "The id lives in the TXT record rather than in the policy file, and it has to come from "
+                + $"this product's own record of the policy. Run: dmarc mta-sts set --domain {domain}");
+        }
+
         // The rule that matters. Enforce means a sender that reaches a host
         // this policy does not list gives up rather than delivering.
         if (string.Equals(policy.Mode, MtaStsMode.Enforce, StringComparison.OrdinalIgnoreCase))

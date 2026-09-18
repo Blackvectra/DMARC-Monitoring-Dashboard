@@ -49,6 +49,7 @@ public sealed class RemediationUiService(
     IConfiguration configuration)
 {
     private readonly TriageService _triage = new(database.Path);
+    private readonly MtaStsStore _policies = new(database.Path);
 
     public string SecretsDescription => providers.Secrets.Description;
     public bool SecretsAvailable => providers.Secrets.IsAvailable;
@@ -102,7 +103,12 @@ public sealed class RemediationUiService(
             // served, so the file is fetched rather than assumed. Skipped
             // entirely for a domain with neither, which is not a fault - it
             // is a domain nobody has set this up for.
-            var served = await mtaSts.FetchAsync(domain, ct: ct);
+            // The id comes from this product's record of the policy, not from
+            // the fetched file - RFC 8461 policy files do not carry it. Fetch
+            // without it and every plan announces "v=STSv1; id=", which is not
+            // a record a sender will accept.
+            var known = await _policies.GetAsync(domain, ct);
+            var served = await mtaSts.FetchAsync(domain, known?.Id ?? "", ct);
             if (!string.IsNullOrWhiteSpace(published.MtaStsRecord) || served.Reachable)
             {
                 var mx = await lookup.MxAsync(domain, ct);
