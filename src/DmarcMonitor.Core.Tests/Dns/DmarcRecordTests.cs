@@ -117,4 +117,33 @@ public sealed class DmarcRecordTests
 
         Assert.Equal(raw, DmarcRecord.Parse(raw).Raw);
     }
+
+    [Theory]
+    [InlineData("v=DMARC1; p=reject; adkim=s; aspf=s", true, true)]
+    [InlineData("v=DMARC1; p=reject; adkim=S; aspf=S", true, true)]
+    [InlineData("v=DMARC1; p=reject; adkim=s", true, false)]
+    [InlineData("v=DMARC1; p=reject; aspf=s", false, true)]
+    [InlineData("v=DMARC1; p=reject; adkim=r; aspf=r", false, false)]
+    public void ReadsStrictAlignment(string raw, bool dkim, bool spf)
+    {
+        // The tag that quietly refuses a domain's own correctly-signed mail
+        // from a subdomain. Nothing read it before, so the page could not say
+        // why an otherwise valid signature was not counting.
+        var r = DmarcRecord.Parse(raw);
+
+        Assert.Equal(dkim, r.StrictDkim);
+        Assert.Equal(spf, r.StrictSpf);
+    }
+
+    [Fact]
+    public void AlignmentIsRelaxedWhenTheRecordDoesNotSay()
+    {
+        // RFC 7489's default, and most records omit the tags. Defaulting to
+        // strict would describe the majority of domains as rejecting subdomain
+        // signatures they actually accept.
+        var r = DmarcRecord.Parse("v=DMARC1; p=reject; rua=mailto:x@example.com");
+
+        Assert.False(r.StrictDkim);
+        Assert.False(r.StrictSpf);
+    }
 }

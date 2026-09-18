@@ -31,6 +31,20 @@ public sealed record DmarcRecord
     public string Rua { get; init; } = "";
 
     /// <summary>
+    /// <c>adkim=s</c>: a DKIM signature must be for this exact domain.
+    /// </summary>
+    /// <remarks>
+    /// Relaxed unless the record says <c>s</c>, which is RFC 7489's default.
+    /// It decides whether a signature over a subdomain of this domain counts,
+    /// so a domain can be rejecting its own correctly-signed mail on the
+    /// strength of this one character.
+    /// </remarks>
+    public bool StrictDkim { get; init; }
+
+    /// <summary><c>aspf=s</c>: the same, for the envelope domain.</summary>
+    public bool StrictSpf { get; init; }
+
+    /// <summary>
     /// What subdomains are actually treated as, following inheritance.
     /// </summary>
     public string EffectiveSubdomainPolicy =>
@@ -71,6 +85,11 @@ public sealed record DmarcRecord
             SubdomainPolicy = tags.GetValueOrDefault("sp", ""),
             Percent = int.TryParse(tags.GetValueOrDefault("pct"), out var pct) ? pct : 100,
             Rua = tags.GetValueOrDefault("rua", ""),
+            StrictDkim = IsStrict(tags.GetValueOrDefault("adkim")),
+            StrictSpf = IsStrict(tags.GetValueOrDefault("aspf")),
         };
     }
+
+    private static bool IsStrict(string? tag) =>
+        string.Equals(tag?.Trim(), "s", StringComparison.OrdinalIgnoreCase);
 }

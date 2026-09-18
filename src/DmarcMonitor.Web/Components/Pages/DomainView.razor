@@ -1,9 +1,13 @@
 @page "/domains/{Domain}"
+@using DmarcMonitor.Core.Charting
 @using DmarcMonitor.Core.Dns
+@using DmarcMonitor.Core.Reporting
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Core.Domains
+@using DmarcMonitor.Web.Components.Charts
 @using DmarcMonitor.Web.Data
 @inject DomainDetailService Detail
+@inject TimeSeriesService Series
 @inject DnsLookup Dns
 @inject ReportStoreConnection Db
 @rendermode InteractiveServer
@@ -14,7 +18,13 @@
     <div>
         <p class="crumb"><a href="">Triage</a> / @Domain</p>
         <h1>@Domain</h1>
-        @if (_detail is not null)
+        @* Not when the client is named after the domain, which is what
+           onboarding by domain name produces for most of them: the heading
+           otherwise prints the same string three times running, once in the
+           breadcrumb, once as the title and once as the customer. *@
+        @if (_detail is not null
+             && !string.IsNullOrWhiteSpace(_detail.ClientName)
+             && !_detail.ClientName.Equals(Domain, StringComparison.OrdinalIgnoreCase))
         {
             <p class="sub">@_detail.ClientName</p>
         }
@@ -103,13 +113,85 @@ else
         </div>
     </div>
 
+    @if (_breakdown is { Total: > 0 })
+    {
+        @* The split the pass rate above cannot give: of this domain's mail,
+           how much authenticated, how much broke for a reason the receiver
+           called expected, and how much proved nothing at all. *@
+        <Gauge Slices="@Volume()" Caption="@($"Everything sent as {Domain}, last {_days} days")" />
+    }
+
+    @* The shape of the domain over time, which no total can show. A domain
+       that was fine until Tuesday and has been rejecting a third of its mail
+       since reads as "97% passing" in the figures above: true, and useless. *@
+    @if (_series is not null && _series.Count > 0)
+    {
+        <VolumeChart Points="_series" Caption="@($"Mail per day, last {_days} days")" />
+    }
+
+    @if (_detail.Failing > 0)
+    {
+        <div class="chart">
+            <figcaption>What happened to the @_detail.Failing.ToString("N0") message(s) that failed</figcaption>
+            <ProportionBar Slices="@Disposition()"
+                           Empty="Nothing failed in this window." />
+            @if (DeliveredAnyway > 0 && _detail.Policy is "reject" or "quarantine")
+            {
+                @* The number that says how much protection the policy is
+                   actually giving, as opposed to what it claims. *@
+                <p class="sub">
+                    @DeliveredAnyway.ToString("N0") failing message(s) were delivered anyway despite
+                    <code>p=@_detail.Policy</code>@(_detail.Pct < 100 ? $", which is what pct={_detail.Pct} does" : "").
+                </p>
+            }
+        </div>
+    }
+
+    @*
+        The page is four screens of evidence and somebody arrives at it with
+        one question. Jump links rather than tabs on purpose: a finding hidden
+        behind a tab is a finding nobody reads, and the unaligned-signature
+        section exists precisely so a discarded valid signature stops being
+        invisible. Everything stays on the page; this only shortens the
+        distance to it.
+
+        Each link carries its own count, so the shape of the domain is legible
+        before following any of them.
+    *@
+    <nav class="jump" aria-label="Sections of this page">
+        @if (_detail.SigningUnaligned.Count > 0)
+        {
+            <a href="#unaligned" class="jump-alert">@_detail.SigningUnaligned.Count signing unaligned</a>
+        }
+        @if (_detail.Impersonating.Count > 0)
+        {
+            <a href="#impersonating">@_detail.Impersonating.Count unauthenticated</a>
+        }
+        @if (_detail.Misconfigured.Count > 0)
+        {
+            <a href="#failing">@_detail.Misconfigured.Count failing</a>
+        }
+        @if (_detail.Clean.Count > 0)
+        {
+            <a href="#clean">@_detail.Clean.Count clean</a>
+        }
+        <a href="#published">Published DNS</a>
+        <a href="#reporting">
+            Reporting
+            @if (_detail.Reporters.Any(r => r.HasGoneQuiet))
+            {
+                <span class="pip watch" title="a receiver has stopped reporting"></span>
+            }
+        </a>
+    </nav>
+
     @if (_detail.Impersonating.Count > 0)
     {
-        <section>
+        <section id="impersonating">
             <h2>Sending as @Domain without authenticating</h2>
             <p class="sub">Proved nothing when they failed. Either a service nobody recorded, or somebody
                sending as this domain.</p>
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
                         <th>Source</th>
@@ -140,17 +222,140 @@ else
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
+        </section>
+    }
+
+    @if (_detail.SigningUnaligned.Count > 0)
+    {
+        @* The line an operator misreads, every time. "dkim=pass" and
+           "dmarc=fail" on the same row is not a contradiction: the signature
+           verified, over a domain DMARC does not accept for this mail. Somebody
+           who has already set DKIM up with the vendor reads the failure as the
+           product being wrong, and stops looking. *@
+        <section class="callout act" id="unaligned">
+            <h2>
+                @(_detail.SigningUnaligned.Count == 1
+                    ? "A source is signing correctly for the wrong domain"
+                    : $"{_detail.SigningUnaligned.Count} sources are signing correctly for the wrong domain")
+            </h2>
+            <p>
+                DKIM is working on @(_detail.SigningUnaligned.Count == 1 ? "this source" : "these sources") —
+                the signature@(_detail.SigningUnaligned.Count == 1 ? "" : "s") verified. DMARC threw it away
+                anyway, because it also requires the signing domain to match the one in the From header, and
+                @(_detail.SigningUnaligned.Count == 1 ? "it does" : "they do") not.
+                @if (_detail.Policy is "reject" or "quarantine")
+                {
+                    <strong> At p=@_detail.Policy that mail is being lost right now.</strong>
+                }
+            </p>
+
+            <div class="table-scroll"><table class="triage">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th class="num">Failed</th>
+                        <th>Signs as</th>
+                        <th>Why it does not count</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in _detail.SigningUnaligned)
+                    {
+                        @* One source, however many domains it signs. Repeating
+                           the failure count against each of them reads as that
+                           many separate losses - one address on the live data
+                           signs three Mailchimp domains and would have claimed
+                           223 failures three times over. *@
+                        @foreach (var (u, i) in s.UnalignedDkim.Select((u, i) => (u, i)))
+                        {
+                            <tr class="act">
+                                @if (i == 0)
+                                {
+                                    <td rowspan="@s.UnalignedDkim.Count"><code>@s.SourceIp</code></td>
+                                    <td class="num" rowspan="@s.UnalignedDkim.Count">@s.Failing.ToString("N0")</td>
+                                }
+                                <td><code>d=@u.Domain</code></td>
+                                <td>
+                                    @if (u.WouldAlignIfRelaxed)
+                                    {
+                                        <span>A subdomain of @Domain. You publish <code>adkim=s</code>,
+                                              which requires an exact match.</span>
+                                    }
+                                    else if (u.Verdict == AlignmentVerdict.Organizational)
+                                    {
+                                        <span>A subdomain of @Domain, which should align. If it is still
+                                              failing, the signature is being broken after signing.</span>
+                                    }
+                                    else
+                                    {
+                                        <span>A different organisation from @Domain. No alignment setting
+                                              makes this count.</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table></div>
+
+            <p><strong>What fixes it</strong></p>
+            <ul>
+                @if (_detail.SigningUnaligned.Any(s => s.UnalignedDkim.Any(u => u.Verdict == AlignmentVerdict.Unrelated)))
+                {
+                    <li>
+                        Have the service sign as <code>@Domain</code> rather than as itself. Most senders
+                        call this custom, branded or authenticated DKIM, and it is usually configured
+                        <em>per product</em> — turning it on for one kind of mail leaves the others signing
+                        the vendor's own domain.
+                    </li>
+                }
+                @if (_detail.AnyWouldAlignIfRelaxed)
+                {
+                    <li>
+                        Or change <code>adkim=s</code> to <code>adkim=r</code> on @Domain, which accepts a
+                        signature from a subdomain. Only worth doing once you have confirmed the subdomain
+                        is yours — relaxing alignment widens what counts as authentic.
+                    </li>
+                }
+            </ul>
+
+            @{
+                // Grouped by the host doing it right. Two broken addresses of
+                // one vendor are one fact about that vendor, and saying it
+                // twice makes it read as two separate discoveries.
+                var proven = _detail.SigningUnaligned
+                    .Where(s => s.SameServiceSigningCorrectly is not null)
+                    .GroupBy(s => s.SameServiceSigningCorrectly!, StringComparer.Ordinal)
+                    .ToList();
+            }
+            @foreach (var group in proven)
+            {
+                @* The fact that ends the argument with a vendor. Its own other
+                   sending host already signs as this customer, so "we cannot do
+                   that" is not available. *@
+                <p>
+                    The same service also sends this domain's mail from <code>@group.Key</code>, and
+                    <strong>that path signs as @Domain correctly</strong> — so the capability exists on
+                    this account.
+                    @(group.Count() == 1 ? "This source has" : "These sources have") simply not been
+                    switched over:
+                    @foreach (var (s, i) in group.Select((s, i) => (s, i)))
+                    {
+                        @(i > 0 ? ", " : "")<code>@s.SourceIp</code>
+                    }.
+                </p>
+            }
         </section>
     }
 
     @if (_detail.Misconfigured.Count > 0)
     {
-        <section>
+        <section id="failing">
             <h2>This domain's own mail, failing</h2>
             <p class="sub">Real services, signing as themselves rather than as @Domain. This is mail
                being lost, and it is the work to do before enforcing.</p>
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
                         <th>Source</th>
@@ -167,20 +372,29 @@ else
                             <td><code>@s.SourceIp</code></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="num">@s.Failing.ToString("N0")</td>
-                            <td><code>@s.AuthenticatedFor</code></td>
+                            <td>
+                                <code>@s.AuthenticatedFor</code>
+                                @if (s.UnalignedDkim.Count > 0)
+                                {
+                                    @* So the two sections are visibly about the
+                                       same rows, rather than reading as two
+                                       separate problems on one address. *@
+                                    <span class="muted"> — DKIM valid, not aligned</span>
+                                }
+                            </td>
                             <td class="muted">@Ago(s.LastSeen)</td>
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
         </section>
     }
 
     @if (_detail.Clean.Count > 0)
     {
-        <section>
+        <section id="clean">
             <h2>Authenticating cleanly</h2>
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
                         <th>Source</th>
@@ -198,7 +412,7 @@ else
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
             @if (_detail.Clean.Count > 10 && !_showAllClean)
             {
                 <p><button class="linkish" @onclick="() => _showAllClean = true">
@@ -220,7 +434,7 @@ else
         </p>
     }
 
-    <section>
+    <section id="published">
         <h2>What is published right now</h2>
         <p class="sub">Everything above comes from reports, and the newest of those is
            @Ago(_detail.LastReport). This is DNS, read just now.</p>
@@ -266,7 +480,7 @@ else
                     </section>
                 }
 
-                <table class="triage">
+                <div class="table-scroll"><table class="triage">
                     <tbody>
                         <tr>
                             <td>Policy</td>
@@ -306,6 +520,28 @@ else
                             </td>
                         </tr>
                         <tr>
+                            <td>Alignment</td>
+                            <td>
+                                @if (published.StrictDkim || published.StrictSpf)
+                                {
+                                    @* Called out because it is invisible until
+                                       it costs somebody a sending path, and the
+                                       report row it produces reads as a broken
+                                       key rather than as this setting. *@
+                                    <span>
+                                        <code>adkim=@(published.StrictDkim ? "s" : "r")</code>
+                                        <code>aspf=@(published.StrictSpf ? "s" : "r")</code>
+                                        — strict, so a signature or envelope from a
+                                        <em>subdomain</em> of @Domain does not count
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span>relaxed, so a subdomain of @Domain counts</span>
+                                }
+                            </td>
+                        </tr>
+                        <tr>
                             <td>Reports to</td>
                             <td>
                                 @if (published.Rua.Length == 0)
@@ -335,12 +571,12 @@ else
                             </tr>
                         }
                     </tbody>
-                </table>
+                </table></div>
             }
         }
     </section>
 
-    <section>
+    <section id="reporting">
         <h2>Who is reporting</h2>
         <p class="sub">A clean pass rate heard from one receiver is a partial picture, not a verdict.</p>
 
@@ -375,7 +611,7 @@ else
         }
         else
         {
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr><th>Receiver</th><th class="num">Reports</th><th class="num">Share</th><th>Last</th></tr>
                 </thead>
@@ -393,7 +629,7 @@ else
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
             <p class="sub">Share is of every message ever reported for this domain, and the list is the whole
                history rather than the window: a receiver that stopped before the window began would not
                appear in it at all, which is exactly the case worth seeing.</p>
@@ -405,7 +641,42 @@ else
     [Parameter] public string Domain { get; set; } = "";
 
     private DomainDetail? _detail;
+    private IReadOnlyList<DayPoint>? _series;
+    private VolumeBreakdown? _breakdown;
     private PublishedRecords? _dns;
+
+    /// <summary>This domain's mail, split by what it turned out to be.</summary>
+    private IReadOnlyList<Slice> Volume() =>
+        _breakdown is null
+            ? []
+            :
+            [
+                new Slice("authenticated", _breakdown.Authenticated, "fine"),
+                new Slice("forwarded or overridden", _breakdown.Overridden, "watch"),
+                new Slice("unauthenticated", _breakdown.Unauthenticated, "urgent"),
+            ];
+
+    private long Quarantined => _series?.Sum(p => p.Quarantined) ?? 0;
+    private long Rejected => _series?.Sum(p => p.Rejected) ?? 0;
+
+    /// <summary>
+    /// Failing mail the receivers delivered regardless.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the detail's own total rather than from the series, so the
+    /// three segments always sum to the number printed above them. The two
+    /// queries use slightly different windows and exclusions, and a bar that
+    /// disagrees with the sentence beside it is worse than no bar.
+    /// </remarks>
+    private long DeliveredAnyway => Math.Max(0, (_detail?.Failing ?? 0) - Quarantined - Rejected);
+
+    /// <summary>What the receivers actually did with the mail that failed.</summary>
+    private IReadOnlyList<Slice> Disposition() =>
+    [
+        new Slice("rejected", Rejected, "urgent"),
+        new Slice("quarantined", Quarantined, "watch"),
+        new Slice("delivered anyway", DeliveredAnyway, "dim"),
+    ];
 
     // Starts true, because before anything has been attempted the honest
     // state is "not yet", not "failed". A page rendered before its circuit
@@ -467,9 +738,11 @@ else
         _error = null;
 
         // Cleared so navigating between domains does not show the previous
-        // domain's record beside this one's reports.
+        // domain's record beside this one's reports, nor its chart above them.
         _dns = null;
         _dnsPending = true;
+        _series = null;
+        _breakdown = null;
 
         if (!Db.Exists) { _loading = false; return; }
 
@@ -483,6 +756,23 @@ else
             // "this domain is quiet", which is the opposite of the truth.
             _detail = null;
             _error = ex.Message;
+            _series = null;
+            _breakdown = null;
+            _loading = false;
+            return;
+        }
+
+        try
+        {
+            _series = _detail is null ? null : await Series.DomainAsync(_detail.Domain, _days);
+            _breakdown = _detail is null ? null : await Series.BreakdownAsync(_detail.Domain, _days);
+        }
+        catch (Exception)
+        {
+            // The charts are the one part of this page that can be dropped
+            // without misleading anybody. The evidence below them is the page.
+            _series = null;
+            _breakdown = null;
         }
         finally
         {

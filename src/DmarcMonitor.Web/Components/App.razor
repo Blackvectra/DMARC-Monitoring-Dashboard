@@ -11,11 +11,26 @@
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="app.css" />
     <link rel="stylesheet" href="DmarcMonitor.Web.styles.css" />
+    @* Before the stylesheet paints, not after. A person who chose dark and
+       then sees a white page on every navigation has been given a flicker
+       rather than a preference. Inline and synchronous for the same reason:
+       a deferred script runs too late to prevent it.
+
+       Wrapped because localStorage throws outright in some privacy modes,
+       and a theme preference is not worth a blank page. *@
+    <script>
+        try {
+            if (localStorage.getItem('dmarc-theme') === 'dark') {
+                document.documentElement.dataset.theme = 'dark';
+            }
+        } catch (e) { /* no stored preference is reachable; light is the default */ }
+    </script>
     <HeadOutlet />
 </head>
 
 <body>
     <Routes />
+    <script src="theme.js"></script>
     <script src="_framework/blazor.web.js"></script>
 </body>
 

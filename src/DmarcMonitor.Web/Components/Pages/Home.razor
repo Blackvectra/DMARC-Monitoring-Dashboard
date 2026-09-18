@@ -3,9 +3,13 @@
    types or bookmarks. Without this it was one of the URLs that returned a
    blank page. *@
 @page "/triage"
+@using DmarcMonitor.Core.Charting
+@using DmarcMonitor.Core.Reporting
 @using DmarcMonitor.Core.Rollout
+@using DmarcMonitor.Web.Components.Charts
 @using DmarcMonitor.Web.Data
 @inject TriageService Triage
+@inject TimeSeriesService Series
 @inject ReportStoreConnection Db
 @rendermode InteractiveServer
 
@@ -59,17 +63,103 @@ else if (_rows.Count == 0)
 }
 else
 {
+    @* What the whole book of domains has been doing, before any of the rows.
+       A table of eighteen totals cannot show that the estate lost a third of
+       its volume on Tuesday; this can. *@
+    @*
+        The overview, read left to right: what the mail was, how many domains
+        are actually sending, and which services are carrying it. Four panels
+        across the top rather than four cards down the page, so the shape of
+        the estate is one glance rather than a scroll.
+    *@
+    <section class="overview">
+        <div class="panel">
+            <h2 class="panel-h">Volume summary, last @_days days</h2>
+            @if (_breakdown is { Total: > 0 })
+            {
+                @* What a pass rate cannot say: how much of the mail broke for
+                   a reason the receiver itself called expected, and how much
+                   proved nothing. Only the second is worth an afternoon. *@
+                <Gauge Slices="@Volume()" Bare="true" />
+            }
+            else
+            {
+                <p class="muted">No mail reported in this window.</p>
+            }
+        </div>
+
+        @* Stacked into one narrow column so the whole overview stays a single
+           row. Two bare counts side by side would take the width the tables
+           either side of them need. *@
+        <div class="panel-stack">
+            <div class="panel panel-figure">
+                <h2 class="panel-h">Active domains</h2>
+                <p class="panel-n good">@_active</p>
+                <p class="panel-sub">sent mail in this window</p>
+            </div>
+
+            <div class="panel panel-figure">
+                <h2 class="panel-h">Inactive domains</h2>
+                <p class="panel-n">@_inactive</p>
+                @* Not the same as safe. A domain nobody sends as is one whose
+                   DMARC record nobody is watching. *@
+                <p class="panel-sub">no mail seen — still worth a policy</p>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2 class="panel-h">Source compliance rates</h2>
+            <SourceRates Sources="_sources" NotShown="@Math.Max(0, _sourceCount - _sources.Count)" />
+        </div>
+    </section>
+
+    @if (_series is not null && _series.Count > 0)
+    {
+        <VolumeChart Points="_series" Caption="@($"All domains, last {_days} days")" />
+
+        <div class="chart">
+            <figcaption>Where this estate stands</figcaption>
+            <ProportionBar Slices="@Severity()" Empty="No domains yet." />
+        </div>
+    }
+
+    @* The counts were already here and were decoration: they said four
+       domains were losing mail and gave no way to see only those four. A
+       severity is the first thing anybody filters by, so it is the filter. *@
     <div class="counts">
+        <button type="button" class="count @(_level is null ? "on" : "")"
+                @onclick="() => Filter(null)">@_rows.Count all</button>
         @foreach (var level in new[] { TriageLevel.Urgent, TriageLevel.Act, TriageLevel.Watch, TriageLevel.OnTrack, TriageLevel.Fine })
         {
             var n = _rows.Count(r => r.Level == level);
             @if (n > 0)
             {
-                <span class="count @Css(level)">@n @Label(level)</span>
+                var chosen = _level == level;
+                <button type="button" class="count @Css(level) @(chosen ? "on" : "")"
+                        aria-pressed="@chosen.ToString().ToLowerInvariant()"
+                        @onclick="() => Filter(level)">@n @Label(level)</button>
             }
         }
+
+        <input class="find" type="search" placeholder="Find a domain or client"
+               aria-label="Find a domain or client"
+               @bind="_find" @bind:event="oninput" />
     </div>
 
+    var shown = Shown();
+
+    @if (shown.Count == 0)
+    {
+        @* A filter that matches nothing has to say so. An empty table under a
+           search box reads as "no domains", which is not what happened. *@
+        <p class="muted">
+            Nothing matches @(_level is null ? "" : $"\"{Label(_level.Value)}\"")@(_level is not null && _find.Length > 0 ? " and " : "")@(_find.Length > 0 ? $"\"{_find}\"" : "").
+            <button class="linkish" @onclick="ClearFilters">Show all @_rows.Count</button>
+        </p>
+    }
+    else
+    {
+    <div class="table-scroll">
     <table class="triage">
         <thead>
             <tr>
@@ -79,16 +169,25 @@ else
                 <th>Policy</th>
                 <th class="num">Messages</th>
                 <th class="num">Passing</th>
+                <th class="spark-col">Trend</th>
                 <th>What needs doing</th>
             </tr>
         </thead>
         <tbody>
-            @foreach (var row in _rows)
+            @foreach (var row in shown)
             {
                 <tr class="@Css(row.Level)">
                     <td><span class="pip @Css(row.Level)" title="@Label(row.Level)"></span></td>
                     <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
-                    <td class="muted">@row.ClientName</td>
+                    @* Onboarding by domain name makes these identical for most
+                       rows, and a column repeating the one beside it eighteen
+                       times is noise in the place the eye scans first. The
+                       column stays, because it earns itself the moment a
+                       client has more than one domain. *@
+                    <td class="muted">
+                        @(string.Equals(row.ClientName, row.Domain, StringComparison.OrdinalIgnoreCase)
+                            ? "—" : row.ClientName)
+                    </td>
                     <td><code>p=@row.Policy</code></td>
                     <td class="num">@row.Messages.ToString("N0")</td>
                     <td class="num">
@@ -101,19 +200,127 @@ else
                             <span class="muted">—</span>
                         }
                     </td>
+                    <td class="spark-col">
+                        @* The column that makes eighteen rows comparable at a
+                           glance: which domains are steady, which are growing,
+                           which fell off a cliff last Tuesday. *@
+                        @if (_sparks.TryGetValue(row.Domain, out var spark))
+                        {
+                            <Sparkline Points="spark" />
+                        }
+                        else
+                        {
+                            <span class="muted">—</span>
+                        }
+                    </td>
                     <td>@row.Headline</td>
                 </tr>
             }
         </tbody>
     </table>
+    </div>
+
+    @if (shown.Count < _rows.Count)
+    {
+        <p class="sub">
+            Showing @shown.Count of @_rows.Count.
+            <button class="linkish" @onclick="ClearFilters">Show all</button>
+        </p>
+    }
+    }
 }
 
 @code {
     private IReadOnlyList<DomainTriage>? _rows;
+    private IReadOnlyList<DayPoint>? _series;
+    private VolumeBreakdown? _breakdown;
+    private IReadOnlyList<SourceCompliance> _sources = [];
+    private int _sourceCount;
+    private int _active;
+    private int _inactive;
+    private IReadOnlyDictionary<string, IReadOnlyList<DayPoint>> _sparks =
+        new Dictionary<string, IReadOnlyList<DayPoint>>();
     private string? _error;
     private int _days = 14;
 
+    private TriageLevel? _level;
+    private string _find = "";
+
     protected override Task OnInitializedAsync() => LoadAsync();
+
+    /// <summary>
+    /// Everything sent as these domains, split by what it turned out to be.
+    /// </summary>
+    /// <remarks>
+    /// Worst last, so the dial reads left to right from the mail that is fine
+    /// to the mail that is not, matching the ordering of every other list in
+    /// the product.
+    /// </remarks>
+    private IReadOnlyList<Slice> Volume() =>
+        _breakdown is null
+            ? []
+            :
+            [
+                new Slice("authenticated", _breakdown.Authenticated, "fine"),
+                new Slice("forwarded or overridden", _breakdown.Overridden, "watch"),
+                new Slice("unauthenticated", _breakdown.Unauthenticated, "urgent"),
+            ];
+
+    /// <summary>The estate split by how much attention each domain needs.</summary>
+    /// <remarks>
+    /// Ordered worst first, matching the table under it and the ordering used
+    /// everywhere else: a bar that runs green-to-red in one place and
+    /// red-to-green in another is read wrongly in both.
+    /// </remarks>
+    private IReadOnlyList<Slice> Severity()
+    {
+        if (_rows is null) { return []; }
+
+        return
+        [
+            new Slice("losing mail", _rows.Count(r => r.Level == TriageLevel.Urgent), "urgent"),
+            new Slice("needs work", _rows.Count(r => r.Level == TriageLevel.Act), "act"),
+            new Slice("worth a look", _rows.Count(r => r.Level == TriageLevel.Watch), "watch"),
+            new Slice("rollout on track", _rows.Count(r => r.Level == TriageLevel.OnTrack), "ontrack"),
+            new Slice("fine", _rows.Count(r => r.Level == TriageLevel.Fine), "fine"),
+        ];
+    }
+
+    /// <summary>
+    /// The rows after the severity filter and the search box.
+    /// </summary>
+    /// <remarks>
+    /// Ordering is left exactly as the triage service returned it. Worst first
+    /// is the whole point of the page, and re-sorting a filtered view by
+    /// anything else would quietly change what "the top row" means.
+    /// </remarks>
+    private IReadOnlyList<DomainTriage> Shown()
+    {
+        if (_rows is null) { return []; }
+
+        var rows = _level is null ? _rows : _rows.Where(r => r.Level == _level).ToList();
+
+        var find = _find.Trim();
+        if (find.Length == 0) { return [.. rows]; }
+
+        // Client as well as domain: an operator who has just been telephoned
+        // knows the customer's name, not which of their four domains it is.
+        return
+        [
+            .. rows.Where(r =>
+                r.Domain.Contains(find, StringComparison.OrdinalIgnoreCase)
+                || r.ClientName.Contains(find, StringComparison.OrdinalIgnoreCase)),
+        ];
+    }
+
+    /// <summary>Clicking the chosen severity again clears it, as a toggle.</summary>
+    private void Filter(TriageLevel? level) => _level = _level == level ? null : level;
+
+    private void ClearFilters()
+    {
+        _level = null;
+        _find = "";
+    }
 
     private async Task LoadAsync()
     {
@@ -130,6 +337,36 @@ else
             // "nothing is wrong", which is the opposite of the truth.
             _rows = Array.Empty<DomainTriage>();
             _error = ex.Message;
+            _series = null;
+            return;
+        }
+
+        try
+        {
+            _series = await Series.EstateAsync(_days);
+            _sparks = await Series.PerDomainAsync(_days);
+            _breakdown = await Series.BreakdownAsync(days: _days);
+
+            // One more than the panel shows, so "N more not shown" can be
+            // honest about whether there are any rather than guessing.
+            const int shown = 6;
+            var sources = await Series.SourcesAsync(days: _days, top: shown + 1);
+            _sourceCount = sources.Count;
+            _sources = [.. sources.Take(shown)];
+
+            (_active, _inactive) = await Series.DomainActivityAsync(_days);
+        }
+        catch (Exception)
+        {
+            // A chart is the one thing on this page that can be dropped
+            // without misleading anybody. The rows are the page; losing the
+            // picture is better than losing them to an exception.
+            _series = null;
+            _breakdown = null;
+            _sources = [];
+            _sourceCount = 0;
+            _active = _inactive = 0;
+            _sparks = new Dictionary<string, IReadOnlyList<DayPoint>>();
         }
     }
 

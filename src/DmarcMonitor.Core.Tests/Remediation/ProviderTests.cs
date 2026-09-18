@@ -21,6 +21,9 @@ public sealed class ProviderTests
         private readonly Queue<(HttpStatusCode Status, string Body)> _answers = new();
         public List<(HttpMethod Method, string Path, string Body)> Sent { get; } = [];
 
+        /// <summary>Headers per request, so a conditional write can be checked.</summary>
+        public List<Dictionary<string, string[]>> Headers { get; } = [];
+
         public Script Then(HttpStatusCode status, string body)
         {
             _answers.Enqueue((status, body));
@@ -31,6 +34,7 @@ public sealed class ProviderTests
         {
             var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct);
             Sent.Add((request.Method, request.RequestUri!.PathAndQuery, body));
+            Headers.Add(request.Headers.ToDictionary(h => h.Key, h => h.Value.ToArray(), StringComparer.OrdinalIgnoreCase));
 
             var (status, answer) = _answers.Count > 0 ? _answers.Dequeue() : (HttpStatusCode.InternalServerError, "{}");
             return new HttpResponseMessage(status) { Content = new StringContent(answer, Encoding.UTF8, "application/json") };
@@ -212,5 +216,74 @@ public sealed class ProviderTests
         var result = await manual.SetRecordAsync(new DnsRecordWrite("_dmarc.acme.com", "TXT", "v=DMARC1; p=none"));
         Assert.False(result.Success);
         Assert.Contains("Publish this yourself", result.Error, StringComparison.Ordinal);
+    }
+
+    // ---- Azure's whole-set write, and what guards it -------------------------
+
+    [Fact]
+    public async Task AzureConditionsTheWriteOnTheSetNotHavingChanged()
+    {
+        // Azure keeps every TXT value at a name in one record set, so changing
+        // one means writing all of them back. Unconditional, that is a lost
+        // update with teeth: a verification token somebody else added between
+        // the read and the write is not overwritten, it is deleted, and the
+        // service that issued it stops trusting the domain. Azure reports
+        // success, because as far as it is concerned the write worked.
+        var existing = """{"etag":"W/\"abc123\"","properties":{"TTL":3600,"TXTRecords":[{"value":["v=spf1 -all"]}]}}""";
+        var script = new Script().Then(HttpStatusCode.OK, existing).Then(HttpStatusCode.OK, "{}");
+        var provider = new AzureDnsProvider(new HttpClient(script), new FakeCredential(), "sub", "rg", "acme.com");
+
+        var result = await provider.SetRecordAsync(
+            new DnsRecordWrite("acme.com", "TXT", "v=spf1 include:new.example -all", ReplacesValue: "v=spf1 -all"));
+
+        Assert.True(result.Success);
+        Assert.Equal(2, script.Sent.Count);
+        Assert.Equal(["W/\"abc123\""], script.Headers[1]["If-Match"]);
+    }
+
+    [Fact]
+    public async Task AzureRefusesToCreateOverASetThatAppearedMeanwhile()
+    {
+        // Nothing was there when it was read. If a set exists by the time of
+        // the write, it holds records this one has never seen, and replacing
+        // it with a set of one would delete them.
+        var script = new Script().Then(HttpStatusCode.NotFound, "{}").Then(HttpStatusCode.OK, "{}");
+        var provider = new AzureDnsProvider(new HttpClient(script), new FakeCredential(), "sub", "rg", "acme.com");
+
+        await provider.SetRecordAsync(new DnsRecordWrite("_dmarc.acme.com", "TXT", "v=DMARC1; p=none"));
+
+        Assert.Equal(["*"], script.Headers[1]["If-None-Match"]);
+        Assert.False(script.Headers[1].ContainsKey("If-Match"));
+    }
+
+    [Fact]
+    public async Task AzureSaysWhatHappenedWhenTheSetChangedUnderIt()
+    {
+        // A 412 is not a fault to retry blindly: the set is no longer what it
+        // was, so the values being written back are no longer the right ones.
+        var existing = """{"etag":"W/\"abc123\"","properties":{"TTL":300,"TXTRecords":[{"value":["v=spf1 -all"]}]}}""";
+        var script = new Script().Then(HttpStatusCode.OK, existing).Then(HttpStatusCode.PreconditionFailed, "{}");
+        var provider = new AzureDnsProvider(new HttpClient(script), new FakeCredential(), "sub", "rg", "acme.com");
+
+        var result = await provider.SetRecordAsync(
+            new DnsRecordWrite("acme.com", "TXT", "v=spf1 -all2", ReplacesValue: "v=spf1 -all"));
+
+        Assert.False(result.Success);
+        Assert.Contains("changed while this was being written", result.Error, StringComparison.Ordinal);
+        Assert.Contains("nothing was changed", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AzureConditionsARemovalTheSameWay()
+    {
+        // Removing one value from a set is the same read-modify-write, and
+        // loses the same neighbours if it is not conditioned.
+        var existing = """{"etag":"W/\"xyz\"","properties":{"TTL":300,"TXTRecords":[{"value":["v=spf1 -all"]},{"value":["MS=ms1"]}]}}""";
+        var script = new Script().Then(HttpStatusCode.OK, existing).Then(HttpStatusCode.OK, "{}");
+        var provider = new AzureDnsProvider(new HttpClient(script), new FakeCredential(), "sub", "rg", "acme.com");
+
+        await provider.RemoveRecordAsync(new DnsProviderRecord("acme.com", "TXT", "MS=ms1", 300, "id"));
+
+        Assert.Equal(["W/\"xyz\""], script.Headers[1]["If-Match"]);
     }
 }

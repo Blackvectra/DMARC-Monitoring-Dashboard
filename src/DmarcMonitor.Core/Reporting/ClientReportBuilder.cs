@@ -39,9 +39,11 @@ public sealed class ClientReportBuilder(string databasePath)
         var changes = await GetChangesAsync(db, clientId, period, ct).ConfigureAwait(false);
         var current = await GetTotalsAsync(db, clientId, period.Start, period.End, ct).ConfigureAwait(false);
         var previous = await GetTotalsAsync(db, clientId, period.PreviousStart, period.PreviousEnd, ct).ConfigureAwait(false);
+        var daily = await GetDailyAsync(db, clientId, period, ct).ConfigureAwait(false);
 
         return new ClientReport
         {
+            Daily = daily,
             ClientName = clientName,
             ProviderName = providerName,
             Period = period,
@@ -117,6 +119,101 @@ public sealed class ClientReportBuilder(string databasePath)
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0, 0); }
         return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+    }
+
+    /// <summary>
+    /// One point per day of the period, for the chart in the report.
+    /// </summary>
+    /// <remarks>
+    /// Scoped to the reported period rather than to a rolling window, because
+    /// a client reconciles this against an invoice and the two have to cover
+    /// the same days.
+    ///
+    /// Days nobody reported on stay marked as such. Drawn as zero they become
+    /// a cliff to the floor and back, and the client asks why their mail
+    /// stopped on a day it did not.
+    /// </remarks>
+    private static async Task<List<DayPoint>> GetDailyAsync(
+        SqliteConnection db, string clientId, ReportPeriod period, CancellationToken ct)
+    {
+        var reported = new HashSet<DateOnly>();
+        await using (var command = db.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT DISTINCT DATE(date_begin)
+                FROM aggregate_reports
+                WHERE client_id = $client AND date_begin >= $from AND date_begin <= $to
+                """;
+            command.Parameters.AddWithValue("$client", clientId);
+            command.Parameters.AddWithValue("$from", Iso(period.Start));
+            command.Parameters.AddWithValue("$to", Iso(period.End));
+
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                if (!reader.IsDBNull(0) && DateOnly.TryParse(
+                        reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+                {
+                    reported.Add(day);
+                }
+            }
+        }
+
+        var counted = new Dictionary<DateOnly, DayPoint>();
+        await using (var command = db.CreateCommand())
+        {
+            // Dispositions on failing rows only: a receiver stamps "none" on
+            // mail that passed as well, and counting those would tell a client
+            // most of their mail was let through despite failing.
+            command.CommandText = """
+                SELECT DATE(date_begin),
+                       COALESCE(SUM(message_count), 0),
+                       COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
+                       COALESCE(SUM(CASE WHEN dmarc_result <> 'pass' AND disposition = 'quarantine'
+                                         THEN message_count END), 0),
+                       COALESCE(SUM(CASE WHEN dmarc_result <> 'pass' AND disposition = 'reject'
+                                         THEN message_count END), 0)
+                FROM aggregate_records
+                WHERE client_id = $client AND date_begin >= $from AND date_begin <= $to
+                GROUP BY DATE(date_begin)
+                """;
+            command.Parameters.AddWithValue("$client", clientId);
+            command.Parameters.AddWithValue("$from", Iso(period.Start));
+            command.Parameters.AddWithValue("$to", Iso(period.End));
+
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                if (reader.IsDBNull(0) || !DateOnly.TryParse(
+                        reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+                {
+                    continue;
+                }
+
+                counted[day] = new DayPoint
+                {
+                    Day = day,
+                    Reported = true,
+                    Messages = reader.GetInt64(1),
+                    Passing = reader.GetInt64(2),
+                    Quarantined = reader.GetInt64(3),
+                    Rejected = reader.GetInt64(4),
+                };
+            }
+        }
+
+        var points = new List<DayPoint>();
+        var first = DateOnly.FromDateTime(period.Start.UtcDateTime);
+        var last = DateOnly.FromDateTime(period.End.UtcDateTime);
+
+        for (var day = first; day <= last; day = day.AddDays(1))
+        {
+            points.Add(counted.TryGetValue(day, out var row)
+                ? row
+                : new DayPoint { Day = day, Reported = reported.Contains(day) });
+        }
+
+        return points;
     }
 
     private static async Task<List<ReportDomainHealth>> GetDomainHealthAsync(

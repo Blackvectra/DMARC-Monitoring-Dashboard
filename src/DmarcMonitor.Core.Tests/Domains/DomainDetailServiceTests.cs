@@ -400,4 +400,286 @@ public sealed class DomainDetailServiceTests : IDisposable
 
         Assert.NotNull(await GetAsync("ACME.com."));
     }
+
+    // ---- a signature that verified and was thrown away anyway ----------------
+
+    /// <summary>
+    /// A row with the two mechanisms said separately, which the shorthand
+    /// helper above cannot express. The shape that matters here is a signature
+    /// that VERIFIES over a domain that is not the one being sent as.
+    /// </summary>
+    private static string SignedRow(
+        string ip, int count, string headerFrom,
+        string dkimDomain, string dkimResult, string spfDomain, string spfResult, string evaluated) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated><disposition>none</disposition>
+                <dkim>{evaluated}</dkim><spf>{evaluated}</spf></policy_evaluated>
+            </row>
+            <identifiers><header_from>{headerFrom}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{dkimDomain}</domain><selector>s1</selector><result>{dkimResult}</result></dkim>
+              <spf><domain>{spfDomain}</domain><result>{spfResult}</result></spf>
+            </auth_results>
+          </record>
+        """;
+
+    /// <summary>The same store, with the domain's alignment mode spelled out.</summary>
+    private async Task StoreAlignedAsync(string domain, string policy, string adkim, params string[] rows)
+    {
+        var begin = DateTimeOffset.UtcNow.AddDays(-2);
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata>
+                <org_name>google.com</org_name>
+                <report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
+                            <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range>
+              </report_metadata>
+              <policy_published><domain>{domain}</domain><p>{policy}</p><pct>100</pct>
+                <adkim>{adkim}</adkim><aspf>{adkim}</aspf></policy_published>
+              {string.Join("\n  ", rows)}
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        Assert.True(parsed.Success, parsed.Error);
+        await _store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
+    [Fact]
+    public async Task AValidSignatureForSomebodyElsesDomainIsNamedAsUnaligned()
+    {
+        // The live case this was built for. KnowBe4 signs its training mail
+        // with its own key over training.knowbe4.com, the signature verifies,
+        // and every message is rejected at p=reject. The report row says
+        // "dkim=pass" next to "dmarc=fail", and without something saying why,
+        // an operator who has already set DKIM up concludes the product is
+        // wrong rather than that one sending path was missed.
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("147.160.167.15", 289, "acme.com",
+                "training.knowbe4.com", "pass", "psm.knowbe4.com", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        var source = Assert.Single(detail!.SigningUnaligned);
+        Assert.Equal("147.160.167.15", source.SourceIp);
+
+        var signature = Assert.Single(source.UnalignedDkim);
+        Assert.Equal("training.knowbe4.com", signature.Domain);
+        Assert.Equal(AlignmentVerdict.Unrelated, signature.Verdict);
+
+        // Not a near miss. No alignment setting on acme.com makes a signature
+        // over knowbe4.com count, so suggesting one would be a wrong fix.
+        Assert.False(signature.WouldAlignIfRelaxed);
+        Assert.False(detail.AnyWouldAlignIfRelaxed);
+    }
+
+    [Fact]
+    public async Task ASignatureThatDidNotVerifyIsNotCalledUnaligned()
+    {
+        // Opposite problem, opposite fix: this key is broken or the message was
+        // modified in transit. Calling it a domain mismatch sends the operator
+        // to the vendor's alignment settings, where they will find nothing.
+        await StoreAlignedAsync("acme.com", "reject", "r",
+            SignedRow("198.51.100.7", 40, "acme.com",
+                "acme.com", "fail", "acme.com", "fail", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Empty(detail!.SigningUnaligned);
+    }
+
+    [Fact]
+    public async Task ASignatureForTheDomainItselfIsNotCalledUnaligned()
+    {
+        // Verified, for exactly the right domain, and the message still failed.
+        // Whatever went wrong, it was not the signing domain.
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("198.51.100.8", 12, "acme.com",
+                "acme.com", "pass", "relay.example.net", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Empty(detail!.SigningUnaligned);
+    }
+
+    [Fact]
+    public async Task ASubdomainSignatureIsANearMissWhenAlignmentIsStrict()
+    {
+        // The cheapest fix in DMARC and the easiest to miss: the sender is
+        // already signing the customer's own namespace, and one character of
+        // the customer's own record is refusing it.
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("203.0.113.40", 61, "acme.com",
+                "mail.acme.com", "pass", "mail.acme.com", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.True(detail!.StrictDkim);
+
+        var signature = Assert.Single(Assert.Single(detail.SigningUnaligned).UnalignedDkim);
+        Assert.Equal(AlignmentVerdict.Organizational, signature.Verdict);
+        Assert.True(signature.WouldAlignIfRelaxed);
+        Assert.True(detail.AnyWouldAlignIfRelaxed);
+    }
+
+    [Fact]
+    public async Task ASubdomainSignatureIsNotOfferedAsANearMissWhenAlignmentIsAlreadyRelaxed()
+    {
+        // Relaxing what is already relaxed fixes nothing, and offering it as a
+        // fix would have somebody weaken a record for no gain.
+        await StoreAlignedAsync("acme.com", "reject", "r",
+            SignedRow("203.0.113.41", 61, "acme.com",
+                "mail.acme.com", "pass", "mail.acme.com", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.False(detail!.StrictDkim);
+
+        var signature = Assert.Single(Assert.Single(detail.SigningUnaligned).UnalignedDkim);
+        Assert.Equal(AlignmentVerdict.Organizational, signature.Verdict);
+        Assert.False(signature.WouldAlignIfRelaxed);
+        Assert.False(detail.AnyWouldAlignIfRelaxed);
+    }
+
+    [Fact]
+    public async Task AnotherHostOfTheSameServiceSigningCorrectlyIsNamed()
+    {
+        // What turns a support ticket into a closed one. Both hosts carry the
+        // same service's mail - the same envelope domain says so - and one of
+        // them already signs as the customer. The vendor cannot answer that it
+        // is unable to.
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("23.21.109.197", 14, "acme.com",
+                "acme.com", "pass", "psm.knowbe4.com", "pass", "pass"),
+            SignedRow("147.160.167.15", 289, "acme.com",
+                "training.knowbe4.com", "pass", "psm.knowbe4.com", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        var broken = Assert.Single(detail!.SigningUnaligned);
+        Assert.Equal("147.160.167.15", broken.SourceIp);
+        Assert.Equal("23.21.109.197", broken.SameServiceSigningCorrectly);
+    }
+
+    [Fact]
+    public async Task ASourceThatPassesWithoutEverSigningTheDomainIsNotOfferedAsProof()
+    {
+        // Found by running this against real data. Three addresses pass DMARC
+        // for bmcedc.com and every one of them signs
+        // antispam.mailspamprotection.com - the same unaligned domain the
+        // failing address signs. Read as "that path signs as the customer", it
+        // sends somebody to a vendor with a claim the vendor can disprove in
+        // one line, which is worse than saying nothing.
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("185.56.86.128", 20, "acme.com",
+                "antispam.example.net", "pass", "djga.example", "pass", "pass"),
+            SignedRow("185.56.86.144", 30, "acme.com",
+                "antispam.example.net", "pass", "djga.example", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        var broken = Assert.Single(detail!.SigningUnaligned);
+        Assert.Equal("185.56.86.144", broken.SourceIp);
+        Assert.Null(broken.SameServiceSigningCorrectly);
+    }
+
+    [Fact]
+    public async Task OneStrayMessageDoesNotEarnACalloutOfItsOwn()
+    {
+        // A forwarded message produces exactly this shape. Six of them on one
+        // domain sat above the finding that mattered.
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("209.85.208.100", 1, "acme.com",
+                "alwaysanalytics.example", "pass", "alwaysanalytics.example", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Empty(detail!.SigningUnaligned);
+
+        // Not hidden, though. The source is still listed as failing, still
+        // carries the reason, and the table still marks it.
+        var source = Assert.Single(detail.Misconfigured);
+        Assert.Single(source.UnalignedDkim);
+    }
+
+    [Fact]
+    public async Task AServiceLosingRealMailIsNotBuriedByTheStrayMessagesAroundIt()
+    {
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("209.85.208.100", 1, "acme.com",
+                "alwaysanalytics.example", "pass", "alwaysanalytics.example", "pass", "fail"),
+            SignedRow("35.174.145.124", 45, "acme.com",
+                "chambermaster.example", "pass", "us.cloud-sec-av.example", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        var flagged = Assert.Single(detail!.SigningUnaligned);
+        Assert.Equal("35.174.145.124", flagged.SourceIp);
+    }
+
+    [Fact]
+    public async Task TheDomainsOwnServersAreNotOfferedAsProofAgainstEachOther()
+    {
+        // Every one of a domain's own hosts shares the domain's own envelope,
+        // so without excluding them this would point at one of the customer's
+        // servers as evidence about a third party that is not involved.
+        await StoreAlignedAsync("acme.com", "reject", "s",
+            SignedRow("192.0.2.25", 400, "acme.com",
+                "acme.com", "pass", "acme.com", "pass", "pass"),
+            SignedRow("192.0.2.26", 30, "acme.com",
+                "mail.acme.com", "pass", "acme.com", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        var near = Assert.Single(detail!.SigningUnaligned);
+        Assert.Null(near.SameServiceSigningCorrectly);
+    }
+
+    [Fact]
+    public async Task AnUnalignedSpfPassIsNotReportedAsASigningProblem()
+    {
+        // A relay passing SPF for its own envelope is how relays work. It is
+        // not a signature, there is nothing to re-sign, and the fix for it is
+        // not the fix offered here.
+        await StoreAlignedAsync("acme.com", "reject", "r",
+            SignedRow("203.0.113.77", 25, "acme.com",
+                "", "none", "relay.example.net", "pass", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Empty(detail!.SigningUnaligned);
+
+        // Still counted as a real service failing, which it is.
+        Assert.Single(detail.Misconfigured);
+    }
+
+    [Fact]
+    public async Task AlignmentDefaultsToRelaxedWhenTheReportDoesNotSay()
+    {
+        // RFC 7489's default. Assuming strict would invent near misses on every
+        // domain whose receivers omit the tag.
+        await StoreAsync("acme.com", "reject", Row("192.0.2.25", 10, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.False(detail!.StrictDkim);
+        Assert.False(detail.StrictSpf);
+    }
 }

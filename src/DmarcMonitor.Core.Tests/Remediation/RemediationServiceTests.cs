@@ -333,4 +333,92 @@ public sealed class RemediationServiceTests : IDisposable
         Assert.Contains(spf, _zone.ValuesAt(Domain));
         Assert.Equal(2, _zone.ValuesAt(Domain).Count);
     }
+
+    // ---- one record of a kind, never two ------------------------------------
+
+    /// <summary>
+    /// A plan to create a record, built when the zone held none.
+    /// </summary>
+    private static ChangePlan Create(string type, string name, string proposed) => new()
+    {
+        Domain = Domain,
+        Type = type,
+        RecordName = name,
+        RecordType = "TXT",
+        CurrentValue = "",
+        ProposedValue = proposed,
+        Summary = $"Publish {name}",
+    };
+
+    [Fact]
+    public async Task ATlsReportingRecordThatAppearedSinceThePlanIsReplacedNotDuplicated()
+    {
+        // RFC 8460 section 3: if the number of TLS-RPT records is not one,
+        // senders MUST assume the domain has no TLS-RPT policy. Writing a
+        // second one does not add reporting, it ends it.
+        //
+        // The plan is built when the name is empty, so it carries no current
+        // value; somebody publishes a record before it is applied. The apply
+        // path has to notice that and replace.
+        const string name = "_smtp._tls.dmvwrr.com";
+        _zone.Add(name, "TXT", "v=TLSRPTv1; rua=mailto:old@dmvwrr.com");
+
+        var outcome = await _service.ApplyAsync(
+            Create(ChangeType.TlsRpt, name, "v=TLSRPTv1; rua=mailto:dmarc@nrgtechservices.com"),
+            _zone, confirm: true, "tester", "test");
+
+        Assert.True(outcome.Applied, outcome.Error);
+        Assert.Single(_zone.ValuesAt(name));
+    }
+
+    [Fact]
+    public async Task AnMtaStsRecordThatAppearedSinceThePlanIsReplacedNotDuplicated()
+    {
+        // RFC 8461 section 3.1: two TXT records at _mta-sts leave a sender
+        // unable to tell which policy id is current, and senders cache the
+        // failure for max_age - so the breakage outlives the mistake.
+        const string name = "_mta-sts.dmvwrr.com";
+        _zone.Add(name, "TXT", "v=STSv1; id=20260101000000");
+
+        var outcome = await _service.ApplyAsync(
+            Create(ChangeType.MtaSts, name, "v=STSv1; id=20260918120000"),
+            _zone, confirm: true, "tester", "test");
+
+        Assert.True(outcome.Applied, outcome.Error);
+        Assert.Single(_zone.ValuesAt(name));
+    }
+
+    [Fact]
+    public async Task ADmarcRecordThatAppearedSinceThePlanIsStillReplacedNotDuplicated()
+    {
+        // The case that was already handled, kept so the fix for the two above
+        // cannot regress it.
+        const string name = "_dmarc.other.example";
+        _zone.Add(name, "TXT", "v=DMARC1; p=none");
+
+        var outcome = await _service.ApplyAsync(
+            Create(ChangeType.DmarcPolicy, name, "v=DMARC1; p=quarantine"),
+            _zone, confirm: true, "tester", "test");
+
+        Assert.True(outcome.Applied, outcome.Error);
+        Assert.Single(_zone.ValuesAt(name));
+    }
+
+    [Fact]
+    public async Task AVerificationTokenSharingTheNameIsNotMistakenForTheRecord()
+    {
+        // The reason this matches by kind rather than by "whatever is there".
+        // An apex holds many TXT records and a plan touches exactly one.
+        _zone.Add(Domain, "TXT", "google-site-verification=abc123");
+
+        var before = _zone.ValuesAt(Domain).Count;
+
+        var outcome = await _service.ApplyAsync(
+            Create(ChangeType.TlsRpt, Domain, "v=TLSRPTv1; rua=mailto:dmarc@nrgtechservices.com"),
+            _zone, confirm: true, "tester", "test");
+
+        Assert.True(outcome.Applied, outcome.Error);
+        Assert.Contains("google-site-verification=abc123", _zone.ValuesAt(Domain));
+        Assert.Equal(before + 1, _zone.ValuesAt(Domain).Count);
+    }
 }

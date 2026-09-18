@@ -561,8 +561,8 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     /// <remarks>
     /// An apex holds many TXT records and a plan touches exactly one of them.
     /// Matched by the value the plan was built from first, and by the record
-    /// kind (v=spf1, v=DMARC1) when the plan is creating one, so a write
-    /// never lands on a verification token that happens to share the name.
+    /// kind when the plan is creating one, so a write never lands on a
+    /// verification token that happens to share the name.
     /// </remarks>
     private static DnsProviderRecord? Matching(IReadOnlyList<DnsProviderRecord> records, ChangePlan plan)
     {
@@ -572,8 +572,46 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
             if (exact is not null) { return exact; }
         }
 
-        var prefix = plan.Type == ChangeType.SpfIncludeRemove ? "v=spf1" : "v=DMARC1";
-        return records.FirstOrDefault(r => r.Value.TrimStart().StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        // The kind comes from the plan's own proposed value rather than from a
+        // list of types kept here.
+        //
+        // That list had two entries and there are four change types, so an
+        // MTA-STS or TLS-RPT plan created with no current value looked for
+        // "v=DMARC1" at _mta-sts or _smtp._tls, never matched, and the write
+        // became an ADD rather than a REPLACE. A second record of either kind
+        // does not add a policy, it removes one: RFC 8461 3.1 leaves a sender
+        // unable to tell which MTA-STS id is current, and RFC 8460 3 says that
+        // if the number of TLS-RPT records is not one, senders MUST assume the
+        // domain has no policy at all. Senders cache the MTA-STS failure for
+        // max_age, so the breakage outlives the mistake.
+        //
+        // Reading it off the proposed value means a change type added later
+        // works here without anybody remembering to come back.
+        var marker = Marker(plan.ProposedValue) ?? Marker(plan.CurrentValue);
+        if (marker is null) { return null; }
+
+        return records.FirstOrDefault(r => r.Value.TrimStart().StartsWith(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The <c>v=</c> tag that says what kind of record this is.
+    /// </summary>
+    /// <remarks>
+    /// Every record this product writes opens with one: v=DMARC1, v=spf1,
+    /// v=STSv1, v=TLSRPTv1. The terminator differs - DMARC and its relatives
+    /// use a semicolon, SPF uses a space - so both end it.
+    /// </remarks>
+    internal static string? Marker(string? value)
+    {
+        var text = (value ?? "").TrimStart();
+        if (!text.StartsWith("v=", StringComparison.OrdinalIgnoreCase)) { return null; }
+
+        var end = text.IndexOfAny([';', ' ', '\t']);
+        var marker = end < 0 ? text : text[..end];
+
+        // "v=" alone identifies nothing, and matching on it would treat every
+        // record at the name as this plan's.
+        return marker.Length > 2 ? marker : null;
     }
 
     private static string Normalise(string? record) =>

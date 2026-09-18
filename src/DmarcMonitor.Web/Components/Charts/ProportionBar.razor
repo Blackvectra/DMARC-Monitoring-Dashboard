@@ -1,0 +1,68 @@
+@using DmarcMonitor.Core.Charting
+
+@*
+    One bar split into named parts: what happened to the mail that failed, or
+    how the estate divides by severity.
+
+    Plain elements rather than SVG. A proportion bar is a row of boxes, and
+    div widths in percent reflow with the page where a fixed viewBox does not.
+
+    Every part is named and carries its own number. The bar is the summary;
+    the legend is the answer.
+*@
+
+@if (Placed.Count == 0)
+{
+    <p class="muted">@Empty</p>
+}
+else
+{
+    <div class="proportion">
+        <div class="proportion-bar" role="img" aria-label="@Describe()">
+            @foreach (var p in Placed)
+            {
+                @* title gives a pointer user the exact figure; the legend
+                   below gives it to everyone else. *@
+                <span class="seg @p.Slice.Css" style="width:@Percent(p.Percent)%"
+                      title="@p.Slice.Label: @p.Slice.Value.ToString("N0") (@p.Percent%)"></span>
+            }
+        </div>
+
+        <div class="proportion-keys">
+            @foreach (var p in Placed)
+            {
+                <span class="key">
+                    <span class="pip @p.Slice.Css"></span>
+                    @p.Slice.Label
+                    <strong>@p.Slice.Value.ToString("N0")</strong>
+                    <span class="muted">@p.Percent%</span>
+                </span>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<Slice> Slices { get; set; } = [];
+
+    /// <summary>What to say when nothing in the bar happened at all.</summary>
+    [Parameter] public string Empty { get; set; } = "Nothing to show.";
+
+    private IReadOnlyList<PlacedSlice> Placed => Chart.Stack(Slices);
+
+    /// <summary>
+    /// Widths are written invariantly.
+    /// </summary>
+    /// <remarks>
+    /// A machine whose locale writes decimals with a comma would emit
+    /// "width:33,3%", which browsers drop as an invalid declaration - leaving
+    /// every segment at its default width. The bar still draws, which is why
+    /// this is worth spelling out: it would look like a styling quirk rather
+    /// than a wrong chart.
+    /// </remarks>
+    private static string Percent(double value) =>
+        value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    private string Describe() =>
+        string.Join(", ", Placed.Select(p => $"{p.Slice.Label} {p.Percent}%"));
+}

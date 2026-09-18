@@ -52,13 +52,27 @@ fi
 # Checked here rather than discovered halfway through. A missing sqlite3 found
 # after the application directory has been moved aside is a stopped service and
 # a confusing error; found now it is one line and nothing has been touched.
+#
+# The hint names the package manager this machine actually has. It said apt,
+# which on Amazon Linux is advice for a different operating system - and the
+# one package called something else there is sqlite3, which is sqlite.
+pkg_hint() {
+    if command -v dnf >/dev/null 2>&1; then
+        echo "sudo dnf install -y $(printf '%s\n' "$@" | sed 's/^sqlite3$/sqlite/' | tr '\n' ' ')"
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "sudo apt install -y $*"
+    else
+        echo "install these with your package manager: $*"
+    fi
+}
+
 missing=()
 for tool in curl unzip sqlite3 python3 systemctl; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if (( ${#missing[@]} )); then
     echo "missing: ${missing[*]}" >&2
-    echo "install them first: sudo apt install -y ${missing[*]}" >&2
+    echo "install them first:  $(pkg_hint "${missing[@]}")" >&2
     exit 69
 fi
 

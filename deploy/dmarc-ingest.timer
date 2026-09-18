@@ -1,0 +1,18 @@
+# Runs the collector on the hour, give or take ten minutes.
+#
+# Persistent=true catches up after the machine has been off. The randomised
+# delay keeps it off the exact hour, which is when everybody else's jobs run.
+#
+# Enabled by hand once /etc/dmarc-ingest.env is filled in:
+#   sudo systemctl enable --now dmarc-ingest.timer
+
+[Unit]
+Description=Collect DMARC reports hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

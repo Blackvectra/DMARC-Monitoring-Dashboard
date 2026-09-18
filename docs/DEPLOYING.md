@@ -93,47 +93,98 @@ alongside `linux-x64`; take whichever matches `uname -m`.
 
 ## 1. The machine
 
-Ubuntu 24.04 LTS, 2 GB. Open ports 80 and 443 to the world and 22 to you.
-Nothing else - in particular, **do not open the port the app listens on**. It
-listens on loopback only and the proxy reaches it from the same machine.
+Ubuntu 24.04 LTS or Amazon Linux 2023, 2 GB. Open ports 80 and 443 to the
+world and 22 to you. Nothing else - in particular, **do not open the port the
+app listens on**. It listens on loopback only and the proxy reaches it from
+the same machine. On AWS the security group is the firewall; neither image
+runs one of its own.
 
-Install the runtime and a proxy:
+The web app is **not** self-contained - it needs the ASP.NET Core 8 runtime
+on the host. The `dmarc` command-line tool is self-contained and needs
+nothing. Caddy is the proxy, because it is the whole TLS setup in three lines
+and renews the certificate itself.
+
+**Ubuntu 24.04** - everything is in Ubuntu's own repositories:
 
 ```bash
 sudo apt update
-sudo apt install -y aspnetcore-runtime-8.0 caddy unzip
+sudo apt install -y aspnetcore-runtime-8.0 caddy unzip sqlite3
 ```
 
 If `aspnetcore-runtime-8.0` is not found, add Microsoft's package feed first:
 <https://learn.microsoft.com/dotnet/core/install/linux-ubuntu>.
 
-The web app is **not** self-contained - it needs that runtime on the host.
-The `dmarc` command-line tool is self-contained and needs nothing.
-
-## 2. The files
-
-From the release page, take `dmarc-web.zip` and `dmarc-linux-x64`:
+**Amazon Linux 2023** - the runtime and the tools are in Amazon's own
+repositories. Caddy is not, so it is the static binary from Caddy's download
+service, installed the way Caddy's documentation describes:
 
 ```bash
-sudo useradd --system --create-home --home-dir /opt/dmarc --shell /usr/sbin/nologin dmarc
+sudo dnf install -y aspnetcore-runtime-8.0 unzip sqlite
 
-unzip -q dmarc-web.zip            # unpacks to ./dmarc-web
-sudo mv dmarc-web /opt/dmarc/app
-sudo mkdir -p /opt/dmarc/data
-sudo chown -R dmarc:dmarc /opt/dmarc
-
-sudo install -m 0755 dmarc-linux-x64 /usr/local/bin/dmarc
-sudo -u dmarc dmarc init-db --db /opt/dmarc/data/dmarc.db
+# Caddy. arch=amd64 on x86_64; arch=arm64 on a t4g.
+curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o caddy
+sudo install -m 0755 caddy /usr/bin/caddy
+sudo groupadd --system caddy
+sudo useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
+    --shell /usr/sbin/nologin --comment "Caddy web server" caddy
+sudo mkdir -p /etc/caddy
+sudo curl -fsSL https://raw.githubusercontent.com/caddyserver/dist/master/init/caddy.service \
+    -o /etc/systemd/system/caddy.service
+sudo systemctl daemon-reload
 ```
 
-A dedicated account, because the provider credentials are encrypted to
-whichever account writes them. Anything that touches them - the web app, and
-`dmarc dns set` - must run as the same user, or the second one gets a file it
-cannot read.
+Two things about Amazon Linux that differ from Ubuntu and do not matter
+here, said so they are not wondered about. It ships with SELinux in
+permissive mode: nothing is blocked, denials are only logged, and nothing
+below needs a context set. And the package that provides `sqlite3` is called
+`sqlite` - `install.sh` and `update.sh` name the right package for whichever
+machine they are on when something is missing.
+
+## 2. Install
+
+From the release page, three files: `dmarc-web.zip`, `dmarc-linux-x64` (or
+`dmarc-linux-arm64` - take whichever matches `uname -m`), and
+`dmarc-deploy.tar.gz`, which holds the install, update and rollback scripts
+and the systemd units. The server has no checkout; that is why they travel
+with the release.
+
+```bash
+tar xzf dmarc-deploy.tar.gz
+sudo ./deploy/install.sh
+```
+
+It refuses to run over an existing install (that is `update.sh`'s job), never
+overwrites a configuration file, and finishes by checking the app answers on
+loopback. What it did, so that it is not magic:
+
+- Created a `dmarc` system account with `/opt/dmarc` as its home. A dedicated
+  account, because the provider credentials are encrypted to whichever
+  account writes them. Anything that touches them - the web app, and
+  `dmarc dns set` - must run as the same user, or the second one gets a file
+  it cannot read.
+- Unpacked the web app to `/opt/dmarc/app`, installed the command as
+  `/usr/local/bin/dmarc`, and created the database at
+  `/opt/dmarc/data/dmarc.db` as that account.
+- Wrote `/opt/dmarc/app/appsettings.Production.json` (step 3) and
+  `/etc/dmarc-ingest.env` (step 6) as templates.
+- Installed `dmarc-web.service`, `dmarc-ingest.service` and
+  `dmarc-ingest.timer` from `deploy/`, and started the first.
+
+Somewhere other than `/opt/dmarc`, or under a different account name:
+`DMARC_ROOT=/srv/dmarc DMARC_USER=svc-dmarc sudo -E ./deploy/install.sh`.
+Every script under `deploy/` honours the same two variables, and the units are
+rewritten to match and then checked for anything still pointing at the
+default.
+
+Until sign-in is configured the app serves nothing but this machine. To see it
+before then, tunnel: `ssh -L 5000:127.0.0.1:5000 <server>` and open
+<http://127.0.0.1:5000>.
 
 ## 3. Configuration
 
-`/opt/dmarc/app/appsettings.Production.json`, owned by `dmarc`, mode `0600`:
+`/opt/dmarc/app/appsettings.Production.json`, owned by `dmarc`, mode `0600`.
+`install.sh` wrote it with the paths filled in and the rest empty; this is
+what a finished one looks like:
 
 ```json
 {
@@ -197,42 +248,18 @@ generate links to somewhere else.
 `ProviderName` is how you are named in client reports. Left empty, reports
 say "your IT provider" in so many words.
 
-## 4. Run it
+## 4. The proxy
 
-`/etc/systemd/system/dmarc-web.service`:
-
-```ini
-[Unit]
-Description=DMARC Monitor
-After=network.target
-
-[Service]
-User=dmarc
-WorkingDirectory=/opt/dmarc/app
-ExecStart=/usr/bin/dotnet /opt/dmarc/app/DmarcMonitor.Web.dll
-Environment=ASPNETCORE_ENVIRONMENT=Production
-Environment=ASPNETCORE_URLS=http://127.0.0.1:5000
-Restart=always
-RestartSec=5
-
-# Its own directory and nothing else. /opt/dmarc rather than
-# /opt/dmarc/data, because ASP.NET Core keeps the keys that sign the
-# sign-in cookie under the account's home directory. Deny it that and
-# the keys live only in memory, so everybody is signed out every time
-# the service restarts - which reads as a flaky login, not as a
-# permissions problem.
-ProtectSystem=strict
-ProtectHome=false
-PrivateTmp=true
-NoNewPrivileges=true
-ReadWritePaths=/opt/dmarc
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Loopback in `ASPNETCORE_URLS`, deliberately: the only way in is through the
-proxy, so a firewall mistake cannot expose the app directly.
+The web app is already running as `dmarc-web.service`, listening on
+`127.0.0.1:5000`. Loopback, deliberately: the only way in is through the
+proxy, so a firewall mistake cannot expose the app directly. The unit is
+`deploy/dmarc-web.service`, and the part worth knowing is the sandbox at the
+bottom of it: the process can write to `/opt/dmarc/data` and nowhere else,
+the rest of the filesystem is read-only to it, and its home directory is
+hidden. The cookie-signing keys live under `data/keys` for exactly that
+reason - left to itself ASP.NET Core keeps them under the home directory,
+would find it hidden, keep them in memory only, and sign everybody out on
+every restart.
 
 `/etc/caddy/Caddyfile` - this is the whole TLS setup, certificate included:
 
@@ -245,7 +272,7 @@ dmarc.nextlayersec.io {
 Point the DNS A record at the instance first, then:
 
 ```bash
-sudo systemctl enable --now dmarc-web
+sudo systemctl enable --now caddy     # already so on Ubuntu; needed on Amazon Linux
 sudo systemctl reload caddy
 ```
 
@@ -280,48 +307,48 @@ Otherwise everyone in the tenant can.
 ## 6. Ingest on a timer
 
 Reports arrive continuously; something has to fetch them. `INGEST-SETUP.md`
-covers the app registration and the certificate. Once that exists:
+covers the app registration and the certificate. Once that exists, put the
+certificate at `/opt/dmarc/data/ingest.pfx`, owned by `dmarc`, mode `0600`,
+and fill in `/etc/dmarc-ingest.env` - root-owned, mode `0600`, written by
+`install.sh`:
 
-`/etc/systemd/system/dmarc-ingest.service`
-
-```ini
-[Unit]
-Description=Collect DMARC reports
-
-[Service]
-Type=oneshot
-User=dmarc
-ExecStart=/usr/local/bin/dmarc ingest \
-  --db /opt/dmarc/data/dmarc.db \
-  --mailbox dmarc@nextlayersec.io \
-  --tenant <tenant id> --client-id <ingest app id> \
-  --cert /opt/dmarc/data/ingest.pfx
+```
+DMARC_MAILBOX=dmarc@nextlayersec.io
+DMARC_TENANT_ID=<tenant id>
+DMARC_CLIENT_ID=<ingest app id>
+DMARC_CERT_PATH=/opt/dmarc/data/ingest.pfx
+DMARC_CERT_PASSWORD=
 ```
 
-`/etc/systemd/system/dmarc-ingest.timer`
+`dmarc-ingest.service` reads it and runs `dmarc ingest` as the `dmarc` account
+with those in its environment, which keeps the certificate password off a
+command line where `ps` would show it. Run it once by hand with `--dry-run`
+first - it parses and reports and writes nothing, which is safe against a
+live mailbox:
 
-```ini
-[Unit]
-Description=Collect DMARC reports hourly
-
-[Timer]
-OnCalendar=hourly
-RandomizedDelaySec=600
-Persistent=true
-
-[Install]
-WantedBy=timers.target
+```bash
+sudo bash -c 'set -a; . /etc/dmarc-ingest.env; exec sudo -E -u dmarc \
+    dmarc ingest --db /opt/dmarc/data/dmarc.db --mailbox "$DMARC_MAILBOX" --dry-run'
 ```
+
+Then:
 
 ```bash
 sudo systemctl enable --now dmarc-ingest.timer
 ```
 
-`Persistent=true` catches up after the machine has been off. The randomised
-delay keeps you off the exact hour, which is when everybody else's jobs run.
+Hourly, give or take ten minutes. `Persistent=true` catches up after the
+machine has been off, and the randomised delay keeps you off the exact hour,
+which is when everybody else's jobs run.
 
-Run it once by hand with `--dry-run` first. It parses and reports and writes
-nothing, which is safe against a live mailbox.
+One thing about the `dmarc` binary worth knowing before it bites: it is a
+single self-contained file that unpacks its native SQLite library the first
+time it runs, into `$HOME/.net` unless `DOTNET_BUNDLE_EXTRACT_BASE_DIR` says
+otherwise. The ingest unit sets that to `/opt/dmarc/data/.net`, because its
+sandbox hides the home directory; without it the run dies with **exit 159**
+and a message about `DOTNET_BUNDLE_EXTRACT_BASE_DIR` before it has printed
+anything else. If a cron job or a hand-written unit ever shows that, this is
+why.
 
 ## 7. MTA-STS, if you want it
 
@@ -357,8 +384,10 @@ sudo -u dmarc sqlite3 /opt/dmarc/data/dmarc.db ".backup '/opt/dmarc/data/backup.
 ```
 
 `.backup` rather than `cp`, because copying a SQLite file while something has
-it open can produce a file that looks fine and is not. Then take
-`backup.db` and the `secrets/` directory off the machine.
+it open can produce a file that looks fine and is not. Then take `backup.db`
+and the `secrets/` and `keys/` directories off the machine. The keys only
+sign the sign-in cookie; a restore without them means everybody signs in
+again, nothing worse.
 
 The secrets directory is encrypted to **this machine and this account**. A
 restore onto a new machine cannot read it: the database rows keep working,
@@ -417,6 +446,10 @@ systemd unit running as root notices and does the work:
 sudo ./deploy/install-update-agent.sh
 ```
 
+From the `dmarc-deploy.tar.gz` unpacked in step 2. It copies the scripts to
+`/opt/dmarc/deploy`, owned by root, and the agent runs those copies - so when
+a later release changes them, run it again from the new tarball.
+
 The only thing crossing that boundary is a version string. The agent treats it
 as hostile anyway: it must match a narrow version shape, and it must be a
 release that really exists on the configured channel, which the agent checks
@@ -459,6 +492,8 @@ everything collected since the update, which restoring would discard.
       deliberately and defeats the protection above.
 - [ ] Every page shows your name in the top corner, not `root`.
 - [ ] The app is listening on `127.0.0.1` only: `ss -ltn | grep 5000`.
+- [ ] It is sandboxed: `systemctl show dmarc-web -p ProtectSystem -p ProtectHome`
+      says `strict` and `yes`.
 - [ ] Only 80, 443 and your SSH source are open in the security group.
 - [ ] `appsettings.Production.json` is `0600` and owned by `dmarc`.
 - [ ] The ingest app registration is restricted to one mailbox by an
@@ -482,19 +517,34 @@ to the account that writes the secret. The application pool identity and
 whoever runs `dmarc dns set` must be the same account, or the app will find a
 credential it cannot decrypt and say so.
 
-## What has not been tested
+## What has been tested, and what has not
 
-Honesty about the gaps, so you meet them knowing rather than at 11pm:
+Honesty about the gaps, so you meet them knowing rather than at 11pm.
 
-- **None of this has been run end to end on a real VM.** It is assembled from
-  how the pieces are built rather than from a deployment that happened. The
-  proxy handling is covered by tests; the systemd units and the Caddyfile are
-  not.
-- **Sign-in through Entra has never been performed.** The code path is
-  exercised by tests only in its not-configured state. Expect to spend an hour
-  on the app registration.
-- **The secret store has not been exercised on Windows**, only on Linux, where
-  the AES-GCM path is the one that runs.
-- **No ARM build**, so the cheapest instance sizes are unavailable.
+**Run for real, on every push:** the `Install on a fresh Ubuntu` job in
+`.github/workflows/tests.yml` builds the two Linux artifacts the way the
+release does and runs `deploy/install.sh` on a clean Ubuntu runner under real
+systemd. It then checks that the service is active and sandboxed, answers on
+loopback and refuses a proxied request, that the cookie keys landed beside
+the database, that the update agent's path unit wakes and refuses a bogus
+request, and that `rollback.sh` refuses a stamp that was never kept. Steps 2
+and 6's units and the agent in step 9 are not assembled from how the pieces
+are built; they have run.
+
+**Not run:**
+
+- **Amazon Linux 2023.** There is no hosted runner for it. The package names
+  and the Caddy steps in step 1 come from Amazon's and Caddy's documentation,
+  not from a machine; `install.sh` itself does nothing distribution-specific
+  beyond the hint it prints when a tool is missing. Expect to spend the first
+  ten minutes on step 1.
+- **The Caddyfile and the certificate**, and therefore anything reached from
+  the internet rather than over loopback.
+- **Sign-in through Entra.** The code path is exercised by tests only in its
+  not-configured state. Expect to spend an hour on the app registration.
+- **`update.sh` end to end**, because it needs a published release to download
+  and there is none yet. Its argument handling, backup and swap logic have
+  been read and shellchecked, not run against a service.
+- **The secret store on Windows**; only the Linux AES-GCM path has run.
 
 See `OPEN-ISSUES.md` for the rest.

@@ -1,0 +1,91 @@
+@using DmarcMonitor.Core.Reporting
+
+@*
+    Which services send this mail, and how much of theirs authenticates.
+
+    Three rates per row because they are three different questions. SPF and
+    DKIM are the raw checks; DMARC is those plus alignment. A row reading SPF
+    100%, DKIM 100%, DMARC 2% is not three numbers disagreeing - it is a
+    service authenticating faultlessly for its own domain and counting for
+    nothing, which is the most misread situation in DMARC and the one this
+    panel exists to make obvious.
+*@
+
+@if (Sources.Count == 0)
+{
+    <p class="muted">No mail in this window.</p>
+}
+else
+{
+    <div class="table-scroll">
+        <table class="triage rates">
+            <thead>
+                <tr>
+                    <th>Source</th>
+                    <th class="num">DMARC</th>
+                    <th class="num">SPF</th>
+                    <th class="num">DKIM</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var s in Sources)
+                {
+                    <tr class="@(s.AuthenticatesButDoesNotAlign ? "act" : "")">
+                        <td>
+                            <code>@s.Source</code>
+                            <span class="muted"> @s.Messages.ToString("N0")</span>
+                            @if (s.AuthenticatesButDoesNotAlign)
+                            {
+                                @* Said in words, because the three numbers on
+                                   their own look like a contradiction. *@
+                                <span class="rate-note">authenticates, does not align</span>
+                            }
+                        </td>
+                        <td class="num @Grade(s.DmarcRate)">@Pct(s.DmarcRate)</td>
+                        <td class="num @Grade(s.SpfRate)">@Pct(s.SpfRate)</td>
+                        <td class="num @Grade(s.DkimRate)">@Pct(s.DkimRate)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    @if (NotShown > 0)
+    {
+        <p class="sub">@NotShown more source(s) not shown.</p>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<SourceCompliance> Sources { get; set; } = [];
+
+    /// <summary>How many were left out of the top slice, if known.</summary>
+    [Parameter] public int NotShown { get; set; }
+
+    /// <summary>
+    /// A rate written so a reader is not misled at either end.
+    /// </summary>
+    /// <remarks>
+    /// 99.6% must not print as 100%, which says every message was fine when
+    /// some were not, and a rate above zero must not print as 0%.
+    /// </remarks>
+    private static string Pct(double rate) =>
+        rate switch
+        {
+            >= 100 => "100%",
+            >= 99.5 => ">99%",
+            > 0 and < 1 => "<1%",
+            _ => rate.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "%",
+        };
+
+    /// <summary>
+    /// Colour follows the same thresholds as everything else in the product,
+    /// and never carries the meaning alone: the figure itself is printed.
+    /// </summary>
+    private static string Grade(double rate) => rate switch
+    {
+        >= 95 => "good",
+        >= 80 => "",
+        _ => "bad",
+    };
+}

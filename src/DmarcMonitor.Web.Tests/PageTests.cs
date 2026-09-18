@@ -107,6 +107,292 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task ADomainPageSaysWhenAValidSignatureIsBeingThrownAwayForTheWrongDomain()
+    {
+        // The whole point of the section. A report row reading "dkim=pass"
+        // beside "dmarc=fail" looks like the product is wrong to anybody who
+        // has already set DKIM up with the vendor, and they stop looking.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("signing correctly for the wrong domain", html, StringComparison.Ordinal);
+        Assert.Contains("d=training.vendor.example", html, StringComparison.Ordinal);
+
+        // And the distinction itself, not just the label.
+        Assert.Contains("the signing domain to match", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainPageNamesTheSameVendorsWorkingPathAsProofItCanBeDone()
+    {
+        // Both hosts carry the same envelope domain, and one of them already
+        // signs as the customer. That fact is what a vendor cannot argue with.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("23.21.109.197", html, StringComparison.Ordinal);
+        Assert.Contains("the capability exists on", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainPageOffersNoVendorProofForADomainThatHasNone()
+    {
+        // acme.com has no third party signing for it at all, so there is no
+        // working path to point at. Claiming one would be an invention.
+        var html = await Client().GetStringAsync("/domains/acme.com");
+
+        Assert.DoesNotContain("the capability exists on", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainWhoseMailIsMerelyUnsignedIsNotAccusedOfMisalignment()
+    {
+        // acme.com's failures have no valid signature at all, which is a
+        // different fault with a different fix. Offering alignment advice
+        // there sends somebody to a vendor setting that is not the problem.
+        var html = await Client().GetStringAsync("/domains/acme.com");
+
+        Assert.DoesNotContain("signing correctly for the wrong domain", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TriageDrawsTheEstateRatherThanOnlyTabulatingIt()
+    {
+        // A table of totals cannot show that the estate lost a third of its
+        // volume on Tuesday.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("chart-svg", html, StringComparison.Ordinal);
+        Assert.Contains("class=\"spark\"", html, StringComparison.Ordinal);
+        Assert.Contains("proportion-bar", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheOverviewLeadsWithVolumeDomainActivityAndSourceRates()
+    {
+        // Four panels across the top rather than four cards down the page, so
+        // the shape of the estate is one glance rather than a scroll.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("class=\"overview\"", html, StringComparison.Ordinal);
+        Assert.Contains("Volume summary", html, StringComparison.Ordinal);
+        Assert.Contains("Active domains", html, StringComparison.Ordinal);
+        Assert.Contains("Inactive domains", html, StringComparison.Ordinal);
+        Assert.Contains("Source compliance rates", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SourceRatesGiveAllThreeChecksBecauseTheyAreThreeQuestions()
+    {
+        // SPF and DKIM are the raw checks; DMARC is those plus alignment. A
+        // row reading SPF 100, DKIM 100, DMARC 2 is not a contradiction.
+        var html = await Client().GetStringAsync("/");
+
+        var table = html[html.IndexOf("Source compliance rates", StringComparison.Ordinal)..];
+        var panel = table[..Math.Min(2500, table.Length)];
+
+        Assert.Contains(">DMARC<", panel, StringComparison.Ordinal);
+        Assert.Contains(">SPF<", panel, StringComparison.Ordinal);
+        Assert.Contains(">DKIM<", panel, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AWideTableScrollsAtEveryWidthRatherThanOnlyOnAPhone()
+    {
+        // This rule lived inside the narrow-screen media query, so a table
+        // wider than its column pushed the whole page sideways at any width
+        // above it: 110px of horizontal overflow at 900px, where the overview
+        // drops to two columns and the source table no longer fits one.
+        var css = await Client().GetStringAsync("/app.css");
+
+        var rule = css.IndexOf(".table-scroll { overflow-x: auto", StringComparison.Ordinal);
+        Assert.True(rule >= 0, ".table-scroll has no unconditional overflow rule");
+
+        // Anything before it must be a closed block, or the rule is nested in
+        // a media query again.
+        var before = css[..rule];
+        Assert.Equal(before.Count(c => c == '{'), before.Count(c => c == '}'));
+    }
+
+    [Fact]
+    public async Task TheDialSplitsVolumeThreeWaysWithEachPartNamed()
+    {
+        // A pass rate cannot say whether the remainder is forwarding, which is
+        // expected, or mail that proved nothing, which is the only part worth
+        // chasing.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("gauge-dial", html, StringComparison.Ordinal);
+        Assert.Contains("authenticated", html, StringComparison.Ordinal);
+        Assert.Contains("forwarded or overridden", html, StringComparison.Ordinal);
+        Assert.Contains("unauthenticated", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheDialsSegmentsAreFilledRatherThanGivenABackground()
+    {
+        // SVG takes `fill`, not `background`. The first version reused the
+        // proportion bar's colour rules, which set `background` on a span and
+        // do nothing whatever to a path, so every segment fell back to the
+        // default fill and the dial rendered solid black. It looked like a
+        // deliberate design until it was put on a screen.
+        var css = await Client().GetStringAsync("/app.css");
+
+        var start = css.IndexOf(".gauge-dial .seg", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the dial's segments have no colour rules of their own");
+
+        var block = css[start..Math.Min(css.Length, start + 600)];
+        Assert.Contains("fill:", block, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NoChartEmitsANumberTheBrowserCannotParse()
+    {
+        // NaN or Infinity in a path attribute renders as an empty chart with
+        // nothing logged anywhere, which is the hardest kind of wrong to spot.
+        foreach (var route in new[] { "/", "/domains/acme.com", "/domains/signed.example" })
+        {
+            var html = await Client().GetStringAsync(route);
+
+            Assert.DoesNotContain("NaN", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("Infinity", html, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task ChartsNeedNoScriptAndNothingFetchedFromTheInternet()
+    {
+        // This is installed on somebody else's server, often one that cannot
+        // reach the internet. A chart that fetches a library from a CDN is a
+        // chart that does not draw.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.DoesNotContain("cdn.", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("unpkg", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("chart.js", html, StringComparison.OrdinalIgnoreCase);
+
+        // The SVG is in the page, not requested after it loads.
+        Assert.Contains("<svg", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheShellSeparatesDailyWorkFromSetup()
+    {
+        // Nine links in one flat list made Triage, which is where every
+        // morning starts, look like the same kind of thing as Updates.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("nav-group", html, StringComparison.Ordinal);
+        Assert.Contains(">Daily<", html, StringComparison.Ordinal);
+        Assert.Contains(">Setup<", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheShellButtonsCallScriptRatherThanBlazor()
+    {
+        // This layout has no render mode, so pages are interactive islands
+        // inside a static shell and an @onclick here is never wired up. Both
+        // buttons shipped that way once: they rendered perfectly and did
+        // nothing at all when clicked, which only a real browser caught.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("dmarcShell.toggleNav()", html, StringComparison.Ordinal);
+        Assert.Contains("dmarcTheme.toggle()", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheThemeIsAppliedBeforeThePagePaints()
+    {
+        // A deferred script runs after first paint, so a person who chose dark
+        // would get a white flash on every navigation.
+        var html = await Client().GetStringAsync("/");
+
+        var head = html[..html.IndexOf("</head>", StringComparison.Ordinal)];
+        Assert.Contains("dmarc-theme", head, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LightIsTheDefaultAndDarkIsNotAssumedFromTheOperatingSystem()
+    {
+        // Somebody who picked light meant it. Inheriting the OS preference
+        // would have the app go dark because their laptop did at sunset.
+        //
+        // Asserted against the stylesheet rather than the page: the rule lives
+        // in app.css, so checking the HTML for it passes whatever the CSS says.
+        var css = await Client().GetStringAsync("/app.css");
+
+        Assert.Contains("data-theme=\"dark\"", css, StringComparison.Ordinal);
+        Assert.DoesNotContain("prefers-color-scheme: dark", css, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EveryColourInTheStylesheetIsAToken()
+    {
+        // The first pass at a light theme left a dozen literal dark hexes in
+        // the rules - table borders, row hovers, code backgrounds - and they
+        // came out as black slots on a white page. Only the two token blocks
+        // at the top may name a colour.
+        var css = await Client().GetStringAsync("/app.css");
+
+        var rules = css[css.IndexOf("* { box-sizing", StringComparison.Ordinal)..];
+        var literals = System.Text.RegularExpressions.Regex.Matches(rules, "#[0-9a-fA-F]{3,8}")
+            .Select(m => m.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        Assert.True(literals.Count == 0, $"hard-coded colours outside the token blocks: {string.Join(", ", literals)}");
+    }
+
+    [Fact]
+    public async Task TriageCountsAreFiltersRatherThanLabels()
+    {
+        // Saying four domains are losing mail and giving no way to see only
+        // those four is a label, not a tool.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("<button type=\"button\" class=\"count", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TablesCanScrollWithoutStretchingTheWholePage()
+    {
+        // A table is the one thing here that cannot reflow honestly: stacking
+        // rows into cards loses the column-to-column comparison that is the
+        // entire reason these are tables. So they scroll, bounded to the
+        // table rather than the page.
+        foreach (var route in new[] { "/", "/domains", "/domains/acme.com" })
+        {
+            var html = await Client().GetStringAsync(route);
+            Assert.Contains("table-scroll", html, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task TheDomainPageOffersJumpLinksRatherThanHidingSectionsBehindTabs()
+    {
+        // Tabs would have hidden the unaligned-signature finding, which exists
+        // precisely so a discarded valid signature stops being invisible.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("class=\"jump\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"unaligned\"", html, StringComparison.Ordinal);
+
+        // Still rendered on the page, not merely linked to.
+        Assert.Contains("signing correctly for the wrong domain", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainNamedAfterItsClientDoesNotPrintTheNameTwice()
+    {
+        // Onboarding by domain name makes the client name equal the domain for
+        // most of them, and the heading printed it in the breadcrumb, as the
+        // title and again as the customer.
+        var html = await Client().GetStringAsync("/domains/acme.com");
+
+        var head = html[html.IndexOf("<h1", StringComparison.Ordinal)..];
+        var afterTitle = head[..Math.Min(400, head.Length)];
+        Assert.DoesNotContain("<p class=\"sub\">acme.com</p>", afterTitle, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ADomainNobodyHasReportedOnIsOnboardingRatherThanAnError()
     {
         var response = await Client().GetAsync("/domains/never-seen.example");
@@ -281,8 +567,15 @@ public sealed class SeededApp : WebApplicationFactory<Program>
         // And a month with data in it, so a report can be generated.
         await StoreAsync(store, august, 200, 10);
 
+        // A second domain carrying the shape that reads as a contradiction: a
+        // vendor whose DKIM signature verifies over its own domain, beside the
+        // same vendor's other host signing as the customer correctly. Kept off
+        // acme.com so the figures the other tests assert on do not move.
+        await StoreUnalignedAsync(store, begin);
+
         var slug = await store.CreateClientAsync("Acme Corp");
         await store.AssignDomainAsync("acme.com", slug!);
+        await store.AssignDomainAsync("signed.example", slug!);
 
         // A provider with a real-looking token, stored the way the settings
         // page stores one, so the pages can be checked for leaking it.
@@ -322,6 +615,67 @@ public sealed class SeededApp : WebApplicationFactory<Program>
                 <auth_results>
                   <dkim><domain>acme.com</domain><selector>selector1</selector><result>fail</result></dkim>
                   <spf><domain>acme.com</domain><result>fail</result></spf>
+                </auth_results>
+              </record>
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        if (!parsed.Success) { throw new InvalidOperationException($"seed report did not parse: {parsed.Error}"); }
+        await store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
+    /// <summary>The valid-signature-wrong-domain case, published at p=reject.</summary>
+    private static async Task StoreUnalignedAsync(ReportStore store, DateTimeOffset begin)
+    {
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata>
+                <org_name>google.com</org_name>
+                <report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
+                            <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range>
+              </report_metadata>
+              <policy_published><domain>signed.example</domain><p>reject</p><pct>100</pct>
+                <adkim>s</adkim><aspf>s</aspf></policy_published>
+              <record>
+                <row>
+                  <source_ip>23.21.109.197</source_ip><count>14</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>pass</dkim><spf>pass</spf></policy_evaluated>
+                </row>
+                <identifiers><header_from>signed.example</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>signed.example</domain><selector>s1</selector><result>pass</result></dkim>
+                  <spf><domain>psm.vendor.example</domain><result>pass</result></spf>
+                </auth_results>
+              </record>
+              <record>
+                <row>
+                  <source_ip>147.160.167.15</source_ip><count>289</count>
+                  <policy_evaluated><disposition>reject</disposition><dkim>fail</dkim><spf>fail</spf></policy_evaluated>
+                </row>
+                <identifiers><header_from>signed.example</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>training.vendor.example</domain><selector>s2</selector><result>pass</result></dkim>
+                  <spf><domain>psm.vendor.example</domain><result>pass</result></spf>
+                </auth_results>
+              </record>
+              <!-- A forwarder, so the estate has all three of the dial's
+                   categories. Without one the middle segment is correctly
+                   omitted and there is nothing to assert it against. Kept off
+                   acme.com so the figures the other tests rely on do not move. -->
+              <record>
+                <row>
+                  <source_ip>198.51.100.44</source_ip><count>12</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf>
+                    <reason><type>forwarded</type><comment>mailing list</comment></reason>
+                  </policy_evaluated>
+                </row>
+                <identifiers><header_from>signed.example</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>signed.example</domain><result>fail</result></dkim>
+                  <spf><domain>signed.example</domain><result>fail</result></spf>
                 </auth_results>
               </record>
             </feedback>

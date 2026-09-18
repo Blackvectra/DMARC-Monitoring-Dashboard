@@ -132,16 +132,40 @@ public sealed class ReportIngestor
     /// a message left in place by a failed move would otherwise be counted
     /// twice, inflating a customer's volume.
     /// </param>
+    /// <summary>
+    /// Stores what one message yielded, before that message is filed away.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Optional, and the reason it exists is a hole rather than a feature.
+    /// Without it a run parses every message into a list, moves each one out
+    /// of the source folder as it goes, and hands the whole list back to be
+    /// stored after the run returns. Everything between the first move and the
+    /// last save is a window in which the reports exist only in memory while
+    /// their messages have already been filed - and the next run reads the
+    /// source folder, not Processed, so anything lost there is never collected
+    /// again.
+    /// </para>
+    /// <para>
+    /// Returning false leaves the message where it is, so the next run picks
+    /// it up. That is the safe direction: a message read twice is caught by
+    /// the duplicate check, a message filed and never stored is gone.
+    /// </para>
+    /// </remarks>
+    private readonly Func<IReadOnlyList<IngestedReport>, CancellationToken, Task<bool>>? _persist;
+
     public ReportIngestor(
         IMailboxClient mailbox,
         IngestOptions options,
         Func<string, string?>? resolveToken = null,
-        Func<string, bool>? isAlreadyIngested = null)
+        Func<string, bool>? isAlreadyIngested = null,
+        Func<IReadOnlyList<IngestedReport>, CancellationToken, Task<bool>>? persist = null)
     {
         _mailbox = mailbox ?? throw new ArgumentNullException(nameof(mailbox));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _resolveToken = resolveToken ?? (_ => null);
         _isAlreadyIngested = isAlreadyIngested ?? (_ => false);
+        _persist = persist;
     }
 
     public async Task<IngestRunResult> RunAsync(CancellationToken cancellationToken = default)
@@ -224,9 +248,41 @@ public sealed class ReportIngestor
 
             reports.AddRange(fromThisMessage);
 
-            // Move only after the reports are in hand. Reversing this loses a
-            // report if the process dies in between, and the message is gone
-            // from the source folder so it is never seen again.
+            // Stored before the message is filed, not after the run ends.
+            //
+            // "In hand" used to mean parsed into a list, and the storing
+            // happened once the whole run returned. Everything between the
+            // first move and the last save was a window in which reports
+            // existed only in memory while their messages had already been
+            // moved out of the source folder - and the next run reads the
+            // source folder, so a process killed in that window loses them for
+            // good. A time-limited scheduled task being cut off mid-backlog is
+            // described elsewhere in this file as the normal case.
+            //
+            // Failing to store leaves the message where it is. That is the
+            // safe direction: a message read twice is caught by the duplicate
+            // check, a message filed and never stored is gone.
+            if (_persist is not null && fromThisMessage.Count > 0)
+            {
+                bool saved;
+                try
+                {
+                    saved = await _persist(fromThisMessage, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    stoppedEarly = true;
+                    break;
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    errors.Add($"{message.Id}: could not be stored, so it was left in place: {ex.Message}");
+                    saved = false;
+                }
+
+                if (!saved) { continue; }
+            }
+
             var destination = ChooseDestination(fromThisMessage, processedId, unrecognisedId, quarantineId);
             try
             {

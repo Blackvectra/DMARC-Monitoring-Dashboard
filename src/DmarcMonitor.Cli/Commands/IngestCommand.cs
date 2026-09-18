@@ -126,10 +126,25 @@ public static class IngestCommand
             // Dry run reads and parses but writes nothing and moves nothing, so
             // the first run against a real mailbox can be inspected before it
             // changes anything.
+            // Counted here rather than after the run, because the storing now
+            // happens inside it: a message is only filed once its reports are
+            // safely in the database.
+            var stored = 0;
+
             var ingestor = dryRun
                 ? new ReportIngestor(new ReadOnlyMailbox(mailboxClient), options, ResolveToken, _ => false)
                 : new ReportIngestor(mailboxClient, options, ResolveToken,
-                    key => IsStored(store, key, ct).GetAwaiter().GetResult());
+                    key => IsStored(store, key, ct).GetAwaiter().GetResult(),
+                    async (found, token) =>
+                    {
+                        var (wrote, failed) = await StoreAsync(store, found, token).ConfigureAwait(false);
+                        stored += wrote;
+
+                        // False leaves the message in the source folder. A
+                        // message read twice is caught by the duplicate check;
+                        // a message filed and never stored is gone.
+                        return failed == 0;
+                    });
 
             Console.WriteLine($"Reading {mailbox}{(dryRun ? " (dry run: nothing will be written or moved)" : "")}");
             Console.WriteLine();
@@ -155,7 +170,8 @@ public static class IngestCommand
                 return 77;
             }
 
-            await ReportAsync(result, store, dryRun, ct).ConfigureAwait(false);
+            Report(result, stored, dryRun);
+            if (!dryRun) { await WarnUnassignedAsync(store, ct).ConfigureAwait(false); }
             return result.Errors.Count > 0 ? 1 : 0;
         }
 
@@ -180,33 +196,52 @@ public static class IngestCommand
         };
     }
 
-    private static async Task ReportAsync(IngestRunResult result, ReportStore store, bool dryRun, CancellationToken ct)
+    /// <summary>
+    /// Writes one message's reports, and says how many did not make it.
+    /// </summary>
+    /// <remarks>
+    /// Called from inside the run, before the message is filed. A report that
+    /// cannot be stored leaves its message in the source folder so the next
+    /// run tries again, which is why the failure count matters rather than
+    /// just being printed.
+    /// </remarks>
+    private static async Task<(int Written, int Failed)> StoreAsync(
+        ReportStore store, IReadOnlyList<IngestedReport> found, CancellationToken ct)
     {
-        var stored = 0;
+        var written = 0;
+        var failed = 0;
 
-        if (!dryRun)
+        foreach (var report in found.Where(r => r.Outcome == IngestOutcome.Ingested))
         {
-            foreach (var report in result.Reports.Where(r => r.Outcome == IngestOutcome.Ingested))
+            try
             {
-                try
+                var id = report.Kind switch
                 {
-                    var id = report.Kind switch
-                    {
-                        ReportKind.DmarcAggregate when report.Aggregate is not null =>
-                            await store.SaveAggregateAsync(report.Aggregate, report.FileName, report.MessageId, ct).ConfigureAwait(false),
-                        ReportKind.TlsRpt when report.Tls is not null =>
-                            await store.SaveTlsAsync(report.Tls, report.FileName, report.MessageId, ct).ConfigureAwait(false),
-                        _ => null,
-                    };
-                    if (id is not null) { stored++; }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    Console.Error.WriteLine($"Could not store {report.FileName} for {report.Domain}: {ex.Message}");
-                }
+                    ReportKind.DmarcAggregate when report.Aggregate is not null =>
+                        await store.SaveAggregateAsync(report.Aggregate, report.FileName, report.MessageId, ct).ConfigureAwait(false),
+                    ReportKind.TlsRpt when report.Tls is not null =>
+                        await store.SaveTlsAsync(report.Tls, report.FileName, report.MessageId, ct).ConfigureAwait(false),
+                    _ => null,
+                };
+
+                if (id is not null) { written++; } else { failed++; }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Could not store {report.FileName} for {report.Domain}: {ex.Message}");
+                failed++;
             }
         }
 
+        return (written, failed);
+    }
+
+    private static void Report(IngestRunResult result, int stored, bool dryRun)
+    {
         Console.WriteLine($"  messages read      {result.MessagesRead}");
         Console.WriteLine($"  reports ingested   {result.IngestedCount}{(dryRun ? " (not written)" : $", {stored} stored")}");
         if (result.DuplicateCount > 0) { Console.WriteLine($"  already seen       {result.DuplicateCount}"); }
@@ -236,17 +271,24 @@ public static class IngestCommand
             Console.WriteLine("  next run continues from here rather than starting again.");
         }
 
-        if (!dryRun)
-        {
-            var unassigned = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
-            if (unassigned.Count > 0)
-            {
-                Console.WriteLine();
-                Console.WriteLine($"  {unassigned.Count} domain(s) are not assigned to a client:");
-                foreach (var d in unassigned.Take(20)) { Console.WriteLine($"    {d}"); }
-                Console.WriteLine("  Reports are arriving for these and nobody is being billed for them.");
-            }
-        }
+    }
+
+    /// <summary>
+    /// Unbilled work, said out loud at the end of a run.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the counts above because it asks the database a question
+    /// and the rest of the summary is arithmetic already in hand.
+    /// </remarks>
+    private static async Task WarnUnassignedAsync(ReportStore store, CancellationToken ct)
+    {
+        var unassigned = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
+        if (unassigned.Count == 0) { return; }
+
+        Console.WriteLine();
+        Console.WriteLine($"  {unassigned.Count} domain(s) are not assigned to a client:");
+        foreach (var d in unassigned.Take(20)) { Console.WriteLine($"    {d}"); }
+        Console.WriteLine("  Reports are arriving for these and nobody is being billed for them.");
     }
 }
 

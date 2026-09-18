@@ -510,4 +510,88 @@ public sealed class ReportIngestorTests
         Assert.Empty(result.Errors);
         Assert.False(result.StoppedEarly);
     }
+
+    // ---- stored before filed ------------------------------------------------
+
+    [Fact]
+    public async Task AMessageIsNotFiledUntilItsReportsAreStored()
+    {
+        // The window this closes: reports were parsed into a list, every
+        // message was moved out of the source folder as the run went, and the
+        // list was only written to the database once the whole run returned.
+        // A process killed in between left the messages filed and the reports
+        // nowhere - and the next run reads the source folder, not Processed,
+        // so they were never collected again. A time-limited scheduled task
+        // being cut off mid-backlog is the normal case, not an exotic one.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var order = new List<string>();
+
+        var ingestor = new ReportIngestor(
+            mailbox, Options(), t => t == Token ? "nrgtechservices.com" : null, null,
+            (found, _) => { order.Add("stored"); return Task.FromResult(true); });
+
+        mailbox.OnMove = _ => order.Add("filed");
+
+        await ingestor.RunAsync();
+
+        Assert.Equal(["stored", "filed"], order);
+    }
+
+    [Fact]
+    public async Task AMessageWhoseReportsCouldNotBeStoredStaysWhereItIs()
+    {
+        // The safe direction. A message read twice is caught by the duplicate
+        // check; a message filed and never stored is gone.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var ingestor = new ReportIngestor(
+            mailbox, Options(), t => t == Token ? "nrgtechservices.com" : null, null,
+            (_, _) => Task.FromResult(false));
+
+        var result = await ingestor.RunAsync();
+
+        Assert.Empty(mailbox.Moved);
+        Assert.Equal(0, result.MessagesMoved);
+    }
+
+    [Fact]
+    public async Task AStoreThatThrowsLeavesTheMessageAndIsReported()
+    {
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var ingestor = new ReportIngestor(
+            mailbox, Options(), t => t == Token ? "nrgtechservices.com" : null, null,
+            (_, _) => throw new InvalidOperationException("database is locked"));
+
+        var result = await ingestor.RunAsync();
+
+        Assert.Empty(mailbox.Moved);
+        Assert.Contains(result.Errors, e => e.Contains("left in place", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task WithNoStoreToCallTheRunBehavesAsItAlwaysDid()
+    {
+        // The callback is optional, so nothing that constructs an ingestor
+        // without one changes behaviour.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox).RunAsync();
+
+        Assert.Equal(1, result.MessagesMoved);
+        Assert.Single(mailbox.Moved);
+    }
 }

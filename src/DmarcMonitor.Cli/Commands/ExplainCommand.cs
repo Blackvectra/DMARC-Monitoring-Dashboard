@@ -128,65 +128,92 @@ public static class ExplainCommand
         Console.WriteLine();
 
         // Sources, worst first, grouped so one line means one sending server.
-        var groups = report.Records
-            .GroupBy(r => r.SourceIp, StringComparer.Ordinal)
-            .Select(g => new
-            {
-                Ip = g.Key,
-                Count = g.Sum(r => (long)r.Count),
-                Passing = g.Where(r => r.IsDmarcPass).Sum(r => (long)r.Count),
-                Overridden = g.Any(r => r.WasOverridden),
-                SpfDomains = g.SelectMany(r => r.SpfResults).Select(a => a.Domain).Distinct(StringComparer.Ordinal).ToList(),
-                DkimDomains = g.SelectMany(r => r.DkimResults).Select(a => a.Domain).Distinct(StringComparer.Ordinal).ToList(),
-                HeaderFrom = g.Select(r => r.HeaderFrom).FirstOrDefault(h => !string.IsNullOrEmpty(h)) ?? p.Domain,
-            })
-            .OrderBy(g => g.Passing == g.Count)      // problems first
-            .ThenByDescending(g => g.Count)
-            .ToList();
+        // The diagnosis is shared with the domain page rather than worked out
+        // again here: the two disagreeing about the same report is worse than
+        // either of them being wrong on its own.
+        var sources = ReportSources.Describe(report);
 
-        Console.WriteLine($"  Sending sources ({groups.Count}):");
+        Console.WriteLine($"  Sending sources ({sources.Count}):");
         Console.WriteLine();
 
-        foreach (var g in groups)
+        foreach (var s in sources)
         {
-            var failing = g.Count - g.Passing;
-            if (failing == 0)
+            switch (s.Outcome)
             {
-                Console.WriteLine($"    OK        {g.Ip}  {Msgs(g.Count)}, all authenticated");
-                continue;
+                case SourceOutcome.Authenticated:
+                    Console.WriteLine($"    OK        {s.SourceIp}  {Msgs(s.Messages)}, all authenticated");
+                    break;
+
+                case SourceOutcome.Forwarded:
+                    Console.WriteLine($"    IGNORE    {s.SourceIp}  {N(s.Failing)} failed, but the receiver recognised a forwarder or mailing list");
+                    Console.WriteLine("              Not an attack and not a misconfiguration. Nothing to do.");
+                    break;
+
+                case SourceOutcome.SignedForAnotherDomain:
+                    ExplainSignedElsewhere(s);
+                    break;
+
+                case SourceOutcome.PassedSpfForAnotherDomain:
+                    Console.WriteLine($"    FIX       {s.SourceIp}  {N(s.Failing)} failed");
+                    Console.WriteLine($"              SPF passed, for {Join(s.UnalignedSpf)} rather than {s.HeaderFrom}.");
+                    Console.WriteLine("              DMARC only counts a pass that matches the address recipients see, and");
+                    Console.WriteLine("              nothing here signed as you, so this mail has nothing to fall back on.");
+                    Console.WriteLine("              A relay sending under its own envelope is normal and cannot be fixed");
+                    Console.WriteLine("              by changing SPF. Have it sign with DKIM as your domain instead.");
+                    break;
+
+                default:
+                    Console.WriteLine($"    CHECK     {s.SourceIp}  {N(s.Failing)} failed, nothing authenticated");
+                    Console.WriteLine("              Either a service of yours nobody recorded, or somebody sending as you.");
+                    break;
             }
-
-            if (g.Overridden)
-            {
-                Console.WriteLine($"    IGNORE    {g.Ip}  {N(failing)} failed, but the receiver recognised a forwarder or mailing list");
-                Console.WriteLine("              Not an attack and not a misconfiguration. Nothing to do.");
-                continue;
-            }
-
-            // The case every table renders as a contradiction: authentication
-            // succeeded, but for a domain the recipient never sees.
-            var elsewhere = g.SpfDomains.Concat(g.DkimDomains)
-                .Where(d => !string.IsNullOrEmpty(d) && !Aligns(d, g.HeaderFrom))
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
-
-            if (elsewhere.Count > 0)
-            {
-                Console.WriteLine($"    FIX       {g.Ip}  {N(failing)} failed");
-                Console.WriteLine($"              Authentication succeeded, but for {string.Join(", ", elsewhere)} rather than {g.HeaderFrom}.");
-                Console.WriteLine("              DMARC only counts authentication matching the address recipients see, so");
-                Console.WriteLine("              this is recorded as a failure even though the checks themselves passed.");
-                Console.WriteLine("              Almost always a real service of yours set up with the provider's own");
-                Console.WriteLine("              domain. Under enforcement this mail starts going to junk.");
-                continue;
-            }
-
-            Console.WriteLine($"    CHECK     {g.Ip}  {N(failing)} failed, nothing authenticated");
-            Console.WriteLine("              Either a service of yours nobody recorded, or somebody sending as you.");
         }
 
         Console.WriteLine();
         return true;
+    }
+
+    /// <summary>
+    /// The line every DMARC table renders as a contradiction: the signature
+    /// verified and the message was rejected anyway.
+    /// </summary>
+    /// <remarks>
+    /// Said as its own case because the reader has usually already set DKIM up
+    /// and concluded the report is wrong. It is not: the key is good, and it is
+    /// signing the wrong name.
+    /// </remarks>
+    private static void ExplainSignedElsewhere(SourceExplanation s)
+    {
+        Console.WriteLine($"    FIX       {s.SourceIp}  {N(s.Failing)} failed");
+        Console.WriteLine($"              DKIM verified, signing {Join(s.UnalignedDkim.Select(u => "d=" + u.Domain))}");
+        Console.WriteLine($"              rather than {s.HeaderFrom}. The signature is good; DMARC discards it");
+        Console.WriteLine("              because the signing domain is not the one recipients see.");
+
+        if (s.WouldAlignIfRelaxed)
+        {
+            // The cheapest fix in DMARC, and invisible unless something says
+            // it: the sender is already signing inside the domain's own
+            // namespace and the domain's own record is refusing it.
+            Console.WriteLine("              This is a subdomain of yours, refused only because you publish");
+            Console.WriteLine("              adkim=s. Either have it sign as the domain itself, or change adkim");
+            Console.WriteLine("              to r once you have confirmed the subdomain is yours.");
+        }
+        else
+        {
+            Console.WriteLine("              Almost always a real service of yours signing with its own domain.");
+            Console.WriteLine("              Have it sign as you; senders call this custom or branded DKIM, and");
+            Console.WriteLine("              it is usually set per product, so one kind of mail can be signing");
+            Console.WriteLine("              correctly while another is not.");
+        }
+    }
+
+    /// <summary>At most three, so one source cannot fill the screen.</summary>
+    private static string Join(IEnumerable<string> values)
+    {
+        var list = values.ToList();
+        return list.Count <= 3
+            ? string.Join(", ", list)
+            : string.Join(", ", list.Take(3)) + $" and {list.Count - 3} more";
     }
 
     private static bool ExplainTls(string json)
@@ -243,15 +270,6 @@ public static class ExplainCommand
 
         Console.WriteLine();
         return true;
-    }
-
-    /// <summary>Relaxed alignment, matching how DMARC actually decides.</summary>
-    private static bool Aligns(string authDomain, string headerFrom)
-    {
-        if (string.IsNullOrEmpty(authDomain) || string.IsNullOrEmpty(headerFrom)) { return false; }
-        if (string.Equals(authDomain, headerFrom, StringComparison.OrdinalIgnoreCase)) { return true; }
-        return authDomain.EndsWith('.' + headerFrom, StringComparison.OrdinalIgnoreCase)
-            || headerFrom.EndsWith('.' + authDomain, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Window(DateTimeOffset begin, DateTimeOffset end)

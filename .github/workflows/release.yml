@@ -166,12 +166,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       - name: Package
         run: |
+          # The server never has a checkout - that is the point of releasing
+          # artifacts - so the install, update and rollback scripts and the
+          # systemd units travel with the release, or the docs tell somebody
+          # to run a script they do not have.
+          tar -czf dmarc-deploy.tar.gz deploy
           cd artifacts
           zip -r  ../dmarc-web.zip        dmarc-web
           mv dmarc-win-x64/dmarc.exe      ../dmarc.exe
@@ -185,11 +192,16 @@ jobs:
             dmarc-linux-x64
             dmarc-linux-arm64
             dmarc-web.zip
+            dmarc-deploy.tar.gz
           body: |
             `dmarc.exe` runs on its own: no .NET install, no checkout, no
             schema file beside it. Every build is checked by creating a
             database in an empty directory before it is published.
 
-            The web bundle needs the ASP.NET Core 8 runtime on the host. See
-            `docs/INGEST-SETUP.md` for the app registration and
-            `docs/OPEN-ISSUES.md` for what is known to be unfinished.
+            The web bundle needs the ASP.NET Core 8 runtime on the host.
+            `dmarc-deploy.tar.gz` holds the install, update and rollback
+            scripts and the systemd units; on a Linux server, unpack it beside
+            the other two files and run `sudo ./deploy/install.sh`. See
+            `docs/DEPLOYING.md` for the whole path, `docs/INGEST-SETUP.md`
+            for the app registration and `docs/OPEN-ISSUES.md` for what is
+            known to be unfinished.

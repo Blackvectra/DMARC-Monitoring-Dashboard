@@ -60,6 +60,21 @@ public sealed class ReportImporter(ReportStore store)
         return ImportAsync(ReadFolderAsync(folder, ct), progress, ct);
     }
 
+    /// <summary>Imports one file: a single report, or an export holding thousands.</summary>
+    /// <remarks>
+    /// A mailbox export is one zip, and <c>dmarc import --from the-export.zip</c>
+    /// is the first thing anybody types with one. It was refused with "No such
+    /// folder" for a file that was plainly there, and the way round it - unzip
+    /// it first - was not said. The browser already took the zip whole; the
+    /// command line now does too, through the same importer.
+    /// </remarks>
+    public Task<ImportResult> ImportFileAsync(
+        string path, IProgress<int>? progress = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return ImportAsync(ReadOneAsync(path, ct), progress, ct);
+    }
+
     /// <summary>
     /// Imports files handed over one at a time.
     /// </summary>
@@ -194,6 +209,12 @@ public sealed class ReportImporter(ReportStore store)
             // not be read must not come back looking like a clean import.
             yield return await ReadAsync(file, ct).ConfigureAwait(false);
         }
+    }
+
+    private static async IAsyncEnumerable<ImportFile> ReadOneAsync(
+        string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        yield return await ReadAsync(path, ct).ConfigureAwait(false);
     }
 
     private static async Task<ImportFile> ReadAsync(string path, CancellationToken ct)

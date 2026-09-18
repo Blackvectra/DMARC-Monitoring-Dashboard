@@ -252,4 +252,90 @@ public sealed class ClientReportRendererTests
     [Fact]
     public void RejectsANullReport() =>
         Assert.Throws<ArgumentNullException>(() => ClientReportRenderer.ToHtml(null!));
+
+    // ---- the chart -----------------------------------------------------------
+
+    /// <summary>A month of days, with mail only on the ones listed.</summary>
+    private static List<DayPoint> Days(params (int Day, long Messages, long Passing)[] mail)
+    {
+        var points = new List<DayPoint>();
+        for (var d = 1; d <= 31; d++)
+        {
+            var row = mail.FirstOrDefault(m => m.Day == d);
+            points.Add(row.Day == d
+                ? new DayPoint { Day = new DateOnly(2026, 8, d), Reported = true, Messages = row.Messages, Passing = row.Passing }
+                : new DayPoint { Day = new DateOnly(2026, 8, d), Reported = false });
+        }
+        return points;
+    }
+
+    [Fact]
+    public void AMonthWithOneReportedDayStillDrawsSomething()
+    {
+        // Found on the real data. mcleanelectric.com was heard from on exactly
+        // one day in August, so the line was a single move with nothing to
+        // join to and the area had no width: the client's report carried an
+        // empty rectangle where the chart should be, which reads as broken
+        // software rather than as a quiet month.
+        var html = ClientReportRenderer.ToHtml(Report() with { Daily = Days((28, 7, 4)) });
+
+        Assert.Contains("class=\"t-dot\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMonthOfRealTrafficDrawsTheLineRatherThanDots()
+    {
+        var html = ClientReportRenderer.ToHtml(
+            Report() with { Daily = Days((1, 100, 90), (2, 120, 110), (3, 80, 80)) });
+
+        Assert.Contains("class=\"t-line\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("class=\"t-dot\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMonthWithNoMailAtAllDrawsNoChart()
+    {
+        // The summary above already says so in words, and an empty chart under
+        // it reads as a rendering fault.
+        var html = ClientReportRenderer.ToHtml(Report(messages: 0, passing: 0) with { Daily = Days() });
+
+        Assert.DoesNotContain("class=\"trend\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheChartSaysWhenDaysAreMissingRatherThanDrawingThemFlat()
+    {
+        // A client who sees a dip needs to know whether their mail stopped or
+        // the reporting did. Those are very different conversations.
+        var html = ClientReportRenderer.ToHtml(
+            Report() with { Daily = Days((1, 100, 90), (2, 120, 110)) });
+
+        Assert.Contains("have no reports at all", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheChartNeverEmitsANumberTheBrowserCannotParse()
+    {
+        // NaN or Infinity in a path attribute renders as an empty chart with
+        // nothing logged anywhere, which is the hardest kind of wrong to spot.
+        var html = ClientReportRenderer.ToHtml(
+            Report(messages: 0, passing: 0) with { Daily = Days((5, 0, 0), (6, 0, 0)) });
+
+        Assert.DoesNotContain("NaN", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Infinity", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheChartCarriesNoScriptAndNoExternalReference()
+    {
+        // The whole document is opened from an email attachment, sometimes
+        // with no network. Anything fetched from elsewhere is a broken image
+        // at exactly the moment the report is being judged.
+        var html = ClientReportRenderer.ToHtml(
+            Report() with { Daily = Days((1, 100, 90), (2, 120, 110)) });
+
+        Assert.DoesNotContain("<script", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("http://", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("https://", html, StringComparison.OrdinalIgnoreCase);
+    }
 }

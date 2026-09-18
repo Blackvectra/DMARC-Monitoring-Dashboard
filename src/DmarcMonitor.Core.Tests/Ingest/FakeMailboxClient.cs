@@ -15,6 +15,9 @@ public sealed class FakeMailboxClient : IMailboxClient
     /// <summary>messageId -> folder it was moved to.</summary>
     public Dictionary<string, string> Moved { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Called as a message is filed, so a test can assert on ordering.</summary>
+    public Action<string>? OnMove { get; set; }
+
     public List<string> FoldersCreated { get; } = [];
 
     /// <summary>Message ids whose attachment fetch should throw.</summary>
@@ -76,6 +79,7 @@ public sealed class FakeMailboxClient : IMailboxClient
         {
             throw new InvalidOperationException("move failed");
         }
+        OnMove?.Invoke(messageId);
         Moved[messageId] = destinationFolderId;
         return Task.CompletedTask;
     }

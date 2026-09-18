@@ -27,16 +27,40 @@ install -o root -g root -m 0755 "${HERE}/update-agent.sh"  "${ROOT}/deploy/updat
 # and reads status; the agent reads requests and writes status.
 install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0755 "${ROOT}/data/updates"
 
-install -o root -g root -m 0644 "${HERE}/dmarc-update.service" /etc/systemd/system/
+# Both units name paths absolutely, because systemd has no variables of its
+# own, and everything else here honours DMARC_ROOT.
+#
+# The path unit was already rewritten for this. The service unit was not, and
+# it carries /opt/dmarc twice: the script it runs, and the only directory it
+# is permitted to write to. Installed anywhere else, the watch fired
+# correctly, the service then failed on a script that was not there - and had
+# it been there, ReadWritePaths would have denied every write it needed to
+# make. The button did nothing, and the reason was two directories away in a
+# unit file nobody was looking at.
+sed -e "s|/opt/dmarc/deploy/update-agent.sh|${ROOT}/deploy/update-agent.sh|" \
+    -e "s|ReadWritePaths=/opt/dmarc |ReadWritePaths=${ROOT} |" \
+    "${HERE}/dmarc-update.service" > /etc/systemd/system/dmarc-update.service
+chown root:root /etc/systemd/system/dmarc-update.service
+chmod 0644 /etc/systemd/system/dmarc-update.service
 
-# The path unit names the spool absolutely, and everything else here honours
-# DMARC_ROOT. Installed anywhere but the default that left systemd watching
-# /opt/dmarc while the app wrote somewhere else, so the button did nothing at
-# all and nothing anywhere said why.
 sed "s|/opt/dmarc/data/updates/requested.json|${ROOT}/data/updates/requested.json|" \
     "${HERE}/dmarc-update.path" > /etc/systemd/system/dmarc-update.path
 chown root:root /etc/systemd/system/dmarc-update.path
 chmod 0644 /etc/systemd/system/dmarc-update.path
+
+# Nothing in either installed unit may still point at the default when the
+# root is somewhere else. Checked rather than assumed: this is the second time
+# a hardcoded /opt/dmarc has survived a rewrite of these files, and it fails
+# silently both times.
+if [[ "$ROOT" != "/opt/dmarc" ]]; then
+    for unit in /etc/systemd/system/dmarc-update.service /etc/systemd/system/dmarc-update.path; do
+        if grep -q "/opt/dmarc" "$unit"; then
+            echo "BUG: ${unit} still refers to /opt/dmarc after being rewritten for ${ROOT}:" >&2
+            grep -n "/opt/dmarc" "$unit" >&2
+            exit 70   # EX_SOFTWARE
+        fi
+    done
+fi
 
 systemctl daemon-reload
 systemctl enable --now dmarc-update.path

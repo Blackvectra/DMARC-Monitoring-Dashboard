@@ -4,6 +4,7 @@ using DmarcMonitor.Web;
 using DmarcMonitor.Web.Auth;
 using DmarcMonitor.Web.Components;
 using DmarcMonitor.Web.Data;
+using Microsoft.AspNetCore.DataProtection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,8 +23,21 @@ builder.AddProxySupport();
 // resolved against wherever the service happened to be started.
 var dbPath = Path.GetFullPath(builder.Configuration["Database:Path"] ?? "dmarc.db");
 builder.Services.AddSingleton(new DatabaseInfo(dbPath));
+
+// The keys that sign the sign-in cookie and the antiforgery token, kept beside
+// the database rather than where ASP.NET Core puts them when nobody says -
+// under the account's home directory. A service unit that hides the home
+// directory (ProtectHome=true, which is the right setting for a service) then
+// gets keys that live in memory only, and everybody is signed out every time
+// the service restarts. That reads as a flaky login, not as a permissions
+// problem, and it is why the unit file used to carry a comment explaining
+// why it could not protect the home directory. Now the keys are wherever the
+// data is, backed up with it, and the unit can.
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(Path.GetDirectoryName(dbPath) ?? ".", "keys")));
 builder.Services.AddSingleton<ReportStoreConnection>();
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Rollout.TriageService(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Reporting.TimeSeriesService(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Intelligence.CorrelationService(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Domains.DomainDetailService(dbPath));
 

@@ -52,7 +52,7 @@ public sealed class AzureDnsProvider : IDnsProvider
         if (set is null) { return []; }
 
         var id = SetPath(name, type);
-        var (ttl, values) = set.Value;
+        var (ttl, values, _) = set.Value;
         return [.. values.Select(v => new DnsProviderRecord(name, type.ToUpperInvariant(), v, ttl, id))];
     }
 
@@ -85,7 +85,7 @@ public sealed class AzureDnsProvider : IDnsProvider
                 values.Add(write.Value);
             }
 
-            return await PutSetAsync(write.Name, write.Type, values, ttl, ct).ConfigureAwait(false);
+            return await PutSetAsync(write.Name, write.Type, values, ttl, set?.ETag, ct).ConfigureAwait(false);
         }
         catch (HttpRequestException ex)
         {
@@ -102,12 +102,12 @@ public sealed class AzureDnsProvider : IDnsProvider
             var set = await GetSetAsync(record.Name, record.Type, ct).ConfigureAwait(false);
             if (set is null) { return ProviderWrite.Failed($"Nothing is published at {record.Name}."); }
 
-            var (ttl, values) = set.Value;
+            var (ttl, values, etag) = set.Value;
             if (!values.Remove(record.Value)) { return ProviderWrite.Failed($"No such value at {record.Name}."); }
 
             if (values.Count > 0)
             {
-                return await PutSetAsync(record.Name, record.Type, values, ttl, ct).ConfigureAwait(false);
+                return await PutSetAsync(record.Name, record.Type, values, ttl, etag, ct).ConfigureAwait(false);
             }
 
             using var request = await Authed(HttpMethod.Delete, SetPath(record.Name, record.Type), ct).ConfigureAwait(false);
@@ -157,7 +157,7 @@ public sealed class AzureDnsProvider : IDnsProvider
     private string SetPath(string name, string type) =>
         $"{_base}/{type.ToUpperInvariant()}/{Relative(name, _zone)}?api-version={ApiVersion}";
 
-    private async Task<(int Ttl, List<string> Values)?> GetSetAsync(string name, string type, CancellationToken ct)
+    private async Task<(int Ttl, List<string> Values, string? ETag)?> GetSetAsync(string name, string type, CancellationToken ct)
     {
         using var request = await Authed(HttpMethod.Get, SetPath(name, type), ct).ConfigureAwait(false);
         using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
@@ -170,10 +170,35 @@ public sealed class AzureDnsProvider : IDnsProvider
 
         var set = await response.Content.ReadFromJsonAsync<RecordSet>(Json, ct).ConfigureAwait(false);
         var values = set?.Properties?.TxtRecords?.Select(r => string.Concat(r.Value ?? [])).ToList() ?? [];
-        return (set?.Properties?.Ttl ?? 300, values);
+        return (set?.Properties?.Ttl ?? 300, values, set?.ETag);
     }
 
-    private async Task<ProviderWrite> PutSetAsync(string name, string type, List<string> values, int ttl, CancellationToken ct)
+    /// <summary>
+    /// Writes the set back, refusing if anyone else changed it first.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Azure keeps every TXT value at a name in one record set, so changing
+    /// one value means reading the set, swapping an entry and writing all of
+    /// them back. Without a condition on the write that is a lost update with
+    /// consequences: a verification token added by somebody else between the
+    /// read and the write is not overwritten, it is deleted, and the service
+    /// that issued it stops trusting the domain. Nothing in the response says
+    /// so, because as far as Azure is concerned the write succeeded.
+    /// </para>
+    /// <para>
+    /// <c>If-Match</c> on the etag read a moment ago makes Azure refuse
+    /// instead. <c>If-None-Match: *</c> does the same job when there was no
+    /// set at all, so a set created concurrently is not silently replaced by
+    /// one holding only this record.
+    /// </para>
+    /// <para>
+    /// Cloudflare needs none of this: it gives every value its own id, so a
+    /// write there touches one record and cannot take its neighbours with it.
+    /// </para>
+    /// </remarks>
+    private async Task<ProviderWrite> PutSetAsync(
+        string name, string type, List<string> values, int ttl, string? etag, CancellationToken ct)
     {
         var body = new RecordSet
         {
@@ -186,7 +211,27 @@ public sealed class AzureDnsProvider : IDnsProvider
 
         using var request = await Authed(HttpMethod.Put, SetPath(name, type), ct).ConfigureAwait(false);
         request.Content = JsonContent.Create(body, options: Json);
+
+        if (!string.IsNullOrWhiteSpace(etag))
+        {
+            request.Headers.TryAddWithoutValidation("If-Match", etag);
+        }
+        else
+        {
+            request.Headers.TryAddWithoutValidation("If-None-Match", "*");
+        }
+
         using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+
+        // Said as what happened rather than as an HTTP code. A 412 here is not
+        // a fault to retry blindly: the set is not what it was, so the values
+        // being written back are no longer the right ones.
+        if (response.StatusCode == HttpStatusCode.PreconditionFailed)
+        {
+            return ProviderWrite.Failed(
+                $"The records at {name} changed while this was being written, so nothing was changed. "
+                + "Read them again and plan from what is there now.");
+        }
 
         return response.IsSuccessStatusCode
             ? ProviderWrite.Ok(SetPath(name, type))
@@ -210,6 +255,9 @@ public sealed class AzureDnsProvider : IDnsProvider
     private sealed class RecordSet
     {
         [JsonPropertyName("properties")] public Properties? Properties { get; set; }
+
+        /// <summary>What the set looked like when it was read, for If-Match.</summary>
+        [JsonPropertyName("etag")] public string? ETag { get; set; }
     }
 
     private sealed class Properties
