@@ -84,6 +84,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Outlook saves attachments relative to ITS working directory, not this
+# shell's. Given "-OutputPath .\export", the directory was created here and
+# the files were written wherever Outlook happened to be - usually the user's
+# profile - or not at all. Both examples in the help use absolute paths, which
+# is why it never showed. Made absolute once, before anything looks at it.
+$OutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+
+# The file's extension is lowercased before it is compared, so the list it is
+# compared against has to be too, or "-Extensions .XML" matched nothing and
+# said nothing. A missing dot is supplied for the same reason.
+$Extensions = @($Extensions | ForEach-Object {
+    $e = $_.Trim().ToLowerInvariant()
+    if ($e -and -not $e.StartsWith('.')) { ".$e" } else { $e }
+} | Where-Object { $_ })
+
 # ---- connect --------------------------------------------------------------
 
 try {
@@ -105,10 +120,31 @@ $namespace = $outlook.GetNamespace('MAPI')
 
 # ---- find the folder ------------------------------------------------------
 
+# Every place that walked into a folder's children asked for .Folders bare.
+# On an ordinary mailbox that is fine. On the other stores Outlook keeps open
+# beside it - public folders, an online archive, a SharePoint list - reading
+# .Folders throws, and with ErrorActionPreference = Stop an unguarded throw
+# ended the whole run. That is the same fault the attachment loop below was
+# already fixed for, and it was worst in -List, which is the mode used to
+# find out why nothing matched: it died before printing the mailbox that
+# actually held the reports.
+function Get-ChildFolders {
+    param($Parent)
+
+    try {
+        $children = $Parent.Folders
+        if ($null -eq $children) { return @() }
+        return @($children)
+    } catch {
+        Write-Verbose "Could not list folders under '$($Parent.Name)': $($_.Exception.Message)"
+        return @()
+    }
+}
+
 function Find-Folder {
     param($Parent, [string]$Name)
 
-    foreach ($child in $Parent.Folders) {
+    foreach ($child in (Get-ChildFolders $Parent)) {
         if ($child.Name -eq $Name) { return $child }
         $found = Find-Folder -Parent $child -Name $Name
         if ($found) { return $found }
@@ -130,7 +166,7 @@ function Get-Inbox {
         # Older Outlook, or a store that will not answer. Fall through.
     }
 
-    foreach ($child in $Store.Folders) {
+    foreach ($child in (Get-ChildFolders $Store)) {
         if ($child.Name -eq 'Inbox') { return $child }
     }
 
@@ -140,7 +176,13 @@ function Get-Inbox {
 # Every open store, not just the first. A shared mailbox such as
 # DMARC@nrgtechservices.com is its own store sitting alongside the operator's
 # own, and searching only the first would silently find nothing.
-$stores = @($namespace.Folders)
+$stores = Get-ChildFolders $namespace
+if ($stores.Count -eq 0) {
+    Write-Host ""
+    Write-Host "Outlook is running but no mailbox could be read from it." -ForegroundColor Red
+    Write-Host "Wait for it to finish loading and try again. If it is asking a question, answer it first."
+    exit 1
+}
 
 if ($Mailbox) {
     $matched = @($stores | Where-Object { $_.Name -like "*$Mailbox*" })
@@ -163,16 +205,22 @@ function Show-Tree {
 
     # Two levels is enough to see the shape without printing a whole mailbox.
     if ($Depth -lt 2) {
-        foreach ($child in $MailFolder.Folders) { Show-Tree -MailFolder $child -Depth ($Depth + 1) }
+        foreach ($child in (Get-ChildFolders $MailFolder)) { Show-Tree -MailFolder $child -Depth ($Depth + 1) }
+    }
+}
+
+# Printed from two places - on -List, and when a named folder is not found -
+# and the two copies had already drifted from each other once.
+function Show-Stores {
+    foreach ($store in $stores) {
+        Write-Host ""
+        Write-Host $store.Name -ForegroundColor Cyan
+        foreach ($child in (Get-ChildFolders $store)) { Show-Tree -MailFolder $child -Depth 1 }
     }
 }
 
 if ($List) {
-    foreach ($store in $stores) {
-        Write-Host ""
-        Write-Host $store.Name -ForegroundColor Cyan
-        foreach ($child in $store.Folders) { Show-Tree -MailFolder $child -Depth 1 }
-    }
+    Show-Stores
     Write-Host ""
     exit 0
 }
@@ -184,6 +232,26 @@ $foundIn = ''
 if (-not $Folder) {
     # No folder named, so take the whole store. Its Folders collection
     # includes the Inbox, so nothing extra is needed here.
+    #
+    # But only when there is one store to take. With several open - the
+    # operator's own beside the shared one is the ordinary case - this took
+    # whichever came first and said which at the top of the output, which is
+    # a line nobody reads until the export turns out to be their own Sent
+    # Items. A -Mailbox that matches two stores has the same problem. Refused
+    # rather than guessed, with the list, so the next run can say which.
+    if ($stores.Count -gt 1) {
+        Write-Host ""
+        if ($Mailbox) {
+            Write-Host "'$Mailbox' matches more than one open mailbox:" -ForegroundColor Red
+        } else {
+            Write-Host "More than one mailbox is open in Outlook, and no -Folder was given:" -ForegroundColor Red
+        }
+        foreach ($s in $stores) { Write-Host "    $($s.Name)" }
+        Write-Host ""
+        Write-Host "Say which with -Mailbox, using enough of the name to match only one." -ForegroundColor DarkGray
+        exit 1
+    }
+
     $targets += [pscustomobject]@{ MailFolder = $stores[0]; Into = $OutputPath }
     $foundIn = $stores[0].Name
 } else {
@@ -218,11 +286,7 @@ if ($targets.Count -eq 0) {
     Write-Host "No folder called '$Folder' in $(if ($Mailbox) { "'$Mailbox'" } else { 'any open mailbox' })." -ForegroundColor Red
     Write-Host ""
     Write-Host "Folders that DO exist:" -ForegroundColor DarkGray
-    foreach ($store in $stores) {
-        Write-Host ""
-        Write-Host $store.Name -ForegroundColor Cyan
-        foreach ($child in $store.Folders) { Show-Tree -MailFolder $child -Depth 1 }
-    }
+    Show-Stores
     Write-Host ""
     Write-Host "Re-run with -Folder <name>, or leave -Folder out to export the whole mailbox." -ForegroundColor DarkGray
     exit 1
@@ -328,7 +392,7 @@ function Export-Folder {
 
     $total = $saved
 
-    foreach ($child in $MailFolder.Folders) {
+    foreach ($child in (Get-ChildFolders $MailFolder)) {
         # Mirror the folder structure, so a report sorted into DMARC\acme.com
         # still says which domain it belongs to after export.
         $safe = ($child.Name -replace '[<>:"/\\|?*]', '_')
