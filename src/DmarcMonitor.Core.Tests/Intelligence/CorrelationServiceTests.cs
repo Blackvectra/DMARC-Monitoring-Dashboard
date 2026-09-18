@@ -67,7 +67,13 @@ public sealed class CorrelationServiceTests : IDisposable
           </record>
         """;
 
-    private async Task StoreAsync(string domain, string clientSlug, params string[] rows)
+    /// <summary>
+    /// A domain nobody has onboarded, which is how every domain starts.
+    /// </summary>
+    private Task StoreUnassignedAsync(string domain, params string[] rows) =>
+        StoreAsync(domain, clientSlug: null, rows);
+
+    private async Task StoreAsync(string domain, string? clientSlug, params string[] rows)
     {
         var xml = $"""
             <?xml version="1.0" encoding="UTF-8"?>
@@ -88,6 +94,11 @@ public sealed class CorrelationServiceTests : IDisposable
         await _store.SaveAggregateAsync(parsed.Report!, xml, null);
 
         // Each domain to its own client, so cross-client counting is real.
+        // Passing null leaves it where an import leaves it - in the Unassigned
+        // bucket - which is the state every real install starts in and which
+        // no test here used to cover.
+        if (clientSlug is null) { return; }
+
         await _store.CreateClientAsync(clientSlug, clientSlug);
         await _store.AssignDomainAsync(domain, clientSlug);
     }
@@ -96,6 +107,42 @@ public sealed class CorrelationServiceTests : IDisposable
     {
         var rows = await new CorrelationService(_dbPath).GetFailingSourcesAsync();
         return rows.FirstOrDefault(r => r.SourceIp == ip);
+    }
+
+    [Fact]
+    public async Task SeesImpersonationAcrossDomainsNobodyHasOnboardedYet()
+    {
+        // Cross-client impersonation is the one finding only a multi-client
+        // platform can make, and it was unreachable on a fresh install. Every
+        // imported domain lands in the single Unassigned bucket, the check
+        // counted rows in the clients table, and so every source looked like
+        // it touched exactly one client no matter how many domains it was
+        // forging. On the live database one address was hitting twelve of the
+        // eighteen domains and was reported as touching one client.
+        await StoreUnassignedAsync("a.example", Row("203.0.113.9", 5, "fail", "a.example", "fail"));
+        await StoreUnassignedAsync("b.example", Row("203.0.113.9", 5, "fail", "b.example", "fail"));
+        await StoreUnassignedAsync("c.example", Row("203.0.113.9", 5, "fail", "c.example", "fail"));
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(3, source!.IndependentParties);
+        Assert.True(source.IsCrossClient, "three unfiled domains are three unrelated parties, not one client");
+        Assert.Equal(SourceVerdict.CrossClientImpersonation, source.Verdict);
+    }
+
+    [Fact]
+    public async Task OneUnassignedDomainIsStillOnlyOneParty()
+    {
+        // The other side of it: the fallback must not turn a single domain
+        // into a campaign just because nobody has filed it yet.
+        await StoreUnassignedAsync("only.example", Row("203.0.113.9", 5, "fail", "only.example", "fail"));
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(1, source!.IndependentParties);
+        Assert.False(source.IsCrossClient);
     }
 
     // ---- the regression this file exists for ---------------------------------
