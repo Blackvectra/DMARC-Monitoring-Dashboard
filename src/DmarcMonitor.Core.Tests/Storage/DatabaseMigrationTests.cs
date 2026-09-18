@@ -192,3 +192,46 @@ public sealed class DatabaseMigrationTests : IDisposable
         Assert.Equal(DatabaseMigrations.BaselineVersion, await DatabaseMigrations.VersionAsync(_dbPath));
     }
 }
+
+/// <summary>
+/// Asking whether a database exists must not create one.
+/// </summary>
+/// <remarks>
+/// Opening a SQLite path that is not there creates it, and every command asks
+/// this question before doing anything. So running one in the wrong directory
+/// used to leave an empty dmarc.db behind, print "run dmarc init-db", and then
+/// init-db would refuse because the file it had just created itself did not
+/// look like a DMARC Monitor database - a dead end reached by following the
+/// instructions exactly.
+/// </remarks>
+public sealed class DatabaseExistenceTests : IDisposable
+{
+    private readonly string _dbPath =
+        Path.Combine(Path.GetTempPath(), $"dmarc-exists-{Guid.NewGuid():N}.db");
+
+    public void Dispose()
+    {
+        SqliteConnection.ClearAllPools();
+        foreach (var suffix in new[] { "", "-wal", "-shm" })
+        {
+            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task AskingAboutADatabaseThatIsNotThereLeavesNothingBehind()
+    {
+        Assert.False(await new ReportStore(_dbPath).IsInitialisedAsync());
+
+        Assert.False(File.Exists(_dbPath));
+    }
+
+    [Fact]
+    public async Task AndTheAnswerIsStillRightOnceItExists()
+    {
+        var store = new ReportStore(_dbPath);
+        await store.InitialiseAsync(DatabaseSchema.Sql);
+
+        Assert.True(await store.IsInitialisedAsync());
+    }
+}

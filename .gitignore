@@ -9,3 +9,8 @@ WorkingDir/
 Reports/
 State/
 Logs/
+
+# A database created by running a command in the repo, not part of the source.
+dmarc.db
+dmarc.db-wal
+dmarc.db-shm

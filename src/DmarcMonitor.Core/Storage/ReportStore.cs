@@ -27,12 +27,16 @@ public sealed class ReportStore
     public ReportStore(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+
+        _databasePath = databasePath;
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
             ForeignKeys = true,
         }.ToString();
     }
+
+    private readonly string _databasePath;
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken ct)
     {
@@ -67,8 +71,19 @@ public sealed class ReportStore
     }
 
     /// <summary>True when the expected tables are present.</summary>
+    /// <remarks>
+    /// Checks for the file before opening it, because opening a SQLite path
+    /// that is not there CREATES it. Every command asks this question first,
+    /// so without this check running any of them in the wrong directory left
+    /// an empty dmarc.db behind, told the operator to run init-db, and then
+    /// init-db refused because a file it had just created itself "does not
+    /// look like a DMARC Monitor database". A dead end reached by following
+    /// the instructions.
+    /// </remarks>
     public async Task<bool> IsInitialisedAsync(CancellationToken ct = default)
     {
+        if (_databasePath is not ":memory:" && !File.Exists(_databasePath)) { return false; }
+
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText =
