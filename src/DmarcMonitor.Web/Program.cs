@@ -79,7 +79,16 @@ if (ProxySetup.ShouldRedirectToHttps(app.Configuration))
 // A URL that matches nothing used to return 404 with an empty body, which is
 // a blank white page with no layout and no way back. The status code stays a
 // real 404 for anything reading it; only what a person sees changes.
-app.UseStatusCodePagesWithReExecute("/not-found");
+//
+// Not for /.well-known, though. Re-executing a 404 runs it back through the
+// pipeline as a request for a page, and that page needs authentication, so a
+// missing MTA-STS policy answered a sending mail server with 302 to a sign-in
+// screen instead of a clean 404. Senders do not follow redirects when fetching
+// a policy - RFC 8461 §3.3 - so it was not a security problem, but it is the
+// wrong answer to a machine that is not a person and cannot sign in.
+app.UseWhen(
+    context => !context.Request.Path.StartsWithSegments("/.well-known"),
+    branch => branch.UseStatusCodePagesWithReExecute("/not-found"));
 
 app.UseStaticFiles();
 app.UseAntiforgery();
