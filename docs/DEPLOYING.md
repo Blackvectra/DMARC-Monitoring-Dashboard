@@ -327,9 +327,14 @@ first - it parses and reports and writes nothing, which is safe against a
 live mailbox:
 
 ```bash
-sudo bash -c 'set -a; . /etc/dmarc-ingest.env; exec sudo -E -u dmarc \
+sudo bash -c 'set -a; . /etc/dmarc-ingest.env; exec sudo -E -H -u dmarc \
     dmarc ingest --db /opt/dmarc/data/dmarc.db --mailbox "$DMARC_MAILBOX" --dry-run'
 ```
+
+The `-H` is load-bearing. `-E` carries the environment file's values across to
+the `dmarc` account, and without `-H` it carries root's `HOME` with them - so
+the binary tries to unpack itself under `/root`, cannot, and dies with the
+exit 159 described below before it has read a single message.
 
 Then:
 

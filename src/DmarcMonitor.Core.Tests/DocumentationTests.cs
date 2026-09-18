@@ -197,4 +197,29 @@ public sealed class DocumentationTests
 
         Assert.Contains(phrase, deploying, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void NoDocumentedCommandHandsTheServiceAccountSomebodyElsesHome()
+    {
+        // `sudo -E -u dmarc` keeps the caller's HOME, so the single-file
+        // binary tries to unpack under /root as the dmarc account and exits
+        // 159 before printing anything. The doc shipped exactly that command
+        // once, directly above the paragraph explaining the symptom. -H is
+        // what makes -E safe here.
+        var root = RepoRoot().FullName;
+
+        foreach (var doc in new[] { "docs/DEPLOYING.md", "docs/RUNNING.md", "docs/INGEST-SETUP.md", "README.md" })
+        {
+            var lines = File.ReadAllLines(Path.Combine(root, doc.Replace('/', Path.DirectorySeparatorChar)));
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (lines[i].Contains("sudo -E", StringComparison.Ordinal)
+                    && lines[i].Contains("-u ", StringComparison.Ordinal)
+                    && !lines[i].Contains("-H", StringComparison.Ordinal))
+                {
+                    Assert.Fail($"{doc}:{i + 1} runs a command as another user with -E but without -H: {lines[i].Trim()}");
+                }
+            }
+        }
+    }
 }
