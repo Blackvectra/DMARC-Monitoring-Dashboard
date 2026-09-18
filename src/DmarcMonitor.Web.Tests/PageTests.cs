@@ -107,6 +107,53 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task ADomainPageSaysWhenAValidSignatureIsBeingThrownAwayForTheWrongDomain()
+    {
+        // The whole point of the section. A report row reading "dkim=pass"
+        // beside "dmarc=fail" looks like the product is wrong to anybody who
+        // has already set DKIM up with the vendor, and they stop looking.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("signing correctly for the wrong domain", html, StringComparison.Ordinal);
+        Assert.Contains("d=training.vendor.example", html, StringComparison.Ordinal);
+
+        // And the distinction itself, not just the label.
+        Assert.Contains("the signing domain to match", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainPageNamesTheSameVendorsWorkingPathAsProofItCanBeDone()
+    {
+        // Both hosts carry the same envelope domain, and one of them already
+        // signs as the customer. That fact is what a vendor cannot argue with.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("23.21.109.197", html, StringComparison.Ordinal);
+        Assert.Contains("the capability exists on", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainPageOffersNoVendorProofForADomainThatHasNone()
+    {
+        // acme.com has no third party signing for it at all, so there is no
+        // working path to point at. Claiming one would be an invention.
+        var html = await Client().GetStringAsync("/domains/acme.com");
+
+        Assert.DoesNotContain("the capability exists on", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainWhoseMailIsMerelyUnsignedIsNotAccusedOfMisalignment()
+    {
+        // acme.com's failures have no valid signature at all, which is a
+        // different fault with a different fix. Offering alignment advice
+        // there sends somebody to a vendor setting that is not the problem.
+        var html = await Client().GetStringAsync("/domains/acme.com");
+
+        Assert.DoesNotContain("signing correctly for the wrong domain", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ADomainNobodyHasReportedOnIsOnboardingRatherThanAnError()
     {
         var response = await Client().GetAsync("/domains/never-seen.example");
@@ -281,8 +328,15 @@ public sealed class SeededApp : WebApplicationFactory<Program>
         // And a month with data in it, so a report can be generated.
         await StoreAsync(store, august, 200, 10);
 
+        // A second domain carrying the shape that reads as a contradiction: a
+        // vendor whose DKIM signature verifies over its own domain, beside the
+        // same vendor's other host signing as the customer correctly. Kept off
+        // acme.com so the figures the other tests assert on do not move.
+        await StoreUnalignedAsync(store, begin);
+
         var slug = await store.CreateClientAsync("Acme Corp");
         await store.AssignDomainAsync("acme.com", slug!);
+        await store.AssignDomainAsync("signed.example", slug!);
 
         // A provider with a real-looking token, stored the way the settings
         // page stores one, so the pages can be checked for leaking it.
@@ -322,6 +376,50 @@ public sealed class SeededApp : WebApplicationFactory<Program>
                 <auth_results>
                   <dkim><domain>acme.com</domain><selector>selector1</selector><result>fail</result></dkim>
                   <spf><domain>acme.com</domain><result>fail</result></spf>
+                </auth_results>
+              </record>
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        if (!parsed.Success) { throw new InvalidOperationException($"seed report did not parse: {parsed.Error}"); }
+        await store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
+    /// <summary>The valid-signature-wrong-domain case, published at p=reject.</summary>
+    private static async Task StoreUnalignedAsync(ReportStore store, DateTimeOffset begin)
+    {
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata>
+                <org_name>google.com</org_name>
+                <report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
+                            <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range>
+              </report_metadata>
+              <policy_published><domain>signed.example</domain><p>reject</p><pct>100</pct>
+                <adkim>s</adkim><aspf>s</aspf></policy_published>
+              <record>
+                <row>
+                  <source_ip>23.21.109.197</source_ip><count>14</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>pass</dkim><spf>pass</spf></policy_evaluated>
+                </row>
+                <identifiers><header_from>signed.example</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>signed.example</domain><selector>s1</selector><result>pass</result></dkim>
+                  <spf><domain>psm.vendor.example</domain><result>pass</result></spf>
+                </auth_results>
+              </record>
+              <record>
+                <row>
+                  <source_ip>147.160.167.15</source_ip><count>289</count>
+                  <policy_evaluated><disposition>reject</disposition><dkim>fail</dkim><spf>fail</spf></policy_evaluated>
+                </row>
+                <identifiers><header_from>signed.example</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>training.vendor.example</domain><selector>s2</selector><result>pass</result></dkim>
+                  <spf><domain>psm.vendor.example</domain><result>pass</result></spf>
                 </auth_results>
               </record>
             </feedback>

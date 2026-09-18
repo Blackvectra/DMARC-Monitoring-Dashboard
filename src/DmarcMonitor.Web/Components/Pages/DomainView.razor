@@ -144,6 +144,129 @@ else
         </section>
     }
 
+    @if (_detail.SigningUnaligned.Count > 0)
+    {
+        @* The line an operator misreads, every time. "dkim=pass" and
+           "dmarc=fail" on the same row is not a contradiction: the signature
+           verified, over a domain DMARC does not accept for this mail. Somebody
+           who has already set DKIM up with the vendor reads the failure as the
+           product being wrong, and stops looking. *@
+        <section class="callout act">
+            <h2>
+                @(_detail.SigningUnaligned.Count == 1
+                    ? "A source is signing correctly for the wrong domain"
+                    : $"{_detail.SigningUnaligned.Count} sources are signing correctly for the wrong domain")
+            </h2>
+            <p>
+                DKIM is working on @(_detail.SigningUnaligned.Count == 1 ? "this source" : "these sources") —
+                the signature@(_detail.SigningUnaligned.Count == 1 ? "" : "s") verified. DMARC threw it away
+                anyway, because it also requires the signing domain to match the one in the From header, and
+                @(_detail.SigningUnaligned.Count == 1 ? "it does" : "they do") not.
+                @if (_detail.Policy is "reject" or "quarantine")
+                {
+                    <strong> At p=@_detail.Policy that mail is being lost right now.</strong>
+                }
+            </p>
+
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th class="num">Failed</th>
+                        <th>Signs as</th>
+                        <th>Why it does not count</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in _detail.SigningUnaligned)
+                    {
+                        @* One source, however many domains it signs. Repeating
+                           the failure count against each of them reads as that
+                           many separate losses - one address on the live data
+                           signs three Mailchimp domains and would have claimed
+                           223 failures three times over. *@
+                        @foreach (var (u, i) in s.UnalignedDkim.Select((u, i) => (u, i)))
+                        {
+                            <tr class="act">
+                                @if (i == 0)
+                                {
+                                    <td rowspan="@s.UnalignedDkim.Count"><code>@s.SourceIp</code></td>
+                                    <td class="num" rowspan="@s.UnalignedDkim.Count">@s.Failing.ToString("N0")</td>
+                                }
+                                <td><code>d=@u.Domain</code></td>
+                                <td>
+                                    @if (u.WouldAlignIfRelaxed)
+                                    {
+                                        <span>A subdomain of @Domain. You publish <code>adkim=s</code>,
+                                              which requires an exact match.</span>
+                                    }
+                                    else if (u.Verdict == AlignmentVerdict.Organizational)
+                                    {
+                                        <span>A subdomain of @Domain, which should align. If it is still
+                                              failing, the signature is being broken after signing.</span>
+                                    }
+                                    else
+                                    {
+                                        <span>A different organisation from @Domain. No alignment setting
+                                              makes this count.</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+
+            <p><strong>What fixes it</strong></p>
+            <ul>
+                @if (_detail.SigningUnaligned.Any(s => s.UnalignedDkim.Any(u => u.Verdict == AlignmentVerdict.Unrelated)))
+                {
+                    <li>
+                        Have the service sign as <code>@Domain</code> rather than as itself. Most senders
+                        call this custom, branded or authenticated DKIM, and it is usually configured
+                        <em>per product</em> — turning it on for one kind of mail leaves the others signing
+                        the vendor's own domain.
+                    </li>
+                }
+                @if (_detail.AnyWouldAlignIfRelaxed)
+                {
+                    <li>
+                        Or change <code>adkim=s</code> to <code>adkim=r</code> on @Domain, which accepts a
+                        signature from a subdomain. Only worth doing once you have confirmed the subdomain
+                        is yours — relaxing alignment widens what counts as authentic.
+                    </li>
+                }
+            </ul>
+
+            @{
+                // Grouped by the host doing it right. Two broken addresses of
+                // one vendor are one fact about that vendor, and saying it
+                // twice makes it read as two separate discoveries.
+                var proven = _detail.SigningUnaligned
+                    .Where(s => s.SameServiceSigningCorrectly is not null)
+                    .GroupBy(s => s.SameServiceSigningCorrectly!, StringComparer.Ordinal)
+                    .ToList();
+            }
+            @foreach (var group in proven)
+            {
+                @* The fact that ends the argument with a vendor. Its own other
+                   sending host already signs as this customer, so "we cannot do
+                   that" is not available. *@
+                <p>
+                    The same service also sends this domain's mail from <code>@group.Key</code>, and
+                    <strong>that path signs as @Domain correctly</strong> — so the capability exists on
+                    this account.
+                    @(group.Count() == 1 ? "This source has" : "These sources have") simply not been
+                    switched over:
+                    @foreach (var (s, i) in group.Select((s, i) => (s, i)))
+                    {
+                        @(i > 0 ? ", " : "")<code>@s.SourceIp</code>
+                    }.
+                </p>
+            }
+        </section>
+    }
+
     @if (_detail.Misconfigured.Count > 0)
     {
         <section>
@@ -167,7 +290,16 @@ else
                             <td><code>@s.SourceIp</code></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="num">@s.Failing.ToString("N0")</td>
-                            <td><code>@s.AuthenticatedFor</code></td>
+                            <td>
+                                <code>@s.AuthenticatedFor</code>
+                                @if (s.UnalignedDkim.Count > 0)
+                                {
+                                    @* So the two sections are visibly about the
+                                       same rows, rather than reading as two
+                                       separate problems on one address. *@
+                                    <span class="muted"> — DKIM valid, not aligned</span>
+                                }
+                            </td>
                             <td class="muted">@Ago(s.LastSeen)</td>
                         </tr>
                     }
@@ -302,6 +434,28 @@ else
                                 else
                                 {
                                     <span>all failing mail</span>
+                                }
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Alignment</td>
+                            <td>
+                                @if (published.StrictDkim || published.StrictSpf)
+                                {
+                                    @* Called out because it is invisible until
+                                       it costs somebody a sending path, and the
+                                       report row it produces reads as a broken
+                                       key rather than as this setting. *@
+                                    <span>
+                                        <code>adkim=@(published.StrictDkim ? "s" : "r")</code>
+                                        <code>aspf=@(published.StrictSpf ? "s" : "r")</code>
+                                        — strict, so a signature or envelope from a
+                                        <em>subdomain</em> of @Domain does not count
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span>relaxed, so a subdomain of @Domain counts</span>
                                 }
                             </td>
                         </tr>

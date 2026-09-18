@@ -5,6 +5,17 @@ using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Domains;
 
+/// <summary>
+/// A signature that verified for a domain other than the one being sent as.
+/// </summary>
+/// <param name="Domain">The <c>d=</c> domain the signature was made with.</param>
+/// <param name="Verdict">How that domain relates to the From domain.</param>
+/// <param name="WouldAlignIfRelaxed">
+/// True when the only thing stopping this from aligning is the domain's own
+/// <c>adkim=s</c>. A different fix from the usual one, and a much smaller one.
+/// </param>
+public sealed record UnalignedSignature(string Domain, AlignmentVerdict Verdict, bool WouldAlignIfRelaxed);
+
 /// <summary>One sending source, as seen for a single domain.</summary>
 public sealed record DomainSource
 {
@@ -26,6 +37,47 @@ public sealed record DomainSource
 
     /// <summary>Other clients this same address was seen failing against.</summary>
     public int OtherClients { get; init; }
+
+    /// <summary>
+    /// Signatures this source made that VERIFIED, on messages that failed DMARC
+    /// anyway.
+    /// </summary>
+    /// <remarks>
+    /// The single most misread line in a DMARC report. "dkim=pass" beside
+    /// "dmarc=fail" is not a contradiction and not a broken key - it is a valid
+    /// signature over the wrong domain, which DMARC discards. Left unexplained
+    /// it costs an operator a day chasing a key that is working perfectly.
+    /// </remarks>
+    public IReadOnlyList<UnalignedSignature> UnalignedDkim { get; init; } = [];
+
+    /// <summary>
+    /// Another address that carries the same service's mail for this domain and
+    /// signs it correctly, when there is one.
+    /// </summary>
+    /// <remarks>
+    /// Worth its own field because it converts an argument into a fact. A
+    /// vendor told "your mail is failing DMARC" will often say it cannot sign
+    /// as a customer's domain; a vendor shown that its own other sending host
+    /// already does, for this very domain, cannot.
+    /// </remarks>
+    public string? SameServiceSigningCorrectly { get; init; }
+
+    /// <summary>The envelope domains seen for this source, as SPF checked them.</summary>
+    public IReadOnlyList<string> EnvelopeDomains { get; init; } = [];
+
+    /// <summary>
+    /// Signing domains this source used on mail that PASSED DMARC.
+    /// </summary>
+    /// <remarks>
+    /// The evidence behind <see cref="SameServiceSigningCorrectly"/>, and the
+    /// reason it is not simply "this source passes DMARC". A source can pass
+    /// while signing somebody else's domain - the live data has three addresses
+    /// passing for bmcedc.com that all sign
+    /// <c>antispam.mailspamprotection.com</c>, exactly the domain the failing
+    /// address signs. Offered as proof, that would send an operator to a vendor
+    /// claiming the vendor already signs as their customer, which it does not.
+    /// </remarks>
+    public IReadOnlyList<string> DkimOnPassingMail { get; init; } = [];
 
     public DateTimeOffset? LastSeen { get; init; }
 
@@ -85,6 +137,20 @@ public sealed record DomainDetail
     public int Pct { get; init; } = 100;
     public string PolicyTarget { get; init; } = "reject";
 
+    /// <summary>
+    /// <c>adkim=s</c>: a signature must be for this exact domain, not a
+    /// subdomain of it.
+    /// </summary>
+    /// <remarks>
+    /// Read from the reports rather than from DNS, so it describes the rule
+    /// that was in force over the mail being counted. Relevant here because it
+    /// decides whether a near-miss signature is a near miss at all.
+    /// </remarks>
+    public bool StrictDkim { get; init; }
+
+    /// <summary><c>aspf=s</c>: the same, for the envelope domain.</summary>
+    public bool StrictSpf { get; init; }
+
     public DateTimeOffset? BaselineStarted { get; init; }
     public int BaselineDays { get; init; } = 14;
 
@@ -135,6 +201,47 @@ public sealed record DomainDetail
     public IReadOnlyList<DomainSource> Impersonating =>
         [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated)
                    .OrderByDescending(s => s.Failing)];
+
+    /// <summary>
+    /// Sources whose DKIM signatures verified and were thrown away anyway.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A view over the sources rather than a fourth bucket: every one of these
+    /// is already listed as misconfigured, which is what it is. This names the
+    /// specific reason, because it is the one an operator gets wrong - the mail
+    /// is signed, the key is good, and the mail is still being rejected.
+    /// </para>
+    /// <para>
+    /// Held to a floor. A single forwarded message produces exactly this shape,
+    /// and on the live data one domain had six such sources at one message each
+    /// sitting above the finding that mattered - a service losing 45 of its 131
+    /// messages. The sources below the floor keep their marker in the table;
+    /// they just do not get a callout of their own.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<DomainSource> SigningUnaligned =>
+        [.. Sources.Where(s => s.UnalignedDkim.Count > 0 && s.Failing >= FailuresWorthACallout)
+                   .OrderByDescending(s => s.Failing)];
+
+    /// <summary>
+    /// How much mail a source has to be losing before it is worth naming on
+    /// its own.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately an absolute count rather than a share. A share hides a
+    /// service that sends a hundred messages for a domain that sends a hundred
+    /// thousand, and that service is exactly the kind whose mail nobody misses
+    /// until an invoice does not arrive.
+    /// </remarks>
+    public const int FailuresWorthACallout = 5;
+
+    /// <summary>
+    /// The sub-case where the domain's own <c>adkim=s</c> is what rejects the
+    /// signature, and relaxing it would not.
+    /// </summary>
+    public bool AnyWouldAlignIfRelaxed =>
+        SigningUnaligned.Any(s => s.UnalignedDkim.Any(u => u.WouldAlignIfRelaxed));
 
     public TriageLevel Level { get; init; } = TriageLevel.Fine;
     public string Headline { get; init; } = "";
@@ -194,10 +301,13 @@ public sealed class DomainDetailService(string databasePath)
             target = reader.IsDBNull(5) ? "reject" : reader.GetString(5);
         }
 
-        var (policy, subPolicy, pct, lastReport) = await PolicyAsync(db, domainId, ct).ConfigureAwait(false);
+        var policyRow = await PolicyAsync(db, domainId, ct).ConfigureAwait(false);
+        var (policy, subPolicy, pct, lastReport) = (policyRow.Policy, policyRow.Sub, policyRow.Pct, policyRow.Last);
         var (messages, passing, overridden) = await TotalsAsync(db, domainId, since, ct).ConfigureAwait(false);
         var sources = await SourcesAsync(db, domainId, since, ct).ConfigureAwait(false);
         var reporters = await ReportersAsync(db, domainId, since, ct).ConfigureAwait(false);
+
+        sources = MarkTheUnaligned(sources, name, policyRow.StrictDkim);
 
         var detail = new DomainDetail
         {
@@ -208,6 +318,8 @@ public sealed class DomainDetailService(string databasePath)
             SubdomainPolicy = subPolicy,
             Pct = pct,
             PolicyTarget = target,
+            StrictDkim = policyRow.StrictDkim,
+            StrictSpf = policyRow.StrictSpf,
             BaselineStarted = baseline,
             BaselineDays = baselineDays,
             Messages = messages,
@@ -236,7 +348,10 @@ public sealed class DomainDetailService(string databasePath)
         return detail with { Level = verdict.Level, Headline = verdict.Headline };
     }
 
-    private static async Task<(string Policy, string Sub, int Pct, DateTimeOffset? Last)> PolicyAsync(
+    private readonly record struct PublishedPolicy(
+        string Policy, string Sub, int Pct, DateTimeOffset? Last, bool StrictDkim, bool StrictSpf);
+
+    private static async Task<PublishedPolicy> PolicyAsync(
         SqliteConnection db, string domainId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
@@ -252,7 +367,8 @@ public sealed class DomainDetailService(string databasePath)
         // policy that was superseded hours ago and be right again on the next
         // refresh, which is the hardest kind of wrong to notice.
         command.CommandText = """
-            SELECT policy_p, COALESCE(policy_sp, ''), COALESCE(policy_pct, 100), date_end
+            SELECT policy_p, COALESCE(policy_sp, ''), COALESCE(policy_pct, 100), date_end,
+                   COALESCE(policy_adkim, 'r'), COALESCE(policy_aspf, 'r')
             FROM aggregate_reports
             WHERE domain_id = $domain
             ORDER BY date_end DESC, received_at DESC
@@ -261,13 +377,20 @@ public sealed class DomainDetailService(string databasePath)
         command.Parameters.AddWithValue("$domain", domainId);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return ("none", "", 100, null); }
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            return new PublishedPolicy("none", "", 100, null, false, false);
+        }
 
-        return (
+        return new PublishedPolicy(
             reader.IsDBNull(0) ? "none" : reader.GetString(0),
             reader.GetString(1),
             reader.GetInt32(2),
-            reader.IsDBNull(3) ? null : ParseDate(reader.GetString(3)));
+            reader.IsDBNull(3) ? null : ParseDate(reader.GetString(3)),
+            // Relaxed unless the report says otherwise, which is what RFC 7489
+            // defaults to. Guessing strict would invent near misses.
+            string.Equals(reader.GetString(4), "s", StringComparison.OrdinalIgnoreCase),
+            string.Equals(reader.GetString(5), "s", StringComparison.OrdinalIgnoreCase));
     }
 
     private static async Task<(long Messages, long Passing, long Overridden)> TotalsAsync(
@@ -320,7 +443,24 @@ public sealed class DomainDetailService(string databasePath)
                      WHERE o.source_ip = r.source_ip
                        AND o.domain_id <> $domain
                        AND o.dmarc_result = 'fail'),
-                   MAX(r.date_begin)
+                   MAX(r.date_begin),
+                   -- Kept apart from the column above, which merges the two
+                   -- mechanisms into one "it proved something". Which one
+                   -- proved it decides the fix: an unaligned DKIM signature is
+                   -- the sender signing the wrong domain, an unaligned SPF pass
+                   -- is usually just how a relay works and cannot be fixed the
+                   -- same way.
+                   COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
+                     CASE WHEN r.dmarc_result = 'fail' AND r.dkim_auth_result = 'pass'
+                          THEN r.dkim_domain END), ''), ''),
+                   COALESCE(NULLIF(GROUP_CONCAT(DISTINCT NULLIF(r.spf_domain, '')), ''), ''),
+                   -- Signatures on mail that PASSED, which is a different
+                   -- question from whether the source passes: a source can pass
+                   -- DMARC by some other route while its signatures name
+                   -- somebody else entirely.
+                   COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
+                     CASE WHEN r.dmarc_result = 'pass' AND r.dkim_auth_result = 'pass'
+                          THEN r.dkim_domain END), ''), '')
             FROM aggregate_records r
             WHERE r.domain_id = $domain AND r.date_begin >= $since
               -- Overridden FAILURES only. A mailing list breaking
@@ -352,9 +492,78 @@ public sealed class DomainDetailService(string databasePath)
                 AuthenticatedFor = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 OtherClients = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
                 LastSeen = reader.IsDBNull(5) ? null : ParseDate(reader.GetString(5)),
+                // Carried as the raw signing domains; the alignment verdict is
+                // put on afterwards, where the From domain and the domain's own
+                // alignment mode are both in hand.
+                UnalignedDkim = [.. Split(reader.IsDBNull(6) ? "" : reader.GetString(6))
+                    .Select(d => new UnalignedSignature(d, AlignmentVerdict.Exact, false))],
+                EnvelopeDomains = [.. Split(reader.IsDBNull(7) ? "" : reader.GetString(7))],
+                DkimOnPassingMail = [.. Split(reader.IsDBNull(8) ? "" : reader.GetString(8))],
             });
         }
         return results;
+    }
+
+    private static IEnumerable<string> Split(string concatenated) =>
+        concatenated.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(d => d.TrimEnd('.').ToLowerInvariant())
+            .Distinct(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Works out which of the verified signatures DMARC threw away, and why.
+    /// </summary>
+    /// <remarks>
+    /// Done here rather than in SQL because it needs the From domain and the
+    /// published alignment mode together, and because the answer for a
+    /// signature that matches exactly is "nothing to say" - a source can fail
+    /// DMARC on some messages while signing this domain correctly on others,
+    /// and that is a broken signature, not a misaddressed one.
+    /// </remarks>
+    private static List<DomainSource> MarkTheUnaligned(List<DomainSource> sources, string domain, bool strictDkim)
+    {
+        // Envelope domains belonging to a service that is already getting this
+        // right somewhere. Only from sources with no failures at all - a source
+        // that half works is not proof that the vendor can do it - and only
+        // where the source actually produced an ALIGNED signature. Passing
+        // DMARC is not the same claim: three addresses pass for bmcedc.com on
+        // the live data while signing the very domain the failing address
+        // signs, and reading those as proof would be a false accusation
+        // against a vendor.
+        var provenGood = sources
+            .Where(s => s.IsClean && s.Messages > 0
+                     && s.DkimOnPassingMail.Any(d => Alignment.Aligns(d, domain, strictDkim)))
+            .SelectMany(s => s.EnvelopeDomains.Select(e => (Envelope: e, s.SourceIp)))
+            // A shared envelope only means "the same service" when the envelope
+            // is somebody else's. Every one of the domain's own servers shares
+            // the domain's own envelope, and pointing one at another as proof
+            // of anything is noise.
+            .Where(x => Alignment.Classify(x.Envelope, domain) == AlignmentVerdict.Unrelated)
+            .GroupBy(x => x.Envelope, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().SourceIp, StringComparer.Ordinal);
+
+        return
+        [
+            .. sources.Select(s =>
+            {
+                var unaligned = s.UnalignedDkim
+                    .Select(u => Alignment.Classify(u.Domain, domain))
+                    .Zip(s.UnalignedDkim, (verdict, u) => (verdict, u.Domain))
+                    .Where(x => x.verdict != AlignmentVerdict.Exact)
+                    .Select(x => new UnalignedSignature(
+                        x.Domain,
+                        x.verdict,
+                        WouldAlignIfRelaxed: x.verdict == AlignmentVerdict.Organizational && strictDkim))
+                    .ToList();
+
+                var sibling = unaligned.Count == 0
+                    ? null
+                    : s.EnvelopeDomains
+                        .Select(e => provenGood.GetValueOrDefault(e))
+                        .FirstOrDefault(ip => ip is not null && !string.Equals(ip, s.SourceIp, StringComparison.Ordinal));
+
+                return s with { UnalignedDkim = unaligned, SameServiceSigningCorrectly = sibling };
+            }),
+        ];
     }
 
     private static async Task<List<DomainReporter>> ReportersAsync(
