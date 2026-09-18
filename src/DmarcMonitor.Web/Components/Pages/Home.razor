@@ -59,17 +59,43 @@ else if (_rows.Count == 0)
 }
 else
 {
+    @* The counts were already here and were decoration: they said four
+       domains were losing mail and gave no way to see only those four. A
+       severity is the first thing anybody filters by, so it is the filter. *@
     <div class="counts">
+        <button type="button" class="count @(_level is null ? "on" : "")"
+                @onclick="() => Filter(null)">@_rows.Count all</button>
         @foreach (var level in new[] { TriageLevel.Urgent, TriageLevel.Act, TriageLevel.Watch, TriageLevel.OnTrack, TriageLevel.Fine })
         {
             var n = _rows.Count(r => r.Level == level);
             @if (n > 0)
             {
-                <span class="count @Css(level)">@n @Label(level)</span>
+                var chosen = _level == level;
+                <button type="button" class="count @Css(level) @(chosen ? "on" : "")"
+                        aria-pressed="@chosen.ToString().ToLowerInvariant()"
+                        @onclick="() => Filter(level)">@n @Label(level)</button>
             }
         }
+
+        <input class="find" type="search" placeholder="Find a domain or client"
+               aria-label="Find a domain or client"
+               @bind="_find" @bind:event="oninput" />
     </div>
 
+    var shown = Shown();
+
+    @if (shown.Count == 0)
+    {
+        @* A filter that matches nothing has to say so. An empty table under a
+           search box reads as "no domains", which is not what happened. *@
+        <p class="muted">
+            Nothing matches @(_level is null ? "" : $"\"{Label(_level.Value)}\"")@(_level is not null && _find.Length > 0 ? " and " : "")@(_find.Length > 0 ? $"\"{_find}\"" : "").
+            <button class="linkish" @onclick="ClearFilters">Show all @_rows.Count</button>
+        </p>
+    }
+    else
+    {
+    <div class="table-scroll">
     <table class="triage">
         <thead>
             <tr>
@@ -83,7 +109,7 @@ else
             </tr>
         </thead>
         <tbody>
-            @foreach (var row in _rows)
+            @foreach (var row in shown)
             {
                 <tr class="@Css(row.Level)">
                     <td><span class="pip @Css(row.Level)" title="@Label(row.Level)"></span></td>
@@ -106,6 +132,16 @@ else
             }
         </tbody>
     </table>
+    </div>
+
+    @if (shown.Count < _rows.Count)
+    {
+        <p class="sub">
+            Showing @shown.Count of @_rows.Count.
+            <button class="linkish" @onclick="ClearFilters">Show all</button>
+        </p>
+    }
+    }
 }
 
 @code {
@@ -113,7 +149,46 @@ else
     private string? _error;
     private int _days = 14;
 
+    private TriageLevel? _level;
+    private string _find = "";
+
     protected override Task OnInitializedAsync() => LoadAsync();
+
+    /// <summary>
+    /// The rows after the severity filter and the search box.
+    /// </summary>
+    /// <remarks>
+    /// Ordering is left exactly as the triage service returned it. Worst first
+    /// is the whole point of the page, and re-sorting a filtered view by
+    /// anything else would quietly change what "the top row" means.
+    /// </remarks>
+    private IReadOnlyList<DomainTriage> Shown()
+    {
+        if (_rows is null) { return []; }
+
+        var rows = _level is null ? _rows : _rows.Where(r => r.Level == _level).ToList();
+
+        var find = _find.Trim();
+        if (find.Length == 0) { return [.. rows]; }
+
+        // Client as well as domain: an operator who has just been telephoned
+        // knows the customer's name, not which of their four domains it is.
+        return
+        [
+            .. rows.Where(r =>
+                r.Domain.Contains(find, StringComparison.OrdinalIgnoreCase)
+                || r.ClientName.Contains(find, StringComparison.OrdinalIgnoreCase)),
+        ];
+    }
+
+    /// <summary>Clicking the chosen severity again clears it, as a toggle.</summary>
+    private void Filter(TriageLevel? level) => _level = _level == level ? null : level;
+
+    private void ClearFilters()
+    {
+        _level = null;
+        _find = "";
+    }
 
     private async Task LoadAsync()
     {

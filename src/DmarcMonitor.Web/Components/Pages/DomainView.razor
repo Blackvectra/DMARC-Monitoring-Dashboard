@@ -14,7 +14,13 @@
     <div>
         <p class="crumb"><a href="">Triage</a> / @Domain</p>
         <h1>@Domain</h1>
-        @if (_detail is not null)
+        @* Not when the client is named after the domain, which is what
+           onboarding by domain name produces for most of them: the heading
+           otherwise prints the same string three times running, once in the
+           breadcrumb, once as the title and once as the customer. *@
+        @if (_detail is not null
+             && !string.IsNullOrWhiteSpace(_detail.ClientName)
+             && !_detail.ClientName.Equals(Domain, StringComparison.OrdinalIgnoreCase))
         {
             <p class="sub">@_detail.ClientName</p>
         }
@@ -103,13 +109,51 @@ else
         </div>
     </div>
 
+    @*
+        The page is four screens of evidence and somebody arrives at it with
+        one question. Jump links rather than tabs on purpose: a finding hidden
+        behind a tab is a finding nobody reads, and the whole point of the
+        section below is that a valid-but-unaligned signature stops being
+        invisible. Everything stays on the page; this only shortens the
+        distance to it.
+
+        Each link carries its own count, so the shape of the domain is legible
+        before following any of them.
+    *@
+    <nav class="jump" aria-label="Sections of this page">
+        @if (_detail.SigningUnaligned.Count > 0)
+        {
+            <a href="#unaligned" class="jump-alert">@_detail.SigningUnaligned.Count signing unaligned</a>
+        }
+        @if (_detail.Impersonating.Count > 0)
+        {
+            <a href="#impersonating">@_detail.Impersonating.Count unauthenticated</a>
+        }
+        @if (_detail.Misconfigured.Count > 0)
+        {
+            <a href="#failing">@_detail.Misconfigured.Count failing</a>
+        }
+        @if (_detail.Clean.Count > 0)
+        {
+            <a href="#clean">@_detail.Clean.Count clean</a>
+        }
+        <a href="#published">Published DNS</a>
+        <a href="#reporting">
+            Reporting
+            @if (_detail.Reporters.Any(r => r.HasGoneQuiet))
+            {
+                <span class="pip watch" title="a receiver has stopped reporting"></span>
+            }
+        </a>
+    </nav>
+
     @if (_detail.Impersonating.Count > 0)
     {
-        <section>
+        <section id="impersonating">
             <h2>Sending as @Domain without authenticating</h2>
             <p class="sub">Proved nothing when they failed. Either a service nobody recorded, or somebody
                sending as this domain.</p>
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
                         <th>Source</th>
@@ -140,7 +184,7 @@ else
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
         </section>
     }
 
@@ -151,7 +195,7 @@ else
            verified, over a domain DMARC does not accept for this mail. Somebody
            who has already set DKIM up with the vendor reads the failure as the
            product being wrong, and stops looking. *@
-        <section class="callout act">
+        <section class="callout act" id="unaligned">
             <h2>
                 @(_detail.SigningUnaligned.Count == 1
                     ? "A source is signing correctly for the wrong domain"
@@ -168,7 +212,7 @@ else
                 }
             </p>
 
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
                         <th>Source</th>
@@ -215,7 +259,7 @@ else
                         }
                     }
                 </tbody>
-            </table>
+            </table></div>
 
             <p><strong>What fixes it</strong></p>
             <ul>
@@ -269,11 +313,11 @@ else
 
     @if (_detail.Misconfigured.Count > 0)
     {
-        <section>
+        <section id="failing">
             <h2>This domain's own mail, failing</h2>
             <p class="sub">Real services, signing as themselves rather than as @Domain. This is mail
                being lost, and it is the work to do before enforcing.</p>
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
                         <th>Source</th>
@@ -304,15 +348,15 @@ else
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
         </section>
     }
 
     @if (_detail.Clean.Count > 0)
     {
-        <section>
+        <section id="clean">
             <h2>Authenticating cleanly</h2>
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
                         <th>Source</th>
@@ -330,7 +374,7 @@ else
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
             @if (_detail.Clean.Count > 10 && !_showAllClean)
             {
                 <p><button class="linkish" @onclick="() => _showAllClean = true">
@@ -352,7 +396,7 @@ else
         </p>
     }
 
-    <section>
+    <section id="published">
         <h2>What is published right now</h2>
         <p class="sub">Everything above comes from reports, and the newest of those is
            @Ago(_detail.LastReport). This is DNS, read just now.</p>
@@ -398,7 +442,7 @@ else
                     </section>
                 }
 
-                <table class="triage">
+                <div class="table-scroll"><table class="triage">
                     <tbody>
                         <tr>
                             <td>Policy</td>
@@ -489,12 +533,12 @@ else
                             </tr>
                         }
                     </tbody>
-                </table>
+                </table></div>
             }
         }
     </section>
 
-    <section>
+    <section id="reporting">
         <h2>Who is reporting</h2>
         <p class="sub">A clean pass rate heard from one receiver is a partial picture, not a verdict.</p>
 
@@ -529,7 +573,7 @@ else
         }
         else
         {
-            <table class="triage">
+            <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr><th>Receiver</th><th class="num">Reports</th><th class="num">Share</th><th>Last</th></tr>
                 </thead>
@@ -547,7 +591,7 @@ else
                         </tr>
                     }
                 </tbody>
-            </table>
+            </table></div>
             <p class="sub">Share is of every message ever reported for this domain, and the list is the whole
                history rather than the window: a receiver that stopped before the window began would not
                appear in it at all, which is exactly the case worth seeing.</p>

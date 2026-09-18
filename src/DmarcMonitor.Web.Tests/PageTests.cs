@@ -154,6 +154,125 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task TheShellSeparatesDailyWorkFromSetup()
+    {
+        // Nine links in one flat list made Triage, which is where every
+        // morning starts, look like the same kind of thing as Updates.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("nav-group", html, StringComparison.Ordinal);
+        Assert.Contains(">Daily<", html, StringComparison.Ordinal);
+        Assert.Contains(">Setup<", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheShellButtonsCallScriptRatherThanBlazor()
+    {
+        // This layout has no render mode, so pages are interactive islands
+        // inside a static shell and an @onclick here is never wired up. Both
+        // buttons shipped that way once: they rendered perfectly and did
+        // nothing at all when clicked, which only a real browser caught.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("dmarcShell.toggleNav()", html, StringComparison.Ordinal);
+        Assert.Contains("dmarcTheme.toggle()", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheThemeIsAppliedBeforeThePagePaints()
+    {
+        // A deferred script runs after first paint, so a person who chose dark
+        // would get a white flash on every navigation.
+        var html = await Client().GetStringAsync("/");
+
+        var head = html[..html.IndexOf("</head>", StringComparison.Ordinal)];
+        Assert.Contains("dmarc-theme", head, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LightIsTheDefaultAndDarkIsNotAssumedFromTheOperatingSystem()
+    {
+        // Somebody who picked light meant it. Inheriting the OS preference
+        // would have the app go dark because their laptop did at sunset.
+        //
+        // Asserted against the stylesheet rather than the page: the rule lives
+        // in app.css, so checking the HTML for it passes whatever the CSS says.
+        var css = await Client().GetStringAsync("/app.css");
+
+        Assert.Contains("data-theme=\"dark\"", css, StringComparison.Ordinal);
+        Assert.DoesNotContain("prefers-color-scheme: dark", css, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EveryColourInTheStylesheetIsAToken()
+    {
+        // The first pass at a light theme left a dozen literal dark hexes in
+        // the rules - table borders, row hovers, code backgrounds - and they
+        // came out as black slots on a white page. Only the two token blocks
+        // at the top may name a colour.
+        var css = await Client().GetStringAsync("/app.css");
+
+        var rules = css[css.IndexOf("* { box-sizing", StringComparison.Ordinal)..];
+        var literals = System.Text.RegularExpressions.Regex.Matches(rules, "#[0-9a-fA-F]{3,8}")
+            .Select(m => m.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        Assert.True(literals.Count == 0, $"hard-coded colours outside the token blocks: {string.Join(", ", literals)}");
+    }
+
+    [Fact]
+    public async Task TriageCountsAreFiltersRatherThanLabels()
+    {
+        // Saying four domains are losing mail and giving no way to see only
+        // those four is a label, not a tool.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("<button type=\"button\" class=\"count", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TablesCanScrollWithoutStretchingTheWholePage()
+    {
+        // A table is the one thing here that cannot reflow honestly: stacking
+        // rows into cards loses the column-to-column comparison that is the
+        // entire reason these are tables. So they scroll, bounded to the
+        // table rather than the page.
+        foreach (var route in new[] { "/", "/domains", "/domains/acme.com" })
+        {
+            var html = await Client().GetStringAsync(route);
+            Assert.Contains("table-scroll", html, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task TheDomainPageOffersJumpLinksRatherThanHidingSectionsBehindTabs()
+    {
+        // Tabs would have hidden the unaligned-signature finding, which exists
+        // precisely so a discarded valid signature stops being invisible.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("class=\"jump\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"unaligned\"", html, StringComparison.Ordinal);
+
+        // Still rendered on the page, not merely linked to.
+        Assert.Contains("signing correctly for the wrong domain", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADomainNamedAfterItsClientDoesNotPrintTheNameTwice()
+    {
+        // Onboarding by domain name makes the client name equal the domain for
+        // most of them, and the heading printed it in the breadcrumb, as the
+        // title and again as the customer.
+        var html = await Client().GetStringAsync("/domains/acme.com");
+
+        var head = html[html.IndexOf("<h1", StringComparison.Ordinal)..];
+        var afterTitle = head[..Math.Min(400, head.Length)];
+        Assert.DoesNotContain("<p class=\"sub\">acme.com</p>", afterTitle, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ADomainNobodyHasReportedOnIsOnboardingRatherThanAnError()
     {
         var response = await Client().GetAsync("/domains/never-seen.example");

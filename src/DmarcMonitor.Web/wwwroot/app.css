@@ -6,22 +6,91 @@
     severity also has a label and a position in the ordering. Roughly one in
     twelve men cannot reliably separate red from green, and this is a tool for
     finding problems.
+
+    Light is the default. A screenshot of this lands in a client's ticket or a
+    report, and a dark one looks like a terminal in a document. Dark is still
+    here for anyone who wants it, chosen explicitly rather than inherited from
+    the operating system: a person who set this to light meant it, and having
+    it flip because their laptop went dark at sunset is not a preference being
+    honoured.
+
+    EVERY colour is a token. The first attempt at a light theme left a dozen
+    literal dark hexes scattered through the rules below - table borders, row
+    hovers, code backgrounds - and they turned into black slots on a white
+    page. If a new rule needs a colour, add a token rather than a hex.
 */
 
+/*
+    Depth runs the opposite way in the two themes, which is why these are
+    three separate tokens rather than one colour lightened twice. On light the
+    page is grey and a panel is white; on dark the page is near-black and a
+    panel lifts off it. Collapsing them made code blocks inside panels vanish.
+*/
 :root {
+    --bg: #f6f8fa;       /* the page behind everything */
+    --panel: #ffffff;    /* cards, callouts, the sidebar */
+    --sunken: #f0f3f6;   /* code blocks: below the panel they sit in */
+    --field: #ffffff;    /* inputs and selects */
+
+    --line: #d1d9e0;
+    /* A second, quieter line for rules inside a panel: a table's row borders
+       at the same weight as its outer border makes a grid rather than a list. */
+    --line-soft: #e4e8ed;
+    --text: #1f2328;
+    --muted: #59636e;
+    --dim: #818b98;
+    --hover: #f0f3f6;
+
+    --urgent: #cf222e;
+    --act: #bc4c00;
+    --watch: #9a6700;
+    --fine: #1a7f37;
+    --ontrack: #0969da;   /* a rollout in progress is information, not a warning */
+    --link: #0969da;
+    --warn: #9a6700;      /* used by .warn-inline, which referenced it undefined */
+
+    /* Tinted backgrounds for banners. Held as their own tokens because the
+       light and dark versions are not a tint of the same colour. */
+    --warn-bg: #fff8c5;
+    --warn-line: #d4a72c;
+    --accent-bg: #ddf4ff;
+
+    /* What sits ON a solid --link background. Inverts between themes, and
+       getting it wrong makes a primary button unreadable rather than ugly. */
+    --on-accent: #ffffff;
+}
+
+/*
+    Dark, by explicit choice. Set on <html> by the toggle in the sidebar and
+    restored from localStorage before first paint, so the page does not flash
+    white on its way to dark.
+*/
+:root[data-theme="dark"] {
     --bg: #0d1117;
     --panel: #161b22;
+    --sunken: #0d1117;
+    --field: #0d1117;
+
     --line: #30363d;
+    --line-soft: #21262d;
     --text: #e6edf3;
     --muted: #8b949e;
     --dim: #484f58;
+    --hover: #1c2128;
 
     --urgent: #f85149;
     --act: #db6d28;
     --watch: #d29922;
     --fine: #3fb950;
-    --ontrack: #58a6ff;   /* a rollout in progress is information, not a warning */
+    --ontrack: #58a6ff;
     --link: #58a6ff;
+    --warn: #d29922;
+
+    --warn-bg: #2d2410;
+    --warn-line: #5a4510;
+    --accent-bg: #0d1b2a;
+
+    --on-accent: #0d1117;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -53,7 +122,7 @@ a:hover { text-decoration: underline; }
 .brand { display: flex; align-items: center; gap: 9px; padding: 0 16px 18px; }
 .brand-mark {
     width: 26px; height: 26px; border-radius: 6px;
-    background: var(--link); color: #0d1117;
+    background: var(--link); color: var(--on-accent);
     display: grid; place-items: center;
     font-weight: 700; font-size: 11px;
 }
@@ -65,8 +134,8 @@ a:hover { text-decoration: underline; }
     color: var(--muted);
     border-left: 2px solid transparent;
 }
-.nav-item:hover { color: var(--text); background: #1c2128; text-decoration: none; }
-.nav-item.active { color: var(--text); border-left-color: var(--link); background: #1c2128; }
+.nav-item:hover { color: var(--text); background: var(--hover); text-decoration: none; }
+.nav-item.active { color: var(--text); border-left-color: var(--link); background: var(--hover); }
 
 .sidebar-foot { margin-top: auto; padding: 14px 16px 0; border-top: 1px solid var(--line); }
 .who { color: var(--muted); font-size: 12px; }
@@ -84,16 +153,16 @@ h2 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
 .head-actions label { color: var(--muted); font-size: 12px; }
 
 select {
-    background: var(--bg); color: var(--text);
+    background: var(--field); color: var(--text);
     border: 1px solid var(--line); border-radius: 6px;
     padding: 4px 8px; margin-left: 6px; font: inherit;
 }
 
 .banner-warn {
-    background: #2d2410; border: 1px solid #5a4510; border-left: 3px solid var(--watch);
+    background: var(--warn-bg); border: 1px solid var(--warn-line); border-left: 3px solid var(--watch);
     border-radius: 6px; padding: 9px 13px; margin-bottom: 18px; font-size: 13px;
 }
-.banner-warn code { background: #0d1117; padding: 1px 5px; border-radius: 3px; }
+.banner-warn code { background: var(--panel); padding: 1px 5px; border-radius: 3px; }
 
 .empty {
     background: var(--panel); border: 1px solid var(--line);
@@ -101,7 +170,7 @@ select {
 }
 .empty p { color: var(--muted); margin-bottom: 10px; }
 .empty pre {
-    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    background: var(--sunken); border: 1px solid var(--line); border-radius: 6px;
     padding: 11px 13px; margin: 10px 0; color: var(--link);
     overflow-x: auto; white-space: pre-wrap;
 }
@@ -119,6 +188,114 @@ select {
 .count.fine   { border-color: var(--fine);   color: var(--fine); }
 .count.ontrack{ border-color: var(--ontrack); color: var(--ontrack); }
 
+/*
+    The counts are buttons on the triage page: saying four domains are losing
+    mail and giving no way to see only those four is a label, not a tool.
+    Styled as one rule with the spans above so a count reads identically
+    whether or not it happens to be clickable on that page.
+*/
+button.count {
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    color: var(--muted);
+}
+button.count:hover { border-color: var(--muted); }
+
+/* The chosen one is filled rather than merely brighter: on a row of five
+   chips, "which is selected" must survive being read in greyscale. */
+button.count.on {
+    background: var(--text);
+    border-color: var(--text);
+    color: var(--panel);
+}
+button.count.urgent.on { background: var(--urgent); border-color: var(--urgent); color: var(--on-accent); }
+button.count.act.on    { background: var(--act);    border-color: var(--act);    color: var(--on-accent); }
+button.count.watch.on  { background: var(--watch);  border-color: var(--watch);  color: var(--on-accent); }
+button.count.fine.on   { background: var(--fine);   border-color: var(--fine);   color: var(--on-accent); }
+button.count.ontrack.on{ background: var(--ontrack); border-color: var(--ontrack); color: var(--on-accent); }
+
+/* Pushed to the end of the row, so filters stay together on the left. */
+.find {
+    margin-left: auto;
+    min-width: 220px;
+    background: var(--field);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 13px;
+}
+.find::placeholder { color: var(--dim); }
+
+@media (max-width: 860px) {
+    /* Below the chips rather than beside them; margin-left:auto on a wrapped
+       flex line pushes it into its own row with a ragged gap. */
+    .find { margin-left: 0; width: 100%; }
+}
+
+/* The row above a list: what to show, and how to group it. */
+.list-controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+.list-controls .find { margin-left: 0; }
+
+.toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.toggle input { cursor: pointer; }
+
+/* ---- in-page section nav ----------------------------------------------- */
+
+/*
+    The domain page is four screens of evidence and somebody arrives with one
+    question. Deliberately links rather than tabs: a finding behind a tab is a
+    finding nobody reads, and the alignment section exists precisely so a valid
+    signature being discarded stops being invisible.
+*/
+.jump {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding-bottom: 16px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+}
+.jump a {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.jump a:hover { color: var(--text); border-color: var(--muted); text-decoration: none; }
+
+/* The one that is a problem rather than a heading. */
+.jump a.jump-alert { border-color: var(--act); color: var(--act); }
+
+/* An anchored section must not land under the floating menu button on a
+   narrow screen, nor flush against the top edge on a wide one. */
+section[id] { scroll-margin-top: 16px; }
+@media (max-width: 860px) {
+    section[id] { scroll-margin-top: 60px; }
+}
+
 /* ---- triage table ------------------------------------------------------ */
 
 .triage { width: 100%; border-collapse: collapse; }
@@ -128,8 +305,8 @@ select {
     text-transform: uppercase; letter-spacing: .4px;
     color: var(--dim); padding: 0 10px 7px; border-bottom: 1px solid var(--line);
 }
-.triage td { padding: 10px; border-bottom: 1px solid #21262d; vertical-align: top; }
-.triage tbody tr:hover { background: #12171d; }
+.triage td { padding: 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+.triage tbody tr:hover { background: var(--hover); }
 .triage .num { text-align: right; font-variant-numeric: tabular-nums; }
 .triage th.num { text-align: right; }
 
@@ -192,12 +369,12 @@ section { margin-bottom: 26px; }
 .form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
 .form-row input, .form-row select { min-width: 220px; }
 .form-row input {
-    background: var(--bg); color: var(--text);
+    background: var(--field); color: var(--text);
     border: 1px solid var(--line); border-radius: 6px;
     padding: 5px 9px; font: inherit;
 }
 button.primary {
-    background: var(--link); color: var(--bg); border: 0; border-radius: 6px;
+    background: var(--link); color: var(--on-accent); border: 0; border-radius: 6px;
     padding: 6px 14px; font: inherit; font-weight: 600; cursor: pointer;
 }
 button.primary:disabled { opacity: .45; cursor: default; }
@@ -209,7 +386,7 @@ button.primary:disabled { opacity: .45; cursor: default; }
 /* A link that acts as the primary action on a page. Anchor rather than
    button because it opens a document, and middle-click should work. */
 a.primary-link {
-    background: var(--link); color: var(--bg); border-radius: 6px;
+    background: var(--link); color: var(--on-accent); border-radius: 6px;
     padding: 6px 14px; font-weight: 600; text-decoration: none;
 }
 
@@ -223,8 +400,8 @@ code.wrap { word-break: break-all; white-space: normal; }
 /* Fix page: one block per domain, one boxed plan per change. */
 .domain-fix { margin-bottom: 26px; }
 .domain-fix h2 .provider { font-size: 12px; margin-left: 10px; }
-.pill { font-size: 11px; padding: 1px 6px; border: 1px solid #30363d; border-radius: 10px; margin-left: 8px; }
-.plan { border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
+.pill { font-size: 11px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 10px; margin-left: 8px; }
+.plan { border: 1px solid var(--line-soft); border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
 .plan.refused { border-left: 3px solid var(--act); }
 .plan-summary { margin-bottom: 6px; }
 .diff td:first-child { color: var(--muted); width: 80px; }
@@ -240,7 +417,7 @@ code.wrap { word-break: break-all; white-space: normal; }
     text-align: center;
     transition: border-color .12s, background .12s;
 }
-.dropzone.over { border-color: var(--link); background: #0d1b2a; }
+.dropzone.over { border-color: var(--link); background: var(--accent-bg); }
 .dropzone.busy { border-style: solid; }
 .dropzone-input {
     position: absolute;
@@ -263,8 +440,8 @@ code.wrap { word-break: break-all; white-space: normal; }
 .diff code.value { display: block; margin-top: 2px; word-break: break-all; }
 .diff td .sub { margin: 4px 0 0; font-size: 12px; }
 pre.policy {
-    background: #0d1117;
-    border: 1px solid #21262d;
+    background: var(--sunken);
+    border: 1px solid var(--line-soft);
     border-radius: 6px;
     padding: 10px 12px;
     overflow-x: auto;
@@ -282,7 +459,7 @@ pre.policy {
     justify-content: space-between;
     gap: 12px;
     padding: 12px 14px;
-    border: 1px solid #21262d;
+    border: 1px solid var(--line-soft);
     border-radius: 6px;
     margin-bottom: 14px;
 }
@@ -293,7 +470,7 @@ pre.policy {
     min-width: 1.4em;
     font-size: 17px;
     font-weight: 600;
-    color: var(--ink, #e6edf3);
+    color: var(--text);
 }
 .worklist .count.act strong { color: var(--act); }
 .worklist .count.watch strong { color: var(--watch); }
@@ -318,4 +495,114 @@ pre.policy {
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--muted);
+}
+
+/* ---- sidebar groups ---------------------------------------------------- */
+
+/*
+    Nine links in one flat list made "Triage" and "Updates" look like the same
+    kind of thing. They are not: one is where the morning starts, the other is
+    touched twice a year.
+*/
+.nav-group {
+    margin: 0 0 4px;
+    padding: 14px 16px 5px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--dim);
+}
+
+/* ---- theme toggle ------------------------------------------------------ */
+
+.theme-toggle {
+    background: none;
+    border: 0;
+    padding: 0;
+    margin-top: 8px;
+    color: var(--muted);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.theme-toggle:hover { color: var(--text); }
+
+/* ---- the narrow-screen button, hidden on a real screen ----------------- */
+
+.nav-toggle {
+    display: none;
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 30;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 7px 11px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+}
+
+.scrim { display: none; }
+
+/* ---- narrow screens ---------------------------------------------------- */
+
+/*
+    Not a phone-first redesign. The job here is that the app stays usable on a
+    phone rather than becoming a 210px sidebar next to a 100px column of
+    squeezed table: the navigation slides away, and the tables scroll
+    sideways inside their own box instead of stretching the page.
+*/
+@media (max-width: 860px) {
+    .nav-toggle { display: block; }
+
+    .sidebar {
+        position: fixed;
+        inset: 0 auto 0 0;
+        z-index: 40;
+        width: 240px;
+        flex-basis: 240px;
+        transform: translateX(-100%);
+        transition: transform .18s ease-out;
+        overflow-y: auto;
+    }
+    .app.nav-open .sidebar { transform: none; }
+
+    .app.nav-open .scrim {
+        display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 35;
+        background: rgba(0, 0, 0, .38);
+        border: 0;
+    }
+
+    /* Clears the floating button, which would otherwise sit on the heading. */
+    main { padding: 56px 14px 24px; }
+
+    .page-head { flex-direction: column; gap: 10px; }
+
+    /*
+        A table is the one thing here that cannot reflow honestly. Stacking
+        rows into cards loses the column-to-column comparison that is the
+        entire reason these are tables, so they scroll instead, and the
+        scrolling is bounded to the table rather than the page.
+    */
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .table-scroll .triage { min-width: 560px; }
+
+    .figures { gap: 8px; }
+    .figure { flex: 1 1 calc(50% - 4px); min-width: 0; }
+}
+
+/* Motion is decoration here; the sidebar still opens and closes without it. */
+@media (prefers-reduced-motion: reduce) {
+    .sidebar { transition: none; }
 }

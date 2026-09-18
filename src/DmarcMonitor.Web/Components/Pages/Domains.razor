@@ -53,8 +53,16 @@ else if (_rows.Count == 0)
 }
 else
 {
-    <div class="form-row">
-        <input class="wide" placeholder="Filter by domain or client" @bind="_filter" @bind:event="oninput" />
+    <div class="list-controls">
+        <input class="find" type="search" placeholder="Filter by domain or client"
+               aria-label="Filter by domain or client"
+               @bind="_filter" @bind:event="oninput" />
+
+        <label class="toggle">
+            <input type="checkbox" @bind="_byClient" />
+            Group by client
+        </label>
+
         @if (!string.IsNullOrWhiteSpace(_filter))
         {
             <span class="muted">@Filtered.Count of @_rows.Count</span>
@@ -65,14 +73,41 @@ else
     {
         <p class="muted">Nothing matches “@_filter”.</p>
     }
+    else if (_byClient)
+    {
+        @* One section per customer. This is the view that matters as the book
+           grows: an MSP is asked "how is Morton doing", not "how is
+           mortonnd.gov doing", and a flat alphabetical list of eighty domains
+           cannot answer that without the reader doing the grouping by eye. *@
+        @foreach (var group in Filtered.GroupBy(r => r.ClientName).OrderBy(g => g.Key, StringComparer.Ordinal))
+        {
+            <section>
+                <h2>
+                    @(string.IsNullOrWhiteSpace(group.Key) ? "Unassigned" : group.Key)
+                    <span class="pill">@group.Count() domain(s)</span>
+                </h2>
+                @DomainTable(group)
+            </section>
+        }
+    }
     else
     {
+        @DomainTable(Filtered)
+    }
+}
+
+@* One definition, rendered either once or once per client. Two copies of a
+   table drift, and the columns here are the ones somebody compares across
+   rows. *@
+@{
+    RenderFragment DomainTable(IEnumerable<DomainTriage> rows) =>
+    @<div class="table-scroll">
         <table class="triage">
             <thead>
                 <tr>
                     <th></th>
                     <th>Domain</th>
-                    <th>Client</th>
+                    @if (!_byClient) { <th>Client</th> }
                     <th>Policy</th>
                     <th class="num">Messages</th>
                     <th class="num">Passing</th>
@@ -81,12 +116,12 @@ else
                 </tr>
             </thead>
             <tbody>
-                @foreach (var row in Filtered)
+                @foreach (var row in rows)
                 {
                     <tr>
                         <td><span class="pip @Css(row.Level)" title="@row.Headline"></span></td>
                         <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
-                        <td class="muted">@row.ClientName</td>
+                        @if (!_byClient) { <td class="muted">@row.ClientName</td> }
                         <td><code>p=@row.Policy</code></td>
                         <td class="num">@row.Messages.ToString("N0")</td>
                         <td class="num">
@@ -105,7 +140,7 @@ else
                 }
             </tbody>
         </table>
-    }
+    </div>;
 }
 
 @code {
@@ -113,6 +148,7 @@ else
     private string? _error;
     private string _filter = "";
     private int _days = 30;
+    private bool _byClient;
 
     // Alphabetical, not by urgency. Triage already ranks; this exists to find
     // a named domain, and a list that reorders itself as data changes is the

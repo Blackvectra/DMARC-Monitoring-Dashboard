@@ -1,20 +1,50 @@
 @inherits LayoutComponentBase
 @inject IConfiguration Configuration
 
+@*
+    The shell. Two jobs beyond holding the page: say which navigation is daily
+    work and which is setup, and get out of the way on a narrow screen.
+
+    The nine links used to be one flat list, which made "Triage" - where every
+    morning starts - look like the same kind of thing as "Updates", which is
+    touched twice a year.
+
+    The menu and theme buttons call plain JavaScript rather than carrying
+    @@onclick. This layout has no render mode: pages are interactive islands
+    inside a statically rendered shell, so a Blazor handler here is never wired
+    up and does nothing when clicked. That is how the first version shipped,
+    and only driving it in a real browser caught it - both buttons rendered
+    perfectly and neither worked.
+*@
+
 <div class="app">
+    @* Only shown on a narrow screen, by CSS. *@
+    <button class="nav-toggle" onclick="dmarcShell.toggleNav()" aria-label="Toggle navigation">
+        ☰ Menu
+    </button>
+
+    @* Tapping away from an open menu closes it, which is what every phone
+       does. A button rather than a div so it is reachable without a pointer. *@
+    <button class="scrim" onclick="dmarcShell.closeNav()" aria-label="Close navigation" tabindex="-1"></button>
+
     <nav class="sidebar">
         <div class="brand">
             <span class="brand-mark">DM</span>
             <span class="brand-name">DMARC Monitor</span>
         </div>
 
+        @* What you open to find out what needs doing today. *@
+        <p class="nav-group">Daily</p>
         <NavLink class="nav-item" href="" Match="NavLinkMatch.All">Triage</NavLink>
         <NavLink class="nav-item" href="domains">Domains</NavLink>
         <NavLink class="nav-item" href="fix">Fix</NavLink>
-        <NavLink class="nav-item" href="clients">Clients</NavLink>
-        <NavLink class="nav-item" href="import">Import</NavLink>
         <NavLink class="nav-item" href="sources">Sources</NavLink>
         <NavLink class="nav-item" href="reports">Reports</NavLink>
+
+        @* What you set once, or when a client is onboarded. *@
+        <p class="nav-group">Setup</p>
+        <NavLink class="nav-item" href="clients">Clients</NavLink>
+        <NavLink class="nav-item" href="import">Import</NavLink>
         <NavLink class="nav-item" href="settings">Settings</NavLink>
         <NavLink class="nav-item" href="updates">Updates</NavLink>
 
@@ -28,6 +58,11 @@
                     }
                 </Authorized>
             </AuthorizeView>
+
+            @* Ships the light-theme wording; the script corrects it on load
+               and after each enhanced navigation, since the server cannot
+               know which theme this browser stored. *@
+            <button class="theme-toggle" onclick="dmarcTheme.toggle()">☾ Dark</button>
         </div>
     </nav>
 
