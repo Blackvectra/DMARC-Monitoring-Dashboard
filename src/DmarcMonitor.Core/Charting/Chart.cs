@@ -206,6 +206,88 @@ public static class Chart
         return points;
     }
 
+    /// <summary>
+    /// One segment of a semicircular gauge, as a filled donut arc.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The dial runs left to right over the top, so <paramref name="from"/> 0
+    /// is the nine o'clock position and 1 is three o'clock. Segments are
+    /// separate filled shapes rather than one stroked circle with a dash
+    /// pattern: a dash offset has to be recomputed whenever any earlier
+    /// segment changes, and getting it wrong draws a gauge that looks right
+    /// and adds up to the wrong thing.
+    /// </para>
+    /// <para>
+    /// An inner radius of zero gives a pie slice rather than a ring.
+    /// </para>
+    /// </remarks>
+    /// <param name="from">Where the segment starts, 0 to 1 across the dial.</param>
+    /// <param name="to">Where it ends, 0 to 1.</param>
+    public static string Arc(double cx, double cy, double outer, double inner, double from, double to)
+    {
+        if (outer <= 0) { return ""; }
+
+        var start = Math.Clamp(Math.Min(from, to), 0, 1);
+        var end = Math.Clamp(Math.Max(from, to), 0, 1);
+
+        // A segment of no width is not drawn at all. Emitting a path for it
+        // produces a hairline artefact on the dial that reads as a category.
+        if (end - start <= 0) { return ""; }
+
+        inner = Math.Clamp(inner, 0, outer);
+
+        // 180 degrees at the left, sweeping clockwise over the top to 360.
+        var a0 = Math.PI * (1 + start);
+        var a1 = Math.PI * (1 + end);
+
+        var large = end - start > 0.5 ? 1 : 0;
+
+        var (ox0, oy0) = (cx + outer * Math.Cos(a0), cy + outer * Math.Sin(a0));
+        var (ox1, oy1) = (cx + outer * Math.Cos(a1), cy + outer * Math.Sin(a1));
+
+        var path = new StringBuilder();
+        path.Append('M').Append(N(ox0)).Append(' ').Append(N(oy0)).Append(' ')
+            .Append('A').Append(N(outer)).Append(' ').Append(N(outer)).Append(" 0 ")
+            .Append(large).Append(" 1 ").Append(N(ox1)).Append(' ').Append(N(oy1)).Append(' ');
+
+        if (inner <= 0)
+        {
+            // A pie slice closes through the centre.
+            path.Append('L').Append(N(cx)).Append(' ').Append(N(cy)).Append(" Z");
+            return path.ToString();
+        }
+
+        var (ix1, iy1) = (cx + inner * Math.Cos(a1), cy + inner * Math.Sin(a1));
+        var (ix0, iy0) = (cx + inner * Math.Cos(a0), cy + inner * Math.Sin(a0));
+
+        path.Append('L').Append(N(ix1)).Append(' ').Append(N(iy1)).Append(' ')
+            .Append('A').Append(N(inner)).Append(' ').Append(N(inner)).Append(" 0 ")
+            .Append(large).Append(" 0 ").Append(N(ix0)).Append(' ').Append(N(iy0)).Append(" Z");
+
+        return path.ToString();
+    }
+
+    /// <summary>
+    /// A share written the way a reader expects, never rounded to nothing.
+    /// </summary>
+    /// <remarks>
+    /// A hundred and fifty-nine threatening messages out of sixteen thousand
+    /// is the finding, not the rounding error. Printed as "0%" it reads as
+    /// "none", which is the one thing it is not.
+    /// </remarks>
+    public static string Share(long value, long total)
+    {
+        if (total <= 0 || value <= 0) { return "0%"; }
+
+        var percent = value * 100.0 / total;
+        if (percent >= 99.5 && value < total) { return ">99%"; }
+        if (percent < 1) { return "<1%"; }
+
+        return Math.Round(percent, MidpointRounding.AwayFromZero)
+            .ToString("0", CultureInfo.InvariantCulture) + "%";
+    }
+
     /// <summary>The horizontal centre of bucket <paramref name="index"/>.</summary>
     /// <remarks>
     /// A single bucket sits in the middle rather than at the left edge: one

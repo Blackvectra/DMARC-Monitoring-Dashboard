@@ -200,6 +200,141 @@ public sealed class ChartTests
         }
     }
 
+    // ---- the gauge ----------------------------------------------------------
+
+    [Fact]
+    public void ASegmentStartsAtTheLeftAndSweepsOverTheTop()
+    {
+        // The dial runs nine o'clock to three o'clock. A segment from 0 begins
+        // at the left edge, level with the centre.
+        var path = Chart.Arc(cx: 50, cy: 50, outer: 40, inner: 25, from: 0, to: 0.5);
+
+        Assert.StartsWith("M10 50", path, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFullDialEndsAtTheRightEdge()
+    {
+        var path = Chart.Arc(50, 50, 40, 25, 0, 1);
+
+        // 90 is cx + outer: the three o'clock position.
+        Assert.Contains("90 50", path, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASegmentOfNoWidthIsNotDrawnAtAll()
+    {
+        // A category with nothing in it must not leave a hairline on the dial,
+        // which reads as a category that exists.
+        Assert.Equal("", Chart.Arc(50, 50, 40, 25, 0.4, 0.4));
+    }
+
+    [Fact]
+    public void ADonutSegmentClosesBackAlongTheInnerEdge()
+    {
+        var path = Chart.Arc(50, 50, 40, 25, 0, 0.5);
+
+        // Two arcs: out along the rim, back along the inside.
+        Assert.Equal(2, path.Count(c => c == 'A'));
+        Assert.EndsWith("Z", path, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AZeroInnerRadiusGivesAPieSliceThroughTheCentre()
+    {
+        var path = Chart.Arc(50, 50, 40, 0, 0, 0.5);
+
+        Assert.Single(path.Where(c => c == 'A'));
+        Assert.Contains("L50 50", path, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASegmentOverHalfTheDialSetsTheLargeArcFlag()
+    {
+        // Without it the browser draws the short way round, which renders the
+        // largest category as the smallest.
+        var big = Chart.Arc(50, 50, 40, 25, 0, 0.9);
+        var small = Chart.Arc(50, 50, 40, 25, 0, 0.3);
+
+        Assert.Contains("0 1 1", big, StringComparison.Ordinal);
+        Assert.Contains("0 0 1", small, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FractionsOutsideTheDialAreClampedRatherThanDrawnOffIt()
+    {
+        var path = Chart.Arc(50, 50, 40, 25, -0.5, 1.5);
+
+        Assert.DoesNotContain("NaN", path, StringComparison.Ordinal);
+        Assert.StartsWith("M10 50", path, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ADialOfNoSizeDrawsNothing()
+    {
+        Assert.Equal("", Chart.Arc(50, 50, 0, 0, 0, 1));
+    }
+
+    [Fact]
+    public void GaugeCoordinatesAreWrittenWithADotWhateverTheLocale()
+    {
+        var original = Thread.CurrentThread.CurrentCulture;
+        try
+        {
+            var comma = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+            comma.NumberFormat.NumberDecimalSeparator = ",";
+            Thread.CurrentThread.CurrentCulture = comma;
+
+            Assert.Equal("1,5", 1.5.ToString("0.##", CultureInfo.CurrentCulture));
+            Assert.DoesNotContain(",", Chart.Arc(50, 50, 40, 25, 0.13, 0.67), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Thread.CurrentThread.CurrentCulture = original;
+        }
+    }
+
+    // ---- shares written for a reader ---------------------------------------
+
+    [Theory]
+    [InlineData(159, 16_249 + 1_477 + 159, "<1%")]
+    [InlineData(1_477, 16_249 + 1_477 + 159, "8%")]
+    [InlineData(16_249, 16_249 + 1_477 + 159, "91%")]
+    public void ASharePrintsTheWayAReaderExpects(long value, long total, string expected)
+    {
+        Assert.Equal(expected, Chart.Share(value, total));
+    }
+
+    [Fact]
+    public void ATinyShareIsNeverPrintedAsNone()
+    {
+        // A hundred and fifty-nine threatening messages is the finding, not
+        // the rounding error. "0%" reads as "none", which is the one thing it
+        // is not.
+        Assert.Equal("<1%", Chart.Share(1, 100_000));
+    }
+
+    [Fact]
+    public void AShareShortOfEverythingIsNotPrintedAsEverything()
+    {
+        // 99.6% rounds to 100%, which tells somebody every message was fine
+        // while some were not.
+        Assert.Equal(">99%", Chart.Share(9_996, 10_000));
+    }
+
+    [Fact]
+    public void EverythingIsPrintedAsEverything()
+    {
+        Assert.Equal("100%", Chart.Share(50, 50));
+    }
+
+    [Fact]
+    public void NothingAtAllIsZero()
+    {
+        Assert.Equal("0%", Chart.Share(0, 100));
+        Assert.Equal("0%", Chart.Share(5, 0));
+    }
+
     // ---- proportions --------------------------------------------------------
 
     [Fact]

@@ -268,6 +268,90 @@ public sealed class TimeSeriesServiceTests : IDisposable
         Assert.Equal(5, series.Sum(p => p.Messages));
     }
 
+    // ---- the three-way split --------------------------------------------------
+
+    /// <summary>A failing row the receiver declined to act on, as a forwarder produces.</summary>
+    private async Task StoreForwardedAsync(string domain, int daysAgo, int count)
+    {
+        var begin = DateTimeOffset.UtcNow.AddDays(-daysAgo);
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata><org_name>google.com</org_name><report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
+                            <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range></report_metadata>
+              <policy_published><domain>{domain}</domain><p>reject</p><pct>100</pct></policy_published>
+              <record>
+                <row><source_ip>203.0.113.99</source_ip><count>{count}</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf>
+                    <reason><type>forwarded</type><comment>mailing list</comment></reason>
+                  </policy_evaluated></row>
+                <identifiers><header_from>{domain}</header_from></identifiers>
+                <auth_results><dkim><domain>{domain}</domain><result>fail</result></dkim>
+                  <spf><domain>{domain}</domain><result>fail</result></spf></auth_results>
+              </record>
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        Assert.True(parsed.Success, parsed.Error);
+        await _store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
+    [Fact]
+    public async Task MailSplitsIntoAuthenticatedForwardedAndUnauthenticated()
+    {
+        // The split a pass rate cannot give. "95% passing" hides whether the
+        // rest is forwarding, which is expected and not worth an afternoon, or
+        // mail that proved nothing, which is the only part worth chasing.
+        await StoreAsync("acme.com", daysAgo: 1, passing: 900, failing: 60);
+        await StoreForwardedAsync("acme.com", daysAgo: 1, count: 40);
+
+        var split = await Service().BreakdownAsync("acme.com", days: 7);
+
+        Assert.Equal(900, split.Authenticated);
+        Assert.Equal(40, split.Overridden);
+        Assert.Equal(60, split.Unauthenticated);
+        Assert.Equal(1000, split.Total);
+    }
+
+    [Fact]
+    public async Task AnOverrideOnMailThatPASSEDDoesNotMoveItOutOfAuthenticated()
+    {
+        // Microsoft stamps "SPF ignored due to local policy" on traffic that
+        // authenticated perfectly well by DKIM. Counting that as overridden
+        // takes a domain's own clean mail out of the segment it belongs in.
+        await StoreAsync("acme.com", daysAgo: 1, passing: 500, failing: 0);
+        await StoreForwardedAsync("acme.com", daysAgo: 1, count: 5);
+
+        var split = await Service().BreakdownAsync("acme.com", days: 7);
+
+        Assert.Equal(500, split.Authenticated);
+        Assert.Equal(5, split.Overridden);
+    }
+
+    [Fact]
+    public async Task TheEstateSplitCoversEveryDomain()
+    {
+        await StoreAsync("acme.com", daysAgo: 1, passing: 100, failing: 10);
+        await StoreAsync("other.example", daysAgo: 1, passing: 200, failing: 20);
+
+        var split = await Service().BreakdownAsync(days: 7);
+
+        Assert.Equal(300, split.Authenticated);
+        Assert.Equal(30, split.Unauthenticated);
+    }
+
+    [Fact]
+    public async Task NoMailGivesNoPassRateRatherThanZeroPerCent()
+    {
+        // 0/0 is not 0%, and a dial reading zero says every message failed.
+        var split = await Service().BreakdownAsync("acme.com", days: 7);
+
+        Assert.Equal(0, split.Total);
+        Assert.Null(split.PassRate);
+    }
+
     [Fact]
     public async Task AWindowOfNothingIsRefusedRatherThanRenderedBlank()
     {

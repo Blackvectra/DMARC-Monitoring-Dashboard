@@ -37,6 +37,48 @@ public sealed record DayPoint
 }
 
 /// <summary>
+/// All of a window's mail split three ways, for the dial.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The split a mail administrator actually needs, and one a pass rate cannot
+/// give: of everything sent as these domains, how much authenticated, how much
+/// failed for a reason the receiver itself called expected, and how much
+/// failed having proved nothing at all. Only the third is a problem, and on a
+/// healthy estate it is the smallest number on the page - which is exactly why
+/// it needs its own segment rather than being folded into "failing".
+/// </para>
+/// </remarks>
+public sealed record VolumeBreakdown
+{
+    /// <summary>Passed DMARC: authenticated and aligned.</summary>
+    public long Authenticated { get; init; }
+
+    /// <summary>
+    /// Failed, but the receiver recorded why and declined to apply the policy.
+    /// </summary>
+    /// <remarks>
+    /// Forwarding and mailing lists break DKIM signatures as a matter of
+    /// course. Counting this against a domain makes a well-run estate look
+    /// broken, and chasing it wastes the time that should go on the last
+    /// bucket.
+    /// </remarks>
+    public long Overridden { get; init; }
+
+    /// <summary>
+    /// Failed and proved nothing. A service nobody recorded, or somebody
+    /// sending as the domain.
+    /// </summary>
+    public long Unauthenticated { get; init; }
+
+    public long Total => Authenticated + Overridden + Unauthenticated;
+
+    /// <summary>Null rather than 0% when there was no mail to judge.</summary>
+    public double? PassRate =>
+        Total == 0 ? null : Math.Round(Authenticated * 100.0 / Total, 1);
+}
+
+/// <summary>
 /// Mail per day, for the charts.
 /// </summary>
 /// <remarks>
@@ -75,6 +117,54 @@ public sealed class TimeSeriesService(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(slug);
         return QueryAsync(null, slug.Trim(), days, ct);
+    }
+
+    /// <summary>
+    /// The window's mail split three ways, for the dial.
+    /// </summary>
+    /// <param name="domain">One domain, or null for the whole estate.</param>
+    public async Task<VolumeBreakdown> BreakdownAsync(
+        string? domain = null, int days = 30, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+
+        var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
+            .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+
+        // The override test is scoped to FAILING rows on purpose. Receivers
+        // also record an override on mail that passed - Microsoft stamps "SPF
+        // ignored due to local policy" on traffic that authenticated perfectly
+        // well by DKIM - and counting those here would move a domain's own
+        // clean mail out of the authenticated segment.
+        command.CommandText = $"""
+            SELECT COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dmarc_result <> 'pass'
+                                      AND r.override_reason IS NOT NULL AND r.override_reason <> ''
+                                     THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dmarc_result <> 'pass'
+                                      AND (r.override_reason IS NULL OR r.override_reason = '')
+                                     THEN r.message_count END), 0)
+            FROM aggregate_records r
+            {Joins(name, null, "r")}
+            WHERE r.date_begin >= $since {Filter(name, null)}
+            """;
+        Bind(command, name, null, since);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return new VolumeBreakdown(); }
+
+        return new VolumeBreakdown
+        {
+            Authenticated = reader.GetInt64(0),
+            Overridden = reader.GetInt64(1),
+            Unauthenticated = reader.GetInt64(2),
+        };
     }
 
     /// <summary>

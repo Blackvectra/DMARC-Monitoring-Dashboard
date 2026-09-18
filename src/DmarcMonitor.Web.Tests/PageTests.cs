@@ -166,6 +166,37 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task TheDialSplitsVolumeThreeWaysWithEachPartNamed()
+    {
+        // A pass rate cannot say whether the remainder is forwarding, which is
+        // expected, or mail that proved nothing, which is the only part worth
+        // chasing.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("gauge-dial", html, StringComparison.Ordinal);
+        Assert.Contains("authenticated", html, StringComparison.Ordinal);
+        Assert.Contains("forwarded or overridden", html, StringComparison.Ordinal);
+        Assert.Contains("unauthenticated", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheDialsSegmentsAreFilledRatherThanGivenABackground()
+    {
+        // SVG takes `fill`, not `background`. The first version reused the
+        // proportion bar's colour rules, which set `background` on a span and
+        // do nothing whatever to a path, so every segment fell back to the
+        // default fill and the dial rendered solid black. It looked like a
+        // deliberate design until it was put on a screen.
+        var css = await Client().GetStringAsync("/app.css");
+
+        var start = css.IndexOf(".gauge-dial .seg", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the dial's segments have no colour rules of their own");
+
+        var block = css[start..Math.Min(css.Length, start + 600)];
+        Assert.Contains("fill:", block, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task NoChartEmitsANumberTheBrowserCannotParse()
     {
         // NaN or Infinity in a path attribute renders as an empty chart with
@@ -581,6 +612,23 @@ public sealed class SeededApp : WebApplicationFactory<Program>
                 <auth_results>
                   <dkim><domain>training.vendor.example</domain><selector>s2</selector><result>pass</result></dkim>
                   <spf><domain>psm.vendor.example</domain><result>pass</result></spf>
+                </auth_results>
+              </record>
+              <!-- A forwarder, so the estate has all three of the dial's
+                   categories. Without one the middle segment is correctly
+                   omitted and there is nothing to assert it against. Kept off
+                   acme.com so the figures the other tests rely on do not move. -->
+              <record>
+                <row>
+                  <source_ip>198.51.100.44</source_ip><count>12</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf>
+                    <reason><type>forwarded</type><comment>mailing list</comment></reason>
+                  </policy_evaluated>
+                </row>
+                <identifiers><header_from>signed.example</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>signed.example</domain><result>fail</result></dkim>
+                  <spf><domain>signed.example</domain><result>fail</result></spf>
                 </auth_results>
               </record>
             </feedback>

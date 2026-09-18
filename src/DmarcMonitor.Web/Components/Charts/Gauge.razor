@@ -1,0 +1,106 @@
+@using DmarcMonitor.Core.Charting
+
+@*
+    The dial: everything sent as these domains, split three ways.
+
+    A pass rate cannot give this split. "95% passing" hides whether the other
+    5% is forwarding, which is expected and not worth an afternoon, or mail
+    that proved nothing, which is the only part worth chasing. On a healthy
+    estate the part that matters is the smallest number on the page, which is
+    exactly why it gets its own segment and its own badge rather than being
+    folded into "failing".
+
+    Each segment is named and carries its own count. Colour is never the only
+    signal, and a reader who cannot separate red from green still gets three
+    labelled rows.
+*@
+
+@if (Placed.Count == 0)
+{
+    <p class="muted">@Empty</p>
+}
+else
+{
+    <figure class="gauge">
+        @if (!string.IsNullOrEmpty(Caption))
+        {
+            <figcaption>@Caption</figcaption>
+        }
+
+        <div class="gauge-body">
+            <svg viewBox="0 0 120 68" class="gauge-dial" role="img" aria-label="@Describe()">
+                @* The track, so an estate with one tiny segment still reads as
+                   a dial rather than as a stray mark. *@
+                <path d="@Chart.Arc(60, 60, 52, 34, 0, 1)" class="gauge-track" />
+
+                @foreach (var seg in Placed)
+                {
+                    <path d="@Chart.Arc(60, 60, 52, 34, seg.From, seg.To)" class="seg @seg.Css">
+                        <title>@seg.Label: @seg.Value.ToString("N0") (@seg.Share)</title>
+                    </path>
+                }
+            </svg>
+
+            <ul class="gauge-keys">
+                @foreach (var seg in Placed)
+                {
+                    <li>
+                        @* The badge repeats the share as a number, so the dial
+                           is never the only place it is stated. *@
+                        <span class="badge @seg.Css">@seg.Share</span>
+                        <span class="gauge-n">@seg.Value.ToString("N0")</span>
+                        <span class="gauge-l">@seg.Label</span>
+                    </li>
+                }
+            </ul>
+        </div>
+    </figure>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<Slice> Slices { get; set; } = [];
+    [Parameter] public string Caption { get; set; } = "";
+    [Parameter] public string Empty { get; set; } = "No mail in this window.";
+
+    private sealed record Segment(string Label, long Value, string Css, string Share, double From, double To);
+
+    /// <summary>
+    /// The segments laid out around the dial.
+    /// </summary>
+    /// <remarks>
+    /// Positions come from the exact counts rather than from the rounded
+    /// shares shown beside them: a segment sized from a displayed "&lt;1%"
+    /// would be drawn a hundred times too wide, and one sized from a rounded
+    /// 91% would leave the dial short of its end.
+    /// </remarks>
+    private IReadOnlyList<Segment> Placed
+    {
+        get
+        {
+            var present = Slices.Where(s => s.Value > 0).ToList();
+            if (present.Count == 0) { return []; }
+
+            var total = present.Sum(s => s.Value);
+            var segments = new List<Segment>(present.Count);
+            var at = 0.0;
+
+            foreach (var slice in present)
+            {
+                var width = (double)slice.Value / total;
+                segments.Add(new Segment(
+                    slice.Label, slice.Value, slice.Css, Chart.Share(slice.Value, total), at, at + width));
+                at += width;
+            }
+
+            // The last segment is pinned to the end rather than left wherever
+            // the accumulated division lands, so the dial always closes.
+            var last = segments[^1];
+            segments[^1] = last with { To = 1.0 };
+
+            return segments;
+        }
+    }
+
+    private string Describe() =>
+        string.Join(", ", Placed.Select(s => $"{s.Label} {s.Share}"));
+}

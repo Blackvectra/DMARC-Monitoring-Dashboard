@@ -364,6 +364,75 @@ section[id] { scroll-margin-top: 16px; }
 .key-fail::before  { background: var(--urgent); }
 .key-gap::before   { background: var(--dim); }
 
+/* ---- the dial ---------------------------------------------------------- */
+
+/*
+    Everything sent as these domains, split three ways. A pass rate cannot
+    give this split: "95% passing" hides whether the rest is forwarding, which
+    is expected, or mail that proved nothing, which is the only part worth
+    chasing. On a healthy estate that part is the smallest number on the page.
+*/
+.gauge {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
+}
+.gauge figcaption {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+
+.gauge-body { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+.gauge-dial { width: 190px; height: 108px; flex: 0 0 auto; }
+.gauge-track { fill: var(--line-soft); }
+
+/*
+    SVG takes `fill`, not `background`. The first version reused the
+    proportion bar's colour rules, which set `background` on a span and do
+    nothing whatever to a path - so every segment fell back to the default
+    fill and the dial rendered solid black. It looked like a deliberate
+    design until it was put on a screen.
+*/
+.gauge-dial .seg.fine    { fill: var(--fine); }
+.gauge-dial .seg.watch   { fill: var(--watch); }
+.gauge-dial .seg.act     { fill: var(--act); }
+.gauge-dial .seg.urgent  { fill: var(--urgent); }
+.gauge-dial .seg.ontrack { fill: var(--ontrack); }
+.gauge-dial .seg.dim     { fill: var(--dim); }
+
+.gauge-keys { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.gauge-keys li { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+
+/* The share as a number, so the dial is never the only place it is stated. */
+.badge {
+    min-width: 38px;
+    text-align: center;
+    padding: 2px 7px;
+    border-radius: 11px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--on-accent);
+    font-variant-numeric: tabular-nums;
+}
+.badge.fine    { background: var(--fine); }
+.badge.watch   { background: var(--watch); }
+.badge.act     { background: var(--act); }
+.badge.urgent  { background: var(--urgent); }
+.badge.ontrack { background: var(--ontrack); }
+.badge.dim     { background: var(--dim); }
+
+.gauge-n { font-weight: 600; font-variant-numeric: tabular-nums; }
+.gauge-l { color: var(--muted); }
+
+@media (max-width: 860px) {
+    .gauge-body { gap: 14px; }
+    .gauge-dial { width: 150px; height: 85px; }
+}
+
 /* ---- proportion bar ---------------------------------------------------- */
 
 .proportion-bar {

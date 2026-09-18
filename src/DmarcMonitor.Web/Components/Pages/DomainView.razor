@@ -113,17 +113,14 @@ else
         </div>
     </div>
 
-    @*
-        The page is four screens of evidence and somebody arrives at it with
-        one question. Jump links rather than tabs on purpose: a finding hidden
-        behind a tab is a finding nobody reads, and the whole point of the
-        section below is that a valid-but-unaligned signature stops being
-        invisible. Everything stays on the page; this only shortens the
-        distance to it.
+    @if (_breakdown is { Total: > 0 })
+    {
+        @* The split the pass rate above cannot give: of this domain's mail,
+           how much authenticated, how much broke for a reason the receiver
+           called expected, and how much proved nothing at all. *@
+        <Gauge Slices="@Volume()" Caption="@($"Everything sent as {Domain}, last {_days} days")" />
+    }
 
-        Each link carries its own count, so the shape of the domain is legible
-        before following any of them.
-    *@
     @* The shape of the domain over time, which no total can show. A domain
        that was fine until Tuesday and has been rejecting a third of its mail
        since reads as "97% passing" in the figures above: true, and useless. *@
@@ -150,6 +147,17 @@ else
         </div>
     }
 
+    @*
+        The page is four screens of evidence and somebody arrives at it with
+        one question. Jump links rather than tabs on purpose: a finding hidden
+        behind a tab is a finding nobody reads, and the unaligned-signature
+        section exists precisely so a discarded valid signature stops being
+        invisible. Everything stays on the page; this only shortens the
+        distance to it.
+
+        Each link carries its own count, so the shape of the domain is legible
+        before following any of them.
+    *@
     <nav class="jump" aria-label="Sections of this page">
         @if (_detail.SigningUnaligned.Count > 0)
         {
@@ -634,7 +642,19 @@ else
 
     private DomainDetail? _detail;
     private IReadOnlyList<DayPoint>? _series;
+    private VolumeBreakdown? _breakdown;
     private PublishedRecords? _dns;
+
+    /// <summary>This domain's mail, split by what it turned out to be.</summary>
+    private IReadOnlyList<Slice> Volume() =>
+        _breakdown is null
+            ? []
+            :
+            [
+                new Slice("authenticated", _breakdown.Authenticated, "fine"),
+                new Slice("forwarded or overridden", _breakdown.Overridden, "watch"),
+                new Slice("unauthenticated", _breakdown.Unauthenticated, "urgent"),
+            ];
 
     private long Quarantined => _series?.Sum(p => p.Quarantined) ?? 0;
     private long Rejected => _series?.Sum(p => p.Rejected) ?? 0;
@@ -722,6 +742,7 @@ else
         _dns = null;
         _dnsPending = true;
         _series = null;
+        _breakdown = null;
 
         if (!Db.Exists) { _loading = false; return; }
 
@@ -736,6 +757,7 @@ else
             _detail = null;
             _error = ex.Message;
             _series = null;
+            _breakdown = null;
             _loading = false;
             return;
         }
@@ -743,12 +765,14 @@ else
         try
         {
             _series = _detail is null ? null : await Series.DomainAsync(_detail.Domain, _days);
+            _breakdown = _detail is null ? null : await Series.BreakdownAsync(_detail.Domain, _days);
         }
         catch (Exception)
         {
             // The charts are the one part of this page that can be dropped
             // without misleading anybody. The evidence below them is the page.
             _series = null;
+            _breakdown = null;
         }
         finally
         {
