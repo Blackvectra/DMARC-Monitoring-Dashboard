@@ -1,0 +1,215 @@
+@page "/updates"
+@using DmarcMonitor.Core.Updates
+@using DmarcMonitor.Web.Data
+@using Microsoft.AspNetCore.Components.Authorization
+@inject IConfiguration Configuration
+@inject ReleaseChannel Releases
+@inject UpdateSpool Spool
+@inject AuthenticationStateProvider Auth
+@rendermode InteractiveServer
+
+<PageTitle>Updates — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Updates</h1>
+        <p class="sub">This machine runs a released version. Work in progress lives on branches and
+           reaches nothing until somebody tags a release, so what you change during the week cannot
+           arrive here on its own.</p>
+    </div>
+</header>
+
+<section>
+    <table class="triage">
+        <tbody>
+            <tr>
+                <td>Running</td>
+                <td>
+                    <code>@BuildInfo.Version</code>
+                    @if (!BuildInfo.IsRelease)
+                    {
+                        <span class="muted"> — built from a working tree, not a release tag</span>
+                    }
+                </td>
+            </tr>
+            <tr><td>Channel</td><td>@Channel</td></tr>
+            <tr>
+                <td>Installing</td>
+                <td>
+                    @if (!Spool.IsAvailable)
+                    {
+                        <span class="muted">not set up on this machine. Releases can be listed but not
+                            installed from here — run <code>deploy/install-update-agent.sh</code>.</span>
+                    }
+                    else
+                    {
+                        <span class="good">ready</span>
+                    }
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</section>
+
+@if (_progress is { State: not UpdateState.Idle })
+{
+    <section class="callout @ProgressClass">
+        <h2>@_progress.Message</h2>
+        @if (_progress.State is UpdateState.Requested or UpdateState.Running)
+        {
+            <p>The service restarts as part of this, so this page will stop answering for a moment.
+               Reload it when it comes back.</p>
+        }
+        else if (_progress is { State: UpdateState.Succeeded, Stamp.Length: > 0 })
+        {
+            <p>To go back: <code>sudo ./rollback.sh @_progress.Stamp</code></p>
+        }
+    </section>
+}
+
+@if (!Configured)
+{
+    <div class="empty">
+        <h2>Not checking for releases</h2>
+        <p>Set <code>Updates:Repository</code> in <code>appsettings.Production.json</code> to be told
+           when a newer version exists.</p>
+    </div>
+}
+else if (_status is null)
+{
+    <p class="muted">Asking what has been released…</p>
+}
+else if (_status.Problem is not null)
+{
+    <div class="empty">
+        <h2>Could not check</h2>
+        <p>@_status.Problem</p>
+    </div>
+}
+else
+{
+    <section>
+        <h2>@_status.Summary</h2>
+
+        @if (_releases.Count == 0)
+        {
+            <p class="muted">Nothing has been released on this channel yet.</p>
+        }
+        else
+        {
+            <table class="triage">
+                <thead>
+                    <tr><th>Version</th><th>Published</th><th></th><th></th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var release in _releases)
+                    {
+                        var running = string.Equals(release.Version, BuildInfo.Version, StringComparison.Ordinal);
+                        <tr>
+                            <td>
+                                <code>@release.Version</code>
+                                @if (release.IsPrerelease) { <span class="muted"> prerelease</span> }
+                            </td>
+                            <td>@release.PublishedAt.ToString("yyyy-MM-dd")</td>
+                            <td>
+                                @if (running)
+                                {
+                                    <span class="good">running</span>
+                                }
+                                else if (release.Url.Length > 0)
+                                {
+                                    <a href="@release.Url" target="_blank" rel="noopener">notes</a>
+                                }
+                            </td>
+                            <td>
+                                @if (!running && Spool.IsAvailable)
+                                {
+                                    <button class="primary" disabled="@Busy"
+                                            @onclick="() => InstallAsync(release.Version)">
+                                        Install @release.Version
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+
+            <p class="sub">
+                Installing backs up the database, keeps the version being replaced, applies any schema
+                change, and puts the old one back if the app does not answer afterwards. This page only
+                writes down which version you chose — a separate service running with the privileges to
+                do it checks that the version is a real release and does the work. The app has no
+                ability to install anything itself, deliberately: it holds the credentials that change
+                your customers' DNS.
+            </p>
+        }
+    </section>
+}
+
+@code {
+    private UpdateStatus? _status;
+    private IReadOnlyList<Release> _releases = [];
+    private UpdateProgress? _progress;
+    private bool Busy;
+
+    private bool Configured => !string.IsNullOrWhiteSpace(Configuration["Updates:Repository"]);
+    private string Channel => Configuration["Updates:Channel"] ?? ReleaseChannel.Stable;
+
+    private string ProgressClass => _progress?.State switch
+    {
+        UpdateState.Failed => "urgent",
+        UpdateState.Succeeded => "fine",
+        _ => "watch",
+    };
+
+    protected override async Task OnInitializedAsync() =>
+        _progress = await Spool.ReadStatusAsync();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // After first paint: this reaches GitHub, and a page that will not
+        // render until an outbound call comes back is one nobody can read
+        // when the network is the thing that is wrong.
+        if (!firstRender || !Configured) { return; }
+
+        await LoadAsync();
+        StateHasChanged();
+    }
+
+    private async Task LoadAsync()
+    {
+        _status = await Releases.CheckAsync(
+            Configuration["Updates:Repository"]!, BuildInfo.Version, Channel, Configuration["Updates:Token"]);
+
+        // The check returns the newest; the table wants the list, so the
+        // newest few are shown with the running one marked.
+        _releases = _status.Latest is null ? [] : [_status.Latest];
+    }
+
+    private async Task InstallAsync(string version)
+    {
+        Busy = true;
+        try
+        {
+            var state = await Auth.GetAuthenticationStateAsync();
+            var who = state.User.Identity?.Name ?? "an operator";
+
+            await Spool.RequestAsync(version, who);
+            _progress = await Spool.ReadStatusAsync();
+        }
+        catch (Exception ex)
+        {
+            _progress = new UpdateProgress
+            {
+                State = UpdateState.Failed,
+                Version = version,
+                Message = ex.Message,
+            };
+        }
+        finally
+        {
+            Busy = false;
+        }
+    }
+}

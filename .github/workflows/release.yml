@@ -22,8 +22,14 @@ jobs:
           # Windows is where an MSP runs this. Linux because the eventual
           # hosted deployment is a container, and finding out it does not
           # publish there at release time is finding out too late.
-          - { os: windows-latest, rid: win-x64,   exe: dmarc.exe }
-          - { os: ubuntu-latest,  rid: linux-x64, exe: dmarc }
+          - { os: windows-latest, rid: win-x64,     exe: dmarc.exe, runs: true }
+          - { os: ubuntu-latest,  rid: linux-x64,   exe: dmarc,     runs: true }
+          # ARM, because the cheapest instance at both AWS and Azure is one
+          # (t4g, Dpsv5) and without this build there is nothing to put on it.
+          # Cross-compiled from an x64 runner, so the binary cannot be executed
+          # here to prove it works - see the architecture check below for what
+          # is verified instead.
+          - { os: ubuntu-latest,  rid: linux-arm64, exe: dmarc,     runs: false }
 
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +37,19 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          # The tag is the version. A manual run has no tag, so it gets one
+          # that is obviously not a release rather than a plausible number.
+          ref="${{ github.ref_name }}"
+          if [[ "$ref" == v* ]]; then
+            echo "number=${ref#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=0.0.0-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish
         shell: bash
@@ -47,9 +66,11 @@ jobs:
             -p:IncludeNativeLibrariesForSelfExtract=true \
             -p:EnableCompressionInSingleFile=true \
             -p:DebugType=none \
+            -p:Version=${{ steps.version.outputs.number }} \
             --output publish/${{ matrix.rid }}
 
       - name: Prove the single file actually runs on its own
+        if: matrix.runs
         shell: bash
         run: |
           # The whole point of this job. Copy the binary somewhere with
@@ -68,6 +89,26 @@ jobs:
           # And that it can read a report without a database or configuration.
           ./${{ matrix.exe }} explain ../src/DmarcMonitor.Core.Tests/Fixtures/google-aggregate.xml
 
+      - name: Check the cross-compiled binary is for the architecture it claims
+        if: ${{ !matrix.runs }}
+        shell: bash
+        run: |
+          # It cannot be run here, so this is what is left: that a single file
+          # exists, that it is an executable for the right machine, and that it
+          # is big enough to be self-contained rather than a stub expecting a
+          # runtime beside it. Short of executing it, which needs an ARM
+          # runner, and worth saying plainly that this is weaker.
+          binary=publish/${{ matrix.rid }}/${{ matrix.exe }}
+          test -f "$binary" || { echo "nothing was published"; exit 1; }
+
+          file "$binary"
+          file "$binary" | grep -q "ARM aarch64" \
+            || { echo "published binary is not an ARM executable"; exit 1; }
+
+          size=$(stat -c%s "$binary")
+          test "$size" -gt 20000000 \
+            || { echo "only $size bytes: too small to be self-contained"; exit 1; }
+
       - uses: actions/upload-artifact@v4
         with:
           name: dmarc-${{ matrix.rid }}
@@ -85,16 +126,32 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Work out the version
+        id: version
+        run: |
+          ref="${{ github.ref_name }}"
+          if [[ "$ref" == v* ]]; then
+            echo "number=${ref#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=0.0.0-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish
         run: |
           dotnet publish src/DmarcMonitor.Web/DmarcMonitor.Web.csproj \
             --configuration Release \
+            -p:Version=${{ steps.version.outputs.number }} \
             --output publish/web
 
       - name: Check the bundle carries what it needs
         run: |
           test -f publish/web/DmarcMonitor.Web.dll || { echo "no web assembly"; exit 1; }
           test -f publish/web/wwwroot/app.css     || { echo "no stylesheet: pages render unstyled"; exit 1; }
+
+          # A bundle that does not know its own version cannot tell a deployed
+          # instance whether it is behind, which is the whole update story.
+          grep -q "${{ steps.version.outputs.number }}" <(strings publish/web/DmarcMonitor.Core.dll) \
+            || { echo "the build was not stamped with its version"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -119,12 +176,14 @@ jobs:
           zip -r  ../dmarc-web.zip        dmarc-web
           mv dmarc-win-x64/dmarc.exe      ../dmarc.exe
           mv dmarc-linux-x64/dmarc        ../dmarc-linux-x64
+          mv dmarc-linux-arm64/dmarc      ../dmarc-linux-arm64
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dmarc.exe
             dmarc-linux-x64
+            dmarc-linux-arm64
             dmarc-web.zip
           body: |
             `dmarc.exe` runs on its own: no .NET install, no checkout, no

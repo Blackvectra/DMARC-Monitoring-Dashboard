@@ -1,0 +1,30 @@
+@page "/not-found"
+
+<PageTitle>No such page — DMARC Monitor</PageTitle>
+
+@*
+    Any URL that matches no route used to return 404 with a zero-length body:
+    a blank white page, no layout, no navigation, no way back except the
+    browser's back button. Mapped through UseStatusCodePagesWithReExecute in
+    Program.cs so the status code is still a real 404 to anything reading it,
+    while a person gets a page that looks like the rest of the application.
+*@
+
+<header class="page-head">
+    <div>
+        <h1>No such page</h1>
+        <p class="sub">That address does not exist here.</p>
+    </div>
+</header>
+
+<div class="empty">
+    <h2>Where you probably meant to go</h2>
+    <p>
+        <a href="">Triage</a> — every domain, worst first. This is the front page.<br />
+        <a href="domains">Domains</a> — one domain at a time, with its sending sources.<br />
+        <a href="fix">Fix</a> — what would change in a customer's DNS.<br />
+        <a href="import">Import</a> — drop in a folder or an archive of reports.
+    </p>
+    <p class="sub">A domain page is <code>/domains/&lt;domain&gt;</code>, so a typo in the
+       domain name lands here rather than on the domain.</p>
+</div>

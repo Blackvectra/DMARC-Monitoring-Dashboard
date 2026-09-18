@@ -43,8 +43,21 @@ public sealed record FailingSource
     public int DomainCount => Domains.Count;
     public int ClientCount => Clients.Count;
 
-    /// <summary>Seen against more than one client. Only a multi-client platform can see this.</summary>
-    public bool IsCrossClient => ClientCount > 1;
+    /// <summary>
+    /// How many unrelated parties this source was seen against.
+    /// </summary>
+    /// <remarks>
+    /// Clients, except that every domain still sitting in the Unassigned
+    /// bucket counts for itself. Unassigned is a waiting room, not a customer:
+    /// two domains in it are no more related than two domains belonging to
+    /// different clients, and counting the bucket as one client meant a fresh
+    /// install - where everything is unassigned - could never see a source
+    /// working through several of them.
+    /// </remarks>
+    public int IndependentParties { get; init; }
+
+    /// <summary>Seen against more than one unrelated party. Only a multi-client platform can see this.</summary>
+    public bool IsCrossClient => IndependentParties > 1;
 
     public bool AuthenticatedNothing => AuthenticatedFor.Count == 0;
 
@@ -120,6 +133,15 @@ public sealed class CorrelationService(string databasePath)
               SUM(r.message_count)                                   AS failed,
               GROUP_CONCAT(DISTINCT d.name)                          AS domains,
               GROUP_CONCAT(DISTINCT c.name)                          AS clients,
+              -- Independent parties, not rows in the clients table. A domain
+              -- nobody has filed yet sits in the single "Unassigned" bucket
+              -- with every other unfiled domain, so counting clients made
+              -- every source on a fresh install look like it touched exactly
+              -- one - and cross-client impersonation, the one thing only a
+              -- multi-client platform can see, could never fire until an
+              -- operator had finished onboarding. Unfiled domains are not
+              -- related to each other; each counts for itself.
+              COUNT(DISTINCT CASE WHEN c.slug = 'unassigned' THEN d.name ELSE c.id END) AS parties,
               MAX(r.date_begin)                                      AS last_seen,
               GROUP_CONCAT(DISTINCT
                 CASE WHEN r.spf_auth_result = 'pass' THEN COALESCE(r.spf_domain, '') ELSE '' END
@@ -148,7 +170,7 @@ public sealed class CorrelationService(string databasePath)
               AND r.date_begin >= $since
               AND (r.override_reason IS NULL OR r.override_reason = '')
             GROUP BY r.source_ip
-            ORDER BY COUNT(DISTINCT r.client_id) DESC, failed DESC
+            ORDER BY COUNT(DISTINCT CASE WHEN c.slug = 'unassigned' THEN d.name ELSE c.id END) DESC, failed DESC
             LIMIT $limit
             """;
         command.Parameters.AddWithValue("$since", since);
@@ -163,8 +185,8 @@ public sealed class CorrelationService(string databasePath)
             var clients = Split(reader.IsDBNull(3) ? "" : reader.GetString(3));
 
             DateTimeOffset? lastSeen = null;
-            if (!reader.IsDBNull(4) &&
-                DateTime.TryParse(reader.GetString(4), CultureInfo.InvariantCulture,
+            if (!reader.IsDBNull(5) &&
+                DateTime.TryParse(reader.GetString(5), CultureInfo.InvariantCulture,
                     DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
             {
                 lastSeen = new DateTimeOffset(parsed, TimeSpan.Zero);
@@ -176,9 +198,10 @@ public sealed class CorrelationService(string databasePath)
                 FailedMessages = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 Domains = domains,
                 Clients = clients,
+                IndependentParties = reader.IsDBNull(4) ? clients.Count : reader.GetInt32(4),
                 LastSeen = lastSeen,
-                AuthenticatedFor = ParseAuthDomains(reader.IsDBNull(5) ? "" : reader.GetString(5)),
-                DomainsAlsoPassed = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                AuthenticatedFor = ParseAuthDomains(reader.IsDBNull(6) ? "" : reader.GetString(6)),
+                DomainsAlsoPassed = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
             });
         }
 

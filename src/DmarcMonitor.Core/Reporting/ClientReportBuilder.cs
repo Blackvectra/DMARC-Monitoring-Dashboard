@@ -94,12 +94,18 @@ public sealed class ClientReportBuilder(string databasePath)
         command.CommandText = """
             SELECT COALESCE(SUM(message_count), 0),
                    COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
-                   -- Forwarded and receiver-overridden traffic is counted here
-                   -- and left out of the source tables on purpose, so the
+                   -- Forwarded and receiver-overridden FAILURES are counted
+                   -- here and left out of the source tables on purpose, so the
                    -- tables sum to less than this. Carried alongside so the
                    -- report can say so rather than leaving a client to notice
                    -- the arithmetic not working.
-                   COALESCE(SUM(CASE WHEN override_reason IS NOT NULL AND override_reason <> ''
+                   --
+                   -- Failures only: a receiver also records an override on
+                   -- mail that PASSED ("SPF ignored due to local policy" on
+                   -- DKIM-authenticated traffic), and counting that as left
+                   -- out took a client's own clean mail out of its report.
+                   COALESCE(SUM(CASE WHEN dmarc_result <> 'pass'
+                                      AND override_reason IS NOT NULL AND override_reason <> ''
                                      THEN message_count END), 0)
             FROM aggregate_records
             WHERE client_id = $client AND date_begin >= $from AND date_begin <= $to
@@ -205,7 +211,11 @@ public sealed class ClientReportBuilder(string databasePath)
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.client_id = $client AND r.date_begin >= $from AND r.date_begin <= $to
-              AND (r.override_reason IS NULL OR r.override_reason = '')
+              -- Overridden FAILURES only; see GetTotalsAsync. Mail that passed
+              -- and merely carried a receiver note is the client's own mail
+              -- and belongs in the table.
+              AND NOT (r.dmarc_result <> 'pass'
+                       AND r.override_reason IS NOT NULL AND r.override_reason <> '')
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             """;

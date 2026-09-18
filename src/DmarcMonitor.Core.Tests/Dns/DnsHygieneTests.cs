@@ -20,7 +20,8 @@ public sealed class DnsHygieneTests
         string? tlsRpt = "v=TLSRPTv1; rua=mailto:tls@example.com",
         string[]? dead = null,
         int lookups = 0,
-        bool failed = false) => new()
+        bool failed = false,
+        bool missing = false) => new()
         {
             Domain = "acme.com",
             SpfRecords = spf ?? ["v=spf1 include:spf.protection.outlook.com -all"],
@@ -30,6 +31,7 @@ public sealed class DnsHygieneTests
             DeadIncludes = dead ?? [],
             SpfLookups = lookups,
             LookupFailed = failed,
+            DomainDoesNotExist = missing,
         };
 
     private static ObservedSending Observed(
@@ -72,6 +74,20 @@ public sealed class DnsHygieneTests
         Assert.Contains("could not be read", only.Problem, StringComparison.Ordinal);
         Assert.DoesNotContain(findings, f => f.Record == "DMARC");
         Assert.DoesNotContain(findings, f => f.Record == "SPF");
+    }
+
+    [Fact]
+    public void ADomainThatDoesNotExistIsNotADomainWithNoRecords()
+    {
+        // NXDOMAIN and "publishes no TXT records" both arrive as an empty
+        // answer section, so a mistyped customer domain used to come back with
+        // a full list of weaknesses and instructions to publish records at an
+        // apex nobody owns - confident, detailed and entirely fictional.
+        var findings = Assess(Published(missing: true));
+
+        var only = Assert.Single(findings);
+        Assert.Contains("no domain called", only.Problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(findings, f => f.Record is "SPF" or "DMARC" or "MTA-STS" or "TLS-RPT");
     }
 
     [Fact]

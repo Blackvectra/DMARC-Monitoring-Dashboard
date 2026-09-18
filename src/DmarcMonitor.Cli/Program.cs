@@ -31,6 +31,14 @@ public static class Program
             var command = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
             var rest = args.Skip(1).ToArray();
 
+            // Asked what a command does, answer - do not do it. No subcommand
+            // looked for a help request, and the consequences were not all
+            // harmless: `init-db --help` found no value for --db, fell back to
+            // the default, and created a 548 KB database in whatever directory
+            // the person happened to be standing in, exit 0. Somebody asking a
+            // command what it does should never have it happen to them.
+            if (rest.Any(a => a is "--help" or "-h" or "/?")) { return Help(); }
+
             return command switch
             {
                 "explain" => await ExplainCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -43,6 +51,8 @@ public static class Program
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "mta-sts" => await MtaStsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "version" or "--version" => Version(),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
             };
@@ -63,6 +73,20 @@ public static class Program
             Console.Error.WriteLine(ex);
             return 1;
         }
+    }
+
+    /// <summary>What this build is, which is the first question when something is wrong.</summary>
+    private static int Version()
+    {
+        Console.WriteLine($"dmarc {DmarcMonitor.Core.Updates.BuildInfo.Version}");
+
+        if (!DmarcMonitor.Core.Updates.BuildInfo.IsRelease)
+        {
+            Console.WriteLine("Built from a working tree rather than a release tag.");
+        }
+
+        Console.WriteLine($"Database schema this build expects: {DmarcMonitor.Core.Storage.DatabaseMigrations.BaselineVersion}");
+        return 0;
     }
 
     private static int Help()
@@ -146,6 +170,19 @@ public static class Program
                                  --secret-stdin, or a prompt. Never as an argument.
                 test             --domain <d>  Read the zone through the provider.
                 remove           --client <slug> [--domain <d>]
+
+              mta-sts            The MTA-STS policy this serves for a domain, at
+                                 mta-sts.<domain>. MTA-STS needs a DNS record AND a policy
+                                 file served over HTTPS; this is the file. Point
+                                 mta-sts.<domain> at the host running the web app, then
+                                 announce it with 'dmarc fix'.
+                list             What is being served, and where.
+                set              --domain <d> [--mode testing|enforce|none] [--mx <host>]...
+                                 Mail servers come from the domain's MX records unless
+                                 named. Starts in testing, which enforces nothing.
+                check            --domain <d>  Fetch what is really served, as a sender does.
+                remove           --domain <d>
+                --db <path>      Database file. Default: dmarc.db
 
               intel              Refresh and show what has been learned about sources
                                  impersonating clients, across every domain watched.

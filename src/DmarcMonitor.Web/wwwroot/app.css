@@ -253,3 +253,69 @@ code.wrap { word-break: break-all; white-space: normal; }
 .dropzone-face { pointer-events: none; display: grid; gap: 4px; }
 .dropzone-face strong { font-size: 15px; }
 .dropzone-face span { color: var(--muted); font-size: 13px; }
+
+/* Transport-security records, which exist to be copied into a DNS zone.
+   The name and the value both have to be selectable without catching the
+   prose around them, and a policy file has to keep its line breaks: a sender
+   parses it line by line and CRLF is not decoration. */
+.plan > summary { cursor: pointer; font-weight: 500; }
+.plan > summary::marker { color: var(--muted); }
+.diff code.value { display: block; margin-top: 2px; word-break: break-all; }
+.diff td .sub { margin: 4px 0 0; font-size: 12px; }
+pre.policy {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre;
+}
+
+/* The Fix worklist bar. Eighteen domains stacked and all open is a page you
+   scroll rather than read; this says what is waiting before any of it. */
+.worklist {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    margin-bottom: 14px;
+}
+.worklist .counts { display: flex; flex-wrap: wrap; gap: 18px; }
+.worklist .count { color: var(--muted); font-size: 13px; }
+.worklist .count strong {
+    display: inline-block;
+    min-width: 1.4em;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--ink, #e6edf3);
+}
+.worklist .count.act strong { color: var(--act); }
+.worklist .count.watch strong { color: var(--watch); }
+.worklist .count.urgent strong { color: var(--urgent); }
+.worklist .filter {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.settled-note { margin: 14px 0 0; font-size: 13px; }
+
+/* Two different jobs, so they do not run together: what this product can
+   write, and what a person has to publish. */
+.group-heading {
+    margin: 14px 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+}

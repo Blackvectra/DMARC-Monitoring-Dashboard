@@ -26,6 +26,16 @@
       the file does not silently change the lookup in DatabaseSchema.
     -->
     <EmbeddedResource Include="..\..\db\schema.sql" LogicalName="schema.sql" />
+
+    <!--
+      Every schema change after the baseline, compiled in for the same reason:
+      an upgrade that only works from a source tree is not an upgrade. The
+      LogicalName prefix is what DatabaseMigrations looks for, and the number
+      in the filename is the order they run in.
+    -->
+    <EmbeddedResource Include="..\..\db\migrations\*.sql">
+      <LogicalName>migration.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
 </Project>

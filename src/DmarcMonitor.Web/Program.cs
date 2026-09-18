@@ -1,3 +1,4 @@
+using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Reporting;
 using DmarcMonitor.Web;
 using DmarcMonitor.Web.Auth;
@@ -8,6 +9,11 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.AddAppAuthentication();
+
+// Whatever holds the TLS certificate - Caddy, nginx, IIS, a load balancer -
+// is in front of this, and without being told so the app sees every request
+// as plain HTTP from 127.0.0.1. See ProxySetup for what that breaks.
+builder.AddProxySupport();
 
 // One database path, resolved once to an absolute path, so a misconfiguration
 // is a startup problem rather than a page that renders empty and looks like no
@@ -42,16 +48,48 @@ builder.Services.AddScoped(sp => new DmarcMonitor.Core.Remediation.DnsProviderCo
     dbPath, sp.GetRequiredService<DmarcMonitor.Core.Remediation.ISecretStore>()));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Remediation.RemediationService(dbPath));
 builder.Services.AddScoped<RemediationUiService>();
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());
+
+// Where the app writes down a version it would like installed. It writes a
+// version and nothing else; a separate unit with the privileges to do the
+// work checks it and acts. See UpdateSpool for why the app is not allowed to
+// install anything itself.
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.UpdateSpool(
+    Path.Combine(Path.GetDirectoryName(dbPath) ?? ".", "updates")));
 
 var app = builder.Build();
+
+// First, so everything after it sees the caller's real address and scheme.
+app.UseProxyHeaders();
 
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/error", createScopeForErrors: true);
-    app.UseHsts();
+    // Not behind a proxy: the proxy owns this header, and two of them is one
+    // too many.
+    if (ProxySetup.ShouldRedirectToHttps(app.Configuration)) { app.UseHsts(); }
 }
 
-app.UseHttpsRedirection();
+if (ProxySetup.ShouldRedirectToHttps(app.Configuration))
+{
+    app.UseHttpsRedirection();
+}
+// A URL that matches nothing used to return 404 with an empty body, which is
+// a blank white page with no layout and no way back. The status code stays a
+// real 404 for anything reading it; only what a person sees changes.
+//
+// Not for /.well-known, though. Re-executing a 404 runs it back through the
+// pipeline as a request for a page, and that page needs authentication, so a
+// missing MTA-STS policy answered a sending mail server with 302 to a sign-in
+// screen instead of a clean 404. Senders do not follow redirects when fetching
+// a policy - RFC 8461 §3.3 - so it was not a security problem, but it is the
+// wrong answer to a machine that is not a person and cannot sign in.
+app.UseWhen(
+    context => !context.Request.Path.StartsWithSegments("/.well-known"),
+    branch => branch.UseStatusCodePagesWithReExecute("/not-found"));
+
 app.UseStaticFiles();
 app.UseAntiforgery();
 
@@ -64,6 +102,38 @@ if (AuthSetup.IsEntraConfigured(app.Configuration))
 {
     app.MapControllers();   // Microsoft.Identity.Web.UI provides sign-in/out
 }
+
+// The other half of MTA-STS.
+//
+// A TXT record at _mta-sts announces a policy; this is the policy. RFC 8461
+// has senders fetch it from mta-sts.<domain>/.well-known/mta-sts.txt over
+// HTTPS, so which domain is being asked about comes from the Host header and
+// nothing else - one instance serves every client's policy, and each client's
+// mta-sts subdomain is a CNAME pointing here.
+//
+// Anonymous, necessarily: the callers are other people's mail servers. It
+// discloses nothing that is not meant to be world-readable - the policy only
+// says which servers may receive this domain's mail, which is already public
+// in its MX records.
+app.MapGet("/.well-known/mta-sts.txt", async (
+    HttpContext context, MtaStsStore policies, CancellationToken ct) =>
+{
+    var host = context.Request.Host.Host;
+
+    // Only ever "mta-sts.<domain>". A request on any other name is not a
+    // sender asking about a domain, and answering it would let this instance
+    // be used to claim a policy for a name nobody asked about.
+    if (!host.StartsWith("mta-sts.", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.NotFound();
+    }
+
+    var policy = await policies.GetAsync(host["mta-sts.".Length..], ct).ConfigureAwait(false);
+    if (policy is null) { return Results.NotFound(); }
+
+    // text/plain is what the RFC requires, and senders check it.
+    return Results.Text(policy.ToFile(), "text/plain; charset=utf-8");
+}).AllowAnonymous();
 
 // The report as a file, rendered by the same code the CLI uses. A download
 // rather than a page: this is a document that gets attached to an email and

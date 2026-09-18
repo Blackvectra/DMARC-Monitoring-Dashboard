@@ -15,6 +15,23 @@ public sealed record DomainFixes(
     bool CanApply,
     string? ProviderError)
 {
+    /// <summary>
+    /// The transport-security records this domain needs, whether or not any
+    /// of them can be applied from here.
+    /// </summary>
+    /// <remarks>
+    /// Separate from Plans, which is what the product would CHANGE. A domain
+    /// with no MTA-STS at all has nothing to change and everything to do, and
+    /// it used to get a page that said nothing whatsoever about it.
+    /// </remarks>
+    public IReadOnlyList<RecordToPublish> TransportRecords { get; init; } = [];
+
+    /// <summary>The policy file behind the CNAME, when there is one to serve.</summary>
+    public string PolicyFile { get; init; } = "";
+
+    /// <summary>True when nobody has said where this instance is reachable.</summary>
+    public bool PolicyHostUnknown { get; init; }
+
     /// <summary>The policy the reports say the domain is ready for, or null.</summary>
     public string? ReadyFor
     {
@@ -44,9 +61,12 @@ public sealed class RemediationUiService(
     DatabaseInfo database,
     DnsLookup lookup,
     RemediationService remediation,
-    DnsProviderConfigs providers)
+    DnsProviderConfigs providers,
+    MtaStsFetcher mtaSts,
+    IConfiguration configuration)
 {
     private readonly TriageService _triage = new(database.Path);
+    private readonly MtaStsStore _policies = new(database.Path);
 
     public string SecretsDescription => providers.Secrets.Description;
     public bool SecretsAvailable => providers.Secrets.IsAvailable;
@@ -72,6 +92,10 @@ public sealed class RemediationUiService(
         var published = await lookup.ReadAsync(domain, ct);
         var plans = new List<ChangePlan>();
 
+        IReadOnlyList<RecordToPublish> transportRecords = [];
+        var policyFile = "";
+        var policyHostUnknown = false;
+
         // Nothing is planned from a failed read: "no record" and "could not
         // read" would plan opposite things.
         if (!published.LookupFailed)
@@ -86,6 +110,81 @@ public sealed class RemediationUiService(
 
             var spf = published.SpfRecords.Count > 0 ? published.SpfRecords[0] : null;
             plans.AddRange(published.DeadIncludes.Select(dead => SpfIncludePlanner.RemoveDeadInclude(domain, spf, dead)));
+
+            // Transport security. TLS-RPT only when there is somewhere to send
+            // the reports; without a configured address this would plan a
+            // record pointing at a mailbox nobody reads.
+            if (configuration["Reporting:TlsReportAddress"] is { Length: > 0 } tlsTo)
+            {
+                var tls = TransportPlanner.TlsReporting(domain, published.TlsRptRecord, tlsTo);
+                if (!tls.IsNoop) { plans.Add(tls); }
+            }
+
+            // MTA-STS is only ever announced for a policy already being
+            // served, so the file is fetched rather than assumed. Skipped
+            // entirely for a domain with neither, which is not a fault - it
+            // is a domain nobody has set this up for.
+            // The id comes from this product's record of the policy, not from
+            // the fetched file - RFC 8461 policy files do not carry it. Fetch
+            // without it and every plan announces "v=STSv1; id=", which is not
+            // a record a sender will accept.
+            var known = await _policies.GetAsync(domain, ct);
+
+            // Fetched only when there is a reason to think a policy exists.
+            //
+            // The fetch is an HTTPS request to mta-sts.<domain>, which for a
+            // domain nobody has set this up for is a name that does not
+            // resolve - so it costs a DNS failure and several hundred
+            // milliseconds to learn nothing. Seventeen of eighteen domains on
+            // the real database are in exactly that state, and the Fix page
+            // paid for all of them on every load.
+            //
+            // Skipped only when BOTH are absent: no TXT record announcing a
+            // policy, and no policy of our own to serve. A policy served but
+            // not yet announced - which is what 'mta-sts set' leaves behind -
+            // still has our stored record, so it is still checked.
+            var served = string.IsNullOrWhiteSpace(published.MtaStsRecord) && known is null
+                ? ServedPolicy.Missing("Not checked: nothing announces a policy and none is configured here.")
+                : await mtaSts.FetchAsync(domain, known?.Id ?? "", ct);
+
+            // The records to publish, independent of whether anything can be
+            // applied. A domain with neither a record nor a served policy is
+            // skipped by the planner below - correctly, there is nothing safe
+            // to change - and that is exactly the domain whose operator needs
+            // to be told what to create.
+            var policyHost = configuration["MtaSts:PolicyHost"];
+            policyHostUnknown = string.IsNullOrWhiteSpace(policyHost);
+
+            if (known is not null)
+            {
+                transportRecords = [.. TransportSetup.MtaSts(domain, policyHost, known)];
+                policyFile = TransportSetup.PolicyFile(known);
+            }
+            else
+            {
+                // No policy has been created, so there is no id to announce
+                // yet and inventing one would have somebody publish a version
+                // number this product does not serve. Only the half that is
+                // knowable is shown.
+                transportRecords =
+                [
+                    .. TransportSetup.MtaSts(domain, policyHost, MtaStsPolicy.ForTesting([], DateTimeOffset.UtcNow))
+                        .Where(r => r.Type == "CNAME"),
+                ];
+            }
+
+            if (configuration["Reporting:TlsReportAddress"] is { Length: > 0 } tlsAddress
+                && string.IsNullOrWhiteSpace(published.TlsRptRecord))
+            {
+                transportRecords = [.. transportRecords, TransportSetup.TlsReporting(domain, tlsAddress)];
+            }
+            if (!string.IsNullOrWhiteSpace(published.MtaStsRecord) || served.Reachable)
+            {
+                var mx = await lookup.MxAsync(domain, ct);
+
+                var plan = TransportPlanner.MtaSts(domain, published.MtaStsRecord, served, mx);
+                if (!plan.IsNoop) { plans.Add(plan); }
+            }
         }
 
         string providerName;
@@ -105,7 +204,22 @@ public sealed class RemediationUiService(
             providerError = ex.Message;
         }
 
-        return new DomainFixes(domain, triage?.ClientName ?? "", published, triage, plans, providerName, canApply, providerError);
+        // Anything the product can already offer to write is not also a record
+        // to publish by hand. TLS-RPT was appearing twice - once as a plan with
+        // an Apply button, once in the records table - which reads as two jobs.
+        var planned = plans
+            .Where(p => p.IsSafe && !p.IsNoop)
+            .Select(p => (p.RecordName, p.RecordType))
+            .ToHashSet();
+
+        transportRecords = [.. transportRecords.Where(r => !planned.Contains((r.Name, r.Type)))];
+
+        return new DomainFixes(domain, triage?.ClientName ?? "", published, triage, plans, providerName, canApply, providerError)
+        {
+            TransportRecords = transportRecords,
+            PolicyFile = policyFile,
+            PolicyHostUnknown = policyHostUnknown,
+        };
     }
 
     public async Task<ApplyOutcome> ApplyAsync(ChangePlan plan, string by, string reason, CancellationToken ct = default)

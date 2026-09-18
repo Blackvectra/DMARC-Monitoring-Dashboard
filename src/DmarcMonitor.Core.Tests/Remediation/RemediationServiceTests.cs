@@ -40,6 +40,75 @@ public sealed class RemediationServiceTests : IDisposable
         _zone.Add(Domain, "TXT", "MS=ms12345678");
     }
 
+    /// <summary>
+    /// A zone that breaks the way a real one does: the network drops.
+    /// </summary>
+    /// <remarks>
+    /// CloudflareDnsProvider has no exception handling of its own, so an
+    /// HttpRequestException from a write travels straight out of the provider.
+    /// This stands in for that.
+    /// </remarks>
+    private sealed class ThrowingZone(InMemoryDnsProvider inner, bool onRead, bool onWrite) : IDnsProvider
+    {
+        public string Name => "throwing";
+        public bool CanWrite => true;
+        public int Reads { get; private set; }
+
+        public Task<IReadOnlyList<DnsProviderRecord>> GetRecordsAsync(string name, string type, CancellationToken ct = default)
+        {
+            Reads++;
+            // The FIRST read is the snapshot and was always guarded; the
+            // second, immediately before the write, was not.
+            return onRead && Reads > 1
+                ? throw new HttpRequestException("connection reset by peer")
+                : inner.GetRecordsAsync(name, type, ct);
+        }
+
+        public Task<ProviderWrite> SetRecordAsync(DnsRecordWrite write, CancellationToken ct = default) =>
+            onWrite
+                ? throw new HttpRequestException("the connection was closed after the request was sent")
+                : inner.SetRecordAsync(write, ct);
+
+        public Task<ProviderWrite> RemoveRecordAsync(DnsProviderRecord record, CancellationToken ct = default) =>
+            inner.RemoveRecordAsync(record, ct);
+    }
+
+    [Fact]
+    public async Task AReadThatFailsJustBeforeTheWriteIsNotAppliedAndNotACrash()
+    {
+        // This read was the only provider call on the apply path with nothing
+        // around it, so a dropped connection here left the method entirely and
+        // reached the operator as a stack trace under "This is a bug".
+        var zone = new ThrowingZone(_zone, onRead: true, onWrite: false);
+        var plan = DmarcPolicyPlanner.Advance(Domain, Before, "quarantine");
+
+        var outcome = await _service.ApplyAsync(plan, zone, confirm: true, "tester", "because");
+
+        Assert.False(outcome.Applied);
+        Assert.Contains("could not be read", outcome.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal([Before], _zone.ValuesAt(Name));
+    }
+
+    [Fact]
+    public async Task AWriteThatMayOrMayNotHaveLandedNeverClaimsNothingHappened()
+    {
+        // A connection dropped after the request left is indistinguishable
+        // from one that never arrived, and a timeout is precisely the case
+        // where the write most likely DID happen. "Not applied" is the one
+        // answer that would certainly be unsafe, so it must not say that -
+        // and it has to carry the previous value, since an operator checking
+        // the zone by hand needs to know what it should have held.
+        var zone = new ThrowingZone(_zone, onRead: false, onWrite: true);
+        var plan = DmarcPolicyPlanner.Advance(Domain, Before, "quarantine");
+
+        var outcome = await _service.ApplyAsync(plan, zone, confirm: true, "tester", "because");
+
+        Assert.False(outcome.Applied);
+        Assert.DoesNotContain("Not applied", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("unknown", outcome.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(Before, outcome.Message, StringComparison.Ordinal);
+    }
+
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();

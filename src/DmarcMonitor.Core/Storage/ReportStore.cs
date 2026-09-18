@@ -24,15 +24,25 @@ public sealed class ReportStore
     public const string DefaultTenantSlug = "local";
     public const string UnassignedClientSlug = "unassigned";
 
+    /// <summary>SQLITE_CORRUPT: the file is a database and is damaged.</summary>
+    private const int Corrupt = 11;
+
+    /// <summary>SQLITE_NOTADB: the file is not a database at all.</summary>
+    private const int NotADatabase = 26;
+
     public ReportStore(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+
+        _databasePath = databasePath;
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
             ForeignKeys = true,
         }.ToString();
     }
+
+    private readonly string _databasePath;
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken ct)
     {
@@ -67,14 +77,38 @@ public sealed class ReportStore
     }
 
     /// <summary>True when the expected tables are present.</summary>
+    /// <remarks>
+    /// Checks for the file before opening it, because opening a SQLite path
+    /// that is not there CREATES it. Every command asks this question first,
+    /// so without this check running any of them in the wrong directory left
+    /// an empty dmarc.db behind, told the operator to run init-db, and then
+    /// init-db refused because a file it had just created itself "does not
+    /// look like a DMARC Monitor database". A dead end reached by following
+    /// the instructions.
+    /// </remarks>
     public async Task<bool> IsInitialisedAsync(CancellationToken ct = default)
     {
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText =
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('aggregate_reports','tls_reports','domains')";
-        var count = Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture);
-        return count == 3;
+        if (_databasePath is not ":memory:" && !File.Exists(_databasePath)) { return false; }
+
+        try
+        {
+            await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('aggregate_reports','tls_reports','domains')";
+            var count = Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture);
+            return count == 3;
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is NotADatabase or Corrupt)
+        {
+            // A file that is not a database is not an exceptional event; it is
+            // somebody pointing --db at the wrong file, which is an ordinary
+            // typo. It used to escape from the WAL pragma in OpenAsync - before
+            // this method could ever return false - and every command printed a
+            // SQLite stack trace under a banner reading "This is a bug",
+            // leaving the one branch written to explain it unreachable.
+            return false;
+        }
     }
 
     /// <summary>
@@ -373,6 +407,7 @@ public sealed class ReportStore
         "dns_change_plans",
         "dns_changes",
         "spf_flatten_state",
+        "mta_sts_policies",
     ];
 
     /// <summary>Every client, with the Unassigned one included: unbilled work is worth seeing.</summary>
@@ -539,19 +574,100 @@ public sealed class ReportStore
         return AssignOutcome.Assigned;
     }
 
+    /// <summary>The longest slug worth having. A filename is built from it.</summary>
+    /// <remarks>
+    /// Filenames have limits - 255 bytes on most filesystems - and the slug is
+    /// only part of one: a client report is slug plus month plus extension.
+    /// Cut at a hyphen so the result still reads as words.
+    /// </remarks>
+    private const int MaxSlugLength = 60;
+
+    /// <summary>
+    /// Accented letters, folded to the ASCII letter they are built on.
+    /// </summary>
+    /// <remarks>
+    /// Spelled out rather than done with Unicode normalisation, because this
+    /// solution builds with InvariantGlobalization (src/Directory.Build.props),
+    /// and under that switch string.Normalize is a no-op and ToLowerInvariant
+    /// only touches ASCII. A FormD-and-strip-the-marks implementation looks
+    /// correct, passes in a scratch project that does not inherit the switch,
+    /// and does nothing at all in the shipped application.
+    ///
+    /// Both cases are listed for the same reason: there is no Unicode casing
+    /// to fall back on.
+    /// </remarks>
+    private static readonly Dictionary<char, string> Folded = BuildFolding();
+
+    private static Dictionary<char, string> BuildFolding()
+    {
+        var map = new Dictionary<char, string>();
+
+        void Add(string lower, string upper, string ascii)
+        {
+            foreach (var c in lower) { map[c] = ascii; }
+            foreach (var c in upper) { map[c] = ascii; }
+        }
+
+        Add("àáâãäåāăą", "ÀÁÂÃÄÅĀĂĄ", "a");
+        Add("çćĉċč", "ÇĆĈĊČ", "c");
+        Add("ďđð", "ĎĐÐ", "d");
+        Add("èéêëēĕėęě", "ÈÉÊËĒĔĖĘĚ", "e");
+        Add("ĝğġģ", "ĜĞĠĢ", "g");
+        Add("ĥħ", "ĤĦ", "h");
+        Add("ìíîïĩīĭįı", "ÌÍÎÏĨĪĬĮİ", "i");
+        Add("ĵ", "Ĵ", "j");
+        Add("ķ", "Ķ", "k");
+        Add("ĺļľŀł", "ĹĻĽĿŁ", "l");
+        Add("ñńņňŋ", "ÑŃŅŇŊ", "n");
+        Add("òóôõöøōŏő", "ÒÓÔÕÖØŌŎŐ", "o");
+        Add("ŕŗř", "ŔŖŘ", "r");
+        Add("śŝşš", "ŚŜŞŠ", "s");
+        Add("ţťŧ", "ŢŤŦ", "t");
+        Add("ùúûüũūŭůűų", "ÙÚÛÜŨŪŬŮŰŲ", "u");
+        Add("ŵ", "Ŵ", "w");
+        Add("ýÿŷ", "ÝŸŶ", "y");
+        Add("źżž", "ŹŻŽ", "z");
+
+        // Letters that are not one ASCII letter with a mark on it.
+        Add("æ", "Æ", "ae");
+        Add("œ", "Œ", "oe");
+        Add("ß", "", "ss");
+        Add("þ", "Þ", "th");
+
+        return map;
+    }
+
     /// <summary>"Morton, ND" becomes "morton-nd": usable in a filename and a URL.</summary>
+    /// <remarks>
+    /// Accented letters are folded to their ASCII base rather than dropped.
+    /// Dropping them turned "Søren Ågård Farms" into "s-ren-g-rd-farms", and
+    /// Scandinavian and German surnames are ordinary in the part of the world
+    /// this was built for. The slug goes into report filenames and cannot be
+    /// changed afterwards, so it is worth getting right the first time.
+    /// </remarks>
     public static string Slugify(string raw)
     {
         ArgumentNullException.ThrowIfNull(raw);
 
+        // Folded BEFORE lowercasing, because under InvariantGlobalization
+        // ToLowerInvariant leaves 'Ø' alone - it only maps ASCII - and the
+        // folding table therefore carries both cases itself.
         var builder = new StringBuilder(raw.Length);
-        foreach (var c in raw.Trim().ToLowerInvariant())
+        foreach (var c in raw.Trim())
         {
-            if (char.IsAsciiLetterOrDigit(c)) { builder.Append(c); }
+            if (Folded.TryGetValue(c, out var ascii)) { builder.Append(ascii); }
+            else if (char.IsAsciiLetterOrDigit(c)) { builder.Append(char.ToLowerInvariant(c)); }
             else if (builder.Length > 0 && builder[^1] != '-') { builder.Append('-'); }
         }
 
-        return builder.ToString().Trim('-');
+        var slug = builder.ToString().Trim('-');
+        if (slug.Length <= MaxSlugLength) { return slug; }
+
+        // Cut back to the last whole word, unless the first word is already
+        // longer than the limit.
+        var cut = slug[..MaxSlugLength];
+        var lastHyphen = cut.LastIndexOf('-');
+        return (lastHyphen > 0 ? cut[..lastHyphen] : cut).Trim('-');
     }
 
     private sealed record DomainIds(string TenantId, string ClientId, string DomainId);

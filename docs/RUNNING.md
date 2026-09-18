@@ -210,6 +210,63 @@ re-send.
 
 ---
 
+## Transport security: MTA-STS and TLS-RPT
+
+Two records that say mail to a domain must travel over a verified, encrypted
+connection. Publish them in this order, because the second needs what the
+first produces.
+
+**TLS-RPT first.** It asks receivers to report failed or downgraded
+connections and changes nothing about delivery, so it is safe on any domain:
+
+    dmarc fix --domain example.com --tls-rpt-to tls@nrgtechservices.com --apply --reason "..."
+
+**MTA-STS second**, and it is two halves that must agree. A TXT record
+announces a policy id; the policy itself is a file served over HTTPS at
+`mta-sts.<domain>/.well-known/mta-sts.txt`. Only the record is DNS, so the
+web app serves the file:
+
+    dmarc mta-sts set --domain example.com          # mail servers from its MX records
+    # point mta-sts.example.com at the host running the web app (a CNAME)
+    dmarc mta-sts check --domain example.com        # fetch it back, as a sender would
+    dmarc fix --domain example.com --apply --reason "..."   # announce it
+
+A policy starts in `testing`, where a sender that cannot connect securely
+reports it and delivers anyway. Moving to `enforce` is the dangerous step and
+works like advancing a DMARC policy: `dmarc fix` will say what blocks it -
+whether TLS reports are arriving, whether any connections are failing, and
+whether the policy covers every mail server the domain publishes.
+
+Two things about enforce worth knowing before you get there. A sender that
+reaches a mail server the policy does not list does not deliver and does not
+fall back. And senders cache the policy for its `max_age`, a week by default,
+so a mistake outlasts the fix for it. That is why `--mode enforce` refuses
+without `--i-have-checked`.
+
+## Upgrading
+
+`dmarc version` says what a build is and which database schema it expects.
+
+`dmarc init-db` against an existing database brings its schema up to date and
+says what it applied. Run it after installing a new build, before starting the
+service; it is safe to run when there is nothing to do.
+
+On a deployed server, `deploy/update.sh` does the whole sequence - back up,
+swap, migrate, start, verify, and put the old one back if it does not come
+up. See `DEPLOYING.md` for how releases and development are kept apart.
+
+## Putting it on a server
+
+`DEPLOYING.md` covers that end to end: which machine, what it costs, the proxy
+and certificate, Entra sign-in, ingest on a timer, backups, and the checklist
+of things that must be true before it is reachable by anybody else.
+
+The one thing to know before reading it: until Entra sign-in is configured
+this app has no login at all, and it protects itself by refusing to serve
+anything but the machine it runs on. Putting a reverse proxy in front does
+not change that - a proxied request is refused outright, because being proxied
+is itself evidence that somebody else can reach it.
+
 ## Known unfinished
 
 [`OPEN-ISSUES.md`](OPEN-ISSUES.md) is the honest list. The one worth knowing

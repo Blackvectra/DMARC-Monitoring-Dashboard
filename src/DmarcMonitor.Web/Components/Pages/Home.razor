@@ -1,4 +1,8 @@
 @page "/"
+@* The sidebar calls this page Triage, so /triage is the address somebody
+   types or bookmarks. Without this it was one of the URLs that returned a
+   blank page. *@
+@page "/triage"
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Web.Data
 @inject TriageService Triage
@@ -10,8 +14,8 @@
 <header class="page-head">
     <div>
         <h1>Triage</h1>
-        <p class="sub">Every domain, worst first. Not an average — an average across thirteen domains
-           hides the one that is broken.</p>
+        <p class="sub">Every domain, worst first. Not an average — an average across a whole book of
+           domains hides the one that is broken.</p>
     </div>
     <div class="head-actions">
         <label>

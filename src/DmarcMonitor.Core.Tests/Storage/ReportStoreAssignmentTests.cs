@@ -227,6 +227,30 @@ public sealed class ReportStoreAssignmentTests : IDisposable
     [InlineData("  Acme  Corp  ", "acme-corp")]
     [InlineData("O'Brien & Sons", "o-brien-sons")]
     [InlineData("---", "")]
+    // Accents are folded, not dropped. Scandinavian and German surnames are
+    // ordinary in North Dakota, and "Søren Ågård Farms" used to become
+    // "s-ren-g-rd-farms" - in a filename nobody can change afterwards.
+    [InlineData("Søren Ågård Farms", "soren-agard-farms")]
+    [InlineData("Hügel Bräu", "hugel-brau")]
+    [InlineData("Åse Ødegård", "ase-odegard")]
+    [InlineData("Weiß & Söhne", "weiss-sohne")]
+    [InlineData("José Peña", "jose-pena")]
+    // Nothing to build from is still nothing: the page says so rather than
+    // inventing a name.
+    [InlineData("客户公司", "")]
     public void SlugifyProducesSomethingUsableInAFilename(string input, string expected) =>
         Assert.Equal(expected, ReportStore.Slugify(input));
+
+    [Fact]
+    public void ASlugIsShortEnoughToBeAFilename()
+    {
+        // A client report is this plus a month plus an extension, and a
+        // filesystem stops at 255 bytes. Cut at a word, so it still reads.
+        var slug = ReportStore.Slugify(string.Join(" ", Enumerable.Repeat("Prairie", 40)));
+
+        Assert.True(slug.Length <= 60, $"slug was {slug.Length} characters");
+        Assert.DoesNotContain("--", slug, StringComparison.Ordinal);
+        Assert.False(slug.EndsWith('-'));
+        Assert.StartsWith("prairie-prairie", slug, StringComparison.Ordinal);
+    }
 }

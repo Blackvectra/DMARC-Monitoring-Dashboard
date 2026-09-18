@@ -166,7 +166,11 @@ both restore identically.
 with this prospect's email setup" before they are a customer. Two of its
 findings cannot fire in that mode:
 
-- **MTA-STS mode** comes from TLS reports, so a prospect's policy shows as
+- **MTA-STS mode** was read only from TLS reports. Fixed: `MtaStsFetcher`
+  fetches the policy file the way a sender does, so the mode is known for any
+  domain, prospect or customer, with or without reports. The paragraph below
+  describes how it used to be.
+- **(was) MTA-STS mode** comes from TLS reports, so a prospect's policy shows as
   published and never as *testing*, which is the interesting state. The mode is
   also in the policy file at
   `https://mta-sts.<domain>/.well-known/mta-sts.txt`, which is one HTTPS GET
@@ -272,7 +276,59 @@ so the failure is legible. What has not been established is where the real
 limits are: at what size the upload gets slow enough that the folder import
 is the better answer.
 
-## 10. The apply path has never written to a real zone
+## 10. The update path has never been run on a server
+
+**Update:** the Updates page and the boundary beneath it are now covered by
+tests - what the app may write, what the agent must refuse, and that both
+sides agree about the file format, which they briefly did not: the app
+serialised the state as a number and the shell helper writes the name.
+
+What is still untried is the same thing as before, plus the agent: no systemd
+path unit has ever woken, no service has been stopped and restarted by it.
+
+**Area** `deploy/update.sh`, `deploy/rollback.sh`
+**Severity** Medium.
+
+The release channel half is tested and was driven against the real GitHub API:
+the Settings page reports what it is running and correctly says nothing has
+been released yet. The scripts that install a release are not. They parse, and
+their logic is legible, and neither has stopped and restarted a real service.
+
+Two things about them worth knowing before the first run:
+
+- **The rollback is not symmetric.** Putting the application back always
+  works; the database is left alone unless `--database` is passed, because a
+  migration that ran is still applied and the current database holds
+  everything collected since the update. Getting this wrong in either
+  direction loses something.
+- **`appsettings.Production.json` lives in the application directory** and is
+  not part of a release, so `update.sh` copies it across. If that copy ever
+  fails silently the new install comes up with no database path, no tenant and
+  no sign-in - which the health check would catch, but by rolling back rather
+  than by saying what happened.
+
+Try it first on a box with nothing real on it, between two tags that differ
+only trivially.
+
+## 10a. No ARM build, and no deployment has happened
+
+**Area** `.github/workflows/release.yml`, `docs/DEPLOYING.md`
+**Severity** Low.
+
+**ARM: done.** The release now publishes `linux-arm64` too, verified locally
+to be a 36 MB self-contained `ARM aarch64` executable. It is the one build
+whose smoke test cannot run it - an x64 runner cannot execute an ARM binary -
+so CI checks the architecture and the size instead and says so. That is
+genuinely weaker than the x64 and Windows checks, which make the binary
+create a database and read a report.
+
+`DEPLOYING.md` itself is assembled from how the pieces are built rather than
+from a deployment that happened. The proxy handling under it is covered by
+tests - including the one that matters, that an unauthenticated instance
+refuses a proxied request - but the systemd units, the Caddyfile and the Entra
+app registration have not been run. The doc says so in its own last section.
+
+## 11. The apply path has never written to a real zone
 
 **Area** `src/DmarcMonitor.Core/Remediation/`, `dmarc fix`, the Fix page
 **Severity** Medium. This is the feature the product exists for, and its

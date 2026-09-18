@@ -1,3 +1,4 @@
+using System.Globalization;
 using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Rollout;
@@ -64,6 +65,25 @@ public static class FixCommand
             ? (await new TriageService(dbPath).GetAsync(ct: ct).ConfigureAwait(false)).Select(t => t.Domain).ToList()
             : [domain!.Trim().ToLowerInvariant()];
 
+        // Checked here rather than left to Args.Int, whose silent fallback is
+        // the wrong shape for a safety limit. It returns 100 for anything that
+        // is not a positive integer, so "--pct twentyfive", "--pct 0",
+        // "--pct -5" and a value accidentally split by a space all planned the
+        // change at 100% of failing mail - the opposite of what somebody
+        // typing --pct wants, with nothing printed to say the flag was
+        // dropped. Above 100 it threw instead, and the stack trace reached the
+        // operator under a banner saying "This is a bug".
+        var percent = 100;
+        if (Args.Value(args, "--pct") is { } pctText)
+        {
+            if (!int.TryParse(pctText, NumberStyles.Integer, CultureInfo.InvariantCulture, out percent)
+                || percent is < 1 or > 100)
+            {
+                Console.Error.WriteLine($"--pct takes a whole number from 1 to 100. '{pctText}' is not one.");
+                return 64;
+            }
+        }
+
         var apply = Args.Flag(args, "--apply");
         var reason = Args.Value(args, "--reason") ?? "";
         if (apply && reason.Length == 0)
@@ -76,7 +96,7 @@ public static class FixCommand
         foreach (var d in domains)
         {
             ct.ThrowIfCancellationRequested();
-            worst = Math.Max(worst, await FixDomainAsync(d, args, policy, apply, by, reason, lookup, service, configs, dbPath, ct).ConfigureAwait(false));
+            worst = Math.Max(worst, await FixDomainAsync(d, args, policy, percent, apply, by, reason, lookup, service, configs, dbPath, ct).ConfigureAwait(false));
         }
 
         Console.WriteLine();
@@ -84,7 +104,7 @@ public static class FixCommand
     }
 
     private static async Task<int> FixDomainAsync(
-        string domain, string[] args, string? policy, bool apply, string by, string reason,
+        string domain, string[] args, string? policy, int percent, bool apply, string by, string reason,
         DnsLookup lookup, RemediationService service, DnsProviderConfigs configs, string dbPath, CancellationToken ct)
     {
         Console.WriteLine();
@@ -100,11 +120,12 @@ public static class FixCommand
         }
 
         var plans = new List<ChangePlan>();
-        var explicitOnly = policy is not null || Args.Flag(args, "--sp") || Args.Flag(args, "--dead-includes");
+        var explicitOnly = policy is not null || Args.Flag(args, "--sp") || Args.Flag(args, "--dead-includes")
+                        || Args.Flag(args, "--transport");
 
         if (policy is not null)
         {
-            plans.Add(DmarcPolicyPlanner.Advance(domain, published.DmarcRecord, policy, Args.Int(args, "--pct", 100)));
+            plans.Add(DmarcPolicyPlanner.Advance(domain, published.DmarcRecord, policy, percent));
         }
 
         // Without a specific ask, everything that is safe to do on the
@@ -120,6 +141,15 @@ public static class FixCommand
         {
             var spf = published.SpfRecords.Count > 0 ? published.SpfRecords[0] : null;
             plans.AddRange(published.DeadIncludes.Select(dead => SpfIncludePlanner.RemoveDeadInclude(domain, spf, dead)));
+        }
+
+        // Transport security: TLS-RPT asks for reports and changes nothing
+        // about delivery, so it is planned freely. MTA-STS is only ever
+        // announced for a policy that is already being served, which the
+        // planner checks by fetching it.
+        if (!explicitOnly || Args.Flag(args, "--transport"))
+        {
+            plans.AddRange(await TransportAsync(domain, published, args, dbPath, ct).ConfigureAwait(false));
         }
 
         if (policy is null)
@@ -156,6 +186,54 @@ public static class FixCommand
     }
 
     /// <summary>
+    /// The transport-security plans for a domain: TLS-RPT, then MTA-STS.
+    /// </summary>
+    /// <remarks>
+    /// TLS-RPT first and always, because it is what produces the evidence the
+    /// MTA-STS decision needs. Enforcing transport security without reports is
+    /// enforcement with the lights off.
+    /// </remarks>
+    private static async Task<List<ChangePlan>> TransportAsync(
+        string domain, PublishedRecords published, string[] args, string dbPath, CancellationToken ct)
+    {
+        var plans = new List<ChangePlan>();
+
+        if (Args.Value(args, "--tls-rpt-to") is { Length: > 0 } address)
+        {
+            var tls = TransportPlanner.TlsReporting(domain, published.TlsRptRecord, address);
+            if (!tls.IsNoop) { plans.Add(tls); }
+        }
+        else if (string.IsNullOrWhiteSpace(published.TlsRptRecord))
+        {
+            Console.WriteLine("    no TLS-RPT record, so nobody reports failed or downgraded connections.");
+            Console.WriteLine($"    to publish one: dmarc fix --domain {domain} --tls-rpt-to <address> --apply --reason \"...\"");
+        }
+
+        // Fetched rather than assumed: the record says a policy exists, only
+        // the file says what it is, and a sender reads the file.
+        //
+        // The id, though, is not in the file - RFC 8461 keeps it in the TXT
+        // record alone - so it has to come from this product's own record of
+        // the policy. Fetching without it built "v=STSv1; id=", which no
+        // sender accepts.
+        var known = await new MtaStsStore(dbPath).GetAsync(domain, ct).ConfigureAwait(false);
+        var served = await new MtaStsFetcher().FetchAsync(domain, known?.Id ?? "", ct).ConfigureAwait(false);
+        if (!served.Reachable && string.IsNullOrWhiteSpace(published.MtaStsRecord))
+        {
+            // Nothing published and nothing served is not a fault to plan
+            // around, it is a domain nobody has set this up for.
+            Console.WriteLine($"    no MTA-STS policy. To start one: dmarc mta-sts set --domain {domain}");
+            return plans;
+        }
+
+        var mx = await new DnsLookup().MxAsync(domain, ct).ConfigureAwait(false);
+        var mtaSts = TransportPlanner.MtaSts(domain, published.MtaStsRecord, served, mx);
+        if (!mtaSts.IsNoop) { plans.Add(mtaSts); }
+
+        return plans;
+    }
+
+    /// <summary>
     /// Says when the reports say a domain is ready to advance, so the
     /// decision is made with the evidence in front of whoever makes it.
     /// </summary>
@@ -168,9 +246,27 @@ public static class FixCommand
         var record = DmarcRecord.Parse(published.DmarcRecord);
         var live = record.IsValid ? record.Policy.ToLowerInvariant() : "";
 
-        var next = row.Headline.Contains("Ready to move to p=", StringComparison.Ordinal)
-            ? row.Headline[(row.Headline.IndexOf("p=", StringComparison.Ordinal) + 2)..].TrimEnd('.')
-            : null;
+        // Taken from after "Ready to move to p=", not after the first "p=".
+        // The headline reads "p=none with everything authenticating. Ready to
+        // move to p=reject.", so the first "p=" is the CURRENT policy, and the
+        // suggested command came out as
+        //
+        //   dmarc fix --domain x --policy none with everything authenticating. Ready to move to p=reject --apply
+        //
+        // which a shell splits into stray words, binding --policy to "none" -
+        // the policy the domain is already on. Pasting the product's own
+        // instruction answered "[ok] x is already at p=none" and exited 0, so
+        // the operator was told the job was done while the domain stayed
+        // unprotected. It fired on precisely the domains that were ready to
+        // advance, which is the only case this code runs for.
+        const string Marker = "Ready to move to p=";
+        var at = row.Headline.IndexOf(Marker, StringComparison.Ordinal);
+        var next = at < 0 ? null : row.Headline[(at + Marker.Length)..].TrimEnd('.').Trim();
+
+        // And checked, rather than printed on trust. A headline that changes
+        // shape should stop the suggestion, not emit a command that means
+        // something else.
+        if (next is not null && next is not ("none" or "quarantine" or "reject")) { next = null; }
 
         if (next is not null && live != next)
         {

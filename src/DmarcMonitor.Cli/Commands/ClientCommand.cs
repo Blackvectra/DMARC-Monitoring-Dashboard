@@ -30,6 +30,7 @@ public static class ClientCommand
             "list" => await ListAsync(store, ct).ConfigureAwait(false),
             "add" => await AddAsync(store, rest, ct).ConfigureAwait(false),
             "assign" => await AssignAsync(store, rest, ct).ConfigureAwait(false),
+            "auto-assign" => await AutoAssignAsync(store, rest, ct).ConfigureAwait(false),
             _ => Usage($"Unknown: dmarc client {action}"),
         };
     }
@@ -87,6 +88,100 @@ public static class ClientCommand
         Console.WriteLine($"Added {name} as '{slug}'.");
         Console.WriteLine($"Next: dmarc client assign --domain <domain> --client {slug}");
         return 0;
+    }
+
+    /// <summary>
+    /// Files every unassigned domain under a client named after it.
+    /// </summary>
+    /// <remarks>
+    /// Onboarding one domain at a time is the honest way to do it, because a
+    /// client is a billing relationship and only a person knows which domains
+    /// belong together. This is for the other case: a book of domains where
+    /// each one IS its own customer, and typing eighteen pairs of commands is
+    /// the only thing standing between an import and a usable set of reports.
+    ///
+    /// The client is named after the domain exactly - mortonnd.gov is filed
+    /// as "mortonnd.gov", slug "mortonnd-gov" - so the mapping is one to one
+    /// and obvious. That matters later: when a real client name is known, it
+    /// is clear which placeholder it replaces, and two domains can never
+    /// collide onto one slug by accident. The slug is permanent because it
+    /// ends up in report filenames, so a dry run prints the whole mapping
+    /// first and nothing is written until --apply.
+    /// </remarks>
+    private static async Task<int> AutoAssignAsync(ReportStore store, string[] args, CancellationToken ct)
+    {
+        var apply = Args.Flag(args, "--apply");
+
+        var domains = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
+        if (domains.Count == 0)
+        {
+            Console.WriteLine("Every domain is already filed under a client.");
+            return 0;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"  {"domain",-26} {"client",-26} {"slug",-24}");
+
+        var taken = (await store.GetClientsAsync(ct).ConfigureAwait(false))
+            .ToDictionary(c => c.Slug, c => c.Name, StringComparer.OrdinalIgnoreCase);
+
+        var planned = new List<(string Domain, string Name, string Slug)>();
+        foreach (var domain in domains)
+        {
+            var name = domain;
+            var slug = ReportStore.Slugify(domain);
+
+            // Nothing should be able to collide when the name is the domain,
+            // but a domain that folds to an existing slug would quietly file
+            // two customers together, and that is not a thing to find out
+            // from a client's report.
+            if (taken.TryGetValue(slug, out var owner) && !owner.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine($"  {domain}: '{slug}' is already '{owner}'. Skipped; file it by hand.");
+                continue;
+            }
+
+            taken[slug] = name;
+            planned.Add((domain, name, slug));
+            Console.WriteLine($"  {domain,-26} {name,-26} {slug,-24}");
+        }
+
+        Console.WriteLine();
+
+        if (!apply)
+        {
+            Console.WriteLine($"  {planned.Count} domain(s) would be filed. Nothing has been written.");
+            Console.WriteLine("  The slug goes into report filenames and cannot be changed afterwards.");
+            Console.WriteLine("  Run it for real:  dmarc client auto-assign --apply");
+            Console.WriteLine();
+            return 0;
+        }
+
+        var filed = 0;
+        foreach (var (domain, name, slug) in planned)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // Null means the slug already exists, which is what happens when
+            // two domains map to one client. That is the intended outcome, not
+            // a failure, so the assign below runs either way.
+            await store.CreateClientAsync(name, slug, ct).ConfigureAwait(false);
+
+            var outcome = await store.AssignDomainAsync(domain, slug, ct).ConfigureAwait(false);
+            if (outcome is ReportStore.AssignOutcome.Assigned or ReportStore.AssignOutcome.AlreadyAssigned)
+            {
+                filed++;
+            }
+            else
+            {
+                Console.Error.WriteLine($"  {domain}: {outcome}");
+            }
+        }
+
+        Console.WriteLine($"  {filed} domain(s) filed.");
+        Console.WriteLine("  Check it: dmarc client list");
+        Console.WriteLine();
+        return filed == planned.Count ? 0 : 65;
     }
 
     private static async Task<int> AssignAsync(ReportStore store, string[] args, CancellationToken ct)

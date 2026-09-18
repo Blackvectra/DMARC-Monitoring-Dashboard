@@ -989,6 +989,51 @@ VALUES ('0007', datetime('now'), 'Domains: record the deliberate baseline window
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0008', datetime('now'), 'Threat indicators: record the domain names alongside the count, so the two cannot disagree');
 
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0009', datetime('now'), 'MTA-STS policies: what this product serves at mta-sts.<domain>, so the DNS record and the policy file cannot disagree');
+
+
+
+-- ============================================================================
+--  MTA-STS POLICIES (RFC 8461)
+-- ============================================================================
+
+-- The policy this product serves for a domain, at
+-- mta-sts.<domain>/.well-known/mta-sts.txt.
+--
+-- MTA-STS is two halves that must agree: a TXT record announcing an id, and
+-- a policy file served over HTTPS with a certificate that validates. Only the
+-- first is DNS. The file has to come from a web server, so the app serves it,
+-- and this is what it serves - one row per domain, looked up by the Host the
+-- request arrived on.
+--
+-- Kept rather than generated from the live MX on each request on purpose. A
+-- policy that changed whenever a DNS answer changed would silently start
+-- refusing mail to a server that had just been added, and senders cache it
+-- for max_age either way.
+CREATE TABLE mta_sts_policies (
+    id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+
+    mode                TEXT NOT NULL DEFAULT 'testing'
+                        CHECK (mode IN ('testing','enforce','none')),
+    -- JSON array of mx patterns, in the order they are written to the file.
+    mx_json             TEXT NOT NULL,
+    max_age_seconds     INTEGER NOT NULL DEFAULT 604800,
+
+    -- What senders see in the TXT record. Changing it is what tells them to
+    -- fetch the file again, so it moves when the policy does and not before.
+    policy_id           TEXT NOT NULL,
+
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    updated_by          TEXT
+);
+
+CREATE UNIQUE INDEX ux_mta_sts_domain ON mta_sts_policies(domain_id);
+
 
 -- ============================================================================
 --  CONVENIENCE VIEWS

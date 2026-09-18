@@ -69,17 +69,43 @@ public sealed class DomainDetailServiceTests : IDisposable
           </record>
         """;
 
+    /// <summary>
+    /// Mail that authenticated, which the receiver nonetheless attached an
+    /// override note to. Microsoft does this constantly: "SPF ignored due to
+    /// local policy" on traffic that passed by DKIM.
+    /// </summary>
+    private static string OverriddenButPassingRow(string ip, int count, string domain) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>none</disposition><dkim>pass</dkim><spf>pass</spf>
+                <reason><type>local_policy</type><comment>SPF ignored due to local policy</comment></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{domain}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{domain}</domain><selector>selector1</selector><result>pass</result></dkim>
+              <spf><domain>{domain}</domain><result>pass</result></spf>
+            </auth_results>
+          </record>
+        """;
+
     private async Task StoreAsync(string domain, string policy, params string[] rows) =>
         await StoreAsync(domain, policy, daysAgo: 2, rows);
 
-    private async Task StoreAsync(string domain, string policy, int daysAgo, params string[] rows)
+    private Task StoreAsync(string domain, string policy, int daysAgo, params string[] rows) =>
+        StoreFromAsync("google.com", domain, policy, daysAgo, rows);
+
+    private async Task StoreFromAsync(string org, string domain, string policy, int daysAgo, params string[] rows)
     {
         var begin = DateTimeOffset.UtcNow.AddDays(-daysAgo);
         var xml = $"""
             <?xml version="1.0" encoding="UTF-8"?>
             <feedback>
               <report_metadata>
-                <org_name>google.com</org_name>
+                <org_name>{org}</org_name>
                 <report_id>{Guid.NewGuid():N}</report_id>
                 <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
                             <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range>
@@ -187,6 +213,104 @@ public sealed class DomainDetailServiceTests : IDisposable
         var listed = detail.Clean.Concat(detail.Misconfigured).Concat(detail.Impersonating)
             .Sum(s => s.Messages);
         Assert.Equal(detail.Messages - detail.OverriddenMessages, listed);
+    }
+
+    [Fact]
+    public async Task MailThatPassedIsNotTreatedAsLeftOutJustBecauseTheReceiverAnnotatedIt()
+    {
+        // An override is only the receiver saying it did not apply the policy
+        // as asked. It says that about mail that PASSED as often as about mail
+        // that failed - "SPF ignored due to local policy" on DKIM-authenticated
+        // traffic is routine from Microsoft.
+        //
+        // Excluding every annotated record took a domain's own clean mail out
+        // of the source tables and then described it to the operator as traffic
+        // left out, alongside forwarded failures. On the live data that was 19
+        // of mortonnd.gov's 84 messages: its own mail servers, passing, and the
+        // page implied there was something unresolved about them.
+        await StoreAsync("acme.com", "reject",
+            Row("192.0.2.25", 100, "pass", "acme.com", "acme.com", "pass"),
+            OverriddenButPassingRow("192.0.2.80", 19, "acme.com"),
+            ForwardedRow("192.0.2.50", 48, "acme.com"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Equal(167, detail!.Messages);
+
+        // Only the forwarded failure is left out. The annotated-but-passing
+        // mail is the domain's own and stays in.
+        Assert.Equal(48, detail.OverriddenMessages);
+
+        var listed = detail.Clean.Concat(detail.Misconfigured).Concat(detail.Impersonating).ToList();
+        Assert.Contains(listed, s => s.SourceIp == "192.0.2.80");
+        Assert.Equal(19, listed.Single(s => s.SourceIp == "192.0.2.80").Messages);
+
+        // And the arithmetic the operator can do by eye still works.
+        Assert.Equal(detail.Messages - detail.OverriddenMessages, listed.Sum(s => s.Messages));
+    }
+
+    // ---- a reporter that goes quiet -----------------------------------------
+
+    [Fact]
+    public async Task NoticesWhenTheReceiverCarryingMostOfTheMailStopsReporting()
+    {
+        // The shape that hid a real problem. mortonnd.gov read as 100% passing
+        // and "ready to move to p=reject" over fourteen days, because
+        // Enterprise Outlook - which had carried 73.5% of everything ever
+        // reported for it - stopped sending about that domain two months
+        // earlier, while still reporting on every other domain in the book.
+        // Reports kept arriving from the others, so nothing looked wrong.
+        await StoreFromAsync("Enterprise Outlook", "acme.com", "none", daysAgo: 70,
+            Row("192.0.2.25", 800, "pass", "acme.com", "acme.com", "pass"));
+        await StoreFromAsync("google.com", "acme.com", "none", daysAgo: 2,
+            Row("192.0.2.25", 40, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+
+        var outlook = detail!.Reporters.Single(r => r.OrgName == "Enterprise Outlook");
+        Assert.True(outlook.HasGoneQuiet, "the reporter carrying most of the mail went quiet and was not flagged");
+        Assert.True(outlook.Share > 90);
+
+        // The one still reporting is not flagged, or the warning means nothing.
+        Assert.False(detail.Reporters.Single(r => r.OrgName == "google.com").HasGoneQuiet);
+    }
+
+    [Fact]
+    public async Task ASmallReporterGoingQuietIsNotWorthSaying()
+    {
+        // Plenty of receivers send one report when a single message happens to
+        // pass through them and are never heard from again. Flagging those
+        // would bury the one that matters.
+        await StoreFromAsync("google.com", "acme.com", "none", daysAgo: 2,
+            Row("192.0.2.25", 900, "pass", "acme.com", "acme.com", "pass"));
+        await StoreFromAsync("tiny.example", "acme.com", "none", daysAgo: 80,
+            Row("192.0.2.99", 1, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.False(detail!.Reporters.Single(r => r.OrgName == "tiny.example").HasGoneQuiet);
+        Assert.DoesNotContain(detail.Reporters, r => r.HasGoneQuiet);
+    }
+
+    [Fact]
+    public async Task AnOldImportDoesNotMakeEveryReporterLookQuiet()
+    {
+        // Silence is measured against the newest report for the domain, not
+        // against the clock. Restoring a backup, or importing an archive of
+        // last year's reports, must not light up every row at once.
+        await StoreFromAsync("Enterprise Outlook", "acme.com", "none", daysAgo: 400,
+            Row("192.0.2.25", 800, "pass", "acme.com", "acme.com", "pass"));
+        await StoreFromAsync("google.com", "acme.com", "none", daysAgo: 402,
+            Row("192.0.2.26", 700, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.DoesNotContain(detail!.Reporters, r => r.HasGoneQuiet);
     }
 
     [Fact]
