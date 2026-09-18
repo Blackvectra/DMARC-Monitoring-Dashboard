@@ -5,17 +5,6 @@ using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Domains;
 
-/// <summary>
-/// A signature that verified for a domain other than the one being sent as.
-/// </summary>
-/// <param name="Domain">The <c>d=</c> domain the signature was made with.</param>
-/// <param name="Verdict">How that domain relates to the From domain.</param>
-/// <param name="WouldAlignIfRelaxed">
-/// True when the only thing stopping this from aligning is the domain's own
-/// <c>adkim=s</c>. A different fix from the usual one, and a much smaller one.
-/// </param>
-public sealed record UnalignedSignature(string Domain, AlignmentVerdict Verdict, bool WouldAlignIfRelaxed);
-
 /// <summary>One sending source, as seen for a single domain.</summary>
 public sealed record DomainSource
 {

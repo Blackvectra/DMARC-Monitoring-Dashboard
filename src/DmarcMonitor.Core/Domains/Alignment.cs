@@ -22,6 +22,17 @@ public enum AlignmentVerdict
 }
 
 /// <summary>
+/// A signature that verified for a domain other than the one being sent as.
+/// </summary>
+/// <param name="Domain">The <c>d=</c> domain the signature was made with.</param>
+/// <param name="Verdict">How that domain relates to the From domain.</param>
+/// <param name="WouldAlignIfRelaxed">
+/// True when the only thing stopping this from aligning is the domain's own
+/// <c>adkim=s</c>. A different fix from the usual one, and a much smaller one.
+/// </param>
+public sealed record UnalignedSignature(string Domain, AlignmentVerdict Verdict, bool WouldAlignIfRelaxed);
+
+/// <summary>
 /// The distinction DMARC turns on and nothing in this product said out loud:
 /// a signature can be perfectly valid and still count for nothing.
 /// </summary>
