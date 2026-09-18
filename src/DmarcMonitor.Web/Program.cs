@@ -9,6 +9,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.AddAppAuthentication();
 
+// Whatever holds the TLS certificate - Caddy, nginx, IIS, a load balancer -
+// is in front of this, and without being told so the app sees every request
+// as plain HTTP from 127.0.0.1. See ProxySetup for what that breaks.
+builder.AddProxySupport();
+
 // One database path, resolved once to an absolute path, so a misconfiguration
 // is a startup problem rather than a page that renders empty and looks like no
 // data. Absolute matters for what the pages say too: "no database at dmarc.db"
@@ -45,13 +50,21 @@ builder.Services.AddScoped<RemediationUiService>();
 
 var app = builder.Build();
 
+// First, so everything after it sees the caller's real address and scheme.
+app.UseProxyHeaders();
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/error", createScopeForErrors: true);
-    app.UseHsts();
+    // Not behind a proxy: the proxy owns this header, and two of them is one
+    // too many.
+    if (ProxySetup.ShouldRedirectToHttps(app.Configuration)) { app.UseHsts(); }
 }
 
-app.UseHttpsRedirection();
+if (ProxySetup.ShouldRedirectToHttps(app.Configuration))
+{
+    app.UseHttpsRedirection();
+}
 app.UseStaticFiles();
 app.UseAntiforgery();
 

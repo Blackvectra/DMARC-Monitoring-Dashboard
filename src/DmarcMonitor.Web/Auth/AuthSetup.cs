@@ -87,6 +87,14 @@ public static class AuthSetup
     /// The failure this prevents is a trial instance left running on a VM with
     /// a public address and no login at all. Blocking it here means that
     /// mistake produces an obvious refusal rather than an open door.
+    ///
+    /// A reverse proxy defeats the obvious version of this check, because
+    /// every request it forwards arrives from the proxy - usually 127.0.0.1.
+    /// So a forwarded request is refused on sight, whether or not the
+    /// forwarded headers were configured to be trusted. Being proxied is
+    /// itself the evidence: somebody has deliberately put this where other
+    /// machines can reach it, which is the exact situation local mode must
+    /// not be in.
     /// </remarks>
     public static void UseLocalModeGuard(this WebApplication app)
     {
@@ -99,13 +107,18 @@ public static class AuthSetup
         {
             var remote = context.Connection.RemoteIpAddress;
             var isLoopback = remote is null || System.Net.IPAddress.IsLoopback(remote);
+            var wasForwarded = WasForwarded(context.Request);
 
-            if (!isLoopback)
+            if (!isLoopback || wasForwarded)
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 await context.Response.WriteAsync(
                     "This instance is running in local trial mode, which has no sign-in, so it only "
                   + "serves the machine it runs on.\n\n"
+                  + (wasForwarded
+                        ? "This request came through a reverse proxy, which means it was not made from this "
+                        + "machine. Local mode refuses those however they are addressed.\n\n"
+                        : "")
                   + "To use it from elsewhere, configure Entra sign-in under AzureAd in appsettings.json.\n"
                   + "To deliberately run without sign-in anyway, set Auth:AllowLocalModeRemotely to true.")
                     .ConfigureAwait(false);
@@ -115,6 +128,22 @@ public static class AuthSetup
             await next(context).ConfigureAwait(false);
         });
     }
+
+    /// <summary>
+    /// Whether a request bears the marks of having passed through a proxy.
+    /// </summary>
+    /// <remarks>
+    /// Read straight off the headers rather than from the forwarded-headers
+    /// middleware, on purpose. That middleware only rewrites what it has been
+    /// configured to trust, and a deployment that put a proxy in front without
+    /// configuring any of it is precisely the one this has to catch. A caller
+    /// on this machine forging the header only locks itself out.
+    /// </remarks>
+    private static bool WasForwarded(HttpRequest request) =>
+        request.Headers.ContainsKey("X-Forwarded-For")
+        || request.Headers.ContainsKey("X-Forwarded-Proto")
+        || request.Headers.ContainsKey("X-Forwarded-Host")
+        || request.Headers.ContainsKey("Forwarded");
 
     /// <summary>Signs the local-mode user in. Only reachable when Entra is not configured.</summary>
     public static void MapLocalSignIn(this WebApplication app)

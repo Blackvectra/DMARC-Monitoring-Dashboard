@@ -272,7 +272,25 @@ so the failure is legible. What has not been established is where the real
 limits are: at what size the upload gets slow enough that the folder import
 is the better answer.
 
-## 10. The apply path has never written to a real zone
+## 10. No ARM build, and no deployment has happened
+
+**Area** `.github/workflows/release.yml`, `docs/DEPLOYING.md`
+**Severity** Low.
+
+The release publishes `win-x64` and `linux-x64`. The cheapest instances at
+both AWS and Azure are ARM (`t4g`, `Dpsv5`), and there is no `linux-arm64`
+build to put on one, so `DEPLOYING.md` tells people to take an x86 instance
+and pay about $3 a month more. Adding the RID is a line in the matrix; the
+smoke test is the awkward part, because an x64 runner cannot execute the
+binary it just built.
+
+`DEPLOYING.md` itself is assembled from how the pieces are built rather than
+from a deployment that happened. The proxy handling under it is covered by
+tests - including the one that matters, that an unauthenticated instance
+refuses a proxied request - but the systemd units, the Caddyfile and the Entra
+app registration have not been run. The doc says so in its own last section.
+
+## 11. The apply path has never written to a real zone
 
 **Area** `src/DmarcMonitor.Core/Remediation/`, `dmarc fix`, the Fix page
 **Severity** Medium. This is the feature the product exists for, and its

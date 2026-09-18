@@ -210,6 +210,18 @@ re-send.
 
 ---
 
+## Putting it on a server
+
+`DEPLOYING.md` covers that end to end: which machine, what it costs, the proxy
+and certificate, Entra sign-in, ingest on a timer, backups, and the checklist
+of things that must be true before it is reachable by anybody else.
+
+The one thing to know before reading it: until Entra sign-in is configured
+this app has no login at all, and it protects itself by refusing to serve
+anything but the machine it runs on. Putting a reverse proxy in front does
+not change that - a proxied request is refused outright, because being proxied
+is itself evidence that somebody else can reach it.
+
 ## Known unfinished
 
 [`OPEN-ISSUES.md`](OPEN-ISSUES.md) is the honest list. The one worth knowing
