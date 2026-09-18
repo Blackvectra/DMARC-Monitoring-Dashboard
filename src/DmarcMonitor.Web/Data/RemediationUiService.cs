@@ -129,7 +129,23 @@ public sealed class RemediationUiService(
             // without it and every plan announces "v=STSv1; id=", which is not
             // a record a sender will accept.
             var known = await _policies.GetAsync(domain, ct);
-            var served = await mtaSts.FetchAsync(domain, known?.Id ?? "", ct);
+
+            // Fetched only when there is a reason to think a policy exists.
+            //
+            // The fetch is an HTTPS request to mta-sts.<domain>, which for a
+            // domain nobody has set this up for is a name that does not
+            // resolve - so it costs a DNS failure and several hundred
+            // milliseconds to learn nothing. Seventeen of eighteen domains on
+            // the real database are in exactly that state, and the Fix page
+            // paid for all of them on every load.
+            //
+            // Skipped only when BOTH are absent: no TXT record announcing a
+            // policy, and no policy of our own to serve. A policy served but
+            // not yet announced - which is what 'mta-sts set' leaves behind -
+            // still has our stored record, so it is still checked.
+            var served = string.IsNullOrWhiteSpace(published.MtaStsRecord) && known is null
+                ? ServedPolicy.Missing("Not checked: nothing announces a policy and none is configured here.")
+                : await mtaSts.FetchAsync(domain, known?.Id ?? "", ct);
 
             // The records to publish, independent of whether anything can be
             // applied. A domain with neither a record nor a served policy is

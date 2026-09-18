@@ -371,9 +371,11 @@ else
             await InvokeAsync(StateHasChanged);
 
             // A few at a time: one at a time is a minute of staring at a
-            // half-filled page, and all at once is ten simultaneous resolver
-            // conversations from one page load.
-            foreach (var batch in _rows.Chunk(4))
+            // half-filled page, and all at once is one page load opening a
+            // resolver conversation per domain. Eight is measured rather than
+            // picked - it is where the wall clock stops improving on a book of
+            // eighteen domains, because each one is latency rather than work.
+            foreach (var batch in _rows.Chunk(8))
             {
                 // Off the circuit's dispatcher. Everything in here is network
                 // and database work, and running it on the thread that renders
