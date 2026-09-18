@@ -78,6 +78,44 @@ public sealed record VolumeBreakdown
         Total == 0 ? null : Math.Round(Authenticated * 100.0 / Total, 1);
 }
 
+/// <summary>One sending service, and how much of its mail authenticates.</summary>
+/// <remarks>
+/// Keyed on the domain the mail authenticated FOR - the envelope domain SPF
+/// checked, or the signing domain where there is no envelope. That is the
+/// closest thing to "which service is this" available from a report alone:
+/// naming the service properly needs a reverse lookup on the sending address
+/// and a catalogue to match it against, and nothing in this product does that
+/// yet. <c>em318306.nrgtechservices.com</c> is SendGrid and
+/// <c>bounce.myngp.com</c> is NGP VAN; the report does not say so, and this
+/// type does not pretend to know.
+/// </remarks>
+public sealed record SourceCompliance
+{
+    public required string Source { get; init; }
+    public long Messages { get; init; }
+
+    /// <summary>Share that passed DMARC: authenticated AND aligned.</summary>
+    public double DmarcRate { get; init; }
+
+    /// <summary>Share whose SPF check passed, aligned or not.</summary>
+    public double SpfRate { get; init; }
+
+    /// <summary>Share whose DKIM signature verified, aligned or not.</summary>
+    public double DkimRate { get; init; }
+
+    /// <summary>
+    /// True when SPF or DKIM passes far more often than DMARC does.
+    /// </summary>
+    /// <remarks>
+    /// The alignment gap, made visible per service. A row reading SPF 100%,
+    /// DKIM 100%, DMARC 2% is not three numbers that disagree - it is a
+    /// service authenticating perfectly for its own domain and counting for
+    /// nothing, which is the single most misread situation in DMARC.
+    /// </remarks>
+    public bool AuthenticatesButDoesNotAlign =>
+        Math.Max(SpfRate, DkimRate) - DmarcRate >= 20;
+}
+
 /// <summary>
 /// Mail per day, for the charts.
 /// </summary>
@@ -165,6 +203,112 @@ public sealed class TimeSeriesService(string databasePath)
             Overridden = reader.GetInt64(1),
             Unauthenticated = reader.GetInt64(2),
         };
+    }
+
+    /// <summary>
+    /// The services sending this mail, and how much of theirs authenticates.
+    /// </summary>
+    /// <param name="domain">One domain, or null for the whole estate.</param>
+    /// <param name="top">How many to return, busiest first.</param>
+    public async Task<IReadOnlyList<SourceCompliance>> SourcesAsync(
+        string? domain = null, int days = 30, int top = 8, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+        if (top < 1) { throw new ArgumentOutOfRangeException(nameof(top), top, "Asking for no rows returns an empty panel with nothing to explain it."); }
+
+        var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
+            .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+
+        // SPF's domain first, then DKIM's. A service is identified by the
+        // envelope it sends under; only where there is none does the signature
+        // say who it was. Rows carrying neither are grouped as unattributed
+        // rather than dropped: mail nobody can name is worth seeing, and a
+        // panel that quietly omits it overstates how well the estate is doing.
+        command.CommandText = $"""
+            SELECT COALESCE(NULLIF(r.spf_domain, ''), NULLIF(r.dkim_domain, ''), '(not stated)'),
+                   COALESCE(SUM(r.message_count), 0),
+                   COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.spf_auth_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count END), 0)
+            FROM aggregate_records r
+            {Joins(name, null, "r")}
+            WHERE r.date_begin >= $since {Filter(name, null)}
+            GROUP BY 1
+            HAVING SUM(r.message_count) > 0
+            ORDER BY SUM(r.message_count) DESC
+            LIMIT $top
+            """;
+        Bind(command, name, null, since);
+        command.Parameters.AddWithValue("$top", top);
+
+        var rows = new List<SourceCompliance>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            var messages = reader.GetInt64(1);
+            if (messages <= 0) { continue; }
+
+            rows.Add(new SourceCompliance
+            {
+                Source = reader.GetString(0),
+                Messages = messages,
+                DmarcRate = Math.Round(reader.GetInt64(2) * 100.0 / messages, 1),
+                SpfRate = Math.Round(reader.GetInt64(3) * 100.0 / messages, 1),
+                DkimRate = Math.Round(reader.GetInt64(4) * 100.0 / messages, 1),
+            });
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// How many domains sent mail in the window, and how many did not.
+    /// </summary>
+    /// <remarks>
+    /// A domain nobody sends as is not a domain that is safe: it is a domain
+    /// whose DMARC record nobody is watching, and the usual reason an estate
+    /// has hundreds of them is that they were registered defensively and
+    /// forgotten. Counted rather than charted because the number is the
+    /// point.
+    /// </remarks>
+    public async Task<(int Active, int Inactive)> DomainActivityAsync(
+        int days = 30, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+
+        var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
+            .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT
+              (SELECT COUNT(*) FROM domains),
+              (SELECT COUNT(DISTINCT r.domain_id)
+                 FROM aggregate_records r
+                WHERE r.date_begin >= $since AND r.message_count > 0)
+            """;
+        command.Parameters.AddWithValue("$since", since);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0); }
+
+        var all = reader.GetInt32(0);
+        var active = reader.GetInt32(1);
+
+        // Clamped because a record can outlive the domain row it pointed at
+        // during a delete, and a negative count on a dashboard is worse than a
+        // slightly wrong one.
+        return (active, Math.Max(0, all - active));
     }
 
     /// <summary>

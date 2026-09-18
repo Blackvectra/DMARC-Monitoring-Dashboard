@@ -66,14 +66,52 @@ else
     @* What the whole book of domains has been doing, before any of the rows.
        A table of eighteen totals cannot show that the estate lost a third of
        its volume on Tuesday; this can. *@
-    @if (_breakdown is { Total: > 0 })
-    {
-        @* What a pass rate cannot say: of everything sent as these domains,
-           how much authenticated, how much broke for a reason the receiver
-           itself called expected, and how much proved nothing. Only the last
-           is worth an afternoon. *@
-        <Gauge Slices="@Volume()" Caption="@($"Everything sent as these domains, last {_days} days")" />
-    }
+    @*
+        The overview, read left to right: what the mail was, how many domains
+        are actually sending, and which services are carrying it. Four panels
+        across the top rather than four cards down the page, so the shape of
+        the estate is one glance rather than a scroll.
+    *@
+    <section class="overview">
+        <div class="panel">
+            <h2 class="panel-h">Volume summary, last @_days days</h2>
+            @if (_breakdown is { Total: > 0 })
+            {
+                @* What a pass rate cannot say: how much of the mail broke for
+                   a reason the receiver itself called expected, and how much
+                   proved nothing. Only the second is worth an afternoon. *@
+                <Gauge Slices="@Volume()" Bare="true" />
+            }
+            else
+            {
+                <p class="muted">No mail reported in this window.</p>
+            }
+        </div>
+
+        @* Stacked into one narrow column so the whole overview stays a single
+           row. Two bare counts side by side would take the width the tables
+           either side of them need. *@
+        <div class="panel-stack">
+            <div class="panel panel-figure">
+                <h2 class="panel-h">Active domains</h2>
+                <p class="panel-n good">@_active</p>
+                <p class="panel-sub">sent mail in this window</p>
+            </div>
+
+            <div class="panel panel-figure">
+                <h2 class="panel-h">Inactive domains</h2>
+                <p class="panel-n">@_inactive</p>
+                @* Not the same as safe. A domain nobody sends as is one whose
+                   DMARC record nobody is watching. *@
+                <p class="panel-sub">no mail seen — still worth a policy</p>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2 class="panel-h">Source compliance rates</h2>
+            <SourceRates Sources="_sources" NotShown="@Math.Max(0, _sourceCount - _sources.Count)" />
+        </div>
+    </section>
 
     @if (_series is not null && _series.Count > 0)
     {
@@ -196,6 +234,10 @@ else
     private IReadOnlyList<DomainTriage>? _rows;
     private IReadOnlyList<DayPoint>? _series;
     private VolumeBreakdown? _breakdown;
+    private IReadOnlyList<SourceCompliance> _sources = [];
+    private int _sourceCount;
+    private int _active;
+    private int _inactive;
     private IReadOnlyDictionary<string, IReadOnlyList<DayPoint>> _sparks =
         new Dictionary<string, IReadOnlyList<DayPoint>>();
     private string? _error;
@@ -304,6 +346,15 @@ else
             _series = await Series.EstateAsync(_days);
             _sparks = await Series.PerDomainAsync(_days);
             _breakdown = await Series.BreakdownAsync(days: _days);
+
+            // One more than the panel shows, so "N more not shown" can be
+            // honest about whether there are any rather than guessing.
+            const int shown = 6;
+            var sources = await Series.SourcesAsync(days: _days, top: shown + 1);
+            _sourceCount = sources.Count;
+            _sources = [.. sources.Take(shown)];
+
+            (_active, _inactive) = await Series.DomainActivityAsync(_days);
         }
         catch (Exception)
         {
@@ -312,6 +363,9 @@ else
             // picture is better than losing them to an exception.
             _series = null;
             _breakdown = null;
+            _sources = [];
+            _sourceCount = 0;
+            _active = _inactive = 0;
             _sparks = new Dictionary<string, IReadOnlyList<DayPoint>>();
         }
     }

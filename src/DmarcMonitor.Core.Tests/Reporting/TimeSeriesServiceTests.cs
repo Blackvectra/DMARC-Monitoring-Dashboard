@@ -352,6 +352,159 @@ public sealed class TimeSeriesServiceTests : IDisposable
         Assert.Null(split.PassRate);
     }
 
+    // ---- source compliance ----------------------------------------------------
+
+    /// <summary>A service sending under its own envelope, signing its own domain.</summary>
+    private async Task StoreServiceAsync(
+        string domain, string envelope, string signing, int count, string evaluated,
+        string spfResult = "pass", string dkimResult = "pass", int daysAgo = 1)
+    {
+        var begin = DateTimeOffset.UtcNow.AddDays(-daysAgo);
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata><org_name>google.com</org_name><report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
+                            <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range></report_metadata>
+              <policy_published><domain>{domain}</domain><p>reject</p><pct>100</pct></policy_published>
+              <record>
+                <row><source_ip>198.51.100.7</source_ip><count>{count}</count>
+                  <policy_evaluated><disposition>none</disposition>
+                    <dkim>{evaluated}</dkim><spf>{evaluated}</spf></policy_evaluated></row>
+                <identifiers><header_from>{domain}</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>{signing}</domain><selector>s1</selector><result>{dkimResult}</result></dkim>
+                  <spf><domain>{envelope}</domain><scope>mfrom</scope><result>{spfResult}</result></spf>
+                </auth_results>
+              </record>
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        Assert.True(parsed.Success, parsed.Error);
+        await _store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
+    [Fact]
+    public async Task ASourceIsNamedByTheEnvelopeItSendsUnder()
+    {
+        await StoreServiceAsync("acme.com", "em1234.acme.com", "acme.com", 500, "pass");
+
+        var source = Assert.Single(await Service().SourcesAsync("acme.com", days: 7));
+
+        Assert.Equal("em1234.acme.com", source.Source);
+        Assert.Equal(500, source.Messages);
+    }
+
+    [Fact]
+    public async Task ASourceWithNoEnvelopeFallsBackToWhatItSigned()
+    {
+        await StoreServiceAsync("acme.com", "", "vendor.example", 40, "fail", spfResult: "none");
+
+        var source = Assert.Single(await Service().SourcesAsync("acme.com", days: 7));
+
+        Assert.Equal("vendor.example", source.Source);
+    }
+
+    [Fact]
+    public async Task MailThatNamesNeitherIsShownRatherThanDropped()
+    {
+        // A panel that quietly omits mail nobody can name overstates how well
+        // the estate is doing.
+        await StoreServiceAsync("acme.com", "", "", 25, "fail", spfResult: "none", dkimResult: "none");
+
+        var source = Assert.Single(await Service().SourcesAsync("acme.com", days: 7));
+
+        Assert.Equal("(not stated)", source.Source);
+        Assert.Equal(25, source.Messages);
+    }
+
+    [Fact]
+    public async Task TheThreeRatesAreCountedSeparately()
+    {
+        // SPF and DKIM are the raw checks; DMARC is those plus alignment. They
+        // are three different questions and a source can answer them
+        // differently.
+        await StoreServiceAsync("acme.com", "psm.vendor.example", "vendor.example", 100, "fail");
+
+        var source = Assert.Single(await Service().SourcesAsync("acme.com", days: 7));
+
+        Assert.Equal(0, source.DmarcRate);
+        Assert.Equal(100, source.SpfRate);
+        Assert.Equal(100, source.DkimRate);
+    }
+
+    [Fact]
+    public async Task ASourceThatAuthenticatesPerfectlyAndAlignsNeverIsFlagged()
+    {
+        // The single most misread situation in DMARC: SPF 100%, DKIM 100%,
+        // DMARC 0%. Those numbers do not disagree - the service is
+        // authenticating faultlessly for its own domain and counting for
+        // nothing.
+        await StoreServiceAsync("acme.com", "psm.vendor.example", "vendor.example", 100, "fail");
+
+        var source = Assert.Single(await Service().SourcesAsync("acme.com", days: 7));
+
+        Assert.True(source.AuthenticatesButDoesNotAlign);
+    }
+
+    [Fact]
+    public async Task AHealthySourceIsNotFlagged()
+    {
+        await StoreServiceAsync("acme.com", "acme.com", "acme.com", 100, "pass");
+
+        var source = Assert.Single(await Service().SourcesAsync("acme.com", days: 7));
+
+        Assert.False(source.AuthenticatesButDoesNotAlign);
+    }
+
+    [Fact]
+    public async Task SourcesComeBackBusiestFirstAndCapped()
+    {
+        for (var i = 0; i < 5; i++)
+        {
+            await StoreServiceAsync("acme.com", $"s{i}.example", "acme.com", (i + 1) * 10, "pass");
+        }
+
+        var sources = await Service().SourcesAsync("acme.com", days: 7, top: 3);
+
+        Assert.Equal(3, sources.Count);
+        Assert.Equal(50, sources[0].Messages);
+        Assert.Equal(sources.OrderByDescending(s => s.Messages).Select(s => s.Messages), sources.Select(s => s.Messages));
+    }
+
+    [Fact]
+    public async Task AskingForNoSourcesIsRefused()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => Service().SourcesAsync("acme.com", days: 7, top: 0));
+    }
+
+    // ---- active and inactive domains ------------------------------------------
+
+    [Fact]
+    public async Task DomainsThatSentNothingAreCountedAsInactive()
+    {
+        // A domain nobody sends as is not a domain that is safe: it is one
+        // whose DMARC record nobody is watching.
+        await StoreAsync("busy.example", daysAgo: 1, passing: 100, failing: 0);
+        await StoreAsync("quiet.example", daysAgo: 60, passing: 100, failing: 0);
+
+        var (active, inactive) = await Service().DomainActivityAsync(days: 7);
+
+        Assert.Equal(1, active);
+        Assert.Equal(1, inactive);
+    }
+
+    [Fact]
+    public async Task ActivityCountsNeverGoNegative()
+    {
+        var (active, inactive) = await Service().DomainActivityAsync(days: 7);
+
+        Assert.True(active >= 0);
+        Assert.True(inactive >= 0);
+    }
+
     [Fact]
     public async Task AWindowOfNothingIsRefusedRatherThanRenderedBlank()
     {

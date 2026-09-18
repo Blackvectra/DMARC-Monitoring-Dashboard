@@ -21,7 +21,7 @@
 }
 else
 {
-    <figure class="gauge">
+    <figure class="gauge @(Bare ? "bare" : "")">
         @if (!string.IsNullOrEmpty(Caption))
         {
             <figcaption>@Caption</figcaption>
@@ -61,6 +61,15 @@ else
     [Parameter, EditorRequired] public IReadOnlyList<Slice> Slices { get; set; } = [];
     [Parameter] public string Caption { get; set; } = "";
     [Parameter] public string Empty { get; set; } = "No mail in this window.";
+
+    /// <summary>
+    /// Drops the card around it, for use inside a panel that already has one.
+    /// </summary>
+    /// <remarks>
+    /// A bordered card inside a bordered panel reads as two things rather than
+    /// one, and on the overview row it made every panel look misaligned.
+    /// </remarks>
+    [Parameter] public bool Bare { get; set; }
 
     private sealed record Segment(string Label, long Value, string Css, string Share, double From, double To);
 

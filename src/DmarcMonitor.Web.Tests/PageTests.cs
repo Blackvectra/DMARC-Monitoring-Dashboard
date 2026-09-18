@@ -166,6 +166,53 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task TheOverviewLeadsWithVolumeDomainActivityAndSourceRates()
+    {
+        // Four panels across the top rather than four cards down the page, so
+        // the shape of the estate is one glance rather than a scroll.
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("class=\"overview\"", html, StringComparison.Ordinal);
+        Assert.Contains("Volume summary", html, StringComparison.Ordinal);
+        Assert.Contains("Active domains", html, StringComparison.Ordinal);
+        Assert.Contains("Inactive domains", html, StringComparison.Ordinal);
+        Assert.Contains("Source compliance rates", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SourceRatesGiveAllThreeChecksBecauseTheyAreThreeQuestions()
+    {
+        // SPF and DKIM are the raw checks; DMARC is those plus alignment. A
+        // row reading SPF 100, DKIM 100, DMARC 2 is not a contradiction.
+        var html = await Client().GetStringAsync("/");
+
+        var table = html[html.IndexOf("Source compliance rates", StringComparison.Ordinal)..];
+        var panel = table[..Math.Min(2500, table.Length)];
+
+        Assert.Contains(">DMARC<", panel, StringComparison.Ordinal);
+        Assert.Contains(">SPF<", panel, StringComparison.Ordinal);
+        Assert.Contains(">DKIM<", panel, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AWideTableScrollsAtEveryWidthRatherThanOnlyOnAPhone()
+    {
+        // This rule lived inside the narrow-screen media query, so a table
+        // wider than its column pushed the whole page sideways at any width
+        // above it: 110px of horizontal overflow at 900px, where the overview
+        // drops to two columns and the source table no longer fits one.
+        var css = await Client().GetStringAsync("/app.css");
+
+        var rule = css.IndexOf(".table-scroll { overflow-x: auto", StringComparison.Ordinal);
+        Assert.True(rule >= 0, ".table-scroll has no unconditional overflow rule");
+
+        // Anything before it must be a closed block, or the rule is nested in
+        // a media query again.
+        var before = css[..rule];
+        Assert.Equal(before.Count(c => c == '{'), before.Count(c => c == '}'));
+    }
+
+    [Fact]
     public async Task TheDialSplitsVolumeThreeWaysWithEachPartNamed()
     {
         // A pass rate cannot say whether the remainder is forwarding, which is

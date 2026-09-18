@@ -364,6 +364,91 @@ section[id] { scroll-margin-top: 16px; }
 .key-fail::before  { background: var(--urgent); }
 .key-gap::before   { background: var(--dim); }
 
+/* ---- the overview row -------------------------------------------------- */
+
+/*
+    Four panels across the top rather than four cards down the page, so the
+    shape of the estate is one glance rather than a scroll: what the mail was,
+    how many domains are actually sending, and which services carry it.
+
+    Auto-fit rather than fixed columns, so the row reflows to two-up and then
+    one-up on the way down to a phone without a breakpoint for each step.
+*/
+.overview {
+    display: grid;
+    /* Two panels that hold something wide, with the bare counts stacked in a
+       narrow column between them. Two counts side by side would take the room
+       the tables either side of them need. */
+    grid-template-columns: minmax(320px, 1.35fr) minmax(150px, 0.55fr) minmax(320px, 1.35fr);
+    gap: 12px;
+    margin-bottom: 18px;
+    align-items: start;
+}
+.panel-stack { display: grid; gap: 12px; }
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 13px 15px;
+    min-width: 0;   /* or a wide table inside stretches the whole grid */
+}
+
+/* The two that hold a dial or a table need more room than a bare number. */
+.panel-wide { grid-column: span 2; }
+
+.panel-h {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 9px;
+}
+.panel-figure { display: flex; flex-direction: column; }
+.panel-n {
+    font-size: 34px;
+    font-weight: 600;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+}
+.panel-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+/* Three columns need roughly 900px before the middle one squeezes the tables
+   either side into something unreadable. */
+@media (max-width: 1100px) {
+    .overview { grid-template-columns: 1fr 1fr; }
+    .panel-stack { grid-column: span 2; grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 700px) {
+    .overview { grid-template-columns: 1fr; }
+    .panel-stack { grid-column: span 1; grid-template-columns: 1fr 1fr; }
+    .panel-n { font-size: 27px; }
+}
+
+/* ---- source compliance rates ------------------------------------------- */
+
+/*
+    Always, not only on a phone. This lived inside the narrow-screen media
+    query, so a table wider than its column pushed the whole page sideways at
+    any width above it - 110px of horizontal overflow at 900px, where the
+    overview drops to two columns and the source table no longer fits one.
+    A table that does not fit scrolls inside its own box whatever the screen.
+*/
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+.rates td, .rates th { padding: 6px 8px; font-size: 12.5px; }
+.rates td code { font-size: 12px; }
+
+/* Said in words, because three numbers that read SPF 100, DKIM 100, DMARC 2
+   look like a contradiction rather than a finding. */
+.rate-note {
+    display: block;
+    font-size: 11px;
+    color: var(--act);
+    margin-top: 2px;
+}
+
 /* ---- the dial ---------------------------------------------------------- */
 
 /*
@@ -385,6 +470,10 @@ section[id] { scroll-margin-top: 16px; }
     color: var(--muted);
     margin-bottom: 8px;
 }
+
+/* Inside a panel that already has a card of its own. Two borders read as two
+   things, and on the overview row it made every panel look misaligned. */
+.gauge.bare { background: none; border: 0; border-radius: 0; padding: 0; margin: 0; }
 
 .gauge-body { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
 .gauge-dial { width: 190px; height: 108px; flex: 0 0 auto; }
@@ -782,7 +871,6 @@ pre.policy {
         entire reason these are tables, so they scroll instead, and the
         scrolling is bounded to the table rather than the page.
     */
-    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .table-scroll .triage { min-width: 560px; }
 
     .figures { gap: 8px; }
