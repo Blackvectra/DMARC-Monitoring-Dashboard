@@ -76,7 +76,27 @@ else
         </div>
     }
 
-    @foreach (var row in _rows)
+    @* A book of eighteen domains was eighteen equal-weight sections stacked
+       down the page, every one of them open, most with nothing to do. The
+       counts say what the page is for before any of it is read, and the
+       filter means it opens on the work. *@
+    @if (_rows.Count > 0)
+    {
+        <section class="worklist">
+            <div class="counts">
+                <span class="count act"><strong>@Ready</strong> ready to apply</span>
+                <span class="count watch"><strong>@Manual</strong> to publish by hand</span>
+                <span class="count urgent"><strong>@Blocked</strong> blocked</span>
+                <span class="count"><strong>@Settled</strong> nothing to do</span>
+            </div>
+            <label class="filter">
+                <input type="checkbox" @bind="_onlyWork" />
+                Only domains with something to do
+            </label>
+        </section>
+    }
+
+    @foreach (var row in Shown)
     {
         var d = _domains.GetValueOrDefault(row.Domain);
 
@@ -147,61 +167,14 @@ else
                     </div>
                 }
 
-                @if (d.Plans.Count == 0)
+                @if (d.Plans.Count == 0 && d.TransportRecords.Count == 0)
                 {
                     <p class="muted">Nothing to fix.</p>
                 }
 
-                @* Transport security, as records rather than as advice.
-                   A domain with no MTA-STS has nothing to CHANGE, so the
-                   planner above says nothing about it - which left an
-                   operator told "no MTA-STS policy" with no way to find out
-                   what to publish. These are the records themselves. *@
-                @if (d.TransportRecords.Count > 0)
+                @if (d.Plans.Count > 0)
                 {
-                    <details class="plan">
-                        <summary>Transport security — @d.TransportRecords.Count record(s) to publish</summary>
-
-                        @if (d.PolicyHostUnknown && d.TransportRecords.Any(r => r.Type == "CNAME"))
-                        {
-                            <p class="bad">
-                                Nobody has set <code>MtaSts:PolicyHost</code>, so the CNAME target below is a
-                                placeholder. Set it to the hostname this app is reachable on, or the policy
-                                will point somewhere senders cannot fetch it.
-                            </p>
-                        }
-
-                        <table class="triage diff">
-                            <tbody>
-                                @foreach (var record in d.TransportRecords)
-                                {
-                                    <tr>
-                                        <td><code>@record.Name</code></td>
-                                        <td>
-                                            <code>@record.Type</code>
-                                            <code class="value">@record.Value</code>
-                                            <p class="sub">@record.Why</p>
-                                        </td>
-                                    </tr>
-                                }
-                            </tbody>
-                        </table>
-
-                        @if (d.PolicyFile.Length > 0)
-                        {
-                            <p class="sub">The policy file served at the end of that CNAME:</p>
-                            <pre class="policy">@d.PolicyFile</pre>
-                        }
-                        else if (d.TransportRecords.Any(r => r.Name.StartsWith("mta-sts.", StringComparison.Ordinal)))
-                        {
-                            <p class="sub">
-                                No policy has been created for this domain yet, so there is no version to
-                                announce and the <code>_mta-sts</code> record is not shown — publishing an id
-                                this app does not serve is worse than publishing nothing. Create one first:
-                                <code>dmarc mta-sts set --domain @d.Domain</code>
-                            </p>
-                        }
-                    </details>
+                    <p class="group-heading">Changes this product can make</p>
                 }
 
                 @foreach (var plan in d.Plans)
@@ -245,8 +218,67 @@ else
                         }
                     </div>
                 }
+
+                @* Transport security, as records rather than as advice.
+                   A domain with no MTA-STS has nothing to CHANGE, so the
+                   planner above says nothing about it - which left an
+                   operator told "no MTA-STS policy" with no way to find out
+                   what to publish. These are the records themselves. *@
+                @if (d.TransportRecords.Count > 0)
+                {
+                    <details class="plan">
+                        <summary>Publish by hand — @d.TransportRecords.Count transport-security record(s)</summary>
+
+                        @if (d.PolicyHostUnknown && d.TransportRecords.Any(r => r.Type == "CNAME"))
+                        {
+                            <p class="bad">
+                                Nobody has set <code>MtaSts:PolicyHost</code>, so the CNAME target below is a
+                                placeholder. Set it to the hostname this app is reachable on, or the policy
+                                will point somewhere senders cannot fetch it.
+                            </p>
+                        }
+
+                        <table class="triage diff">
+                            <tbody>
+                                @foreach (var record in d.TransportRecords)
+                                {
+                                    <tr>
+                                        <td><code>@record.Name</code></td>
+                                        <td>
+                                            <code>@record.Type</code>
+                                            <code class="value">@record.Value</code>
+                                            <p class="sub">@record.Why</p>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+
+                        @if (d.PolicyFile.Length > 0)
+                        {
+                            <p class="sub">The policy file served at the end of that CNAME:</p>
+                            <pre class="policy">@d.PolicyFile</pre>
+                        }
+                        else if (d.TransportRecords.Any(r => r.Name.StartsWith("mta-sts.", StringComparison.Ordinal)))
+                        {
+                            <p class="sub">
+                                No policy has been created for this domain yet, so there is no version to
+                                announce and the <code>_mta-sts</code> record is not shown — publishing an id
+                                this app does not serve is worse than publishing nothing. Create one first:
+                                <code>dmarc mta-sts set --domain @d.Domain</code>
+                            </p>
+                        }
+                    </details>
+                }
             }
         </section>
+    }
+
+    @if (_onlyWork && Settled > 0)
+    {
+        <p class="muted settled-note">
+            @Settled domain(s) with nothing to do are hidden. Untick the filter above to see them.
+        </p>
     }
 
     <section>
@@ -356,6 +388,46 @@ else
 
         await LoadAsync();
     }
+
+    // ---- what the page is for, before any of it is read ---------------------
+
+    /// <summary>Open on the work rather than on the whole book.</summary>
+    private bool _onlyWork = true;
+
+    /// <summary>A change this product could make now, given a provider.</summary>
+    private static bool HasReadyWork(DomainFixes d) =>
+        d.Plans.Any(p => p.IsSafe && !p.IsNoop);
+
+    /// <summary>Records only a person can publish - no API, or nothing to automate.</summary>
+    private static bool HasManualWork(DomainFixes d) => d.TransportRecords.Count > 0;
+
+    /// <summary>
+    /// Something is wrong that the page cannot get past on its own.
+    /// </summary>
+    /// <remarks>
+    /// A refused plan counts. It is not a failure of the product - the refusal
+    /// is the finding - but it is the thing an operator has to go and deal
+    /// with, so it belongs with the work rather than with the quiet domains.
+    /// </remarks>
+    private static bool IsBlocked(DomainFixes d) =>
+        d.Published.LookupFailed || d.ProviderError is not null || d.Plans.Any(p => !p.IsSafe);
+
+    private static bool NeedsAttention(DomainFixes d) =>
+        HasReadyWork(d) || HasManualWork(d) || IsBlocked(d);
+
+    private int Ready => _domains.Values.Count(HasReadyWork);
+    private int Manual => _domains.Values.Count(d => !HasReadyWork(d) && HasManualWork(d));
+    private int Blocked => _domains.Values.Count(IsBlocked);
+    private int Settled => _domains.Values.Count(d => !NeedsAttention(d));
+
+    /// <summary>
+    /// The rows to draw. A domain still being read is always shown, because
+    /// hiding it would make the page appear to lose domains while it loads.
+    /// </summary>
+    private IEnumerable<DomainTriage> Shown =>
+        !_onlyWork
+            ? _rows
+            : _rows.Where(r => _domains.GetValueOrDefault(r.Domain) is not { } d || NeedsAttention(d));
 
     private async Task LoadAsync()
     {

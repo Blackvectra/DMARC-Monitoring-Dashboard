@@ -204,6 +204,16 @@ public sealed class RemediationUiService(
             providerError = ex.Message;
         }
 
+        // Anything the product can already offer to write is not also a record
+        // to publish by hand. TLS-RPT was appearing twice - once as a plan with
+        // an Apply button, once in the records table - which reads as two jobs.
+        var planned = plans
+            .Where(p => p.IsSafe && !p.IsNoop)
+            .Select(p => (p.RecordName, p.RecordType))
+            .ToHashSet();
+
+        transportRecords = [.. transportRecords.Where(r => !planned.Contains((r.Name, r.Type)))];
+
         return new DomainFixes(domain, triage?.ClientName ?? "", published, triage, plans, providerName, canApply, providerError)
         {
             TransportRecords = transportRecords,
