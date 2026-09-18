@@ -71,9 +71,10 @@ dollars, because you pay for the disk and not the hours. Lightsail bills its
 flat rate whether the instance is running or not, which is the right trade
 once it is real and the wrong one while you are poking at it.
 
-**Use an x86 instance**, not ARM (`t4g`, `Dpsv5`). The release workflow
-publishes `win-x64` and `linux-x64` only, so there is no ARM build to install
-yet. ARM would save about $3 a month; it is on the list, not done.
+**ARM is fine** (`t4g.small` on AWS, `Dpsv5` on Azure) and is the cheapest
+way to run this - about $12 a month, or a couple of dollars for a week of
+testing if you stop it in between. The release publishes `linux-arm64`
+alongside `linux-x64`; take whichever matches `uname -m`.
 
 ---
 
@@ -341,18 +342,71 @@ but every DNS provider credential has to be entered again. That is the
 intended behaviour - it is why a stolen backup is not a stolen Cloudflare
 token - and it is worth knowing before the day you need the restore.
 
-## 9. Upgrading later
+## 9. Releases, and keeping this machine stable
+
+The point of this section: **work in progress must not arrive on a machine
+managing customers' DNS just because somebody merged something.**
+
+So there are two separate things, and only one of them reaches this server:
+
+| | where it lives | what reaches the server |
+|---|---|---|
+| Development | branches, then `main` | nothing |
+| A release | a `v*` tag | the artifacts that tag built |
+
+Tagging is the decision. Until you tag, you can change whatever you like on
+`main` and this box keeps running what it has.
 
 ```bash
-sudo systemctl stop dmarc-web
-# replace /opt/dmarc/app and /usr/local/bin/dmarc with the new release
-sudo -u dmarc dmarc init-db --db /opt/dmarc/data/dmarc.db   # applies any schema change
-sudo systemctl start dmarc-web
+git tag v1.3.0 && git push origin v1.3.0
 ```
 
-`init-db` against an existing database brings its schema up to date and prints
-what it applied. Skipping it is how a new build meets an old database and
-fails on a table that was added after that database was created.
+That builds `dmarc.exe`, `dmarc-linux-x64`, `dmarc-linux-arm64` and
+`dmarc-web.zip`, stamps each with `1.3.0`, and attaches them to a GitHub
+release.
+
+**The server can tell you when it is behind.** Set `Updates:Repository` in
+`appsettings.Production.json` and the Settings page reports what it is running
+and whether a newer release exists:
+
+```json
+"Updates": {
+  "Repository": "Blackvectra/DMARC-Monitoring-Dashboard",
+  "Channel": "stable",
+  "Token": ""
+}
+```
+
+`stable` ignores anything marked prerelease, so tagging `v1.4.0-rc1` and
+marking it a prerelease on GitHub lets you test it on one box (`"Channel":
+"preview"`) without every other instance being told to install it. `Token` is
+needed only if the repository is private, and a read-only one is enough.
+
+It **reports and never installs**. An instance that can rewrite its own code
+is a much larger thing to trust than one that tells you a version exists, and
+this one writes to customers' DNS. Installing is a command you run:
+
+```bash
+sudo ./deploy/update.sh v1.3.0
+```
+
+That backs up the database with SQLite's own `.backup`, keeps the old install
+rather than overwriting it, carries `appsettings.Production.json` across,
+applies any schema migration *after* the new binary is in place and *before*
+the service starts, and checks the app answers afterwards - putting the old
+one back if it does not.
+
+Rolling back is a move, not a download:
+
+```bash
+sudo ./deploy/rollback.sh 20260918-120000              # the application
+sudo ./deploy/rollback.sh 20260918-120000 --database   # and the database
+```
+
+Those are two decisions on purpose. Swapping the application back is always
+safe. Restoring the database is not always wanted: if the version you are
+leaving applied no migration, the current database is fine and holds
+everything collected since the update, which restoring would discard.
 
 ## Before it is reachable by anybody else
 

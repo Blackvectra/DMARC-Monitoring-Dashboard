@@ -245,9 +245,15 @@ without `--i-have-checked`.
 
 ## Upgrading
 
+`dmarc version` says what a build is and which database schema it expects.
+
 `dmarc init-db` against an existing database brings its schema up to date and
 says what it applied. Run it after installing a new build, before starting the
 service; it is safe to run when there is nothing to do.
+
+On a deployed server, `deploy/update.sh` does the whole sequence - back up,
+swap, migrate, start, verify, and put the old one back if it does not come
+up. See `DEPLOYING.md` for how releases and development are kept apart.
 
 ## Putting it on a server
 

@@ -50,6 +50,7 @@ builder.Services.AddScoped(_ => new DmarcMonitor.Core.Remediation.RemediationSer
 builder.Services.AddScoped<RemediationUiService>();
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());
 
 var app = builder.Build();
 

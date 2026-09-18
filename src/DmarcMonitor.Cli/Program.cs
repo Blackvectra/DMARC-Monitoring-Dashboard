@@ -44,6 +44,7 @@ public static class Program
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "mta-sts" => await MtaStsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "version" or "--version" => Version(),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
             };
@@ -64,6 +65,20 @@ public static class Program
             Console.Error.WriteLine(ex);
             return 1;
         }
+    }
+
+    /// <summary>What this build is, which is the first question when something is wrong.</summary>
+    private static int Version()
+    {
+        Console.WriteLine($"dmarc {DmarcMonitor.Core.Updates.BuildInfo.Version}");
+
+        if (!DmarcMonitor.Core.Updates.BuildInfo.IsRelease)
+        {
+            Console.WriteLine("Built from a working tree rather than a release tag.");
+        }
+
+        Console.WriteLine($"Database schema this build expects: {DmarcMonitor.Core.Storage.DatabaseMigrations.BaselineVersion}");
+        return 0;
     }
 
     private static int Help()

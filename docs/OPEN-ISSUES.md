@@ -276,17 +276,43 @@ so the failure is legible. What has not been established is where the real
 limits are: at what size the upload gets slow enough that the folder import
 is the better answer.
 
-## 10. No ARM build, and no deployment has happened
+## 10. The update path has never been run on a server
+
+**Area** `deploy/update.sh`, `deploy/rollback.sh`
+**Severity** Medium.
+
+The release channel half is tested and was driven against the real GitHub API:
+the Settings page reports what it is running and correctly says nothing has
+been released yet. The scripts that install a release are not. They parse, and
+their logic is legible, and neither has stopped and restarted a real service.
+
+Two things about them worth knowing before the first run:
+
+- **The rollback is not symmetric.** Putting the application back always
+  works; the database is left alone unless `--database` is passed, because a
+  migration that ran is still applied and the current database holds
+  everything collected since the update. Getting this wrong in either
+  direction loses something.
+- **`appsettings.Production.json` lives in the application directory** and is
+  not part of a release, so `update.sh` copies it across. If that copy ever
+  fails silently the new install comes up with no database path, no tenant and
+  no sign-in - which the health check would catch, but by rolling back rather
+  than by saying what happened.
+
+Try it first on a box with nothing real on it, between two tags that differ
+only trivially.
+
+## 10a. No ARM build, and no deployment has happened
 
 **Area** `.github/workflows/release.yml`, `docs/DEPLOYING.md`
 **Severity** Low.
 
-The release publishes `win-x64` and `linux-x64`. The cheapest instances at
-both AWS and Azure are ARM (`t4g`, `Dpsv5`), and there is no `linux-arm64`
-build to put on one, so `DEPLOYING.md` tells people to take an x86 instance
-and pay about $3 a month more. Adding the RID is a line in the matrix; the
-smoke test is the awkward part, because an x64 runner cannot execute the
-binary it just built.
+**ARM: done.** The release now publishes `linux-arm64` too, verified locally
+to be a 36 MB self-contained `ARM aarch64` executable. It is the one build
+whose smoke test cannot run it - an x64 runner cannot execute an ARM binary -
+so CI checks the architecture and the size instead and says so. That is
+genuinely weaker than the x64 and Windows checks, which make the binary
+create a database and read a report.
 
 `DEPLOYING.md` itself is assembled from how the pieces are built rather than
 from a deployment that happened. The proxy handling under it is covered by

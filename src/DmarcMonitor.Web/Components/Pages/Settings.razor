@@ -6,6 +6,7 @@
 @inject ReportUiService ReportUi
 @inject RemediationUiService Fixes
 @inject OnboardingService Onboarding
+@inject DmarcMonitor.Core.Updates.ReleaseChannel Releases
 @rendermode InteractiveServer
 
 <PageTitle>Settings — DMARC Monitor</PageTitle>
@@ -98,6 +99,57 @@
                 </td>
             </tr>
             <tr><td>Opened</td><td>read-only, except onboarding and import</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<section>
+    <h2>This build</h2>
+    <p class="sub">Development happens on branches; this machine runs a released version. Nothing
+       here installs anything - it says what exists, and updating is a command somebody runs.</p>
+    <table class="triage">
+        <tbody>
+            <tr>
+                <td>Running</td>
+                <td>
+                    <code>@DmarcMonitor.Core.Updates.BuildInfo.Version</code>
+                    @if (!DmarcMonitor.Core.Updates.BuildInfo.IsRelease)
+                    {
+                        <span class="muted"> — built from a working tree, not a release tag</span>
+                    }
+                </td>
+            </tr>
+            <tr><td>Database schema</td><td><code>@_schema</code></td></tr>
+            @if (UpdatesConfigured)
+            {
+                <tr>
+                    <td>Releases</td>
+                    <td>
+                        @if (_update is null)
+                        {
+                            <span class="muted">checking…</span>
+                        }
+                        else
+                        {
+                            <span class="@(_update.UpdateAvailable ? "bad" : "")">@_update.Summary</span>
+                            @if (_update is { UpdateAvailable: true, Latest: not null })
+                            {
+                                <br />
+                                <span class="sub">To install it:
+                                    <code>sudo ./update.sh v@_update.Latest.Version</code></span>
+                            }
+                        }
+                    </td>
+                </tr>
+            }
+            else
+            {
+                <tr>
+                    <td>Releases</td>
+                    <td><span class="muted">not checked. Set <code>Updates:Repository</code> to be told
+                        when a newer version exists.</span></td>
+                </tr>
+            }
         </tbody>
     </table>
 </section>
@@ -242,8 +294,41 @@
     private string _clientId = "";
     private string _secret = "";
 
+    private DmarcMonitor.Core.Updates.UpdateStatus? _update;
+    private string _schema = "unknown";
+
+    private bool UpdatesConfigured => !string.IsNullOrWhiteSpace(Configuration["Updates:Repository"]);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // After the page is up, because it reaches GitHub: a settings page
+        // that will not render until an outbound request comes back is a
+        // settings page nobody can read when the network is the problem.
+        if (!firstRender || !UpdatesConfigured) { return; }
+
+        _update = await Releases.CheckAsync(
+            Configuration["Updates:Repository"]!,
+            DmarcMonitor.Core.Updates.BuildInfo.Version,
+            Configuration["Updates:Channel"] ?? DmarcMonitor.Core.Updates.ReleaseChannel.Stable,
+            Configuration["Updates:Token"]);
+
+        StateHasChanged();
+    }
+
     protected override async Task OnInitializedAsync()
     {
+        if (Db.Exists)
+        {
+            try
+            {
+                _schema = await DmarcMonitor.Core.Storage.DatabaseMigrations.VersionAsync(Db.Path);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _schema = "could not be read";
+            }
+        }
+
         if (!Db.Exists) { _providers = []; return; }
 
         try
