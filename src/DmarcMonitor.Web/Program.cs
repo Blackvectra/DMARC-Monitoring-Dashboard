@@ -32,6 +32,17 @@ builder.Services.AddScoped<ReportUiService>();
 // outside the machine, so it is the one service whose slowness can be seen.
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.DnsLookup());
 
+// The write path that reaches outside the machine: it changes a customer's
+// DNS. Provider tokens live in the secret store, never in the database, and
+// the store's location is configurable so a service account can keep its own.
+var secretsDir = builder.Configuration["Secrets:Directory"];
+builder.Services.AddSingleton<DmarcMonitor.Core.Remediation.ISecretStore>(_ =>
+    new DmarcMonitor.Core.Remediation.LocalSecretStore(string.IsNullOrWhiteSpace(secretsDir) ? null : Path.GetFullPath(secretsDir)));
+builder.Services.AddScoped(sp => new DmarcMonitor.Core.Remediation.DnsProviderConfigs(
+    dbPath, sp.GetRequiredService<DmarcMonitor.Core.Remediation.ISecretStore>()));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Remediation.RemediationService(dbPath));
+builder.Services.AddScoped<RemediationUiService>();
+
 var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())

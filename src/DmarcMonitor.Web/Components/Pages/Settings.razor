@@ -4,6 +4,9 @@
 @inject IConfiguration Configuration
 @inject ReportStoreConnection Db
 @inject ReportUiService ReportUi
+@inject RemediationUiService Fixes
+@inject OnboardingService Onboarding
+@rendermode InteractiveServer
 
 <PageTitle>Settings — DMARC Monitor</PageTitle>
 
@@ -100,6 +103,108 @@
 </section>
 
 <section>
+    <h2>DNS providers</h2>
+    <p class="sub">Which provider holds each client's zones, so the Fix page can write to them. Only
+       the coordinates are shown; the token is stored once, under the reference shown, and never
+       displayed again. A token on a settings page is a token in a screenshot in a support ticket.</p>
+    <table class="triage">
+        <tbody>
+            <tr><td>Secrets</td><td>@Fixes.SecretsDescription</td></tr>
+        </tbody>
+    </table>
+
+    @if (_providers is null)
+    {
+        <p class="muted">Loading…</p>
+    }
+    else if (_providers.Count == 0)
+    {
+        <p class="muted">None configured. Fixes can be planned but not applied.</p>
+    }
+    else
+    {
+        <table class="triage">
+            <thead>
+                <tr><th>Zone(s)</th><th>Provider</th><th>Coordinates</th><th>Credential</th><th></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var p in _providers)
+                {
+                    <tr>
+                        <td>@(p.Domain ?? $"every domain of {p.ClientSlug}")</td>
+                        <td>@p.Provider</td>
+                        <td>
+                            @foreach (var kv in p.Settings)
+                            {
+                                <code>@kv.Key=@kv.Value</code><br />
+                            }
+                            @if (p.LastError is not null)
+                            {
+                                <span class="bad">@p.LastError</span>
+                            }
+                        </td>
+                        <td>@if (p.CredentialRef is not null) { <code>@p.CredentialRef</code> } else { <span class="muted">none</span> }</td>
+                        <td><button disabled="@_busy" @onclick="() => RemoveProviderAsync(p)">Remove</button></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    @if (_providerMessage is not null)
+    {
+        <p class="@(_providerMessageIsError ? "bad" : "good")">@_providerMessage</p>
+    }
+
+    <h3>Add or replace</h3>
+    <div class="form-row">
+        <select @bind="_client">
+            <option value="">Client…</option>
+            @foreach (var c in _clients)
+            {
+                <option value="@c.Slug">@c.Name</option>
+            }
+        </select>
+        <input placeholder="Domain (blank = every domain of the client)" @bind="_domain" @bind:event="oninput" />
+        <select @bind="_provider">
+            <option value="cloudflare">Cloudflare</option>
+            <option value="azuredns">Azure DNS</option>
+            <option value="manual">Manual (no API)</option>
+        </select>
+    </div>
+    @if (_provider == "cloudflare")
+    {
+        <div class="form-row">
+            <input placeholder="Zone id" @bind="_zoneId" @bind:event="oninput" />
+            <input type="password" class="wide" placeholder="API token — Zone:DNS:Edit on this zone only, never the Global API Key"
+                   @bind="_secret" @bind:event="oninput" autocomplete="off" />
+        </div>
+    }
+    else if (_provider == "azuredns")
+    {
+        <div class="form-row">
+            <input placeholder="Subscription id" @bind="_subscription" @bind:event="oninput" />
+            <input placeholder="Resource group" @bind="_resourceGroup" @bind:event="oninput" />
+            <input placeholder="Zone name" @bind="_zone" @bind:event="oninput" />
+        </div>
+        <div class="form-row">
+            <input placeholder="Tenant id (optional)" @bind="_tenantId" @bind:event="oninput" />
+            <input placeholder="App (client) id (optional)" @bind="_clientId" @bind:event="oninput" />
+            <input type="password" placeholder="Client secret (optional)" @bind="_secret" @bind:event="oninput" autocomplete="off" />
+        </div>
+        <p class="sub">Without an app registration the service's own identity is used: a managed identity
+           on a server, or whoever is signed in to az on a desk.</p>
+    }
+    <div class="form-row">
+        <button class="primary" disabled="@(_busy || !Fixes.SecretsAvailable || string.IsNullOrWhiteSpace(_client))" @onclick="SetProviderAsync">Save</button>
+        @if (!Fixes.SecretsAvailable)
+        {
+            <span class="bad">The secret store cannot be used here, so nothing can be saved.</span>
+        }
+    </div>
+</section>
+
+<section>
     <h2>Reports</h2>
     <table class="triage">
         <tbody>
@@ -120,6 +225,98 @@
 </section>
 
 @code {
+    private IReadOnlyList<DmarcMonitor.Core.Remediation.DnsProviderConfig>? _providers;
+    private IReadOnlyList<DmarcMonitor.Core.Storage.ReportStore.ClientSummary> _clients = [];
+    private string? _providerMessage;
+    private bool _providerMessageIsError;
+    private bool _busy;
+
+    private string _client = "";
+    private string _domain = "";
+    private string _provider = "cloudflare";
+    private string _zoneId = "";
+    private string _subscription = "";
+    private string _resourceGroup = "";
+    private string _zone = "";
+    private string _tenantId = "";
+    private string _clientId = "";
+    private string _secret = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Db.Exists) { _providers = []; return; }
+
+        try
+        {
+            _providers = await Fixes.ProvidersAsync();
+            _clients = [.. (await Onboarding.GetClientsAsync())
+                .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)];
+        }
+        catch (Exception ex)
+        {
+            _providers = [];
+            _providerMessage = ex.Message;
+            _providerMessageIsError = true;
+        }
+    }
+
+    private async Task SetProviderAsync()
+    {
+        _busy = true;
+        try
+        {
+            var settings = new Dictionary<string, string>();
+            void Put(string key, string value) { if (!string.IsNullOrWhiteSpace(value)) { settings[key] = value.Trim(); } }
+            Put("zone_id", _zoneId);
+            Put("subscription_id", _subscription);
+            Put("resource_group", _resourceGroup);
+            Put("zone", _zone);
+            Put("tenant_id", _tenantId);
+            Put("client_id", _clientId);
+
+            var saved = await Fixes.SetProviderAsync(_client, string.IsNullOrWhiteSpace(_domain) ? null : _domain.Trim(),
+                _provider, settings, string.IsNullOrWhiteSpace(_secret) ? null : _secret);
+
+            _providerMessage = $"{saved.Provider} saved for {saved.Domain ?? $"every domain of {saved.ClientSlug}"}.";
+            _providerMessageIsError = false;
+
+            // The token is dropped from the page's memory the moment it is
+            // stored. It is not shown back, and a re-render must not carry it.
+            _secret = "";
+            _providers = await Fixes.ProvidersAsync();
+        }
+        catch (Exception ex)
+        {
+            _providerMessage = ex.Message;
+            _providerMessageIsError = true;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task RemoveProviderAsync(DmarcMonitor.Core.Remediation.DnsProviderConfig config)
+    {
+        _busy = true;
+        try
+        {
+            await Fixes.RemoveProviderAsync(config.ClientSlug, config.Domain);
+            _providerMessage = "Removed, and its credential with it.";
+            _providerMessageIsError = false;
+            _providers = await Fixes.ProvidersAsync();
+        }
+        catch (Exception ex)
+        {
+            _providerMessage = ex.Message;
+            _providerMessageIsError = true;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
     private bool EntraConfigured => AuthSetup.IsEntraConfigured(Configuration);
     private bool LocalModeRemote => AuthSetup.LocalModeAllowedRemotely(Configuration);
 

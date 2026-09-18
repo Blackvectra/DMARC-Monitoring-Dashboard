@@ -10,6 +10,12 @@
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="DnsClient" Version="1.8.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The tests reach two provider helpers that shape what goes over the wire. -->
+    <InternalsVisibleTo Include="DmarcMonitor.Core.Tests" />
   </ItemGroup>
 
   <ItemGroup>

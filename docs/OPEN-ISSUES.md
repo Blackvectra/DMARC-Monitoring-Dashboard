@@ -101,11 +101,15 @@ Every sidebar link now resolves: Triage, Domains, a domain, Clients, Import,
 Sources, Reports, Settings. Reports previews a client's month and opens the
 real document through the same renderer the CLI uses, so the two cannot drift.
 
-Settings shows what the instance is configured to do but cannot change any of
-it. That is deliberate for now - a form writing to appsettings.json becomes a
-second source of truth that disagrees with the file after a restart - but the
-provider name in particular is something an operator will want to set without
-editing a file on the server.
+Settings shows what the instance is configured to do and, apart from DNS
+providers, cannot change any of it. That is deliberate for now - a form
+writing to appsettings.json becomes a second source of truth that disagrees
+with the file after a restart - but the provider name in particular is
+something an operator will want to set without editing a file on the server.
+
+DNS providers are the exception because they were never file configuration:
+they live in `dns_provider_configs` with the token in the secret store, and
+the page writes them the same way `dmarc dns set` does.
 
 **How to fix, when it is worth it.** A small writable configuration store
 (a table in the existing database, read at startup with the file as the
@@ -229,6 +233,56 @@ The web app is not self-contained and needs the ASP.NET Core 8 runtime on the
 host. That is a deliberate trade - a self-contained web bundle is several
 hundred megabytes - but it means "copy one file and run it" is true of the CLI
 and not of the app.
+
+## 9. The apply path has never written to a real zone
+
+**Area** `src/DmarcMonitor.Core/Remediation/`, `dmarc fix`, the Fix page
+**Severity** Medium. This is the feature the product exists for, and its
+last step is untried.
+
+Everything up to the provider is exercised against real data: `dmarc fix
+--all` on the 1,687-report database plans the two `sp=none` removals
+(bmcedc.com, ndunited.org), plans mortonnd.gov's move to quarantine, and
+refuses its move to reject. The guardrails - refuse unsafe, no-op twice,
+snapshot before writing, refuse a stale plan, roll back from the snapshot,
+refuse a second rollback - are proven against the in-memory zone.
+
+What has not happened is a write to Cloudflare or Azure DNS. Both providers
+are tested against recorded responses whose shape comes from the API
+documentation and the prototype, not from a call. Three things could be
+wrong in ways the tests cannot see:
+
+- **Cloudflare TXT quoting.** The API returns content quoted and accepts it
+  either way; the provider unquotes on read and sends unquoted. If a zone
+  turns out to hold content with the quotes as part of the value, the
+  snapshot comparison in `ApplyAsync` will call the plan stale and refuse,
+  which is the safe failure.
+- **Azure record-set replacement.** The provider reads the set, swaps one
+  value and PUTs the whole set back so the other TXT values at the apex
+  survive. A PUT that Azure treats as a partial update, or a set with an
+  `etag` requirement, would show up here first.
+- **Propagation.** `VerifyAsync` resolves through its own uncached client,
+  but it resolves through whatever resolver the host uses. A resolver that
+  itself caches for the old TTL will say "not yet" for that long, and the
+  history table will say "accepted, not yet seen in DNS" until then.
+
+**How to try it.** One domain, with a Cloudflare token scoped to that zone
+only:
+
+    dmarc dns set --client <slug> --domain <d> --provider cloudflare --zone-id <id>
+    dmarc dns test --domain <d>
+    dmarc fix --domain <d>                       # dry run: shows before and after
+    dmarc fix --domain <d> --apply --reason "..."
+    dmarc fix --history
+    dmarc fix --rollback <id> --reason "trying the rollback"
+
+Then look at the zone in the provider's own UI after each step. The Fix page
+does the same with buttons.
+
+Not built, and known: SPF flattening, DKIM publication, MTA-STS and TLS-RPT
+records, and BIMI. The `dns_change_plans` CHECK constraint already admits
+them. Removing an include on the strength of "no mail seen from it" is
+deliberately not plannable and should stay that way.
 
 ## 8. Smaller things
 

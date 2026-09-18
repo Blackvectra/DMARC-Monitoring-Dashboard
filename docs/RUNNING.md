@@ -108,6 +108,52 @@ import is resumed by running it again.
 
 ---
 
+## Fixing what it finds
+
+`dmarc check` says what is wrong with a domain's DNS. `dmarc fix` changes it,
+and records having done so, which is what the client's monthly report prints
+under "what we did".
+
+    dmarc fix --domain example.com                 # dry run: what would change, before and after
+    dmarc fix --all                                # the same for every domain
+    dmarc fix --domain example.com --apply --reason "Subdomains were left at sp=none"
+
+Without a flag it plans only what is safe on the record's own evidence: a
+subdomain policy weaker than the domain's, and an include that resolves to
+nothing. Moving the policy is a decision the reports have to justify, so it
+is asked for explicitly, and the tool says when they do justify it:
+
+    dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none, everything authenticating"
+
+It refuses to go from `none` to `reject` in one step; `--pct 25` ramps.
+
+Nothing is written without `--apply` and a `--reason`, and the reason is
+written for the customer because it goes on their report. Every write is
+recorded with what was there before, read from the zone at the moment of
+writing:
+
+    dmarc fix --history
+    dmarc fix --verify <id>                        # is DNS serving it yet
+    dmarc fix --rollback <id> --reason "..."       # put back what was there
+
+To write, the product needs to know which provider holds the zone:
+
+    dmarc dns set --client <slug> --provider cloudflare --zone-id <zone id>
+    dmarc dns set --client <slug> --provider azuredns --subscription <id> --resource-group <rg> --zone <zone>
+    dmarc dns test --domain example.com
+    dmarc dns list
+
+The token is read from `DMARC_DNS_SECRET`, from stdin with `--secret-stdin`,
+or at a prompt that does not echo; never from an argument. For Cloudflare use
+an API token scoped to `Zone:DNS:Edit` on that one zone, never the Global API
+Key. The token goes to the secret store (DPAPI on Windows, an owner-only key
+file elsewhere; `dmarc dns list` says which and where) and the database holds
+only a reference to it. Without a provider, fixes are planned and shown with
+what to publish by hand.
+
+The Fix page in the web app does all of the above with buttons, and Settings
+is where providers are added there.
+
 ## Scheduling
 
 Daily is enough; receivers send at most once a day per domain.

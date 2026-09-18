@@ -1,5 +1,6 @@
 using System.Net;
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
@@ -41,6 +42,7 @@ public sealed class PageTests : IClassFixture<SeededApp>
         "/",
         "/domains",
         "/domains/acme.com",
+        "/fix",
         "/clients",
         "/import",
         "/sources",
@@ -134,6 +136,41 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("Acme Corp", html, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("/settings")]
+    [InlineData("/fix")]
+    [InlineData("/")]
+    public async Task NoPageEverShowsAProviderToken(string route)
+    {
+        // The settings page lists the provider and its credential reference.
+        // The reference is fine to show; the token behind it is not, on this
+        // page or any other, in a screenshot or a support ticket.
+        var html = await Client().GetStringAsync(route);
+
+        Assert.DoesNotContain(SeededApp.ProviderToken, html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SettingsNamesTheProviderAndWhereSecretsLive()
+    {
+        var html = await Client().GetStringAsync("/settings");
+
+        Assert.Contains("cloudflare", html, StringComparison.Ordinal);
+        Assert.Contains("zone-acme", html, StringComparison.Ordinal);
+        Assert.Contains("dmarc.local.cloudflare.", html, StringComparison.Ordinal);
+        Assert.Contains("never", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FixSaysWhatItIsForBeforeAnythingIsRead()
+    {
+        // DNS is read after first render, so the static page is what a
+        // request sees. It has to say what will happen, not sit blank.
+        var html = await Client().GetStringAsync("/fix");
+
+        Assert.Contains("what we did", html, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AReportDownloadsAsAWholeDocument()
     {
@@ -178,7 +215,11 @@ public sealed class PageTests : IClassFixture<SeededApp>
         var html = await Client().GetStringAsync("/settings");
 
         Assert.DoesNotContain("ClientSecret", html, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("password", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(SeededApp.ProviderToken, html, StringComparison.Ordinal);
+
+        // The page does take a token in, once, through a password field, so
+        // what is typed is not on the screen either.
+        Assert.Contains("type=\"password\"", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -202,6 +243,11 @@ public sealed class SeededApp : WebApplicationFactory<Program>
 {
     private readonly string _dbPath =
         Path.Combine(Path.GetTempPath(), $"dmarc-pages-{Guid.NewGuid():N}.db");
+    private readonly string _secretsDir =
+        Path.Combine(Path.GetTempPath(), $"dmarc-pages-secrets-{Guid.NewGuid():N}");
+
+    /// <summary>The token stored for the seeded provider. Must never appear in any page.</summary>
+    public const string ProviderToken = "cf-token-KEEP-OUT-OF-PAGES-9f8e7d";
 
     public SeededApp() => Seed().GetAwaiter().GetResult();
 
@@ -215,6 +261,7 @@ public sealed class SeededApp : WebApplicationFactory<Program>
         // state that looks like a passing test. Going in through
         // configuration is also what a real deployment does.
         builder.UseSetting("Database:Path", _dbPath);
+        builder.UseSetting("Secrets:Directory", _secretsDir);
     }
 
     private async Task Seed()
@@ -235,6 +282,11 @@ public sealed class SeededApp : WebApplicationFactory<Program>
 
         var slug = await store.CreateClientAsync("Acme Corp");
         await store.AssignDomainAsync("acme.com", slug!);
+
+        // A provider with a real-looking token, stored the way the settings
+        // page stores one, so the pages can be checked for leaking it.
+        var configs = new DnsProviderConfigs(_dbPath, new LocalSecretStore(_secretsDir));
+        await configs.SetAsync(slug!, null, "cloudflare", new Dictionary<string, string> { ["zone_id"] = "zone-acme" }, ProviderToken);
     }
 
     private static async Task StoreAsync(ReportStore store, DateTimeOffset begin, int passing, int failing)
@@ -289,5 +341,6 @@ public sealed class SeededApp : WebApplicationFactory<Program>
         {
             try { File.Delete(_dbPath + suffix); } catch (IOException) { }
         }
+        try { Directory.Delete(_secretsDir, recursive: true); } catch (IOException) { }
     }
 }

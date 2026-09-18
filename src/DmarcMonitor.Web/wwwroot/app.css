@@ -219,3 +219,13 @@ a.primary-link {
 
 /* A record is one long unbroken string and must not push the page sideways. */
 code.wrap { word-break: break-all; white-space: normal; }
+
+/* Fix page: one block per domain, one boxed plan per change. */
+.domain-fix { margin-bottom: 26px; }
+.domain-fix h2 .provider { font-size: 12px; margin-left: 10px; }
+.pill { font-size: 11px; padding: 1px 6px; border: 1px solid #30363d; border-radius: 10px; margin-left: 8px; }
+.plan { border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
+.plan.refused { border-left: 3px solid var(--act); }
+.plan-summary { margin-bottom: 6px; }
+.diff td:first-child { color: var(--muted); width: 80px; }
+.diff code { word-break: break-all; }

@@ -41,6 +41,8 @@ public static class Program
                 "report" => await ReportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "check" => await CheckCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
             };
@@ -119,6 +121,32 @@ public static class Program
                 --all            Every domain in the database.
                 --db <path>      Database file. Default: dmarc.db
 
+              fix                Fix what 'check' found, in the customer's DNS. A dry run
+                                 unless --apply is given. Every apply is recorded with who,
+                                 when, why and what was there before, and appears on the
+                                 client's report under "what we did".
+                --domain <d>     One domain. With no other flag: the safe fixes only (a
+                                 weaker subdomain policy, includes that resolve to nothing).
+                --all            The safe fixes for every domain.
+                --policy <p>     Move one domain to quarantine or reject. Refuses to skip
+                                 quarantine on the way to reject.
+                --pct <n>        Apply the policy to this percent of failing mail.
+                --apply          Write it. Needs --reason "...", written for the customer.
+                --by <name>      Who is doing this. Default: the signed-in user.
+                --history        What has been applied, newest first.
+                --verify <id>    Check a change is visible in DNS yet.
+                --rollback <id>  Put back what was there. Needs --reason.
+                --db <path>      Database file. Default: dmarc.db
+
+              dns                Which DNS provider holds each client's zones. Needed for
+                                 'fix --apply'; without one, fixes are planned and shown.
+                list             What is configured. Never shows a credential.
+                set              --client <slug> [--domain <d>] --provider cloudflare|azuredns|manual
+                                 The credential is read from DMARC_DNS_SECRET, stdin with
+                                 --secret-stdin, or a prompt. Never as an argument.
+                test             --domain <d>  Read the zone through the provider.
+                remove           --client <slug> [--domain <d>]
+
               intel              Refresh and show what has been learned about sources
                                  impersonating clients, across every domain watched.
                 --db <path>      Database file. Default: dmarc.db
@@ -149,6 +177,8 @@ public static class Program
               dmarc client add --name "Morton, ND"
               dmarc client assign --domain mortonnd.gov --client morton-nd
               dmarc check --domain example.com
+              dmarc fix --domain example.com
+              dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"
               dmarc ingest --mailbox dmarc@example.com --dry-run
             """);
         return 0;
