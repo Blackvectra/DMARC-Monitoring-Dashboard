@@ -87,6 +87,24 @@ staff; it never reads mail.
 
 ---
 
+## Getting reports in
+
+Three ways, all of which end in the same place:
+
+**Drop them in the browser.** Open Import and drag files onto the panel, or
+click it. A single report somebody forwarded, a folder of them, or a whole
+mailbox export as one zip - including a zip of attachments that are themselves
+gzipped, which is what an export usually is. Importing the same thing twice is
+safe: reports already stored are recognised and skipped rather than doubled.
+
+**Import a folder on the server.** For an export already on the machine, or
+one too large to upload. Same page, at the bottom, or from the command line:
+
+    dmarc import --from C:\dmarc-export
+
+**Read the mailbox directly**, which is the one that keeps working without
+anybody doing anything. See below.
+
 ## Collecting reports
 
 Two ways in. The mailbox is the real one.

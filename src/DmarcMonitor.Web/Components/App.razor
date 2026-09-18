@@ -5,6 +5,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
+    @* Named explicitly, and a real file: without one every browser asks for
+       /favicon.ico on every page, which the sign-in guard answers with a
+       redirect and the log records forever as noise. *@
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="app.css" />
     <link rel="stylesheet" href="DmarcMonitor.Web.styles.css" />
     <HeadOutlet />

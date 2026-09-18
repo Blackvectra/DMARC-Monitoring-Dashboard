@@ -51,20 +51,17 @@ public sealed class RemediationUiService(
     public string SecretsDescription => providers.Secrets.Description;
     public bool SecretsAvailable => providers.Secrets.IsAvailable;
 
-    /// <summary>Every domain, with the safe fixes planned. Reads DNS for each, so it is slow.</summary>
-    public async Task<IReadOnlyList<DomainFixes>> PlanAllAsync(CancellationToken ct = default)
-    {
-        var rows = await _triage.GetAsync(ct: ct);
-        var result = new List<DomainFixes>();
-
-        foreach (var row in rows)
-        {
-            ct.ThrowIfCancellationRequested();
-            result.Add(await PlanAsync(row.Domain, row, null, ct));
-        }
-
-        return result;
-    }
+    /// <summary>
+    /// Every domain worth planning for, straight from the database.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the planning because this is instant and planning is
+    /// not: the page lists the domains at once and fills each in as its DNS
+    /// comes back, rather than showing nothing for the half-minute it takes
+    /// to ask about ten domains.
+    /// </remarks>
+    public Task<IReadOnlyList<DomainTriage>> DomainsAsync(CancellationToken ct = default) =>
+        _triage.GetAsync(ct: ct);
 
     /// <summary>
     /// One domain, with the safe fixes and optionally a policy move planned.

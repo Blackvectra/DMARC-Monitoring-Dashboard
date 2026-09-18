@@ -273,6 +273,160 @@ public sealed class ReportAttachmentTests
         Assert.True(extracted.Count <= ReportAttachment.MaxArchiveEntries);
     }
 
+    // ---- what a mailbox export actually looks like -------------------------
+
+    /// <summary>A zip holding attachments as they arrived: gzipped, zipped, bare.</summary>
+    private static byte[] ExportZip(int gzipped = 0, int zipped = 0, int bare = 0)
+    {
+        using var outer = new MemoryStream();
+        using (var zip = new ZipArchive(outer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            for (var i = 0; i < gzipped; i++) { Put(zip, $"gz{i}.xml.gz", Gzip(Report($"gz{i}"))); }
+            for (var i = 0; i < zipped; i++) { Put(zip, $"z{i}.xml.zip", Zip($"z{i}.xml", Report($"z{i}"))); }
+            for (var i = 0; i < bare; i++) { Put(zip, $"b{i}.xml", Encoding.UTF8.GetBytes(Report($"b{i}"))); }
+        }
+        return outer.ToArray();
+    }
+
+    private static string Report(string id) =>
+        $"<feedback><report_metadata><report_id>{id}</report_id></report_metadata></feedback>";
+
+    private static void Put(ZipArchive zip, string name, byte[] content)
+    {
+        using var s = zip.CreateEntry(name).Open();
+        s.Write(content);
+    }
+
+    private static byte[] Gzip(string text)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+        {
+            gz.Write(Encoding.UTF8.GetBytes(text));
+        }
+        return ms.ToArray();
+    }
+
+    private static byte[] Zip(string name, string text)
+    {
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            Put(zip, name, Encoding.UTF8.GetBytes(text));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void ReadsAnExportZipOfAttachmentsAsTheyArrived()
+    {
+        // The thing somebody actually drags onto the page: a mailbox export,
+        // which is a zip OF the attachments, each still gzipped or zipped as
+        // its receiver sent it. Read one level deep this finds nothing at all,
+        // because what is inside the zip is not XML, it is more gzip.
+        var reports = ReportAttachment.ExtractAll(
+            "dmarc-export.zip", ExportZip(gzipped: 4, zipped: 3, bare: 2), ExtractionBudget.ForOperator()).ToList();
+
+        Assert.Equal(9, reports.Count);
+        Assert.All(reports, r => Assert.Equal(ReportKind.DmarcAggregate, r.Kind));
+
+        // Named for the report inside, not for the export it came in.
+        Assert.Contains(reports, r => r.FileName == "gz0.xml");
+        Assert.Contains(reports, r => r.FileName == "z0.xml");
+        Assert.DoesNotContain(reports, r => r.FileName.Contains("export", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnExportLargerThanTheMailBudgetStillComesInForAnOperator()
+    {
+        // 100 reports is nothing for an export and far past what an email
+        // attachment is allowed. The difference is who the file came from.
+        var export = ExportZip(gzipped: 100);
+
+        Assert.Equal(100, ReportAttachment.ExtractAll("export.zip", export, ExtractionBudget.ForOperator()).Count());
+        Assert.True(ReportAttachment.Extract("export.zip", export).Count <= ReportAttachment.MaxArchiveEntries);
+    }
+
+    [Fact]
+    public void SaysSoWhenItRanOutRatherThanReturningWhatFitted()
+    {
+        // The whole point of the budget being the caller's. An export cut off
+        // half way that reports success is a client reported on with half
+        // their mail missing, and nobody ever finds out.
+        var budget = new ExtractionBudget(entries: 5, bytes: ExtractAll.Plenty);
+
+        var reports = ReportAttachment.ExtractAll("export.zip", ExportZip(gzipped: 20), budget).ToList();
+
+        Assert.Equal(5, reports.Count);
+        Assert.True(budget.Exhausted);
+    }
+
+    [Fact]
+    public void DoesNotClaimItRanOutWhenEverythingFitted()
+    {
+        var budget = new ExtractionBudget(entries: 50, bytes: ExtractAll.Plenty);
+
+        Assert.Equal(6, ReportAttachment.ExtractAll("export.zip", ExportZip(gzipped: 6), budget).Count());
+        Assert.False(budget.Exhausted);
+    }
+
+    [Fact]
+    public void TheByteBudgetIsSpentOnWhatArrivedNotOnWhatTheArchiveClaimed()
+    {
+        // A zip bomb declares whatever gets it past a length check, so the
+        // budget is charged as the bytes come out of the stream.
+        var budget = new ExtractionBudget(entries: 100, bytes: 200);
+
+        var reports = ReportAttachment.ExtractAll("export.zip", ExportZip(gzipped: 20), budget).ToList();
+
+        Assert.True(budget.Exhausted);
+        Assert.True(reports.Count < 20);
+    }
+
+    [Fact]
+    public void StopsFollowingArchivesThatGoOnForever()
+    {
+        // A zip inside a zip inside a zip, and so on. Terminates rather than
+        // recursing until the stack gives out.
+        var payload = Zip("r.xml", Report("deep"));
+        for (var i = 0; i < ReportAttachment.MaxArchiveDepth + 3; i++)
+        {
+            using var ms = new MemoryStream();
+            using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+            {
+                Put(zip, $"layer{i}.zip", payload);
+            }
+            payload = ms.ToArray();
+        }
+
+        Assert.Empty(ReportAttachment.ExtractAll("nested.zip", payload, ExtractionBudget.ForOperator()));
+    }
+
+    [Fact]
+    public void ADeadEntryDoesNotCostAnotherEntryItsPlace()
+    {
+        // Empty and unreadable members are common in a real export. Charging
+        // the budget for them would cut a legitimate export short.
+        using var outer = new MemoryStream();
+        using (var zip = new ZipArchive(outer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            zip.CreateEntry("empty.xml");
+            Put(zip, "notes.txt", Encoding.UTF8.GetBytes("nothing to see"));
+            Put(zip, "real.xml.gz", Gzip(Report("real")));
+        }
+
+        var budget = new ExtractionBudget(entries: 2, bytes: ExtractAll.Plenty);
+        var reports = ReportAttachment.ExtractAll("mixed.zip", outer.ToArray(), budget).ToList();
+
+        Assert.Equal("real.xml", Assert.Single(reports).FileName);
+        Assert.False(budget.Exhausted);
+    }
+
+    private static class ExtractAll
+    {
+        public const long Plenty = 64L * 1024 * 1024;
+    }
+
     [Fact]
     public void NeverSurfacesATraversalPathAsAFileName()
     {

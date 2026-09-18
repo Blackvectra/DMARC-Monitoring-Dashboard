@@ -12,14 +12,19 @@ namespace DmarcMonitor.Core.Remediation;
 /// </summary>
 public sealed class ManualDnsProvider(ILookupClient? client = null) : IDnsProvider
 {
-    private readonly ILookupClient _client = client ?? new LookupClient(new LookupClientOptions
+    // Built on first use, not on construction. This is the provider every
+    // zone with no API configured gets, so one is made per domain on a page
+    // listing them all, and building a resolver discovers the system's name
+    // servers - work worth doing once something is actually going to be
+    // asked, and not at all for the common case of only showing a plan.
+    private readonly Lazy<ILookupClient> _client = new(() => client ?? new LookupClient(new LookupClientOptions
     {
         Timeout = TimeSpan.FromSeconds(5),
         Retries = 2,
         // The point of reading here is to see what is live right now, so a
         // cached answer from before somebody's edit is the wrong answer.
         UseCache = false,
-    });
+    }));
 
     public string Name => "manual";
     public bool CanWrite => false;
@@ -33,7 +38,7 @@ public sealed class ManualDnsProvider(ILookupClient? client = null) : IDnsProvid
             return [];
         }
 
-        var response = await _client.QueryAsync(name, QueryType.TXT, cancellationToken: ct).ConfigureAwait(false);
+        var response = await _client.Value.QueryAsync(name, QueryType.TXT, cancellationToken: ct).ConfigureAwait(false);
 
         return [.. response.Answers.TxtRecords()
             .Select(r => new DnsProviderRecord(name, "TXT", string.Concat(r.Text), (int)r.TimeToLive, "live"))];
