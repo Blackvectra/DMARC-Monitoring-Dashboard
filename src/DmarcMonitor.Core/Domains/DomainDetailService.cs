@@ -46,6 +46,31 @@ public sealed record DomainReporter
     public required string OrgName { get; init; }
     public int Reports { get; init; }
     public DateTimeOffset? LastReport { get; init; }
+
+    /// <summary>Messages this receiver has ever reported on for the domain.</summary>
+    public long Messages { get; init; }
+
+    /// <summary>Its share of every message ever reported for the domain, as a percentage.</summary>
+    public double Share { get; init; }
+
+    /// <summary>Days since its last report, or null if it has never sent one.</summary>
+    public int? DaysSilent { get; init; }
+
+    /// <summary>
+    /// A receiver that used to carry real volume for this domain and has
+    /// stopped, while others are still reporting.
+    /// </summary>
+    /// <remarks>
+    /// The product already notices a domain nobody reports on. It did not
+    /// notice a domain whose BIGGEST reporter stops while the rest carry on,
+    /// and that is the more dangerous shape: reports keep arriving, the page
+    /// keeps showing a pass rate, and the pass rate is now computed over
+    /// whoever is left. On the live data Enterprise Outlook carried 73.5% of
+    /// mortonnd.gov's mail and stopped sending about it on 2026-07-16, while
+    /// still reporting on every other domain. What was left read as 100%
+    /// clean and "ready for p=reject".
+    /// </remarks>
+    public bool HasGoneQuiet { get; init; }
 }
 
 /// <summary>Everything the domain page shows.</summary>
@@ -340,29 +365,89 @@ public sealed class DomainDetailService(string databasePath)
         // Who is reporting matters as much as what they say. A domain heard
         // from by one receiver is a domain whose picture is partial, and an
         // operator reading a clean pass rate should be able to see that.
+        //
+        // Deliberately NOT limited to the window. A reporter that stopped is
+        // invisible inside a window that begins after it stopped, which is
+        // exactly the case worth seeing, so this is the whole history and the
+        // silence is measured against it.
         command.CommandText = """
-            SELECT org_name, COUNT(*), MAX(date_end)
-            FROM aggregate_reports
-            WHERE domain_id = $domain AND date_end >= $since
-            GROUP BY org_name
-            ORDER BY COUNT(*) DESC
+            SELECT r.org_name,
+                   COUNT(DISTINCT r.id),
+                   MAX(r.date_end),
+                   COALESCE(SUM(rec.message_count), 0)
+            FROM aggregate_reports r
+            LEFT JOIN aggregate_records rec ON rec.report_id = r.id
+            WHERE r.domain_id = $domain
+            GROUP BY r.org_name
+            ORDER BY COUNT(DISTINCT r.id) DESC
             """;
         command.Parameters.AddWithValue("$domain", domainId);
-        command.Parameters.AddWithValue("$since", since);
 
         var results = new List<DomainReporter>();
-        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        await using (var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false))
         {
-            results.Add(new DomainReporter
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                OrgName = reader.GetString(0),
-                Reports = reader.GetInt32(1),
-                LastReport = reader.IsDBNull(2) ? null : ParseDate(reader.GetString(2)),
-            });
+                results.Add(new DomainReporter
+                {
+                    OrgName = reader.GetString(0),
+                    Reports = reader.GetInt32(1),
+                    LastReport = reader.IsDBNull(2) ? null : ParseDate(reader.GetString(2)),
+                    Messages = reader.GetInt64(3),
+                });
+            }
         }
-        return results;
+
+        return MarkTheQuietOnes(results);
+    }
+
+    /// <summary>A reporter carrying at least this share of the mail is worth missing.</summary>
+    /// <remarks>
+    /// Below it, silence is ordinary: plenty of receivers send one report when
+    /// one message happens to pass through them and are never heard from
+    /// again, and flagging those would bury the one that matters.
+    /// </remarks>
+    public const double SignificantReporterShare = 10.0;
+
+    /// <summary>
+    /// How long a reporter has to be silent before it counts as gone.
+    /// </summary>
+    /// <remarks>
+    /// Aggregate reports are daily by convention, so a week and a half of
+    /// nothing is well past a missed run or a weekend.
+    /// </remarks>
+    public const int DaysBeforeAReporterCountsAsQuiet = 10;
+
+    private static List<DomainReporter> MarkTheQuietOnes(List<DomainReporter> reporters)
+    {
+        var total = reporters.Sum(r => r.Messages);
+        if (total == 0) { return reporters; }
+
+        var newest = reporters.Max(r => r.LastReport);
+        if (newest is null) { return reporters; }
+
+        var now = DateTimeOffset.UtcNow;
+
+        // Judged against the newest report for THIS domain rather than against
+        // the clock, so a database restored from a backup, or an import of an
+        // old archive, does not light up every row at once.
+        return
+        [
+            .. reporters.Select(r =>
+            {
+                var share = Math.Round(r.Messages * 100.0 / total, 1);
+                var silent = r.LastReport is null ? (int?)null : (int)(now - r.LastReport.Value).TotalDays;
+                var behind = r.LastReport is null ? 0 : (newest.Value - r.LastReport.Value).TotalDays;
+
+                return r with
+                {
+                    Share = share,
+                    DaysSilent = silent,
+                    HasGoneQuiet = share >= SignificantReporterShare
+                                && behind >= DaysBeforeAReporterCountsAsQuiet,
+                };
+            }),
+        ];
     }
 
     private static DateTimeOffset? ParseDate(string raw) =>

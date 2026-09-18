@@ -100,10 +100,13 @@ public static class ClientCommand
     /// each one IS its own customer, and typing eighteen pairs of commands is
     /// the only thing standing between an import and a usable set of reports.
     ///
-    /// The slug is taken from the domain without its last label, so
-    /// mortonnd.gov becomes "mortonnd" rather than "mortonnd-gov". It is
-    /// permanent - it ends up in report filenames - so a dry run prints the
-    /// whole mapping first and nothing is written until --apply.
+    /// The client is named after the domain exactly - mortonnd.gov is filed
+    /// as "mortonnd.gov", slug "mortonnd-gov" - so the mapping is one to one
+    /// and obvious. That matters later: when a real client name is known, it
+    /// is clear which placeholder it replaces, and two domains can never
+    /// collide onto one slug by accident. The slug is permanent because it
+    /// ends up in report filenames, so a dry run prints the whole mapping
+    /// first and nothing is written until --apply.
     /// </remarks>
     private static async Task<int> AutoAssignAsync(ReportStore store, string[] args, CancellationToken ct)
     {
@@ -125,16 +128,17 @@ public static class ClientCommand
         var planned = new List<(string Domain, string Name, string Slug)>();
         foreach (var domain in domains)
         {
-            var name = NameFor(domain);
-            var slug = ReportStore.Slugify(name);
+            var name = domain;
+            var slug = ReportStore.Slugify(domain);
 
-            // A slug that is taken by a DIFFERENT name would quietly file two
-            // customers together, so fall back to the whole domain.
-            if (slug.Length == 0
-                || (taken.TryGetValue(slug, out var owner) && !owner.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            // Nothing should be able to collide when the name is the domain,
+            // but a domain that folds to an existing slug would quietly file
+            // two customers together, and that is not a thing to find out
+            // from a client's report.
+            if (taken.TryGetValue(slug, out var owner) && !owner.Equals(name, StringComparison.OrdinalIgnoreCase))
             {
-                name = domain;
-                slug = ReportStore.Slugify(domain);
+                Console.Error.WriteLine($"  {domain}: '{slug}' is already '{owner}'. Skipped; file it by hand.");
+                continue;
             }
 
             taken[slug] = name;
@@ -178,21 +182,6 @@ public static class ClientCommand
         Console.WriteLine("  Check it: dmarc client list");
         Console.WriteLine();
         return filed == planned.Count ? 0 : 65;
-    }
-
-    /// <summary>
-    /// The client name a domain implies: everything but the last label.
-    /// </summary>
-    /// <remarks>
-    /// "mortonnd.gov" -> "mortonnd". Deliberately naive about multi-part
-    /// public suffixes - "example.co.uk" would become "example-co" - because
-    /// the alternative is shipping a public suffix list to guess at something
-    /// the operator can simply correct with 'dmarc client add'.
-    /// </remarks>
-    private static string NameFor(string domain)
-    {
-        var parts = domain.Trim().TrimEnd('.').Split('.', StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length <= 1 ? domain : string.Join('.', parts[..^1]);
     }
 
     private static async Task<int> AssignAsync(ReportStore store, string[] args, CancellationToken ct)

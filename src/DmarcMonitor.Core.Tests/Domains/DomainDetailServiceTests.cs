@@ -95,14 +95,17 @@ public sealed class DomainDetailServiceTests : IDisposable
     private async Task StoreAsync(string domain, string policy, params string[] rows) =>
         await StoreAsync(domain, policy, daysAgo: 2, rows);
 
-    private async Task StoreAsync(string domain, string policy, int daysAgo, params string[] rows)
+    private Task StoreAsync(string domain, string policy, int daysAgo, params string[] rows) =>
+        StoreFromAsync("google.com", domain, policy, daysAgo, rows);
+
+    private async Task StoreFromAsync(string org, string domain, string policy, int daysAgo, params string[] rows)
     {
         var begin = DateTimeOffset.UtcNow.AddDays(-daysAgo);
         var xml = $"""
             <?xml version="1.0" encoding="UTF-8"?>
             <feedback>
               <report_metadata>
-                <org_name>google.com</org_name>
+                <org_name>{org}</org_name>
                 <report_id>{Guid.NewGuid():N}</report_id>
                 <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
                             <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range>
@@ -245,6 +248,69 @@ public sealed class DomainDetailServiceTests : IDisposable
 
         // And the arithmetic the operator can do by eye still works.
         Assert.Equal(detail.Messages - detail.OverriddenMessages, listed.Sum(s => s.Messages));
+    }
+
+    // ---- a reporter that goes quiet -----------------------------------------
+
+    [Fact]
+    public async Task NoticesWhenTheReceiverCarryingMostOfTheMailStopsReporting()
+    {
+        // The shape that hid a real problem. mortonnd.gov read as 100% passing
+        // and "ready to move to p=reject" over fourteen days, because
+        // Enterprise Outlook - which had carried 73.5% of everything ever
+        // reported for it - stopped sending about that domain two months
+        // earlier, while still reporting on every other domain in the book.
+        // Reports kept arriving from the others, so nothing looked wrong.
+        await StoreFromAsync("Enterprise Outlook", "acme.com", "none", daysAgo: 70,
+            Row("192.0.2.25", 800, "pass", "acme.com", "acme.com", "pass"));
+        await StoreFromAsync("google.com", "acme.com", "none", daysAgo: 2,
+            Row("192.0.2.25", 40, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+
+        var outlook = detail!.Reporters.Single(r => r.OrgName == "Enterprise Outlook");
+        Assert.True(outlook.HasGoneQuiet, "the reporter carrying most of the mail went quiet and was not flagged");
+        Assert.True(outlook.Share > 90);
+
+        // The one still reporting is not flagged, or the warning means nothing.
+        Assert.False(detail.Reporters.Single(r => r.OrgName == "google.com").HasGoneQuiet);
+    }
+
+    [Fact]
+    public async Task ASmallReporterGoingQuietIsNotWorthSaying()
+    {
+        // Plenty of receivers send one report when a single message happens to
+        // pass through them and are never heard from again. Flagging those
+        // would bury the one that matters.
+        await StoreFromAsync("google.com", "acme.com", "none", daysAgo: 2,
+            Row("192.0.2.25", 900, "pass", "acme.com", "acme.com", "pass"));
+        await StoreFromAsync("tiny.example", "acme.com", "none", daysAgo: 80,
+            Row("192.0.2.99", 1, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.False(detail!.Reporters.Single(r => r.OrgName == "tiny.example").HasGoneQuiet);
+        Assert.DoesNotContain(detail.Reporters, r => r.HasGoneQuiet);
+    }
+
+    [Fact]
+    public async Task AnOldImportDoesNotMakeEveryReporterLookQuiet()
+    {
+        // Silence is measured against the newest report for the domain, not
+        // against the clock. Restoring a backup, or importing an archive of
+        // last year's reports, must not light up every row at once.
+        await StoreFromAsync("Enterprise Outlook", "acme.com", "none", daysAgo: 400,
+            Row("192.0.2.25", 800, "pass", "acme.com", "acme.com", "pass"));
+        await StoreFromAsync("google.com", "acme.com", "none", daysAgo: 402,
+            Row("192.0.2.26", 700, "pass", "acme.com", "acme.com", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.DoesNotContain(detail!.Reporters, r => r.HasGoneQuiet);
     }
 
     [Fact]

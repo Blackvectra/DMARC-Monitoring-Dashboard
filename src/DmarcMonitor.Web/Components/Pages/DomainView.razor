@@ -343,27 +343,60 @@ else
     <section>
         <h2>Who is reporting</h2>
         <p class="sub">A clean pass rate heard from one receiver is a partial picture, not a verdict.</p>
+
+        @{ var quiet = _detail.Reporters.Where(r => r.HasGoneQuiet).ToList(); }
+        @if (quiet.Count > 0)
+        {
+            @* The dangerous shape. A domain nobody reports on is already
+               flagged; this is the one where reports keep arriving and the
+               pass rate quietly becomes "whoever is left". *@
+            <div class="callout urgent">
+                <h3>@(quiet.Count == 1 ? "A receiver that carried this domain's mail has stopped reporting"
+                                        : $"{quiet.Count} receivers that carried this domain's mail have stopped reporting")</h3>
+                <p>
+                    @foreach (var r in quiet)
+                    {
+                        <span><strong>@r.OrgName</strong> reported @r.Share.ToString("0.#")% of this domain's
+                        mail and last sent anything @Ago(r.LastReport).</span><br />
+                    }
+                </p>
+                <p>
+                    The figures above are computed from the receivers still reporting, so they describe less
+                    of this domain's mail than they appear to. Worth settling before advancing the policy:
+                    either that mail stopped flowing, the <code>rua</code> address changed, or the reports
+                    are arriving and not reaching this database.
+                </p>
+            </div>
+        }
+
         @if (_detail.Reporters.Count == 0)
         {
-            <p class="muted">No reports in this window.</p>
+            <p class="muted">No reports at all for this domain.</p>
         }
         else
         {
             <table class="triage">
                 <thead>
-                    <tr><th>Receiver</th><th class="num">Reports</th><th>Last</th></tr>
+                    <tr><th>Receiver</th><th class="num">Reports</th><th class="num">Share</th><th>Last</th></tr>
                 </thead>
                 <tbody>
                     @foreach (var r in _detail.Reporters)
                     {
-                        <tr>
-                            <td>@r.OrgName</td>
+                        <tr class="@(r.HasGoneQuiet ? "warn" : "")">
+                            <td>
+                                @r.OrgName
+                                @if (r.HasGoneQuiet) { <span class="bad"> — stopped</span> }
+                            </td>
                             <td class="num">@r.Reports</td>
+                            <td class="num">@r.Share.ToString("0.#")%</td>
                             <td class="muted">@Ago(r.LastReport)</td>
                         </tr>
                     }
                 </tbody>
             </table>
+            <p class="sub">Share is of every message ever reported for this domain, and the list is the whole
+               history rather than the window: a receiver that stopped before the window began would not
+               appear in it at all, which is exactly the case worth seeing.</p>
         }
     </section>
 }
