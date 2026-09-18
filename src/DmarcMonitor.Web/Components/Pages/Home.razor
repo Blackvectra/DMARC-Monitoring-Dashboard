@@ -1,4 +1,8 @@
 @page "/"
+@* The sidebar calls this page Triage, so /triage is the address somebody
+   types or bookmarks. Without this it was one of the URLs that returned a
+   blank page. *@
+@page "/triage"
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Web.Data
 @inject TriageService Triage

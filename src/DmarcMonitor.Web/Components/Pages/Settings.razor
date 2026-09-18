@@ -252,6 +252,18 @@
         {
             <span class="bad">The secret store cannot be used here, so nothing can be saved.</span>
         }
+        else if (_clients.Count == 0)
+        {
+            @* A provider is stored per client, so with no clients the dropdown
+               is empty and Save can never enable. The Fix page sends people
+               here to configure a provider, and on a fresh install they
+               arrived at a form that silently could not be used. *@
+            <span class="bad">
+                No clients yet, and a provider is stored against a client.
+                <a href="clients">Add one under Clients</a> first — domains arrive under
+                "Unassigned" and can be filed from there.
+            </span>
+        }
     </div>
 </section>
 

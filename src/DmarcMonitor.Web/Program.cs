@@ -76,6 +76,11 @@ if (ProxySetup.ShouldRedirectToHttps(app.Configuration))
 {
     app.UseHttpsRedirection();
 }
+// A URL that matches nothing used to return 404 with an empty body, which is
+// a blank white page with no layout and no way back. The status code stays a
+// real 404 for anything reading it; only what a person sees changes.
+app.UseStatusCodePagesWithReExecute("/not-found");
+
 app.UseStaticFiles();
 app.UseAntiforgery();
 

@@ -59,6 +59,23 @@ else
         <p class="muted">Reading DNS for @_pending more domain(s)…</p>
     }
 
+    @* There is an empty state for a missing database file but there was none
+       for a database with no domains in it, so a fresh install saw the heading
+       and then "Nothing has been applied yet" with nothing in between - the
+       one page in the application without an answer to "there is nothing
+       here yet". *@
+    @if (_pending == 0 && _rows.Count == 0)
+    {
+        <div class="empty">
+            <h2>Nothing to fix yet</h2>
+            <p>Domains appear here as reports arrive for them. Once there is something to
+               judge, this page shows what it would change in each customer's DNS and the
+               button that does it.</p>
+            <p><a href="import">Import a folder of reports</a> to get started, or set up the
+               mailbox ingest so they arrive on their own.</p>
+        </div>
+    }
+
     @foreach (var row in _rows)
     {
         var d = _domains.GetValueOrDefault(row.Domain);
