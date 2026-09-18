@@ -278,6 +278,14 @@ is the better answer.
 
 ## 10. The update path has never been run on a server
 
+**Update:** the Updates page and the boundary beneath it are now covered by
+tests - what the app may write, what the agent must refuse, and that both
+sides agree about the file format, which they briefly did not: the app
+serialised the state as a number and the shell helper writes the name.
+
+What is still untried is the same thing as before, plus the agent: no systemd
+path unit has ever woken, no service has been stopped and restarted by it.
+
 **Area** `deploy/update.sh`, `deploy/rollback.sh`
 **Severity** Medium.
 

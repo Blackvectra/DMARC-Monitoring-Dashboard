@@ -382,15 +382,32 @@ marking it a prerelease on GitHub lets you test it on one box (`"Channel":
 "preview"`) without every other instance being told to install it. `Token` is
 needed only if the repository is private, and a read-only one is enough.
 
-It **reports and never installs**. An instance that can rewrite its own code
-is a much larger thing to trust than one that tells you a version exists, and
-this one writes to customers' DNS. Installing is a command you run:
+**The Updates page has a button**, and the interesting part is how it works.
+The web app runs as the unprivileged `dmarc` account and cannot replace its
+own files - it holds the credentials that rewrite your customers' DNS, and a
+web application that can also install software is a far larger thing to have
+compromised. So pressing Install writes down a version number, and a separate
+systemd unit running as root notices and does the work:
+
+```bash
+sudo ./deploy/install-update-agent.sh
+```
+
+The only thing crossing that boundary is a version string. The agent treats it
+as hostile anyway: it must match a narrow version shape, and it must be a
+release that really exists on the configured channel, which the agent checks
+against GitHub itself rather than trusting the request. So the worst an
+attacker who owned the web app could achieve through this is installing a
+genuine release of this product.
+
+Without the agent installed the page still lists releases and says plainly
+that it cannot install them. The command works either way:
 
 ```bash
 sudo ./deploy/update.sh v1.3.0
 ```
 
-That backs up the database with SQLite's own `.backup`, keeps the old install
+Both paths run the same script, which backs up the database with SQLite's own `.backup`, keeps the old install
 rather than overwriting it, carries `appsettings.Production.json` across,
 applies any schema migration *after* the new binary is in place and *before*
 the service starts, and checks the app answers afterwards - putting the old
@@ -424,6 +441,9 @@ everything collected since the update, which restoring would discard.
       application access policy (`INGEST-SETUP.md`, step 4). Without it, the
       certificate reads every mailbox in the tenant.
 - [ ] A backup has been taken *and restored somewhere* at least once.
+- [ ] If the repository is private and the Updates page is in use, the token
+      is in `/etc/dmarc-update.env` at mode `0600` owned by root - **not** in
+      the app's configuration, which the unprivileged account can read.
 
 ## On Windows instead
 

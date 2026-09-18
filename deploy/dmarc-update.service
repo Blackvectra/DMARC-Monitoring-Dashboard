@@ -1,0 +1,25 @@
+# The privileged half of the update button.
+#
+# Root, because it stops a service and replaces files in /opt and
+# /usr/local/bin. That is exactly why it is separate from the web app, which
+# runs as the unprivileged dmarc user and can only ever write down a version
+# number it would like.
+#
+# GITHUB_TOKEN is only needed if the repository is private. Put it in
+# /etc/dmarc-update.env, mode 0600, owned by root - NOT in the app's
+# configuration, which the unprivileged account can read.
+
+[Unit]
+Description=Install a requested DMARC Monitor update
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dmarc/deploy/update-agent.sh
+EnvironmentFile=-/etc/dmarc-update.env
+
+# It has to stop and start a service and write to /opt, so it cannot be
+# locked down much. What it can be is unable to reach anything else.
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/opt/dmarc /usr/local/bin

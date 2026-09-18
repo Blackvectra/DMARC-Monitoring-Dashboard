@@ -1,0 +1,15 @@
+# Watches for the file the web app writes when somebody presses Update.
+#
+# A path unit rather than a timer: it fires when the file appears rather than
+# polling, so pressing the button acts within a second and nothing runs in
+# between.
+
+[Unit]
+Description=Watch for a requested DMARC Monitor update
+
+[Path]
+PathExists=/opt/dmarc/data/updates/requested.json
+Unit=dmarc-update.service
+
+[Install]
+WantedBy=multi-user.target

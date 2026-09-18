@@ -48,6 +48,7 @@ public sealed class PageTests : IClassFixture<SeededApp>
         "/sources",
         "/reports",
         "/settings",
+        "/updates",
     };
 
     [Theory]

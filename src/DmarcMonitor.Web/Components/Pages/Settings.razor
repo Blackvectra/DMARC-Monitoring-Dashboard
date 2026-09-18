@@ -132,11 +132,10 @@
                         else
                         {
                             <span class="@(_update.UpdateAvailable ? "bad" : "")">@_update.Summary</span>
-                            @if (_update is { UpdateAvailable: true, Latest: not null })
+                            @if (_update is { UpdateAvailable: true })
                             {
                                 <br />
-                                <span class="sub">To install it:
-                                    <code>sudo ./update.sh v@_update.Latest.Version</code></span>
+                                <span class="sub"><a href="updates">Install it from the Updates page</a>.</span>
                             }
                         }
                     </td>

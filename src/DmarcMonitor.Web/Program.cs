@@ -52,6 +52,13 @@ builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath)
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());
 
+// Where the app writes down a version it would like installed. It writes a
+// version and nothing else; a separate unit with the privileges to do the
+// work checks it and acts. See UpdateSpool for why the app is not allowed to
+// install anything itself.
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.UpdateSpool(
+    Path.Combine(Path.GetDirectoryName(dbPath) ?? ".", "updates")));
+
 var app = builder.Build();
 
 // First, so everything after it sees the caller's real address and scheme.
