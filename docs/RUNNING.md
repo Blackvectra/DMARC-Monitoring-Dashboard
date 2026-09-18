@@ -19,7 +19,7 @@ product is worth the rest of the setup.
 
 ```
 dmarc init-db
-dmarc import --from C:\some-folder-of-reports
+dmarc import --from C:\some-folder-of-reports      # or the export zip itself
 dmarc client add    --name "Acme Corp"
 dmarc client assign --domain acme.com --client acme-corp
 dmarc report --client acme-corp --provider "Your Company"
@@ -97,10 +97,12 @@ mailbox export as one zip - including a zip of attachments that are themselves
 gzipped, which is what an export usually is. Importing the same thing twice is
 safe: reports already stored are recognised and skipped rather than doubled.
 
-**Import a folder on the server.** For an export already on the machine, or
-one too large to upload. Same page, at the bottom, or from the command line:
+**Import a folder or an export on the server.** For an export already on the
+machine, or one too large to upload. Same page, at the bottom, or from the
+command line, pointed at a folder or at the export zip itself:
 
     dmarc import --from C:\dmarc-export
+    dmarc import --from C:\Downloads\dmarc-export.zip
 
 **Read the mailbox directly**, which is the one that keeps working without
 anybody doing anything. See below.
@@ -114,10 +116,11 @@ Two ways in. The mailbox is the real one.
 `--dry-run`, which parses and reports while writing nothing and moving
 nothing, so it is safe against a live mailbox.
 
-**From a folder**, for an archive or files somebody sent you:
+**From a folder or a file**, for an archive or files somebody sent you:
 
 ```
 dmarc import --from C:\dmarc-export
+dmarc import --from C:\dmarc-export.zip
 ```
 
 or the Import page, which runs the same code. Re-importing the same folder is
@@ -257,9 +260,10 @@ up. See `DEPLOYING.md` for how releases and development are kept apart.
 
 ## Putting it on a server
 
-`DEPLOYING.md` covers that end to end: which machine, what it costs, the proxy
-and certificate, Entra sign-in, ingest on a timer, backups, and the checklist
-of things that must be true before it is reachable by anybody else.
+`DEPLOYING.md` covers that end to end for Ubuntu and Amazon Linux: which
+machine, what it costs, `deploy/install.sh`, the proxy and certificate, Entra
+sign-in, ingest on a timer, backups, and the checklist of things that must be
+true before it is reachable by anybody else.
 
 The one thing to know before reading it: until Entra sign-in is configured
 this app has no login at all, and it protects itself by refusing to serve

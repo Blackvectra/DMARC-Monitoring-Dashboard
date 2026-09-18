@@ -248,7 +248,15 @@ an unbundled native library both look fine until somebody copies the exe
 somewhere on its own, which is the first thing anybody does.
 
 Both the Windows and Linux jobs, and the web bundle, are untried: the workflow
-has not been triggered. Tag a version or run it manually and see.
+has not been triggered. Tag a version or run it manually and see. What IS
+tried, on every push, is the Linux artifacts being built the same way and
+installed on a fresh Ubuntu runner by `deploy/install.sh` (the `Install on a
+fresh Ubuntu` job in `tests.yml`), so the first tag will not be the first
+time the bundle has been unpacked onto a server.
+
+The release also attaches `dmarc-deploy.tar.gz` - the scripts and systemd
+units under `deploy/` - because the server has no checkout and the docs tell
+somebody to run them.
 
 The web app is not self-contained and needs the ASP.NET Core 8 runtime on the
 host. That is a deliberate trade - a self-contained web bundle is several
@@ -283,16 +291,23 @@ tests - what the app may write, what the agent must refuse, and that both
 sides agree about the file format, which they briefly did not: the app
 serialised the state as a number and the shell helper writes the name.
 
-What is still untried is the same thing as before, plus the agent: no systemd
-path unit has ever woken, no service has been stopped and restarted by it.
+**Second update:** the path unit has now woken, under real systemd, in CI:
+the `Install on a fresh Ubuntu` job installs the agent, writes a request the
+way the app writes one (with a version that is a path-traversal attempt), and
+checks that the agent consumed it and left a `Failed` status saying why.
+`rollback.sh` is driven the same way, with a stamp that was never kept.
+
+What is still untried: `update.sh` end to end, because it needs a published
+release to download and there is none. No service has been stopped and
+restarted by it.
 
 **Area** `deploy/update.sh`, `deploy/rollback.sh`
 **Severity** Medium.
 
 The release channel half is tested and was driven against the real GitHub API:
 the Settings page reports what it is running and correctly says nothing has
-been released yet. The scripts that install a release are not. They parse, and
-their logic is legible, and neither has stopped and restarted a real service.
+been released yet. The script that installs a release is not. It parses, its
+logic is legible, and it has not stopped and restarted a real service.
 
 Two things about them worth knowing before the first run:
 
@@ -322,11 +337,19 @@ so CI checks the architecture and the size instead and says so. That is
 genuinely weaker than the x64 and Windows checks, which make the binary
 create a database and read a report.
 
-`DEPLOYING.md` itself is assembled from how the pieces are built rather than
-from a deployment that happened. The proxy handling under it is covered by
-tests - including the one that matters, that an unauthenticated instance
-refuses a proxied request - but the systemd units, the Caddyfile and the Entra
-app registration have not been run. The doc says so in its own last section.
+**Deployment: partly done.** `deploy/install.sh` now runs on every push, on
+a fresh Ubuntu runner with real systemd: it creates the account, unpacks the
+bundle, creates the database, installs the units and starts the service, and
+the job then checks the service is active and sandboxed, answers on loopback,
+refuses a proxied request, and keeps its cookie keys beside the database
+where the sandbox can reach them. That is the Ubuntu half of `DEPLOYING.md`
+done for real.
+
+Still assembled rather than run: **Amazon Linux 2023**, for which there is no
+hosted runner - its package names and the Caddy static-binary steps come from
+the vendors' documentation, not from a machine - the Caddyfile and
+certificate, and the Entra app registration. The doc says so in its own last
+section.
 
 ## 11. The apply path has never written to a real zone
 

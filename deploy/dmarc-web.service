@@ -1,0 +1,36 @@
+# The web app: unprivileged, loopback only, and allowed to write to its data
+# directory and nothing else.
+#
+# Installed by deploy/install.sh, which rewrites /opt/dmarc and the account
+# name when DMARC_ROOT or DMARC_USER say otherwise. See docs/DEPLOYING.md.
+
+[Unit]
+Description=DMARC Monitor
+After=network.target
+
+[Service]
+User=dmarc
+WorkingDirectory=/opt/dmarc/app
+ExecStart=/usr/bin/dotnet /opt/dmarc/app/DmarcMonitor.Web.dll
+Environment=ASPNETCORE_ENVIRONMENT=Production
+
+# Loopback, deliberately: the only way in is through the proxy, so a firewall
+# mistake cannot expose the app directly.
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5000
+
+Restart=always
+RestartSec=5
+
+# Everything it writes - the database, the secret store, the cookie-signing
+# keys, the update spool - lives under data/. The application directory and
+# the rest of the filesystem are read-only to it, and the home directory is
+# hidden: the keys used to live there, which is why an earlier version of
+# this file could not hide it without signing everybody out on every restart.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/dmarc/data
+
+[Install]
+WantedBy=multi-user.target

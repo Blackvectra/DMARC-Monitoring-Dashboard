@@ -133,4 +133,68 @@ public sealed class DocumentationTests
 
         Assert.True(offenders.Count == 0, $"these reference a PowerShell script: {string.Join(", ", offenders)}");
     }
+
+    // The deployment path. DEPLOYING.md tells somebody to run scripts and
+    // rely on units; these hold the tree to what it says, because the server
+    // has no checkout and finds out the hard way.
+
+    [Fact]
+    public void TheDeployDirectoryShipsEverythingTheDocsTellSomebodyToRun()
+    {
+        var root = RepoRoot().FullName;
+
+        foreach (var name in new[]
+                 {
+                     "install.sh", "update.sh", "rollback.sh", "install-update-agent.sh", "update-agent.sh",
+                     "dmarc-web.service", "dmarc-ingest.service", "dmarc-ingest.timer",
+                     "dmarc-update.service", "dmarc-update.path",
+                 })
+        {
+            Assert.True(File.Exists(Path.Combine(root, "deploy", name)), $"deploy/{name} is missing");
+        }
+
+        // And the server gets them: they must travel with the release, and
+        // the doc must say where they came from.
+        var release = File.ReadAllText(Path.Combine(root, ".github", "workflows", "release.yml"));
+        var deploying = File.ReadAllText(Path.Combine(root, "docs", "DEPLOYING.md"));
+        Assert.Contains("dmarc-deploy.tar.gz", release, StringComparison.Ordinal);
+        Assert.Contains("dmarc-deploy.tar.gz", deploying, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheWebUnitListensOnLoopbackAndIsSandboxed()
+    {
+        // Loopback is what makes a firewall mistake survivable; the sandbox
+        // is what makes a compromised web app a smaller thing. Both are one
+        // deleted line from gone.
+        var unit = File.ReadAllText(Path.Combine(RepoRoot().FullName, "deploy", "dmarc-web.service"));
+
+        Assert.Contains("ASPNETCORE_URLS=http://127.0.0.1:5000", unit, StringComparison.Ordinal);
+        Assert.Contains("ProtectSystem=strict", unit, StringComparison.Ordinal);
+        Assert.Contains("ProtectHome=true", unit, StringComparison.Ordinal);
+        Assert.Contains("ReadWritePaths=/opt/dmarc/data", unit, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheIngestUnitGivesTheSingleFileBinarySomewhereToUnpack()
+    {
+        // With the home directory hidden and nothing else said, the binary
+        // exits 159 before printing a word. The unit has to say where.
+        var unit = File.ReadAllText(Path.Combine(RepoRoot().FullName, "deploy", "dmarc-ingest.service"));
+
+        Assert.Contains("ProtectHome=true", unit, StringComparison.Ordinal);
+        Assert.Contains("DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net", unit, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Ubuntu 24.04")]
+    [InlineData("Amazon Linux 2023")]
+    [InlineData("deploy/install.sh")]
+    [InlineData("DOTNET_BUNDLE_EXTRACT_BASE_DIR")]
+    public void DeployingCoversBothDistributionsAndTheInstaller(string phrase)
+    {
+        var deploying = File.ReadAllText(Path.Combine(RepoRoot().FullName, "docs", "DEPLOYING.md"));
+
+        Assert.Contains(phrase, deploying, StringComparison.Ordinal);
+    }
 }

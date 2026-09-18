@@ -6,29 +6,34 @@ using DmarcMonitor.Core.Tls;
 namespace DmarcMonitor.Cli.Commands;
 
 /// <summary>
-/// Imports report files from a folder, without a mailbox.
+/// Imports report files from a folder or a single file, without a mailbox.
 ///
 /// Exists because the mailbox path needs a tenant and a certificate, and there
 /// are plenty of reasons to load reports without either: proving the storage
 /// and the screens work, importing an archive somebody exported, or answering
 /// "what does this pile of files actually say" for a prospect.
+///
+/// A file as well as a folder, because an export IS a file - one zip - and
+/// pointing this at it was refused as "No such folder" for something that was
+/// plainly there.
 /// </summary>
 public static class ImportCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
-        var folder = Args.Value(args, "--from");
+        var from = Args.Value(args, "--from");
 
-        if (string.IsNullOrWhiteSpace(folder))
+        if (string.IsNullOrWhiteSpace(from))
         {
-            Console.Error.WriteLine("Give me a folder: dmarc import --from <folder> [--db <path>]");
+            Console.Error.WriteLine("Give me a folder or an export: dmarc import --from <folder or file> [--db <path>]");
             return 64;
         }
 
-        if (!Directory.Exists(folder))
+        var isFolder = Directory.Exists(from);
+        if (!isFolder && !File.Exists(from))
         {
-            Console.Error.WriteLine($"No such folder: {folder}");
+            Console.Error.WriteLine($"No such file or folder: {from}");
             return 66;
         }
 
@@ -43,7 +48,10 @@ public static class ImportCommand
         // would drift, and "it worked from the terminal" is a support question
         // nobody can answer.
         var progress = new Progress<int>(n => Console.WriteLine($"  {n} file(s) read"));
-        var result = await new ReportImporter(store).ImportFolderAsync(folder, progress, ct).ConfigureAwait(false);
+        var importer = new ReportImporter(store);
+        var result = isFolder
+            ? await importer.ImportFolderAsync(from, progress, ct).ConfigureAwait(false)
+            : await importer.ImportFileAsync(from, progress, ct).ConfigureAwait(false);
 
         foreach (var error in result.Errors) { Console.Error.WriteLine($"  {error}"); }
 

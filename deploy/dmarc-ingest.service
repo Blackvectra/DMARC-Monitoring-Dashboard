@@ -1,0 +1,38 @@
+# One collection run. Started by dmarc-ingest.timer; runnable by hand with
+#   sudo systemctl start dmarc-ingest
+#
+# The mailbox, tenant, app registration, certificate path and its password
+# come from /etc/dmarc-ingest.env - root-owned, mode 0600, written as a
+# template by deploy/install.sh - so nothing in this unit needs editing. The
+# dmarc command reads DMARC_TENANT_ID, DMARC_CLIENT_ID, DMARC_CERT_PATH and
+# DMARC_CERT_PASSWORD from its environment, which keeps the password off a
+# command line where `ps` would show it. The certificate itself must be
+# readable by the dmarc account, because that is who runs this; put it under
+# /opt/dmarc/data, owned by dmarc, mode 0600.
+
+[Unit]
+Description=Collect DMARC reports
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dmarc
+EnvironmentFile=/etc/dmarc-ingest.env
+ExecStart=/usr/local/bin/dmarc ingest --db /opt/dmarc/data/dmarc.db --mailbox ${DMARC_MAILBOX}
+
+# The dmarc binary is one self-contained file that unpacks its native SQLite
+# library the first time it runs, and it needs somewhere writable to do that.
+# Left unset it uses the home directory - which the sandbox below hides - and
+# the command dies with exit 159 and a message about
+# DOTNET_BUNDLE_EXTRACT_BASE_DIR before it has printed anything else.
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net
+
+# The same sandbox as the web app. This process holds the certificate that
+# reads the mailbox, and it needs the database, the extraction directory
+# above, and nothing else.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/dmarc/data

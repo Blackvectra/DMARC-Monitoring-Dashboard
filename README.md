@@ -62,7 +62,9 @@ a client report without a mailbox or an app registration.
 ## Requirements
 
 - **Running it:** nothing. The CLI is self-contained; the web app ships as a
-  published bundle. Linux or Windows.
+  published bundle. Linux or Windows. On a server, `deploy/install.sh` sets
+  up Ubuntu or Amazon Linux from the release files - see
+  [docs/DEPLOYING.md](docs/DEPLOYING.md).
 - **Building it:** .NET 8 SDK.
 - **Collecting from a mailbox:** a Microsoft 365 tenant and an Entra app
   registration — see [docs/INGEST-SETUP.md](docs/INGEST-SETUP.md). Not needed
