@@ -188,14 +188,53 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
             };
         }
 
-        var records0 = await provider.GetRecordsAsync(plan.RecordName, plan.RecordType, ct).ConfigureAwait(false);
-        var existing = Matching(records0, plan);
+        // The second read of the zone, and it was the only provider call on
+        // this path with nothing around it. A transient failure here threw out
+        // of the whole method and reached the operator as a stack trace under
+        // "This is a bug". Nothing has been written at this point, so the
+        // honest answer is simply that it was not applied.
+        DnsProviderRecord? existing;
+        try
+        {
+            var records0 = await provider.GetRecordsAsync(plan.RecordName, plan.RecordType, ct).ConfigureAwait(false);
+            existing = Matching(records0, plan);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or DnsClient.DnsResponseException or TimeoutException or InvalidOperationException)
+        {
+            return new ApplyOutcome
+            {
+                Plan = plan, PlanId = planId, Provider = provider.Name, Snapshot = live,
+                Error = $"Could not re-read the record before writing: {ex.Message}",
+                Message = "Not applied: the record could not be read immediately before the write.",
+            };
+        }
 
         var write = new DnsRecordWrite(
             plan.RecordName, plan.RecordType, plan.ProposedValue,
             ReplacesId: existing?.Id, ReplacesValue: existing?.Value);
 
-        var result = await provider.SetRecordAsync(write, ct).ConfigureAwait(false);
+        ProviderWrite result;
+        try
+        {
+            result = await provider.SetRecordAsync(write, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TimeoutException or InvalidOperationException)
+        {
+            // Deliberately NOT worded as "not applied". The Cloudflare
+            // provider has no exception handling of its own, so a connection
+            // dropped after the request left is indistinguishable here from
+            // one that never arrived - and a timeout is the case where the
+            // write most likely DID happen. Claiming nothing was written would
+            // be the one answer that is certainly unsafe.
+            return new ApplyOutcome
+            {
+                Plan = plan, PlanId = planId, Provider = provider.Name, Snapshot = live,
+                Error = $"The write to {provider.Name} failed: {ex.Message}",
+                Message = $"The write to {provider.Name} did not complete, and whether it reached the zone is unknown. "
+                        + $"Check {plan.RecordName} before trying again. It held \"{live}\" beforehand.",
+            };
+        }
+
         if (!result.Success)
         {
             return new ApplyOutcome
@@ -206,9 +245,31 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
             };
         }
 
-        var changeId = await StoreChangeAsync(db, ids.Value, planId, plan, live, provider.Name, result.Id, appliedBy, reason, ct)
-            .ConfigureAwait(false);
-        await SetPlanStatusAsync(db, planId, "applied", ct).ConfigureAwait(false);
+        string changeId;
+        try
+        {
+            changeId = await StoreChangeAsync(db, ids.Value, planId, plan, live, provider.Name, result.Id, appliedBy, reason, ct)
+                .ConfigureAwait(false);
+            await SetPlanStatusAsync(db, planId, "applied", ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is SqliteException or IOException)
+        {
+            // The customer's zone HAS been changed and the row that records it
+            // could not be written - a locked or full database, most likely.
+            // Rollback works from that row, so there is now no automatic way
+            // back, and silence here would leave a change nobody can see in
+            // the history or on the client's report. The previous value goes
+            // in the message because it is the only place left holding it.
+            return new ApplyOutcome
+            {
+                Plan = plan, PlanId = planId, Applied = true, Provider = provider.Name, Snapshot = live,
+                Error = $"The change was made but could not be recorded: {ex.Message}",
+                Message = $"WRITTEN, BUT NOT RECORDED. {plan.RecordName} now holds \"{plan.ProposedValue}\". "
+                        + $"It held \"{live}\" before. There is no audit row, so this will not appear in the history "
+                        + "or on the client's report, and it cannot be rolled back by this product. Put that value "
+                        + "back by hand if it was not wanted.",
+            };
+        }
 
         return new ApplyOutcome
         {
