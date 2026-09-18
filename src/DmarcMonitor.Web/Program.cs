@@ -1,3 +1,4 @@
+using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Reporting;
 using DmarcMonitor.Web;
 using DmarcMonitor.Web.Auth;
@@ -47,6 +48,8 @@ builder.Services.AddScoped(sp => new DmarcMonitor.Core.Remediation.DnsProviderCo
     dbPath, sp.GetRequiredService<DmarcMonitor.Core.Remediation.ISecretStore>()));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Remediation.RemediationService(dbPath));
 builder.Services.AddScoped<RemediationUiService>();
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
 
 var app = builder.Build();
 
@@ -77,6 +80,38 @@ if (AuthSetup.IsEntraConfigured(app.Configuration))
 {
     app.MapControllers();   // Microsoft.Identity.Web.UI provides sign-in/out
 }
+
+// The other half of MTA-STS.
+//
+// A TXT record at _mta-sts announces a policy; this is the policy. RFC 8461
+// has senders fetch it from mta-sts.<domain>/.well-known/mta-sts.txt over
+// HTTPS, so which domain is being asked about comes from the Host header and
+// nothing else - one instance serves every client's policy, and each client's
+// mta-sts subdomain is a CNAME pointing here.
+//
+// Anonymous, necessarily: the callers are other people's mail servers. It
+// discloses nothing that is not meant to be world-readable - the policy only
+// says which servers may receive this domain's mail, which is already public
+// in its MX records.
+app.MapGet("/.well-known/mta-sts.txt", async (
+    HttpContext context, MtaStsStore policies, CancellationToken ct) =>
+{
+    var host = context.Request.Host.Host;
+
+    // Only ever "mta-sts.<domain>". A request on any other name is not a
+    // sender asking about a domain, and answering it would let this instance
+    // be used to claim a policy for a name nobody asked about.
+    if (!host.StartsWith("mta-sts.", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.NotFound();
+    }
+
+    var policy = await policies.GetAsync(host["mta-sts.".Length..], ct).ConfigureAwait(false);
+    if (policy is null) { return Results.NotFound(); }
+
+    // text/plain is what the RFC requires, and senders check it.
+    return Results.Text(policy.ToFile(), "text/plain; charset=utf-8");
+}).AllowAnonymous();
 
 // The report as a file, rendered by the same code the CLI uses. A download
 // rather than a page: this is a document that gets attached to an email and

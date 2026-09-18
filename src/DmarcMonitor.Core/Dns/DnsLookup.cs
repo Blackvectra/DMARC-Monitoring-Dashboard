@@ -244,6 +244,39 @@ public sealed class DnsLookup(ILookupClient? client = null)
         return IPNetwork.TryParse(value, out network);
     }
 
+    /// <summary>
+    /// The mail exchangers a domain publishes, best preference first.
+    /// </summary>
+    /// <remarks>
+    /// Needed to write an MTA-STS policy, which lists the hosts a sender is
+    /// allowed to deliver to. Getting this list wrong in enforce mode does not
+    /// degrade anything gracefully: a sender that cannot match the host it
+    /// reached against the policy refuses to deliver at all.
+    /// </remarks>
+    public async Task<IReadOnlyList<string>> MxAsync(string domain, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+
+        try
+        {
+            var response = await _client
+                .QueryAsync(domain.Trim().TrimEnd('.'), QueryType.MX, cancellationToken: ct)
+                .ConfigureAwait(false);
+
+            return [.. response.Answers.MxRecords()
+                .OrderBy(r => r.Preference)
+                .Select(r => r.Exchange.Value.TrimEnd('.').ToLowerInvariant())
+                .Where(host => host.Length > 0)
+                .Distinct(StringComparer.Ordinal)];
+        }
+        catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
+        {
+            // Empty means "could not tell", and every caller treats that as a
+            // reason to refuse rather than as a domain with no mail servers.
+            return [];
+        }
+    }
+
     private async Task<List<string>> TxtAsync(string name, CancellationToken ct)
     {
         var response = await _client.QueryAsync(name, QueryType.TXT, cancellationToken: ct).ConfigureAwait(false);

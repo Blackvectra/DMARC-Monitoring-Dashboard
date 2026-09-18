@@ -44,7 +44,9 @@ public sealed class RemediationUiService(
     DatabaseInfo database,
     DnsLookup lookup,
     RemediationService remediation,
-    DnsProviderConfigs providers)
+    DnsProviderConfigs providers,
+    MtaStsFetcher mtaSts,
+    IConfiguration configuration)
 {
     private readonly TriageService _triage = new(database.Path);
 
@@ -86,6 +88,28 @@ public sealed class RemediationUiService(
 
             var spf = published.SpfRecords.Count > 0 ? published.SpfRecords[0] : null;
             plans.AddRange(published.DeadIncludes.Select(dead => SpfIncludePlanner.RemoveDeadInclude(domain, spf, dead)));
+
+            // Transport security. TLS-RPT only when there is somewhere to send
+            // the reports; without a configured address this would plan a
+            // record pointing at a mailbox nobody reads.
+            if (configuration["Reporting:TlsReportAddress"] is { Length: > 0 } tlsTo)
+            {
+                var tls = TransportPlanner.TlsReporting(domain, published.TlsRptRecord, tlsTo);
+                if (!tls.IsNoop) { plans.Add(tls); }
+            }
+
+            // MTA-STS is only ever announced for a policy already being
+            // served, so the file is fetched rather than assumed. Skipped
+            // entirely for a domain with neither, which is not a fault - it
+            // is a domain nobody has set this up for.
+            var served = await mtaSts.FetchAsync(domain, ct: ct);
+            if (!string.IsNullOrWhiteSpace(published.MtaStsRecord) || served.Reachable)
+            {
+                var mx = await lookup.MxAsync(domain, ct);
+
+                var plan = TransportPlanner.MtaSts(domain, published.MtaStsRecord, served, mx);
+                if (!plan.IsNoop) { plans.Add(plan); }
+            }
         }
 
         string providerName;

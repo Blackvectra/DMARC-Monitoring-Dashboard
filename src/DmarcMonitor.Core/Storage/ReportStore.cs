@@ -373,6 +373,7 @@ public sealed class ReportStore
         "dns_change_plans",
         "dns_changes",
         "spf_flatten_state",
+        "mta_sts_policies",
     ];
 
     /// <summary>Every client, with the Unassigned one included: unbilled work is worth seeing.</summary>

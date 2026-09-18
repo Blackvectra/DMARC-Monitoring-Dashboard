@@ -100,7 +100,8 @@ public static class FixCommand
         }
 
         var plans = new List<ChangePlan>();
-        var explicitOnly = policy is not null || Args.Flag(args, "--sp") || Args.Flag(args, "--dead-includes");
+        var explicitOnly = policy is not null || Args.Flag(args, "--sp") || Args.Flag(args, "--dead-includes")
+                        || Args.Flag(args, "--transport");
 
         if (policy is not null)
         {
@@ -120,6 +121,15 @@ public static class FixCommand
         {
             var spf = published.SpfRecords.Count > 0 ? published.SpfRecords[0] : null;
             plans.AddRange(published.DeadIncludes.Select(dead => SpfIncludePlanner.RemoveDeadInclude(domain, spf, dead)));
+        }
+
+        // Transport security: TLS-RPT asks for reports and changes nothing
+        // about delivery, so it is planned freely. MTA-STS is only ever
+        // announced for a policy that is already being served, which the
+        // planner checks by fetching it.
+        if (!explicitOnly || Args.Flag(args, "--transport"))
+        {
+            plans.AddRange(await TransportAsync(domain, published, args, ct).ConfigureAwait(false));
         }
 
         if (policy is null)
@@ -153,6 +163,48 @@ public static class FixCommand
         }
 
         return worst;
+    }
+
+    /// <summary>
+    /// The transport-security plans for a domain: TLS-RPT, then MTA-STS.
+    /// </summary>
+    /// <remarks>
+    /// TLS-RPT first and always, because it is what produces the evidence the
+    /// MTA-STS decision needs. Enforcing transport security without reports is
+    /// enforcement with the lights off.
+    /// </remarks>
+    private static async Task<List<ChangePlan>> TransportAsync(
+        string domain, PublishedRecords published, string[] args, CancellationToken ct)
+    {
+        var plans = new List<ChangePlan>();
+
+        if (Args.Value(args, "--tls-rpt-to") is { Length: > 0 } address)
+        {
+            var tls = TransportPlanner.TlsReporting(domain, published.TlsRptRecord, address);
+            if (!tls.IsNoop) { plans.Add(tls); }
+        }
+        else if (string.IsNullOrWhiteSpace(published.TlsRptRecord))
+        {
+            Console.WriteLine("    no TLS-RPT record, so nobody reports failed or downgraded connections.");
+            Console.WriteLine($"    to publish one: dmarc fix --domain {domain} --tls-rpt-to <address> --apply --reason \"...\"");
+        }
+
+        // Fetched rather than assumed: the record says a policy exists, only
+        // the file says what it is, and a sender reads the file.
+        var served = await new MtaStsFetcher().FetchAsync(domain, ct: ct).ConfigureAwait(false);
+        if (!served.Reachable && string.IsNullOrWhiteSpace(published.MtaStsRecord))
+        {
+            // Nothing published and nothing served is not a fault to plan
+            // around, it is a domain nobody has set this up for.
+            Console.WriteLine($"    no MTA-STS policy. To start one: dmarc mta-sts set --domain {domain}");
+            return plans;
+        }
+
+        var mx = await new DnsLookup().MxAsync(domain, ct).ConfigureAwait(false);
+        var mtaSts = TransportPlanner.MtaSts(domain, published.MtaStsRecord, served, mx);
+        if (!mtaSts.IsNoop) { plans.Add(mtaSts); }
+
+        return plans;
     }
 
     /// <summary>

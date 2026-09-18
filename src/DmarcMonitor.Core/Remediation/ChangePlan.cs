@@ -5,6 +5,8 @@ public static class ChangeType
 {
     public const string DmarcPolicy = "dmarc-policy";
     public const string SpfIncludeRemove = "spf-include-remove";
+    public const string MtaSts = "mta-sts";
+    public const string TlsRpt = "tls-rpt";
 }
 
 /// <summary>

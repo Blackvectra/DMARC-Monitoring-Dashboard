@@ -166,7 +166,11 @@ both restore identically.
 with this prospect's email setup" before they are a customer. Two of its
 findings cannot fire in that mode:
 
-- **MTA-STS mode** comes from TLS reports, so a prospect's policy shows as
+- **MTA-STS mode** was read only from TLS reports. Fixed: `MtaStsFetcher`
+  fetches the policy file the way a sender does, so the mode is known for any
+  domain, prospect or customer, with or without reports. The paragraph below
+  describes how it used to be.
+- **(was) MTA-STS mode** comes from TLS reports, so a prospect's policy shows as
   published and never as *testing*, which is the interesting state. The mode is
   also in the policy file at
   `https://mta-sts.<domain>/.well-known/mta-sts.txt`, which is one HTTPS GET

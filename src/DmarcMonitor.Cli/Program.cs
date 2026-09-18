@@ -43,6 +43,7 @@ public static class Program
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "mta-sts" => await MtaStsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
             };
@@ -146,6 +147,19 @@ public static class Program
                                  --secret-stdin, or a prompt. Never as an argument.
                 test             --domain <d>  Read the zone through the provider.
                 remove           --client <slug> [--domain <d>]
+
+              mta-sts            The MTA-STS policy this serves for a domain, at
+                                 mta-sts.<domain>. MTA-STS needs a DNS record AND a policy
+                                 file served over HTTPS; this is the file. Point
+                                 mta-sts.<domain> at the host running the web app, then
+                                 announce it with 'dmarc fix'.
+                list             What is being served, and where.
+                set              --domain <d> [--mode testing|enforce|none] [--mx <host>]...
+                                 Mail servers come from the domain's MX records unless
+                                 named. Starts in testing, which enforces nothing.
+                check            --domain <d>  Fetch what is really served, as a sender does.
+                remove           --domain <d>
+                --db <path>      Database file. Default: dmarc.db
 
               intel              Refresh and show what has been learned about sources
                                  impersonating clients, across every domain watched.

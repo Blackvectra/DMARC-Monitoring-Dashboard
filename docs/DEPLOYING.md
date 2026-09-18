@@ -298,7 +298,32 @@ delay keeps you off the exact hour, which is when everybody else's jobs run.
 Run it once by hand with `--dry-run` first. It parses and reports and writes
 nothing, which is safe against a live mailbox.
 
-## 7. Backups
+## 7. MTA-STS, if you want it
+
+The app serves the policy file, so one instance can serve every client's:
+
+```bash
+sudo -u dmarc dmarc mta-sts set --domain example.com --db /opt/dmarc/data/dmarc.db
+```
+
+Then add a CNAME per domain - `mta-sts.example.com` pointing at this host -
+and a Caddy block so the certificate covers it:
+
+```
+mta-sts.example.com, mta-sts.another-client.com {
+    reverse_proxy 127.0.0.1:5000
+}
+```
+
+Caddy gets a certificate for each name on first request. The app answers
+`/.well-known/mta-sts.txt` by the Host it arrived on, so it serves the right
+client's policy without any per-domain configuration beyond the row.
+
+Then `dmarc fix --domain example.com --apply --reason "..."` publishes the TXT
+record that announces it. In that order: the record announces a policy, and
+announcing one nothing is serving does nothing at all.
+
+## 8. Backups
 
 Two files matter and they are both small:
 
@@ -315,6 +340,19 @@ restore onto a new machine cannot read it: the database rows keep working,
 but every DNS provider credential has to be entered again. That is the
 intended behaviour - it is why a stolen backup is not a stolen Cloudflare
 token - and it is worth knowing before the day you need the restore.
+
+## 9. Upgrading later
+
+```bash
+sudo systemctl stop dmarc-web
+# replace /opt/dmarc/app and /usr/local/bin/dmarc with the new release
+sudo -u dmarc dmarc init-db --db /opt/dmarc/data/dmarc.db   # applies any schema change
+sudo systemctl start dmarc-web
+```
+
+`init-db` against an existing database brings its schema up to date and prints
+what it applied. Skipping it is how a new build meets an old database and
+fails on a table that was added after that database was created.
 
 ## Before it is reachable by anybody else
 

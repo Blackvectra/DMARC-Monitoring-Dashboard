@@ -30,7 +30,22 @@ public static class InitDbCommand
             var store = new ReportStore(dbPath);
             if (await store.IsInitialisedAsync(ct).ConfigureAwait(false))
             {
-                Console.WriteLine($"{dbPath} already exists and has the expected tables. Nothing to do.");
+                // Existing and ours: bring it up to date rather than declining.
+                // This is the upgrade path, and running it is what stops a new
+                // build meeting an old database and failing on a table that
+                // was added after it was created.
+                var result = await DatabaseMigrations.ApplyAsync(dbPath, ct).ConfigureAwait(false);
+
+                if (result.Changed)
+                {
+                    Console.WriteLine($"{dbPath} was already a DMARC Monitor database. Brought it up to date:");
+                    foreach (var applied in result.Applied) { Console.WriteLine($"  {applied}"); }
+                }
+                else
+                {
+                    Console.WriteLine($"{dbPath} already exists and is up to date (schema {result.Version}).");
+                }
+
                 return 0;
             }
 
