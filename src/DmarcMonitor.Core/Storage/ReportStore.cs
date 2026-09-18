@@ -574,19 +574,100 @@ public sealed class ReportStore
         return AssignOutcome.Assigned;
     }
 
+    /// <summary>The longest slug worth having. A filename is built from it.</summary>
+    /// <remarks>
+    /// Filenames have limits - 255 bytes on most filesystems - and the slug is
+    /// only part of one: a client report is slug plus month plus extension.
+    /// Cut at a hyphen so the result still reads as words.
+    /// </remarks>
+    private const int MaxSlugLength = 60;
+
+    /// <summary>
+    /// Accented letters, folded to the ASCII letter they are built on.
+    /// </summary>
+    /// <remarks>
+    /// Spelled out rather than done with Unicode normalisation, because this
+    /// solution builds with InvariantGlobalization (src/Directory.Build.props),
+    /// and under that switch string.Normalize is a no-op and ToLowerInvariant
+    /// only touches ASCII. A FormD-and-strip-the-marks implementation looks
+    /// correct, passes in a scratch project that does not inherit the switch,
+    /// and does nothing at all in the shipped application.
+    ///
+    /// Both cases are listed for the same reason: there is no Unicode casing
+    /// to fall back on.
+    /// </remarks>
+    private static readonly Dictionary<char, string> Folded = BuildFolding();
+
+    private static Dictionary<char, string> BuildFolding()
+    {
+        var map = new Dictionary<char, string>();
+
+        void Add(string lower, string upper, string ascii)
+        {
+            foreach (var c in lower) { map[c] = ascii; }
+            foreach (var c in upper) { map[c] = ascii; }
+        }
+
+        Add("àáâãäåāăą", "ÀÁÂÃÄÅĀĂĄ", "a");
+        Add("çćĉċč", "ÇĆĈĊČ", "c");
+        Add("ďđð", "ĎĐÐ", "d");
+        Add("èéêëēĕėęě", "ÈÉÊËĒĔĖĘĚ", "e");
+        Add("ĝğġģ", "ĜĞĠĢ", "g");
+        Add("ĥħ", "ĤĦ", "h");
+        Add("ìíîïĩīĭįı", "ÌÍÎÏĨĪĬĮİ", "i");
+        Add("ĵ", "Ĵ", "j");
+        Add("ķ", "Ķ", "k");
+        Add("ĺļľŀł", "ĹĻĽĿŁ", "l");
+        Add("ñńņňŋ", "ÑŃŅŇŊ", "n");
+        Add("òóôõöøōŏő", "ÒÓÔÕÖØŌŎŐ", "o");
+        Add("ŕŗř", "ŔŖŘ", "r");
+        Add("śŝşš", "ŚŜŞŠ", "s");
+        Add("ţťŧ", "ŢŤŦ", "t");
+        Add("ùúûüũūŭůűų", "ÙÚÛÜŨŪŬŮŰŲ", "u");
+        Add("ŵ", "Ŵ", "w");
+        Add("ýÿŷ", "ÝŸŶ", "y");
+        Add("źżž", "ŹŻŽ", "z");
+
+        // Letters that are not one ASCII letter with a mark on it.
+        Add("æ", "Æ", "ae");
+        Add("œ", "Œ", "oe");
+        Add("ß", "", "ss");
+        Add("þ", "Þ", "th");
+
+        return map;
+    }
+
     /// <summary>"Morton, ND" becomes "morton-nd": usable in a filename and a URL.</summary>
+    /// <remarks>
+    /// Accented letters are folded to their ASCII base rather than dropped.
+    /// Dropping them turned "Søren Ågård Farms" into "s-ren-g-rd-farms", and
+    /// Scandinavian and German surnames are ordinary in the part of the world
+    /// this was built for. The slug goes into report filenames and cannot be
+    /// changed afterwards, so it is worth getting right the first time.
+    /// </remarks>
     public static string Slugify(string raw)
     {
         ArgumentNullException.ThrowIfNull(raw);
 
+        // Folded BEFORE lowercasing, because under InvariantGlobalization
+        // ToLowerInvariant leaves 'Ø' alone - it only maps ASCII - and the
+        // folding table therefore carries both cases itself.
         var builder = new StringBuilder(raw.Length);
-        foreach (var c in raw.Trim().ToLowerInvariant())
+        foreach (var c in raw.Trim())
         {
-            if (char.IsAsciiLetterOrDigit(c)) { builder.Append(c); }
+            if (Folded.TryGetValue(c, out var ascii)) { builder.Append(ascii); }
+            else if (char.IsAsciiLetterOrDigit(c)) { builder.Append(char.ToLowerInvariant(c)); }
             else if (builder.Length > 0 && builder[^1] != '-') { builder.Append('-'); }
         }
 
-        return builder.ToString().Trim('-');
+        var slug = builder.ToString().Trim('-');
+        if (slug.Length <= MaxSlugLength) { return slug; }
+
+        // Cut back to the last whole word, unless the first word is already
+        // longer than the limit.
+        var cut = slug[..MaxSlugLength];
+        var lastHyphen = cut.LastIndexOf('-');
+        return (lastHyphen > 0 ? cut[..lastHyphen] : cut).Trim('-');
     }
 
     private sealed record DomainIds(string TenantId, string ClientId, string DomainId);
