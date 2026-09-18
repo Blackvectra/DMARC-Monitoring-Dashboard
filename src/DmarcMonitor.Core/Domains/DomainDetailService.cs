@@ -253,10 +253,20 @@ public sealed class DomainDetailService(string databasePath)
         // The overridden count comes from the same pass as the total, so the
         // figure explaining the gap cannot itself be computed over a different
         // set of rows from the gap it explains.
+        //
+        // Counted only where the message also FAILED. An override is just the
+        // receiver saying it did not apply the requested policy, and it says
+        // that about mail that passed as well: Microsoft stamps "SPF ignored
+        // due to local policy" on traffic that authenticated perfectly well by
+        // DKIM. Counting those as "left out" removed a domain's own clean mail
+        // from the source tables and then described it to the operator in the
+        // same breath as forwarded failures - on the live data, 19 of
+        // mortonnd.gov's 84 messages, which is its own mail servers.
         command.CommandText = """
             SELECT COALESCE(SUM(message_count), 0),
                    COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
-                   COALESCE(SUM(CASE WHEN override_reason IS NOT NULL AND override_reason <> ''
+                   COALESCE(SUM(CASE WHEN dmarc_result <> 'pass'
+                                      AND override_reason IS NOT NULL AND override_reason <> ''
                                      THEN message_count END), 0)
             FROM aggregate_records
             WHERE domain_id = $domain AND date_begin >= $since
@@ -288,7 +298,12 @@ public sealed class DomainDetailService(string databasePath)
                    MAX(r.date_begin)
             FROM aggregate_records r
             WHERE r.domain_id = $domain AND r.date_begin >= $since
-              AND (r.override_reason IS NULL OR r.override_reason = '')
+              -- Overridden FAILURES only. A mailing list breaking
+              -- authentication is expected and buries the findings that
+              -- matter, so it stays out; a source whose mail passed and merely
+              -- carried a receiver note belongs in the table like any other.
+              AND NOT (r.dmarc_result <> 'pass'
+                       AND r.override_reason IS NOT NULL AND r.override_reason <> '')
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             """;

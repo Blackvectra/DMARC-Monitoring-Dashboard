@@ -69,6 +69,29 @@ public sealed class DomainDetailServiceTests : IDisposable
           </record>
         """;
 
+    /// <summary>
+    /// Mail that authenticated, which the receiver nonetheless attached an
+    /// override note to. Microsoft does this constantly: "SPF ignored due to
+    /// local policy" on traffic that passed by DKIM.
+    /// </summary>
+    private static string OverriddenButPassingRow(string ip, int count, string domain) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>none</disposition><dkim>pass</dkim><spf>pass</spf>
+                <reason><type>local_policy</type><comment>SPF ignored due to local policy</comment></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{domain}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{domain}</domain><selector>selector1</selector><result>pass</result></dkim>
+              <spf><domain>{domain}</domain><result>pass</result></spf>
+            </auth_results>
+          </record>
+        """;
+
     private async Task StoreAsync(string domain, string policy, params string[] rows) =>
         await StoreAsync(domain, policy, daysAgo: 2, rows);
 
@@ -187,6 +210,41 @@ public sealed class DomainDetailServiceTests : IDisposable
         var listed = detail.Clean.Concat(detail.Misconfigured).Concat(detail.Impersonating)
             .Sum(s => s.Messages);
         Assert.Equal(detail.Messages - detail.OverriddenMessages, listed);
+    }
+
+    [Fact]
+    public async Task MailThatPassedIsNotTreatedAsLeftOutJustBecauseTheReceiverAnnotatedIt()
+    {
+        // An override is only the receiver saying it did not apply the policy
+        // as asked. It says that about mail that PASSED as often as about mail
+        // that failed - "SPF ignored due to local policy" on DKIM-authenticated
+        // traffic is routine from Microsoft.
+        //
+        // Excluding every annotated record took a domain's own clean mail out
+        // of the source tables and then described it to the operator as traffic
+        // left out, alongside forwarded failures. On the live data that was 19
+        // of mortonnd.gov's 84 messages: its own mail servers, passing, and the
+        // page implied there was something unresolved about them.
+        await StoreAsync("acme.com", "reject",
+            Row("192.0.2.25", 100, "pass", "acme.com", "acme.com", "pass"),
+            OverriddenButPassingRow("192.0.2.80", 19, "acme.com"),
+            ForwardedRow("192.0.2.50", 48, "acme.com"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Equal(167, detail!.Messages);
+
+        // Only the forwarded failure is left out. The annotated-but-passing
+        // mail is the domain's own and stays in.
+        Assert.Equal(48, detail.OverriddenMessages);
+
+        var listed = detail.Clean.Concat(detail.Misconfigured).Concat(detail.Impersonating).ToList();
+        Assert.Contains(listed, s => s.SourceIp == "192.0.2.80");
+        Assert.Equal(19, listed.Single(s => s.SourceIp == "192.0.2.80").Messages);
+
+        // And the arithmetic the operator can do by eye still works.
+        Assert.Equal(detail.Messages - detail.OverriddenMessages, listed.Sum(s => s.Messages));
     }
 
     [Fact]
