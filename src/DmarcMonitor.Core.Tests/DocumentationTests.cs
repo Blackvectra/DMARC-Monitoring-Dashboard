@@ -124,7 +124,12 @@ public sealed class DocumentationTests
 
                 if (Path.GetExtension(file) is not (".cs" or ".razor" or ".sh" or ".service" or ".path" or ".json")) { continue; }
 
-                if (File.ReadAllText(file).Contains(".ps1", StringComparison.OrdinalIgnoreCase))
+                // deploy/bootstrap.ps1 is not the superseded product: it is the
+                // Windows counterpart of bootstrap.sh, shipped on purpose and
+                // run in CI on a Windows runner. Naming it is fine; naming any
+                // other .ps1 is the old product creeping back.
+                var text = File.ReadAllText(file).Replace("bootstrap.ps1", "", StringComparison.OrdinalIgnoreCase);
+                if (text.Contains(".ps1", StringComparison.OrdinalIgnoreCase))
                 {
                     offenders.Add(Path.GetRelativePath(root, file));
                 }
@@ -145,6 +150,7 @@ public sealed class DocumentationTests
 
         foreach (var name in new[]
                  {
+                     "bootstrap.sh", "bootstrap.ps1",
                      "install.sh", "update.sh", "rollback.sh", "install-update-agent.sh", "update-agent.sh",
                      "dmarc-web.service", "dmarc-ingest.service", "dmarc-ingest.timer",
                      "dmarc-update.service", "dmarc-update.path",
@@ -190,7 +196,11 @@ public sealed class DocumentationTests
     [InlineData("Ubuntu 24.04")]
     [InlineData("Amazon Linux 2023")]
     [InlineData("deploy/install.sh")]
+    [InlineData("deploy/bootstrap.sh")]
+    [InlineData("bootstrap.ps1")]
     [InlineData("DOTNET_BUNDLE_EXTRACT_BASE_DIR")]
+    [InlineData("signout-callback-oidc")]
+    [InlineData("ID tokens")]
     public void DeployingCoversBothDistributionsAndTheInstaller(string phrase)
     {
         var deploying = File.ReadAllText(Path.Combine(RepoRoot().FullName, "docs", "DEPLOYING.md"));

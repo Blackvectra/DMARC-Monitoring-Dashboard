@@ -24,8 +24,11 @@ public static class IngestCommand
         var clientId = Args.Value(args, "--client-id") ?? Environment.GetEnvironmentVariable("DMARC_CLIENT_ID");
         var certPath = Args.Value(args, "--cert") ?? Environment.GetEnvironmentVariable("DMARC_CERT_PATH");
         var certPassword = Args.Value(args, "--cert-password") ?? Environment.GetEnvironmentVariable("DMARC_CERT_PASSWORD");
-        var reportingDomain = Args.Value(args, "--reporting-domain") ?? "";
-        var fallback = Args.Value(args, "--fallback");
+        // An environment file with the line "DMARC_FALLBACK_ADDRESS=" is the
+        // template every install ships with, and it means "not set", not "the
+        // empty address" - which is what ?? alone made of it.
+        var reportingDomain = NonBlank(Args.Value(args, "--reporting-domain")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_REPORTING_DOMAIN")) ?? "";
+        var fallback = NonBlank(Args.Value(args, "--fallback")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_FALLBACK_ADDRESS"));
         var maxMessages = Args.Int(args, "--max", 500);
         var dryRun = Args.Flag(args, "--dry-run");
 
@@ -52,21 +55,17 @@ public static class IngestCommand
             return 66;
         }
 
-        if (string.IsNullOrWhiteSpace(reportingDomain) && string.IsNullOrWhiteSpace(fallback))
-        {
-            // Without either, nothing can be attributed and every report would
-            // be filed as unrecognised. Saying so now beats a run that reads
-            // the whole mailbox and stores nothing.
-            Console.Error.WriteLine("Give me --reporting-domain, --fallback, or both.");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("  --reporting-domain  the subdomain per-domain report addresses use,");
-            Console.Error.WriteLine("                      for example rua.nrgsecure.com");
-            Console.Error.WriteLine("  --fallback          a single shared address every domain reports to,");
-            Console.Error.WriteLine("                      for example dmarc@nrgtechservices.com");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Without one of these no report can be attributed to a domain.");
-            return 64;
-        }
+        // Without a reporting domain or a shared address nothing can be
+        // attributed and every report would be filed as unrecognised. The
+        // commonest shape by far is one shared mailbox that every domain
+        // reports to - which is the mailbox being read - so that is the
+        // default, said out loud below. It used to be an error instead, which
+        // made the systemd unit and the documented command exit 64 on every
+        // machine that followed the docs.
+        var attributedBy = string.IsNullOrWhiteSpace(reportingDomain)
+            ? $"the shared address {fallback ?? mailbox} (set --reporting-domain or DMARC_REPORTING_DOMAIN if per-domain addresses are in use)"
+            : $"per-domain addresses under {reportingDomain}{(fallback is null ? "" : $", falling back to {fallback}")}";
+        fallback ??= string.IsNullOrWhiteSpace(reportingDomain) ? mailbox : null;
 
         var store = new ReportStore(dbPath);
         if (!dryRun && !await store.IsInitialisedAsync(ct).ConfigureAwait(false))
@@ -147,6 +146,7 @@ public static class IngestCommand
                     });
 
             Console.WriteLine($"Reading {mailbox}{(dryRun ? " (dry run: nothing will be written or moved)" : "")}");
+            Console.WriteLine($"Attributing reports by {attributedBy}");
             Console.WriteLine();
 
             IngestRunResult result;
@@ -172,6 +172,21 @@ public static class IngestCommand
 
             Report(result, stored, dryRun);
             if (!dryRun) { await WarnUnassignedAsync(store, ct).ConfigureAwait(false); }
+
+            // Genuine reports and not one of them addressed to anything this
+            // deployment recognises means the shared address is wrong, not
+            // the mail. The messages were left in place, so this is the exit
+            // code that says "configure it and run again", not "data lost".
+            if (result.UnattributedCount > 0 && result.IngestedCount == 0 && result.DuplicateCount == 0)
+            {
+                Console.Error.WriteLine();
+                Console.Error.WriteLine($"No report was addressed to {fallback ?? "a recognised address"}. They were sent to:");
+                foreach (var a in result.UnattributedAddresses.Take(5)) { Console.Error.WriteLine($"  {a}"); }
+                Console.Error.WriteLine("Set --fallback (or DMARC_FALLBACK_ADDRESS) to the address in the domains' rua= tag,");
+                Console.Error.WriteLine("or --reporting-domain if per-domain addresses are in use. Nothing was moved.");
+                return 64;
+            }
+
             return result.Errors.Count > 0 ? 1 : 0;
         }
 
@@ -180,6 +195,8 @@ public static class IngestCommand
         // null is honest about that; inventing a domain would file reports
         // against the wrong customer.
         static string? ResolveToken(string token) => null;
+
+        static string? NonBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     private static async Task<bool> IsStored(ReportStore store, string key, CancellationToken ct)
@@ -245,7 +262,23 @@ public static class IngestCommand
         Console.WriteLine($"  messages read      {result.MessagesRead}");
         Console.WriteLine($"  reports ingested   {result.IngestedCount}{(dryRun ? " (not written)" : $", {stored} stored")}");
         if (result.DuplicateCount > 0) { Console.WriteLine($"  already seen       {result.DuplicateCount}"); }
-        if (result.UnrecognisedCount > 0) { Console.WriteLine($"  not reports        {result.UnrecognisedCount}"); }
+        if (result.UnrecognisedCount > 0)
+        {
+            Console.WriteLine($"  not reports        {result.UnrecognisedCount}");
+            // Grouped by reason, so a mailbox full of one kind of thing is one
+            // line rather than a page, and the reason points at the cause.
+            foreach (var g in result.Reports.Where(r => r.Outcome == IngestOutcome.Unrecognised)
+                         .GroupBy(r => r.Reason).OrderByDescending(g => g.Count()).Take(5))
+            {
+                Console.WriteLine($"    {g.Count()}: {g.Key}");
+            }
+        }
+
+        if (result.UnattributedCount > 0)
+        {
+            Console.WriteLine($"  not attributed     {result.UnattributedCount} (genuine reports, left in the mailbox)");
+            Console.WriteLine($"    delivered to: {string.Join(", ", result.UnattributedAddresses.Take(5))}");
+        }
 
         if (result.QuarantinedCount > 0)
         {

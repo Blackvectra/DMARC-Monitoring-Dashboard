@@ -6,7 +6,9 @@
 # template by deploy/install.sh - so nothing in this unit needs editing. The
 # dmarc command reads DMARC_TENANT_ID, DMARC_CLIENT_ID, DMARC_CERT_PATH and
 # DMARC_CERT_PASSWORD from its environment, which keeps the password off a
-# command line where `ps` would show it. The certificate itself must be
+# command line where `ps` would show it; DMARC_FALLBACK_ADDRESS and
+# DMARC_REPORTING_DOMAIN are optional and default to the mailbox itself being
+# the one shared address every domain reports to. The certificate must be
 # readable by the dmarc account, because that is who runs this; put it under
 # /opt/dmarc/data, owned by dmarc, mode 0600.
 

@@ -23,6 +23,13 @@ install -o root -g root -m 0755 "${HERE}/update.sh"        "${ROOT}/deploy/updat
 install -o root -g root -m 0755 "${HERE}/rollback.sh"      "${ROOT}/deploy/rollback.sh"
 install -o root -g root -m 0755 "${HERE}/update-agent.sh"  "${ROOT}/deploy/update-agent.sh"
 
+# The two that set a machine up, kept for re-running: bootstrap.sh applies
+# configuration on an installed machine (adding sign-in, the mailbox), and a
+# bootstrap that was piped through bash left no copy of itself anywhere.
+for script in bootstrap.sh install.sh; do
+    [[ -f "${HERE}/${script}" ]] && install -o root -g root -m 0755 "${HERE}/${script}" "${ROOT}/deploy/${script}"
+done
+
 # The spool is the one directory both sides touch. The app writes requests
 # and reads status; the agent reads requests and writes status.
 install -d -o "${USER_NAME}" -g "${USER_NAME}" -m 0755 "${ROOT}/data/updates"

@@ -52,7 +52,7 @@ jobs:
           # machine too. A parse error here means the dashboard never opens -
           # exactly the failure mode of PR #7.
           $bad = 0
-          Get-ChildItem -Path ./tools, ./legacy -Filter *.ps1 -File | ForEach-Object {
+          Get-ChildItem -Path ./tools, ./legacy, ./deploy -Filter *.ps1 -File | ForEach-Object {
             $errs = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
               $_.FullName, [ref]$null, [ref]$errs) | Out-Null
@@ -216,6 +216,180 @@ jobs:
       - name: What the service logged
         if: always()
         run: sudo journalctl -u dmarc-web -n 40 --no-pager || true
+
+  bootstrap-linux:
+    name: One command on a fresh Ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the release artifacts the way release.yml does
+        run: |
+          dotnet publish src/DmarcMonitor.Cli/DmarcMonitor.Cli.csproj \
+            --configuration Release --runtime linux-x64 --self-contained true \
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true -p:DebugType=none \
+            --output publish/cli
+          dotnet publish src/DmarcMonitor.Web/DmarcMonitor.Web.csproj \
+            --configuration Release --output publish/dmarc-web
+          (cd publish && zip -qr ../dmarc-web.zip dmarc-web)
+          cp publish/cli/dmarc dmarc-linux-x64
+          # The distro package puts the runtime at /usr/bin/dotnet, which is
+          # what the unit names and what bootstrap finds under sudo's PATH.
+          # setup-dotnet puts it elsewhere; this stands in for the package.
+          sudo ln -sf "$(command -v dotnet)" /usr/bin/dotnet
+
+      - name: One command, from nothing
+        run: |
+          # Everything at once: Caddy on localhost (its internal CA, so no
+          # public DNS is needed), Entra sign-in against the "common" tenant
+          # (real metadata, so the redirect is built for real), and the
+          # collector with a certificate the script makes.
+          sudo ./deploy/bootstrap.sh --from-dir . --host localhost --email ci@example.com \
+            --provider-name CI --tenant-id common --client-id 00000000-0000-0000-0000-000000000000 \
+            --make-ingest-cert --mailbox dmarc@example.com \
+            --ingest-tenant-id 11111111-2222-3333-4444-555555555555 \
+            --ingest-client-id 22222222-3333-4444-5555-666666666666
+
+      - name: Everything it promised is true
+        run: |
+          systemctl is-active dmarc-web caddy dmarc-ingest.timer dmarc-update.path
+          sudo journalctl -u dmarc-web -n 30 --no-pager | grep -q 'Sign-in: Microsoft Entra'
+
+          # Through Caddy, as a visitor would arrive: TLS terminated, proxied,
+          # and the app - now with sign-in configured - sends them to Entra.
+          code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/)
+          echo "https://localhost/: $code"; test "$code" = 302
+          curl -sk -o /dev/null -D - https://localhost/ | grep -qi 'location: https://login.microsoftonline.com/common/'
+
+          # The collector: its files, their permissions, and that it gets past
+          # its own validation with the certificate that was made (a made-up
+          # tenant, so authentication fails - exit 77 - and nothing else does).
+          sudo test -f /opt/dmarc/data/ingest.pfx
+          test "$(sudo stat -c '%a %U' /opt/dmarc/data/ingest.pfx)" = "600 dmarc"
+          test -f "$HOME/dmarc-ingest.cer"
+          test "$(sudo stat -c '%a %U' /etc/dmarc-ingest.env)" = "600 root"
+          sudo grep -q '^DMARC_TENANT_ID="11111111' /etc/dmarc-ingest.env
+          set +e
+          sudo bash -c 'set -a; . /etc/dmarc-ingest.env; exec sudo -E -H -u dmarc dmarc ingest --db /opt/dmarc/data/dmarc.db --mailbox "$DMARC_MAILBOX" --dry-run' > ingest.out 2>&1
+          code=$?
+          set -e
+          cat ingest.out; echo "exit $code"; test "$code" = 77
+          grep -q 'Attributing reports by the shared address dmarc@example.com' ingest.out
+
+          # Running it again only applies configuration. Captured to a file
+          # rather than piped into grep -q, which would close the pipe on the
+          # first match and kill the script half way with SIGPIPE.
+          sudo ./deploy/bootstrap.sh --from-dir . --host localhost --email ci@example.com --provider-name "CI again" > second-run.out
+          cat second-run.out
+          grep -q 'already installed' second-run.out
+          sudo grep -q '"ProviderName": "CI again"' /opt/dmarc/app/appsettings.Production.json
+          systemctl is-active dmarc-web
+
+      - name: What the services logged
+        if: always()
+        run: |
+          sudo journalctl -u dmarc-web -n 30 --no-pager || true
+          sudo journalctl -u caddy -n 30 --no-pager || true
+
+  bootstrap-windows:
+    name: One command on a fresh Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the release artifacts the way release.yml does
+        shell: pwsh
+        run: |
+          dotnet publish src/DmarcMonitor.Cli/DmarcMonitor.Cli.csproj `
+            --configuration Release --runtime win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true -p:DebugType=none `
+            --output publish/cli
+          dotnet publish src/DmarcMonitor.Web/DmarcMonitor.Web.csproj `
+            --configuration Release --output publish/dmarc-web
+          Compress-Archive -Path publish/dmarc-web -DestinationPath dmarc-web.zip
+          Copy-Item publish/cli/dmarc.exe dmarc.exe
+
+      - name: One command, from nothing
+        shell: pwsh
+        run: |
+          # The runner image has IIS holding port 80 through http.sys, which
+          # a fresh server would not. The script refuses to install Caddy over
+          # a taken port and says so; here IIS is simply not wanted.
+          Stop-Service -Name W3SVC -Force -ErrorAction SilentlyContinue
+          Set-Service -Name W3SVC -StartupType Disabled -ErrorAction SilentlyContinue
+          .\deploy\bootstrap.ps1 -FromDir . -HostName localhost -Email ci@example.com -ProviderName CI `
+            -TenantId common -ClientId 00000000-0000-0000-0000-000000000000 `
+            -MakeIngestCert -Mailbox dmarc@example.com `
+            -IngestTenantId 11111111-2222-3333-4444-555555555555 `
+            -IngestClientId 22222222-3333-4444-5555-666666666666
+
+      - name: Everything it promised is true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((Get-Service dmarc-web).Status -ne 'Running') { throw 'dmarc-web is not running' }
+          if ((Get-Service caddy).Status -ne 'Running') { throw 'caddy is not running' }
+          $svc = Get-CimInstance Win32_Service -Filter "Name='dmarc-web'"
+          "dmarc-web runs as $($svc.StartName)"
+          if ($svc.StartName -notmatch 'LocalService') { throw "dmarc-web runs as $($svc.StartName), not LocalService" }
+
+          $code = & curl.exe -s -o NUL -w '%{http_code}' http://127.0.0.1:5000/
+          "loopback: $code"; if ($code -ne '302') { throw "loopback answered $code" }
+          $code = & curl.exe -sk -o NUL -w '%{http_code}' https://localhost/
+          "https://localhost/: $code"; if ($code -ne '302') { throw "https answered $code" }
+          $headers = & curl.exe -sk -D - -o NUL https://localhost/
+          if (-not ($headers -match 'location: https://login.microsoftonline.com/common/')) { throw 'no redirect to Entra' }
+
+          if (-not (Test-Path C:\dmarc\data\ingest.pfx)) { throw 'no ingest.pfx' }
+          if (-not (Test-Path C:\dmarc\dmarc-ingest.cer)) { throw 'no dmarc-ingest.cer' }
+          if (-not (Get-ScheduledTask -TaskName 'DMARC ingest' -ErrorAction SilentlyContinue)) { throw 'no DMARC ingest task' }
+
+          # The secrets are readable by the service and administrators only:
+          # nothing inherited from C:\, and LocalService (S-1-5-19) is named.
+          foreach ($f in @('C:\dmarc\data\ingest.pfx', 'C:\dmarc\ingest.cmd', 'C:\dmarc\app\appsettings.Production.json')) {
+            $acl = Get-Acl $f
+            $sids = $acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
+            "$f -> $($sids -join ' ')"
+            if ($acl.Access | Where-Object IsInherited) { throw "$f still inherits its ACL" }
+            if ($sids -notcontains 'S-1-5-19') { throw "$f is not readable by LocalService" }
+            if ($sids -contains 'S-1-5-32-545') { throw "$f is readable by every user" }
+          }
+
+          # The collector gets past its own validation with the certificate
+          # that was made; a made-up tenant fails authentication (77).
+          $p = Start-Process -FilePath cmd.exe -ArgumentList '/c', 'C:\dmarc\ingest.cmd --dry-run' -Wait -PassThru -NoNewWindow
+          Get-Content C:\dmarc\data\ingest.log
+          "ingest exit $($p.ExitCode)"; if ($p.ExitCode -ne 77) { throw "ingest exited $($p.ExitCode)" }
+          if (-not (Select-String -Path C:\dmarc\data\ingest.log -Pattern 'Attributing reports by the shared address dmarc@example.com' -Quiet)) { throw 'attribution line missing' }
+
+          # Running it again only applies configuration.
+          # The script talks through Write-Host (the information stream), which
+          # an assignment does not capture; *>&1 folds every stream into one.
+          $out = (.\deploy\bootstrap.ps1 -FromDir . -HostName localhost -Email ci@example.com -ProviderName 'CI again' *>&1) | Out-String
+          $out
+          if ($out -notmatch 'already installed') { throw 'second run did not detect the install' }
+          if ((Get-Content C:\dmarc\app\appsettings.Production.json -Raw) -notmatch '"ProviderName":\s*"CI again"') { throw 'configuration was not applied' }
+          if ((Get-Service dmarc-web).Status -ne 'Running') { throw 'dmarc-web is not running after the second run' }
+
+      - name: What the services logged
+        if: always()
+        shell: pwsh
+        run: |
+          Get-WinEvent -LogName Application -MaxEvents 40 -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProviderName -match 'dmarc|\.NET' } |
+            Format-Table TimeCreated, ProviderName, Message -AutoSize -Wrap | Out-String -Width 200
+          Get-Content C:\dmarc\bin\caddy-service.out.log -Tail 30 -ErrorAction SilentlyContinue
+          Get-Content C:\dmarc\bin\caddy-service.err.log -Tail 30 -ErrorAction SilentlyContinue
 
   schema:
     name: SQLite schema

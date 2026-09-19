@@ -91,6 +91,47 @@ alongside `linux-x64`; take whichever matches `uname -m`.
 
 ---
 
+## The short version: one command
+
+Steps 1 to 4 below, and as much of 5 and 6 as you hand it, are one script.
+On a fresh Linux machine whose DNS name already points at it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Blackvectra/DMARC-Monitoring-Dashboard/main/deploy/bootstrap.sh \
+  | sudo bash -s -- --host dmarc.nextlayersec.io --email you@nrgtechservices.com
+```
+
+On Windows, from an elevated PowerShell, with `deploy/bootstrap.ps1` from the
+release's `dmarc-deploy.tar.gz`:
+
+```powershell
+.\bootstrap.ps1 -HostName dmarc.nextlayersec.io -Email you@nrgtechservices.com
+```
+
+Either one installs the runtime and Caddy, downloads the latest release,
+installs the service listening on loopback, puts Caddy in front of it with a
+certificate, and installs the update agent. It ends with the exact Entra
+steps still to do. Re-running it is safe: on an installed machine it only
+applies configuration, which is how sign-in and the mailbox are added later:
+
+```bash
+sudo ./deploy/bootstrap.sh --host dmarc.nextlayersec.io \
+    --tenant-id <directory id> --client-id <application id>          # sign-in (step 5)
+
+sudo ./deploy/bootstrap.sh --host dmarc.nextlayersec.io --make-ingest-cert \
+    --mailbox dmarc@nrgtechservices.com \
+    --ingest-tenant-id <directory id> --ingest-client-id <ingest app id>   # the collector (step 6)
+```
+
+After a run that was piped through `bash`, the copy to re-run is
+`/opt/dmarc/deploy/bootstrap.sh`; the script ends by printing the exact
+command. The same arguments exist on Windows with PowerShell spelling
+(`-TenantId`, `-MakeIngestCert`, ...). `--help` lists everything. The steps
+below are what it does, so that it is not magic - and so that a machine it
+does not know can still be set up by hand.
+
+---
+
 ## 1. The machine
 
 Ubuntu 24.04 LTS or Amazon Linux 2023, 2 GB. Open ports 80 and 443 to the
@@ -287,11 +328,24 @@ In the Entra admin centre, **App registrations → New registration**:
 - Supported account types: **this organizational directory only**
 - Redirect URI: **Web**, `https://dmarc.nextlayersec.io/signin-oidc`
 
-Then under **Authentication**, set the front-channel logout URL to
-`https://dmarc.nextlayersec.io/signout-oidc`.
+Then under **Authentication**:
+
+- Add a second redirect URI, `https://dmarc.nextlayersec.io/signout-callback-oidc`.
+  Sign-out sends people back there, and Entra only sends people to registered
+  addresses; without it, signing out ends on a Microsoft page telling you to
+  close the browser.
+- Front-channel logout URL: `https://dmarc.nextlayersec.io/signout-oidc`.
+- Under *Implicit grant and hybrid flows*, tick **ID tokens (used for
+  implicit and hybrid flows)**. This app signs people in without a client
+  secret, which is the ID-token flow, and Entra refuses that flow until the
+  box is ticked (the error names `response_type`). Two Microsoft pages say
+  not to tick it; they describe apps that also call an API with a secret,
+  which this one does not.
+- Save.
 
 Copy the **Application (client) ID** and **Directory (tenant) ID** into
-`appsettings.Production.json` and restart.
+`appsettings.Production.json` (or hand them to `bootstrap.sh --tenant-id
+--client-id`) and restart.
 
 **No client secret is needed.** This registration only signs people in; it
 calls no API on their behalf, so there is nothing to redeem a code for and
@@ -300,17 +354,29 @@ complaint about client authentication, that assumption was wrong for your
 tenant's configuration - add a secret under `AzureAd:ClientCredentials` and
 put a reminder in the calendar for its expiry.
 
-Restrict who can sign in under **Enterprise applications → DMARC Monitor →
-Properties → Assignment required**, then assign the group that should have it.
-Otherwise everyone in the tenant can.
+Restrict who can sign in under **Enterprise applications → DMARC Monitor**:
+first **Permissions → Grant admin consent** (once assignment is required,
+users can no longer consent for themselves, and the first sign-in otherwise
+ends in "Need admin approval"), then **Properties → Assignment required =
+Yes**, then **Users and groups** → add the people or the group that should
+have it. Otherwise everyone in the tenant can. Assigning a group needs an
+Entra ID P1 licence; on a free tenant assign people individually.
 
 ## 6. Ingest on a timer
 
 Reports arrive continuously; something has to fetch them. `INGEST-SETUP.md`
-covers the app registration and the certificate. Once that exists, put the
-certificate at `/opt/dmarc/data/ingest.pfx`, owned by `dmarc`, mode `0600`,
-and fill in `/etc/dmarc-ingest.env` - root-owned, mode `0600`, written by
-`install.sh`:
+covers the app registration. The shortest route from there is one command,
+which makes the certificate, prints the `.cer` to upload, fills in the
+environment file below and enables the timer:
+
+```bash
+sudo ./deploy/bootstrap.sh --host dmarc.nextlayersec.io --make-ingest-cert \
+    --mailbox dmarc@nextlayersec.io --ingest-tenant-id <tenant id> --ingest-client-id <ingest app id>
+```
+
+By hand instead: put the certificate at `/opt/dmarc/data/ingest.pfx`, owned
+by `dmarc`, mode `0600`, and fill in `/etc/dmarc-ingest.env` - root-owned,
+mode `0600`, written by `install.sh`:
 
 ```
 DMARC_MAILBOX=dmarc@nextlayersec.io
@@ -318,13 +384,24 @@ DMARC_TENANT_ID=<tenant id>
 DMARC_CLIENT_ID=<ingest app id>
 DMARC_CERT_PATH=/opt/dmarc/data/ingest.pfx
 DMARC_CERT_PASSWORD=
+DMARC_FALLBACK_ADDRESS=
+DMARC_REPORTING_DOMAIN=
 ```
 
-`dmarc-ingest.service` reads it and runs `dmarc ingest` as the `dmarc` account
-with those in its environment, which keeps the certificate password off a
-command line where `ps` would show it. Run it once by hand with `--dry-run`
-first - it parses and reports and writes nothing, which is safe against a
-live mailbox:
+The last two say how a report is attributed to a domain and are usually left
+empty: every domain's `rua` points at the one shared mailbox, so the mailbox
+itself is the address. Set `DMARC_FALLBACK_ADDRESS` if the `rua` address is an
+alias or group rather than the mailbox's own address, and
+`DMARC_REPORTING_DOMAIN` only if per-domain addresses like
+`client.com@rua.example.com` are in use. Getting it wrong loses nothing: reports
+to an address the collector does not recognise are left in the mailbox and the
+run says which address to set.
+
+`dmarc-ingest.service` reads the file and runs `dmarc ingest` as the `dmarc`
+account with those in its environment, which keeps the certificate password
+off a command line where `ps` would show it. Run it once by hand with
+`--dry-run` first - it parses and reports and writes nothing, which is safe
+against a live mailbox:
 
 ```bash
 sudo bash -c 'set -a; . /etc/dmarc-ingest.env; exec sudo -E -H -u dmarc \
@@ -511,38 +588,70 @@ everything collected since the update, which restoring would discard.
 
 ## On Windows instead
 
-The same shape, with different names: IIS with the ASP.NET Core Hosting
-Bundle in place of Caddy, an application pool identity in place of the `dmarc`
-user, Task Scheduler in place of the systemd timer, win-acme for the
-certificate. `Proxy:Behind` still has to be `true` - IIS is a reverse proxy
-like any other.
+`deploy/bootstrap.ps1` is the same script with Windows names, run from an
+elevated PowerShell:
+
+```powershell
+.\bootstrap.ps1 -HostName dmarc.nextlayersec.io -Email you@nrgtechservices.com
+```
+
+What it sets up, and where:
+
+| | Linux | Windows |
+|---|---|---|
+| Runtime | the distribution's `aspnetcore-runtime-8.0` | a private copy under `C:\dmarc\dotnet`, installed with Microsoft's `dotnet-install.ps1` |
+| The app | `dmarc-web.service`, user `dmarc`, sandboxed | Windows service `dmarc-web`, account `NT AUTHORITY\LocalService`, writable only under `C:\dmarc\data` |
+| The proxy | Caddy as a systemd service | Caddy as a Windows service through WinSW, ports 80 and 443 opened in Windows Firewall |
+| Configuration | `/opt/dmarc/app/appsettings.Production.json` | `C:\dmarc\app\appsettings.Production.json` |
+| The collector | `dmarc-ingest.timer`, settings in `/etc/dmarc-ingest.env` | Task Scheduler task `DMARC ingest`, settings in `C:\dmarc\ingest.cmd` (readable by administrators and the service only) |
+| The certificate | `--make-ingest-cert` via OpenSSL | `-MakeIngestCert` via `New-SelfSignedCertificate` |
+
+Same arguments, PowerShell spelling: `-TenantId`, `-ClientId`, `-Mailbox`,
+`-IngestTenantId`, `-IngestClientId`, `-MakeIngestCert`, `-FromDir`, `-NoProxy`.
+
+Caddy needs ports 80 and 443. On a machine with IIS installed they belong to
+`http.sys`, and the script stops before installing Caddy and says so; either
+`Stop-Service W3SVC` and disable it, or run with `-NoProxy` and put IIS in
+front yourself (`Proxy:Behind` is already `true`).
 
 The one genuine difference is the secret store: on Windows it is DPAPI, keyed
-to the account that writes the secret. The application pool identity and
-whoever runs `dmarc dns set` must be the same account, or the app will find a
-credential it cannot decrypt and say so.
+to the account that writes the secret. The service runs as `LocalService`, so
+a provider token stored from an administrator's console with `dmarc dns set`
+is encrypted as that administrator and the service cannot read it. On Windows,
+add DNS providers through the Settings page, which stores them as the service.
+
+The Updates page's Install button has no Windows agent yet; update by running
+`bootstrap.ps1 -Release <tag>` after stopping the service, or wait for it.
 
 ## What has been tested, and what has not
 
 Honesty about the gaps, so you meet them knowing rather than at 11pm.
 
-**Run for real, on every push:** the `Install on a fresh Ubuntu` job in
-`.github/workflows/tests.yml` builds the two Linux artifacts the way the
-release does and runs `deploy/install.sh` on a clean Ubuntu runner under real
-systemd. It then checks that the service is active and sandboxed, answers on
+**Run for real, on every push:** three jobs in `.github/workflows/tests.yml`.
+`Install on a fresh Ubuntu` builds the two Linux artifacts the way the
+release does and runs `deploy/install.sh` on a clean runner under real
+systemd, then checks that the service is active and sandboxed, answers on
 loopback and refuses a proxied request, that the cookie keys landed beside
 the database, that the update agent's path unit wakes and refuses a bogus
-request, and that `rollback.sh` refuses a stamp that was never kept. Steps 2
-and 6's units and the agent in step 9 are not assembled from how the pieces
-are built; they have run.
+request, and that `rollback.sh` refuses a stamp that was never kept. `One
+command on a fresh Ubuntu` and `One command on a fresh Windows` run
+`bootstrap.sh` and `bootstrap.ps1` from nothing with everything switched on -
+Caddy in front (on `localhost`, with its internal certificate authority),
+sign-in against Entra's `common` tenant so the redirect is built for real,
+and the collector with a certificate the script makes - and check that a
+request through the proxy is redirected to Entra, that the collector reads
+its certificate and gets as far as authentication, and that running the
+script again only applies configuration. Steps 1 to 6 and the agent in step
+9 are not assembled from how the pieces are built; they have run, on both
+operating systems.
 
 **Not run:**
 
 - **Amazon Linux 2023.** There is no hosted runner for it. The package names
-  and the Caddy steps in step 1 come from Amazon's and Caddy's documentation,
-  not from a machine; `install.sh` itself does nothing distribution-specific
-  beyond the hint it prints when a tool is missing. Expect to spend the first
-  ten minutes on step 1.
+  and the Caddy steps in step 1 come from Amazon's and Caddy's documentation
+  and the live AL2023 package repository, not from a machine; `bootstrap.sh`
+  takes the `dnf` path there and the static-binary route for Caddy, and
+  neither has been run on Amazon Linux itself.
 - **The Caddyfile and the certificate**, and therefore anything reached from
   the internet rather than over loopback.
 - **Sign-in through Entra.** The code path is exercised by tests only in its
@@ -550,6 +659,10 @@ are built; they have run.
 - **`update.sh` end to end**, because it needs a published release to download
   and there is none yet. Its argument handling, backup and swap logic have
   been read and shellchecked, not run against a service.
-- **The secret store on Windows**; only the Linux AES-GCM path has run.
+- **The secret store on Windows** under the service account; only the Linux
+  AES-GCM path has run against real provider credentials.
+- **Windows Server itself.** `bootstrap.ps1` runs on the hosted Windows
+  runner, which is Windows Server 2022/2025 with an administrator shell; a
+  hardened domain-joined server with policies of its own has not been tried.
 
 See `OPEN-ISSUES.md` for the rest.

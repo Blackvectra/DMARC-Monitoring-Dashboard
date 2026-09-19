@@ -185,6 +185,11 @@ DMARC_TENANT_ID=
 DMARC_CLIENT_ID=
 DMARC_CERT_PATH=${ROOT}/data/ingest.pfx
 DMARC_CERT_PASSWORD=
+# Optional. Reports are attributed by the one shared address every domain
+# reports to (the mailbox itself, unless set here), or by per-domain
+# addresses under a reporting domain such as rua.example.com.
+DMARC_FALLBACK_ADDRESS=
+DMARC_REPORTING_DOMAIN=
 ENV
     chmod 0600 "$INGEST_ENV"
     echo "  wrote ${INGEST_ENV} (fill it in, then enable dmarc-ingest.timer)"
@@ -236,6 +241,9 @@ if [[ "$ok" != true ]]; then
     echo "  journalctl -u dmarc-web -n 50" >&2
     exit 1
 fi
+
+# Under bootstrap.sh the next steps are its job, and it says its own.
+[[ -n "${DMARC_BOOTSTRAP:-}" ]] && exit 0
 
 cat <<DONE
 
