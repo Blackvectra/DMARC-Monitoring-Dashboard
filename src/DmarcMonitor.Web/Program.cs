@@ -8,6 +8,14 @@ using Microsoft.AspNetCore.DataProtection;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// On Windows the app runs as a service (deploy/bootstrap.ps1 installs it as
+// one). Without this the process never tells the Service Control Manager it
+// has started, and the SCM kills it after thirty seconds as "failed to
+// respond" - a service that runs perfectly for half a minute and then dies,
+// which reads as a crash. On Linux, or when started from a shell anywhere,
+// this is a no-op.
+builder.Host.UseWindowsService();
+
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.AddAppAuthentication();
 

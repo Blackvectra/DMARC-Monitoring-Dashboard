@@ -56,7 +56,18 @@ broader is a larger blast radius for no gain.
 
 ### 3. Upload a certificate
 
-Create one — on Windows:
+The deployment scripts make one for you and print the file to upload:
+
+```bash
+sudo ./deploy/bootstrap.sh --host <your host> --make-ingest-cert          # Linux
+.\bootstrap.ps1 -HostName <your host> -MakeIngestCert                     # Windows
+```
+
+The private half lands where the collector runs (`/opt/dmarc/data/ingest.pfx`
+or `C:\dmarc\data\ingest.pfx`, readable by the service account only) and its
+password goes where the collector reads it. Upload the printed `.cer`.
+
+To make one by hand instead — on Windows:
 
 ```powershell
 $cert = New-SelfSignedCertificate `
@@ -127,6 +138,17 @@ dmarc ingest ^
   --dry-run
 ```
 
+On a machine set up by the deployment scripts the same values are already in
+the environment file (`/etc/dmarc-ingest.env`) or `C:\dmarc\ingest.cmd`, and
+the dry run is the command `bootstrap` printed, or `C:\dmarc\ingest.cmd --dry-run`.
+
+Reports are attributed to a domain by the address they were sent to. With
+one shared mailbox that every domain's `rua` points at - the usual shape -
+nothing more is needed: the mailbox itself is that address, and the run says
+so on its second line. If per-domain addresses such as
+`client.com@rua.example.com` are in use, pass `--reporting-domain
+rua.example.com` (or set `DMARC_REPORTING_DOMAIN`).
+
 `--dry-run` parses everything and reports what it found, writing nothing and
 moving nothing. Run it against the live mailbox as many times as you like.
 
@@ -149,12 +171,18 @@ check makes the second read harmless.
 
 ## Scheduling it
 
-Daily is enough — receivers send at most once a day per domain, most of them
-overnight.
+The deployment scripts schedule it once they know the mailbox, the tenant,
+the application id and the certificate: hourly, as `dmarc-ingest.timer` on
+Linux (`docs/DEPLOYING.md` step 6) and as the Task Scheduler task
+`DMARC ingest` on Windows, running as the service account. Hourly is more
+than enough; receivers send at most once a day per domain, most of them
+overnight, and a run that finds nothing costs nothing.
+
+By hand on Windows, if you are not using `bootstrap.ps1`:
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "C:\dmarc\dmarc.exe" `
-    -Argument "ingest --mailbox DMARC@nrgtechservices.com --db C:\dmarc\dmarc.db ..." 
+$action = New-ScheduledTaskAction -Execute "C:\dmarc\bin\dmarc.exe" `
+    -Argument "ingest --mailbox DMARC@nrgtechservices.com --db C:\dmarc\data\dmarc.db --cert C:\dmarc\data\ingest.pfx --tenant <id> --client-id <id>"
 $trigger = New-ScheduledTaskTrigger -Daily -At 6am
 Register-ScheduledTask -TaskName "DMARC ingest" -Action $action -Trigger $trigger `
     -User "NT AUTHORITY\SYSTEM" -RunLevel Highest

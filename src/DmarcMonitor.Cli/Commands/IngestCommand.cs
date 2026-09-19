@@ -24,8 +24,11 @@ public static class IngestCommand
         var clientId = Args.Value(args, "--client-id") ?? Environment.GetEnvironmentVariable("DMARC_CLIENT_ID");
         var certPath = Args.Value(args, "--cert") ?? Environment.GetEnvironmentVariable("DMARC_CERT_PATH");
         var certPassword = Args.Value(args, "--cert-password") ?? Environment.GetEnvironmentVariable("DMARC_CERT_PASSWORD");
-        var reportingDomain = Args.Value(args, "--reporting-domain") ?? "";
-        var fallback = Args.Value(args, "--fallback");
+        // An environment file with the line "DMARC_FALLBACK_ADDRESS=" is the
+        // template every install ships with, and it means "not set", not "the
+        // empty address" - which is what ?? alone made of it.
+        var reportingDomain = NonBlank(Args.Value(args, "--reporting-domain")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_REPORTING_DOMAIN")) ?? "";
+        var fallback = NonBlank(Args.Value(args, "--fallback")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_FALLBACK_ADDRESS"));
         var maxMessages = Args.Int(args, "--max", 500);
         var dryRun = Args.Flag(args, "--dry-run");
 
@@ -52,21 +55,17 @@ public static class IngestCommand
             return 66;
         }
 
-        if (string.IsNullOrWhiteSpace(reportingDomain) && string.IsNullOrWhiteSpace(fallback))
-        {
-            // Without either, nothing can be attributed and every report would
-            // be filed as unrecognised. Saying so now beats a run that reads
-            // the whole mailbox and stores nothing.
-            Console.Error.WriteLine("Give me --reporting-domain, --fallback, or both.");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("  --reporting-domain  the subdomain per-domain report addresses use,");
-            Console.Error.WriteLine("                      for example rua.nrgsecure.com");
-            Console.Error.WriteLine("  --fallback          a single shared address every domain reports to,");
-            Console.Error.WriteLine("                      for example dmarc@nrgtechservices.com");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("Without one of these no report can be attributed to a domain.");
-            return 64;
-        }
+        // Without a reporting domain or a shared address nothing can be
+        // attributed and every report would be filed as unrecognised. The
+        // commonest shape by far is one shared mailbox that every domain
+        // reports to - which is the mailbox being read - so that is the
+        // default, said out loud below. It used to be an error instead, which
+        // made the systemd unit and the documented command exit 64 on every
+        // machine that followed the docs.
+        var attributedBy = string.IsNullOrWhiteSpace(reportingDomain)
+            ? $"the shared address {fallback ?? mailbox} (set --reporting-domain or DMARC_REPORTING_DOMAIN if per-domain addresses are in use)"
+            : $"per-domain addresses under {reportingDomain}{(fallback is null ? "" : $", falling back to {fallback}")}";
+        fallback ??= string.IsNullOrWhiteSpace(reportingDomain) ? mailbox : null;
 
         var store = new ReportStore(dbPath);
         if (!dryRun && !await store.IsInitialisedAsync(ct).ConfigureAwait(false))
@@ -147,6 +146,7 @@ public static class IngestCommand
                     });
 
             Console.WriteLine($"Reading {mailbox}{(dryRun ? " (dry run: nothing will be written or moved)" : "")}");
+            Console.WriteLine($"Attributing reports by {attributedBy}");
             Console.WriteLine();
 
             IngestRunResult result;
@@ -180,6 +180,8 @@ public static class IngestCommand
         // null is honest about that; inventing a domain would file reports
         // against the wrong customer.
         static string? ResolveToken(string token) => null;
+
+        static string? NonBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     private static async Task<bool> IsStored(ReportStore store, string key, CancellationToken ct)

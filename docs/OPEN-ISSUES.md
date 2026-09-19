@@ -345,11 +345,23 @@ refuses a proxied request, and keeps its cookie keys beside the database
 where the sandbox can reach them. That is the Ubuntu half of `DEPLOYING.md`
 done for real.
 
+**One command, both operating systems.** `deploy/bootstrap.sh` and
+`deploy/bootstrap.ps1` do the whole path from a fresh machine - runtime,
+Caddy, the release, the service, TLS, the update agent, and as much of
+sign-in and the collector as they are handed - and two more CI jobs run them
+from nothing on Ubuntu and Windows runners with everything switched on:
+Caddy on `localhost` with its internal CA, sign-in against Entra's `common`
+tenant, and the collector with a certificate the script makes. Writing them
+found that the collector unit shipped a week earlier could not run at all
+(`dmarc ingest` refused to start without `--fallback` or
+`--reporting-domain`, which neither the unit nor the docs passed); the
+fallback now defaults to the mailbox and both come from the environment.
+
 Still assembled rather than run: **Amazon Linux 2023**, for which there is no
 hosted runner - its package names and the Caddy static-binary steps come from
-the vendors' documentation, not from a machine - the Caddyfile and
-certificate, and the Entra app registration. The doc says so in its own last
-section.
+the vendors' documentation and the live package repository, not from a
+machine - a real Entra tenant, a real mailbox, and a hardened Windows Server
+rather than the hosted runner. The doc says so in its own last section.
 
 ## 11. The apply path has never written to a real zone
 
