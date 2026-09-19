@@ -172,6 +172,21 @@ public static class IngestCommand
 
             Report(result, stored, dryRun);
             if (!dryRun) { await WarnUnassignedAsync(store, ct).ConfigureAwait(false); }
+
+            // Genuine reports and not one of them addressed to anything this
+            // deployment recognises means the shared address is wrong, not
+            // the mail. The messages were left in place, so this is the exit
+            // code that says "configure it and run again", not "data lost".
+            if (result.UnattributedCount > 0 && result.IngestedCount == 0 && result.DuplicateCount == 0)
+            {
+                Console.Error.WriteLine();
+                Console.Error.WriteLine($"No report was addressed to {fallback ?? "a recognised address"}. They were sent to:");
+                foreach (var a in result.UnattributedAddresses.Take(5)) { Console.Error.WriteLine($"  {a}"); }
+                Console.Error.WriteLine("Set --fallback (or DMARC_FALLBACK_ADDRESS) to the address in the domains' rua= tag,");
+                Console.Error.WriteLine("or --reporting-domain if per-domain addresses are in use. Nothing was moved.");
+                return 64;
+            }
+
             return result.Errors.Count > 0 ? 1 : 0;
         }
 
@@ -247,7 +262,23 @@ public static class IngestCommand
         Console.WriteLine($"  messages read      {result.MessagesRead}");
         Console.WriteLine($"  reports ingested   {result.IngestedCount}{(dryRun ? " (not written)" : $", {stored} stored")}");
         if (result.DuplicateCount > 0) { Console.WriteLine($"  already seen       {result.DuplicateCount}"); }
-        if (result.UnrecognisedCount > 0) { Console.WriteLine($"  not reports        {result.UnrecognisedCount}"); }
+        if (result.UnrecognisedCount > 0)
+        {
+            Console.WriteLine($"  not reports        {result.UnrecognisedCount}");
+            // Grouped by reason, so a mailbox full of one kind of thing is one
+            // line rather than a page, and the reason points at the cause.
+            foreach (var g in result.Reports.Where(r => r.Outcome == IngestOutcome.Unrecognised)
+                         .GroupBy(r => r.Reason).OrderByDescending(g => g.Count()).Take(5))
+            {
+                Console.WriteLine($"    {g.Count()}: {g.Key}");
+            }
+        }
+
+        if (result.UnattributedCount > 0)
+        {
+            Console.WriteLine($"  not attributed     {result.UnattributedCount} (genuine reports, left in the mailbox)");
+            Console.WriteLine($"    delivered to: {string.Join(", ", result.UnattributedAddresses.Take(5))}");
+        }
 
         if (result.QuarantinedCount > 0)
         {

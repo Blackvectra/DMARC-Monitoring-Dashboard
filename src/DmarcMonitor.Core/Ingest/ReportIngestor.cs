@@ -62,6 +62,15 @@ public enum IngestOutcome
     /// <summary>Not a report, or a report this version cannot read.</summary>
     Unrecognised,
 
+    /// <summary>
+    /// A genuine report delivered to an address this deployment does not
+    /// recognise at all: not a per-domain address, not the shared one. That is
+    /// almost always the shared address being configured wrong (an alias, a
+    /// group, a UPN), so the message is left where it is for the run after the
+    /// configuration is corrected rather than filed away as junk.
+    /// </summary>
+    Unattributed,
+
     /// <summary>The delivery address and the report disagree about the domain.</summary>
     Quarantined,
 }
@@ -85,6 +94,13 @@ public sealed record IngestedReport
 
     /// <summary>Plain-English explanation, safe to log or show an operator.</summary>
     public string Reason { get; init; } = "";
+
+    /// <summary>
+    /// The addresses the message was delivered to. Filled in for an
+    /// unattributed report, because that is exactly what the operator needs
+    /// to see to fix the configuration.
+    /// </summary>
+    public IReadOnlyList<string> DeliveredTo { get; init; } = [];
 }
 
 public sealed record IngestRunResult
@@ -106,6 +122,16 @@ public sealed record IngestRunResult
     public int QuarantinedCount => Reports.Count(r => r.Outcome == IngestOutcome.Quarantined);
     public int DuplicateCount => Reports.Count(r => r.Outcome == IngestOutcome.Duplicate);
     public int UnrecognisedCount => Reports.Count(r => r.Outcome == IngestOutcome.Unrecognised);
+    public int UnattributedCount => Reports.Count(r => r.Outcome == IngestOutcome.Unattributed);
+
+    /// <summary>The distinct addresses unattributed reports were delivered to, most common first.</summary>
+    public IReadOnlyList<string> UnattributedAddresses => Reports
+        .Where(r => r.Outcome == IngestOutcome.Unattributed)
+        .SelectMany(r => r.DeliveredTo)
+        .GroupBy(a => a, StringComparer.OrdinalIgnoreCase)
+        .OrderByDescending(g => g.Count())
+        .Select(g => g.Key)
+        .ToList();
 }
 
 /// <summary>
@@ -284,6 +310,7 @@ public sealed class ReportIngestor
             }
 
             var destination = ChooseDestination(fromThisMessage, processedId, unrecognisedId, quarantineId);
+            if (destination is null) { continue; }
             try
             {
                 await _mailbox.MoveMessageAsync(message.Id, destination, cancellationToken).ConfigureAwait(false);
@@ -320,14 +347,18 @@ public sealed class ReportIngestor
     }
 
     /// <summary>
-    /// Where a message goes once processed. Worst outcome wins: a message
-    /// carrying one good report and one quarantined report is quarantined, so
-    /// the thing worth looking at is not buried in the processed folder.
+    /// Where a message goes once processed, or null to leave it where it is.
+    /// Worst outcome wins: a message carrying one good report and one
+    /// quarantined report is quarantined, so the thing worth looking at is not
+    /// buried in the processed folder. An unattributed report stays put: moving
+    /// it to the unrecognised folder would make a configuration mistake
+    /// permanent, because nothing reads that folder again.
     /// </summary>
-    private static string ChooseDestination(
+    private static string? ChooseDestination(
         List<IngestedReport> reports, string processed, string unrecognised, string quarantine)
     {
         if (reports.Exists(r => r.Outcome == IngestOutcome.Quarantined)) { return quarantine; }
+        if (reports.Exists(r => r.Outcome == IngestOutcome.Unattributed)) { return null; }
         if (reports.Count == 0) { return unrecognised; }
         if (reports.TrueForAll(r => r.Outcome == IngestOutcome.Unrecognised)) { return unrecognised; }
         return processed;
@@ -379,6 +410,11 @@ public sealed class ReportIngestor
                 ReportId = report.Metadata.ReportId,
                 Reason = attribution.Reason,
             };
+        }
+
+        if (IsUnattributed(attribution))
+        {
+            return Unattributed(message, extracted.FileName, ReportKind.DmarcAggregate, report.Policy.Domain);
         }
 
         if (!attribution.ShouldIngest)
@@ -441,6 +477,11 @@ public sealed class ReportIngestor
                 ReportId = report.ReportId,
                 Reason = attribution.Reason,
             };
+        }
+
+        if (IsUnattributed(attribution))
+        {
+            return Unattributed(message, extracted.FileName, ReportKind.TlsRpt, domain);
         }
 
         if (!attribution.ShouldIngest)
@@ -527,4 +568,34 @@ public sealed class ReportIngestor
         Outcome = IngestOutcome.Unrecognised,
         Reason = reason,
     };
+
+    /// <summary>
+    /// An address of no recognised shape. A per-domain address whose token
+    /// resolves to nothing is different: that is the expected tail after a
+    /// domain is removed, and filing it away is right.
+    /// </summary>
+    private static bool IsUnattributed(AttributionResult attribution) =>
+        attribution.Outcome == AttributionOutcome.UnknownAddress && string.IsNullOrEmpty(attribution.Token);
+
+    private static IngestedReport Unattributed(MailMessage message, string fileName, ReportKind kind, string claimedDomain) => new()
+    {
+        MessageId = message.Id,
+        FileName = fileName,
+        Outcome = IngestOutcome.Unattributed,
+        Kind = kind,
+        Domain = (claimedDomain ?? "").Trim().TrimEnd('.').ToLowerInvariant(),
+        DeliveredTo = message.ToAddresses.Select(CleanAddress).Where(a => a.Length > 0).ToList(),
+        Reason = "A genuine report, but delivered to an address that is neither the shared reporting address "
+               + "nor a per-domain one. Left in the mailbox; set the shared address to the one it was sent to "
+               + "and it is ingested on the next run.",
+    };
+
+    private static string CleanAddress(string address)
+    {
+        var cleaned = (address ?? "").Trim();
+        var open = cleaned.LastIndexOf('<');
+        var close = cleaned.LastIndexOf('>');
+        if (open >= 0 && close > open) { cleaned = cleaned[(open + 1)..close].Trim(); }
+        return cleaned;
+    }
 }

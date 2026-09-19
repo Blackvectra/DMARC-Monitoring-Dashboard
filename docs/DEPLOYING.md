@@ -390,8 +390,12 @@ DMARC_REPORTING_DOMAIN=
 
 The last two say how a report is attributed to a domain and are usually left
 empty: every domain's `rua` points at the one shared mailbox, so the mailbox
-itself is the address. Set `DMARC_REPORTING_DOMAIN` only if per-domain
-addresses like `client.com@rua.example.com` are in use.
+itself is the address. Set `DMARC_FALLBACK_ADDRESS` if the `rua` address is an
+alias or group rather than the mailbox's own address, and
+`DMARC_REPORTING_DOMAIN` only if per-domain addresses like
+`client.com@rua.example.com` are in use. Getting it wrong loses nothing: reports
+to an address the collector does not recognise are left in the mailbox and the
+run says which address to set.
 
 `dmarc-ingest.service` reads the file and runs `dmarc ingest` as the `dmarc`
 account with those in its environment, which keeps the certificate password

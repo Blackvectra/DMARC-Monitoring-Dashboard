@@ -210,6 +210,78 @@ public sealed class ReportIngestorTests
     }
 
     [Fact]
+    public async Task LeavesAGenuineReportToAnUnknownAddressInTheMailbox()
+    {
+        // The shared address is configured as the mailbox, but the rua= tag
+        // points at an alias of it. Filing the report as unrecognised would
+        // lose it for good: nothing reads that folder again. It stays put,
+        // says where it was sent, and the run after the fix picks it up.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", "DMARC Reports <dmarc-reports@nrgtechservices.com>"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(
+            mailbox, Options(fallback: "dmarc@nrgtechservices.com"), resolve: _ => null).RunAsync();
+
+        var report = Assert.Single(result.Reports);
+        Assert.Equal(IngestOutcome.Unattributed, report.Outcome);
+        Assert.Equal(ReportKind.DmarcAggregate, report.Kind);
+        Assert.Equal("nrgtechservices.com", report.Domain);
+        Assert.Equal(["dmarc-reports@nrgtechservices.com"], report.DeliveredTo);
+        Assert.Equal(1, result.UnattributedCount);
+        Assert.Equal(["dmarc-reports@nrgtechservices.com"], result.UnattributedAddresses);
+        Assert.Equal(0, result.UnrecognisedCount);
+        Assert.False(mailbox.Moved.ContainsKey("m1"));
+
+        // Corrected configuration, same mailbox: ingested and filed.
+        var again = await Ingestor(
+            mailbox, Options(fallback: "dmarc-reports@nrgtechservices.com"), resolve: _ => null).RunAsync();
+
+        Assert.Equal(1, again.IngestedCount);
+        Assert.Equal("DMARC-Processed", mailbox.Moved["m1"]);
+    }
+
+    [Fact]
+    public async Task StillFilesAReportToAStaleIssuedAddressAsUnrecognised()
+    {
+        // A per-domain address whose token no longer resolves is the expected
+        // tail after a domain is removed, not a configuration mistake, so it
+        // is filed away rather than re-read every hour for ever.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"aaaaaaaaaaaaaaaa@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox, Options(fallback: "dmarc@nrgtechservices.com"), resolve: _ => null).RunAsync();
+
+        Assert.Equal(0, result.UnattributedCount);
+        Assert.Equal(1, result.UnrecognisedCount);
+        Assert.Equal("DMARC-Unrecognised", mailbox.Moved["m1"]);
+    }
+
+    [Fact]
+    public async Task AQuarantinedReportStillOutranksAnUnattributedOne()
+    {
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", "dmarc-reports@nrgtechservices.com"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")),
+            FakeMailboxClient.Attachment("tls.json", Fixture("google-tlsrpt.json")));
+        mailbox.Add(
+            Message("m2", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(
+            mailbox, Options(fallback: "dmarc@nrgtechservices.com"),
+            resolve: t => t == Token ? "someone-else.com" : null).RunAsync();
+
+        Assert.Equal(2, result.UnattributedCount);
+        Assert.False(mailbox.Moved.ContainsKey("m1"));
+        Assert.Equal("DMARC-Quarantine", mailbox.Moved["m2"]);
+    }
+
+    [Fact]
     public async Task IngestsViaTheSharedFallbackAddress()
     {
         // A deployment that has not moved to per-domain addressing still works.

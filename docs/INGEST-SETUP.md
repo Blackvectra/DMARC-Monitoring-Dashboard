@@ -145,9 +145,18 @@ the dry run is the command `bootstrap` printed, or `C:\dmarc\ingest.cmd --dry-ru
 Reports are attributed to a domain by the address they were sent to. With
 one shared mailbox that every domain's `rua` points at - the usual shape -
 nothing more is needed: the mailbox itself is that address, and the run says
-so on its second line. If per-domain addresses such as
+so on its second line. If the `rua` address is not literally the mailbox's
+own address - an alias, a distribution group that delivers into it, or you
+gave `--mailbox` the account's UPN - pass the address in the `rua` tag as
+`--fallback` (or set `DMARC_FALLBACK_ADDRESS`). If per-domain addresses such as
 `client.com@rua.example.com` are in use, pass `--reporting-domain
 rua.example.com` (or set `DMARC_REPORTING_DOMAIN`).
+
+Getting this wrong is safe. A genuine report sent to an address the collector
+does not recognise is counted as **not attributed**, listed with the address
+it was sent to, and left in the mailbox rather than filed away; when none at
+all could be attributed the run exits 64 and says which address to set. Fix
+the address and the next run ingests them.
 
 `--dry-run` parses everything and reports what it found, writing nothing and
 moving nothing. Run it against the live mailbox as many times as you like.
