@@ -1,8 +1,11 @@
 @page "/import"
 @using DmarcMonitor.Core.Ingest
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
 @using DmarcMonitor.Web.Data
 @inject ImportUiService Importer
 @inject ReportStoreConnection Db
+@inject OrgContext Org
 @rendermode InteractiveServer
 
 <PageTitle>Import — DMARC Monitor</PageTitle>
@@ -27,6 +30,18 @@
 }
 else
 {
+    @if (_access is not null)
+    {
+        @* Said before anything is dropped: a report for a domain nobody has
+           seen creates that domain, and which organisation it lands in is
+           decided here, not discovered on the Clients page afterwards. *@
+        <p class="sub">
+            Domains not seen before are filed under
+            <strong>@(_access.Current?.Name ?? _access.Visible.FirstOrDefault(o => o.Slug == OrgContext.OrganisationFor(_access))?.Name ?? OrgContext.OrganisationFor(_access))</strong>@(_access is { IsMaster: true, Current: null, Visible.Count: > 1 } ? " — switch organisation in the sidebar to file them elsewhere." : ".")
+            Domains already known keep their client and organisation.
+        </p>
+    }
+
     <section>
         @* The file input sits invisibly over the whole panel, so dropping and
            clicking both work with no script of our own: a file input accepts
@@ -159,6 +174,18 @@ else
     private string? _problem;
     private IReadOnlyList<string> _unassigned = [];
     private CancellationTokenSource? _cts;
+    private OrganisationAccess? _access;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Db.Exists) { return; }
+        try { _access = await Org.GetAsync(); }
+        catch (Exception) { _access = null; }
+    }
+
+    private string Organisation => _access is null
+        ? DmarcMonitor.Core.Storage.ReportStore.DefaultTenantSlug
+        : OrgContext.OrganisationFor(_access);
 
     private async Task UploadAsync(InputFileChangeEventArgs e)
     {
@@ -179,7 +206,7 @@ else
         if (files.Count == 0) { return; }
 
         await RunAsync(
-            (progress, ct) => Importer.ImportUploadsAsync(files, progress, ct));
+            (progress, ct) => Importer.ImportUploadsAsync(files, Organisation, progress, ct));
     }
 
     private async Task ImportFolderAsync()
@@ -196,7 +223,7 @@ else
             return;
         }
 
-        await RunAsync((progress, ct) => Importer.ImportAsync(folder, progress, ct));
+        await RunAsync((progress, ct) => Importer.ImportAsync(folder, Organisation, progress, ct));
     }
 
     private async Task RunAsync(Func<IProgress<int>, CancellationToken, Task<ImportResult>> import)
@@ -216,7 +243,7 @@ else
             });
 
             _result = await import(progress, _cts.Token);
-            _unassigned = await Importer.GetUnassignedDomainsAsync();
+            _unassigned = await Importer.GetUnassignedDomainsAsync(_access?.TenantId);
         }
         catch (OperationCanceledException)
         {

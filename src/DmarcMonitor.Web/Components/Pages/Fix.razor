@@ -2,10 +2,12 @@
 @using DmarcMonitor.Core.Remediation
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Web.Data
+@using DmarcMonitor.Web.Auth
 @using Microsoft.AspNetCore.Components.Authorization
 @inject RemediationUiService Fixes
 @inject ReportStoreConnection Db
 @inject AuthenticationStateProvider Auth
+@inject OrgContext Org
 @rendermode InteractiveServer
 
 <PageTitle>Fix — DMARC Monitor</PageTitle>
@@ -353,6 +355,7 @@ else
     private readonly Dictionary<string, DomainFixes> _domains = new(StringComparer.OrdinalIgnoreCase);
     private int _pending;
     private bool _loaded;
+    private string? _tenant;
     private IReadOnlyList<AppliedChange>? _history;
     private string? _error;
     private string? _message;
@@ -434,10 +437,11 @@ else
         _error = null;
         try
         {
-            // The list first, which is a database read and instant, then the
-            // DNS for each one behind it.
-            _rows = await Fixes.DomainsAsync();
-            _history = await Fixes.HistoryAsync();
+            // The scope first, then the list, which is a database read and
+            // instant, then the DNS for each one behind it.
+            _tenant = (await Org.GetAsync()).TenantId;
+            _rows = await Fixes.DomainsAsync(_tenant);
+            _history = await Fixes.HistoryAsync(_tenant);
             _pending = _rows.Count;
             _loaded = true;
             await InvokeAsync(StateHasChanged);
@@ -454,7 +458,7 @@ else
                 // means the page cannot repaint while it waits - which is the
                 // whole point of filling the list in as answers arrive.
                 var planned = await Task.Run(
-                    () => Task.WhenAll(batch.Select(r => Fixes.PlanAsync(r.Domain, r, null))));
+                    () => Task.WhenAll(batch.Select(r => Fixes.PlanAsync(r.Domain, r, null, _tenant))));
 
                 foreach (var plan in planned) { _domains[plan.Domain] = plan; }
                 _pending -= batch.Length;
@@ -476,7 +480,7 @@ else
     {
         if (string.IsNullOrEmpty(policy) || !_domains.TryGetValue(domain, out var current)) { return; }
 
-        _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, policy);
+        _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, policy, _tenant);
     }
 
     private async Task<string> WhoAsync()

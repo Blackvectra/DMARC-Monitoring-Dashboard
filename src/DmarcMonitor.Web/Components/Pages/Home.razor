@@ -6,11 +6,16 @@
 @using DmarcMonitor.Core.Charting
 @using DmarcMonitor.Core.Reporting
 @using DmarcMonitor.Core.Rollout
+@using DmarcMonitor.Core.Storage
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
 @using DmarcMonitor.Web.Components.Charts
 @using DmarcMonitor.Web.Data
 @inject TriageService Triage
 @inject TimeSeriesService Series
 @inject ReportStoreConnection Db
+@inject OrgContext Org
+@inject OnboardingService Onboarding
 @rendermode InteractiveServer
 
 <PageTitle>Triage — DMARC Monitor</PageTitle>
@@ -22,6 +27,22 @@
            domains hides the one that is broken.</p>
     </div>
     <div class="head-actions">
+        @* One client at a time, when there is more than one to choose from.
+           The whole page follows it: the dial, the chart, the rows. An MSP is
+           asked "how is Morton doing", and the answer must not be the estate. *@
+        @if (_clients.Count > 1)
+        {
+            <label>
+                Client
+                <select @bind="_client" @bind:after="LoadAsync" aria-label="Client">
+                    <option value="">All clients</option>
+                    @foreach (var c in _clients)
+                    {
+                        <option value="@c.Slug">@c.Name</option>
+                    }
+                </select>
+            </label>
+        }
         <label>
             Window
             <select @bind="_days" @bind:after="LoadAsync">
@@ -115,10 +136,10 @@ else
 
     @if (_series is not null && _series.Count > 0)
     {
-        <VolumeChart Points="_series" Caption="@($"All domains, last {_days} days")" />
+        <VolumeChart Points="_series" Caption="@($"{Subject}, last {_days} days")" />
 
         <div class="chart">
-            <figcaption>Where this estate stands</figcaption>
+            <figcaption>Where @(string.IsNullOrEmpty(_client) ? "this estate" : "this client") stands</figcaption>
             <ProportionBar Slices="@Severity()" Empty="No domains yet." />
         </div>
     }
@@ -128,10 +149,10 @@ else
        severity is the first thing anybody filters by, so it is the filter. *@
     <div class="counts">
         <button type="button" class="count @(_level is null ? "on" : "")"
-                @onclick="() => Filter(null)">@_rows.Count all</button>
+                @onclick="() => Filter(null)">@Scoped.Count all</button>
         @foreach (var level in new[] { TriageLevel.Urgent, TriageLevel.Act, TriageLevel.Watch, TriageLevel.OnTrack, TriageLevel.Fine })
         {
-            var n = _rows.Count(r => r.Level == level);
+            var n = Scoped.Count(r => r.Level == level);
             @if (n > 0)
             {
                 var chosen = _level == level;
@@ -154,7 +175,7 @@ else
            search box reads as "no domains", which is not what happened. *@
         <p class="muted">
             Nothing matches @(_level is null ? "" : $"\"{Label(_level.Value)}\"")@(_level is not null && _find.Length > 0 ? " and " : "")@(_find.Length > 0 ? $"\"{_find}\"" : "").
-            <button class="linkish" @onclick="ClearFilters">Show all @_rows.Count</button>
+            <button class="linkish" @onclick="ClearFilters">Show all @Scoped.Count</button>
         </p>
     }
     else
@@ -165,6 +186,7 @@ else
             <tr>
                 <th></th>
                 <th>Domain</th>
+                @if (AcrossOrganisations) { <th>Organisation</th> }
                 <th>Client</th>
                 <th>Policy</th>
                 <th class="num">Messages</th>
@@ -179,6 +201,7 @@ else
                 <tr class="@Css(row.Level)">
                     <td><span class="pip @Css(row.Level)" title="@Label(row.Level)"></span></td>
                     <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
+                    @if (AcrossOrganisations) { <td class="muted">@row.Organisation</td> }
                     @* Onboarding by domain name makes these identical for most
                        rows, and a column repeating the one beside it eighteen
                        times is noise in the place the eye scans first. The
@@ -220,10 +243,10 @@ else
     </table>
     </div>
 
-    @if (shown.Count < _rows.Count)
+    @if (shown.Count < Scoped.Count)
     {
         <p class="sub">
-            Showing @shown.Count of @_rows.Count.
+            Showing @shown.Count of @Scoped.Count.
             <button class="linkish" @onclick="ClearFilters">Show all</button>
         </p>
     }
@@ -231,6 +254,8 @@ else
 }
 
 @code {
+    private OrganisationAccess? _access;
+    private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
     private IReadOnlyList<DomainTriage>? _rows;
     private IReadOnlyList<DayPoint>? _series;
     private VolumeBreakdown? _breakdown;
@@ -242,9 +267,23 @@ else
         new Dictionary<string, IReadOnlyList<DayPoint>>();
     private string? _error;
     private int _days = 14;
+    private string _client = "";
 
     private TriageLevel? _level;
     private string _find = "";
+
+    /// <summary>The rows within the chosen client, before severity and search.</summary>
+    private IReadOnlyList<DomainTriage> Scoped =>
+        _rows is null ? []
+        : string.IsNullOrEmpty(_client) ? _rows
+        : [.. _rows.Where(r => r.ClientSlug.Equals(_client, StringComparison.OrdinalIgnoreCase))];
+
+    /// <summary>A master looking at every organisation at once needs to be told which is which.</summary>
+    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+
+    private string Subject =>
+        !string.IsNullOrEmpty(_client) ? _clients.FirstOrDefault(c => c.Slug == _client)?.Name ?? "This client"
+        : _access?.Current?.Name ?? "All domains";
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
@@ -274,20 +313,19 @@ else
     /// </remarks>
     private IReadOnlyList<Slice> Severity()
     {
-        if (_rows is null) { return []; }
-
+        var rows = Scoped;
         return
         [
-            new Slice("losing mail", _rows.Count(r => r.Level == TriageLevel.Urgent), "urgent"),
-            new Slice("needs work", _rows.Count(r => r.Level == TriageLevel.Act), "act"),
-            new Slice("worth a look", _rows.Count(r => r.Level == TriageLevel.Watch), "watch"),
-            new Slice("rollout on track", _rows.Count(r => r.Level == TriageLevel.OnTrack), "ontrack"),
-            new Slice("fine", _rows.Count(r => r.Level == TriageLevel.Fine), "fine"),
+            new Slice("losing mail", rows.Count(r => r.Level == TriageLevel.Urgent), "urgent"),
+            new Slice("needs work", rows.Count(r => r.Level == TriageLevel.Act), "act"),
+            new Slice("worth a look", rows.Count(r => r.Level == TriageLevel.Watch), "watch"),
+            new Slice("rollout on track", rows.Count(r => r.Level == TriageLevel.OnTrack), "ontrack"),
+            new Slice("fine", rows.Count(r => r.Level == TriageLevel.Fine), "fine"),
         ];
     }
 
     /// <summary>
-    /// The rows after the severity filter and the search box.
+    /// The rows after the client, the severity filter and the search box.
     /// </summary>
     /// <remarks>
     /// Ordering is left exactly as the triage service returned it. Worst first
@@ -296,12 +334,10 @@ else
     /// </remarks>
     private IReadOnlyList<DomainTriage> Shown()
     {
-        if (_rows is null) { return []; }
-
-        var rows = _level is null ? _rows : _rows.Where(r => r.Level == _level).ToList();
+        var rows = _level is null ? Scoped : [.. Scoped.Where(r => r.Level == _level)];
 
         var find = _find.Trim();
-        if (find.Length == 0) { return [.. rows]; }
+        if (find.Length == 0) { return rows; }
 
         // Client as well as domain: an operator who has just been telephoned
         // knows the customer's name, not which of their four domains it is.
@@ -329,7 +365,19 @@ else
 
         try
         {
-            _rows = await Triage.GetAsync(_days);
+            // The scope first, before anything is read: every query below
+            // carries it, and a page that read first and scoped afterwards
+            // would have already fetched what it must not show.
+            _access = await Org.GetAsync();
+            var tenant = _access.TenantId;
+
+            // Unassigned is only a client worth choosing while it holds
+            // something; empty, it is an eleventh customer nobody can bill.
+            _clients = [.. (await Onboarding.GetClientsAsync(tenant))
+                .Where(c => c.Slug != ReportStore.UnassignedClientSlug || c.Domains > 0)];
+            if (!string.IsNullOrEmpty(_client) && _clients.All(c => c.Slug != _client)) { _client = ""; }
+
+            _rows = await Triage.GetAsync(_days, tenant);
         }
         catch (Exception ex)
         {
@@ -343,18 +391,21 @@ else
 
         try
         {
-            _series = await Series.EstateAsync(_days);
-            _sparks = await Series.PerDomainAsync(_days);
-            _breakdown = await Series.BreakdownAsync(days: _days);
+            var tenant = _access.TenantId;
+            var client = string.IsNullOrEmpty(_client) ? null : _client;
+
+            _series = await Series.EstateAsync(_days, tenant, client);
+            _sparks = await Series.PerDomainAsync(_days, tenant);
+            _breakdown = await Series.BreakdownAsync(days: _days, tenantId: tenant, clientSlug: client);
 
             // One more than the panel shows, so "N more not shown" can be
             // honest about whether there are any rather than guessing.
             const int shown = 6;
-            var sources = await Series.SourcesAsync(days: _days, top: shown + 1);
+            var sources = await Series.SourcesAsync(days: _days, top: shown + 1, tenantId: tenant, clientSlug: client);
             _sourceCount = sources.Count;
             _sources = [.. sources.Take(shown)];
 
-            (_active, _inactive) = await Series.DomainActivityAsync(_days);
+            (_active, _inactive) = await Series.DomainActivityAsync(_days, tenant, client);
         }
         catch (Exception)
         {

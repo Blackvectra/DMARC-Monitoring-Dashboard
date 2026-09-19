@@ -1,20 +1,25 @@
 @inherits LayoutComponentBase
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
 @inject IConfiguration Configuration
+@inject OrgContext Org
 
 @*
-    The shell. Two jobs beyond holding the page: say which navigation is daily
-    work and which is setup, and get out of the way on a narrow screen.
+    The shell. Three jobs beyond holding the page: say which navigation is
+    daily work and which is setup, say which organisation is being looked at
+    and let a person who may see more than one switch, and get out of the way
+    on a narrow screen.
 
     The nine links used to be one flat list, which made "Triage" - where every
     morning starts - look like the same kind of thing as "Updates", which is
     touched twice a year.
 
-    The menu and theme buttons call plain JavaScript rather than carrying
-    @@onclick. This layout has no render mode: pages are interactive islands
-    inside a statically rendered shell, so a Blazor handler here is never wired
-    up and does nothing when clicked. That is how the first version shipped,
-    and only driving it in a real browser caught it - both buttons rendered
-    perfectly and neither worked.
+    The menu, theme and organisation controls call plain JavaScript rather
+    than carrying @@onclick. This layout has no render mode: pages are
+    interactive islands inside a statically rendered shell, so a Blazor handler
+    here is never wired up and does nothing when clicked. That is how the first
+    version shipped, and only driving it in a real browser caught it - both
+    buttons rendered perfectly and neither worked.
 *@
 
 <div class="app">
@@ -32,6 +37,34 @@
             <span class="brand-mark">DM</span>
             <span class="brand-name">DMARC Monitor</span>
         </div>
+
+        @* Which organisation this is. A switcher for anybody who may see more
+           than one; a plain name for everybody else, because a select with one
+           option is a control that does nothing. *@
+        @if (_access is { HasAccess: true })
+        {
+            <div class="org">
+                @if (_access.CanSwitch)
+                {
+                    <label class="org-label" for="org-switch">Organisation</label>
+                    <select id="org-switch" class="org-switch" onchange="dmarcShell.switchOrg(this.value)" aria-label="Organisation">
+                        @if (_access.IsMaster)
+                        {
+                            <option value="" selected="@(_access.Current is null)">All organisations</option>
+                        }
+                        @foreach (var o in _access.Visible)
+                        {
+                            <option value="@o.Slug" selected="@(_access.Current?.Slug == o.Slug)">@o.Name</option>
+                        }
+                    </select>
+                }
+                else if (_access.Current is not null)
+                {
+                    <p class="org-label">Organisation</p>
+                    <p class="org-name">@_access.Current.Name</p>
+                }
+            </div>
+        }
 
         @* What you open to find out what needs doing today. *@
         <p class="nav-group">Daily</p>
@@ -77,10 +110,45 @@
                 <code>appsettings.json</code> to turn on Microsoft sign-in.
             </div>
         }
-        @Body
+
+        @if (_access is { HasAccess: false })
+        {
+            @* Signed in, and in no organisation's group. The page is withheld
+               rather than rendered empty, and it says what would change that,
+               because "no domains" would read as a product with nothing in it
+               rather than a person with nothing granted. *@
+            <div class="empty">
+                <h2>No organisation</h2>
+                <p>You are signed in, but you are not in the security group of any organisation here, so there
+                   is nothing you can see.</p>
+                <p class="muted">Ask whoever runs this to add you to an organisation's group in Microsoft Entra,
+                   or to the master group named in <code>Auth:MasterGroupId</code>. Sign out and back in once
+                   they have.</p>
+            </div>
+        }
+        else
+        {
+            @Body
+        }
     </main>
 </div>
 
 @code {
+    private OrganisationAccess? _access;
+
     private bool EntraConfigured => DmarcMonitor.Web.Auth.AuthSetup.IsEntraConfigured(Configuration);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _access = await Org.GetAsync();
+        }
+        catch (Exception)
+        {
+            // No database yet, or one that cannot be read. The pages say so
+            // themselves; the shell must still draw so they can.
+            _access = null;
+        }
+    }
 }

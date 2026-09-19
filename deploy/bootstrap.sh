@@ -41,6 +41,10 @@
 #   --tenant-id <id> --client-id <id>
 #                               Entra sign-in (docs/DEPLOYING.md step 5). Until both
 #                               are set the app serves nothing but this machine.
+#   --master-group-id <id>      The Entra security group whose members see every
+#                               organisation (docs/DEPLOYING.md step 5).
+#   --organisation <slug>       The organisation this machine's collector files new
+#                               domains under. Default: local.
 #   --mailbox <address> --ingest-tenant-id <id> --ingest-client-id <id>
 #   --cert <path.pfx>           The collector (docs/INGEST-SETUP.md). The .pfx is
 #                               copied under the install root, owned by the service
@@ -71,7 +75,7 @@ USER_NAME="${DMARC_USER:-dmarc}"
 
 HOST=""; EMAIL=""; RELEASE="latest"; FROM_DIR=""
 PROVIDER_NAME=""; TLS_REPORT_ADDRESS=""
-TENANT_ID=""; CLIENT_ID=""
+TENANT_ID=""; CLIENT_ID=""; MASTER_GROUP_ID=""; ORGANISATION=""
 MAILBOX=""; INGEST_TENANT_ID=""; INGEST_CLIENT_ID=""; CERT=""; CERT_PASSWORD="${DMARC_CERT_PASSWORD:-}"
 FALLBACK_ADDRESS=""; REPORTING_DOMAIN=""
 MAKE_CERT=false; PROXY=true; UPDATE_AGENT=true
@@ -99,6 +103,8 @@ while (( $# )); do
         --tls-report-address) need_value "$1" "${2:-}"; TLS_REPORT_ADDRESS="$2"; shift 2 ;;
         --tenant-id)          need_value "$1" "${2:-}"; TENANT_ID="$2"; shift 2 ;;
         --client-id)          need_value "$1" "${2:-}"; CLIENT_ID="$2"; shift 2 ;;
+        --master-group-id)    need_value "$1" "${2:-}"; MASTER_GROUP_ID="$2"; shift 2 ;;
+        --organisation)       need_value "$1" "${2:-}"; ORGANISATION="$2"; shift 2 ;;
         --mailbox)            need_value "$1" "${2:-}"; MAILBOX="$2"; shift 2 ;;
         --ingest-tenant-id)   need_value "$1" "${2:-}"; INGEST_TENANT_ID="$2"; shift 2 ;;
         --ingest-client-id)   need_value "$1" "${2:-}"; INGEST_CLIENT_ID="$2"; shift 2 ;;
@@ -326,6 +332,7 @@ echo "== configuration"
 [[ -n "$HOST" ]]               && settings_set "MtaSts:PolicyHost" "$HOST"
 [[ -n "$PROVIDER_NAME" ]]      && settings_set "Reporting:ProviderName" "$PROVIDER_NAME"
 [[ -n "$TLS_REPORT_ADDRESS" ]] && settings_set "Reporting:TlsReportAddress" "$TLS_REPORT_ADDRESS"
+[[ -n "$MASTER_GROUP_ID" ]]    && settings_set "Auth:MasterGroupId" "$MASTER_GROUP_ID" && echo "   master group: ${MASTER_GROUP_ID} sees every organisation"
 existing_tenant="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); a=d.get("AzureAd",{}); print(a.get("TenantId","") if a.get("ClientId") else "")' "$SETTINGS" 2>/dev/null || true)"
 if [[ -n "$TENANT_ID" ]]; then
     settings_set "AzureAd:TenantId" "$TENANT_ID" "AzureAd:ClientId" "$CLIENT_ID"
@@ -400,7 +407,7 @@ if [[ -n "$CERT" && "$CERT" != "${ROOT}/data/ingest.pfx" ]]; then
     CERT="${ROOT}/data/ingest.pfx"
 fi
 
-if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK_ADDRESS$REPORTING_DOMAIN" ]]; then
+if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK_ADDRESS$REPORTING_DOMAIN$ORGANISATION" ]]; then
     echo "== collector"
     [[ -n "$MAILBOX" ]]          && env_set DMARC_MAILBOX "$MAILBOX"
     [[ -n "$INGEST_TENANT_ID" ]] && env_set DMARC_TENANT_ID "$INGEST_TENANT_ID"
@@ -409,6 +416,7 @@ if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK
     [[ -n "$CERT_PASSWORD" ]]    && env_set DMARC_CERT_PASSWORD "$CERT_PASSWORD"
     [[ -n "$FALLBACK_ADDRESS" ]] && env_set DMARC_FALLBACK_ADDRESS "$FALLBACK_ADDRESS"
     [[ -n "$REPORTING_DOMAIN" ]] && env_set DMARC_REPORTING_DOMAIN "$REPORTING_DOMAIN"
+    [[ -n "$ORGANISATION" ]]     && env_set DMARC_ORGANISATION "$ORGANISATION"
     chmod 0600 "$INGEST_ENV"
 
     # Enabled only when everything it needs is known; a timer firing a

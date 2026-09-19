@@ -1,8 +1,10 @@
 @page "/sources"
 @using DmarcMonitor.Core.Intelligence
 @using DmarcMonitor.Web.Data
+@using DmarcMonitor.Web.Auth
 @inject CorrelationService Correlation
 @inject ReportStoreConnection Db
+@inject OrgContext Org
 @rendermode InteractiveServer
 
 <PageTitle>Sources — DMARC Monitor</PageTitle>
@@ -116,7 +118,10 @@ else
 
         try
         {
-            _rows = await Correlation.GetFailingSourcesAsync(_days);
+            // Across this organisation's clients, which is the point of the
+            // page, and never across organisations, which would be a leak.
+            var access = await Org.GetAsync();
+            _rows = await Correlation.GetFailingSourcesAsync(_days, tenantId: access.TenantId);
             _crossClient = [.. _rows.Where(r => r.IsCrossClient)];
         }
         catch (Exception ex)

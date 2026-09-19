@@ -46,8 +46,19 @@ public sealed class DatabaseMigrationTests : IDisposable
 
         // Undo everything at or after the version, so this is genuinely a
         // database that never had it rather than one that has it hidden.
-        foreach (var migration in DatabaseMigrations.All.Where(m => string.CompareOrdinal(m.Version, upToVersion) >= 0))
+        // Newest first, so a column added by one migration is gone before the
+        // table it was added to is dropped by an earlier one's undo.
+        foreach (var migration in DatabaseMigrations.All
+                     .Where(m => string.CompareOrdinal(m.Version, upToVersion) >= 0)
+                     .OrderByDescending(m => m.Version, StringComparer.Ordinal))
         {
+            foreach (var (table, column) in ColumnsAddedIn(migration.Sql))
+            {
+                await using var drop = db.CreateCommand();
+                drop.CommandText = $"ALTER TABLE {table} DROP COLUMN {column}";
+                await drop.ExecuteNonQueryAsync();
+            }
+
             foreach (var table in TablesIn(migration.Sql))
             {
                 await using var drop = db.CreateCommand();
@@ -68,6 +79,12 @@ public sealed class DatabaseMigrationTests : IDisposable
         sql.Split('\n')
            .Where(line => line.TrimStart().StartsWith("CREATE TABLE ", StringComparison.OrdinalIgnoreCase))
            .Select(line => line.Trim()["CREATE TABLE ".Length..].Split(' ', '(')[0]);
+
+    /// <summary>The columns a migration adds to tables that already existed.</summary>
+    private static IEnumerable<(string Table, string Column)> ColumnsAddedIn(string sql) =>
+        System.Text.RegularExpressions.Regex
+            .Matches(sql, @"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            .Select(m => (m.Groups[1].Value, m.Groups[2].Value));
 
     private async Task<bool> HasTableAsync(string name)
     {

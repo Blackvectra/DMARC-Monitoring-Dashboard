@@ -140,33 +140,42 @@ public sealed class TimeSeriesService(string databasePath)
     }.ToString();
 
     /// <summary>The whole estate, one point per day.</summary>
-    public Task<IReadOnlyList<DayPoint>> EstateAsync(int days = 30, CancellationToken ct = default) =>
-        QueryAsync(null, null, days, ct);
+    /// <param name="tenantId">One organisation, or null for all of them.</param>
+    /// <param name="clientSlug">One client of it, or null for all of them.</param>
+    public Task<IReadOnlyList<DayPoint>> EstateAsync(
+        int days = 30, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default) =>
+        QueryAsync(null, Slug(clientSlug), days, tenantId, ct);
 
     /// <summary>One domain, one point per day.</summary>
-    public Task<IReadOnlyList<DayPoint>> DomainAsync(string domain, int days = 30, CancellationToken ct = default)
+    public Task<IReadOnlyList<DayPoint>> DomainAsync(
+        string domain, int days = 30, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
-        return QueryAsync(domain.Trim().TrimEnd('.').ToLowerInvariant(), null, days, ct);
+        return QueryAsync(domain.Trim().TrimEnd('.').ToLowerInvariant(), null, days, tenantId, ct);
     }
 
     /// <summary>One client's domains together, one point per day.</summary>
-    public Task<IReadOnlyList<DayPoint>> ClientAsync(string slug, int days = 30, CancellationToken ct = default)
+    public Task<IReadOnlyList<DayPoint>> ClientAsync(
+        string slug, int days = 30, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(slug);
-        return QueryAsync(null, slug.Trim(), days, ct);
+        return QueryAsync(null, slug.Trim(), days, tenantId, ct);
     }
 
     /// <summary>
     /// The window's mail split three ways, for the dial.
     /// </summary>
     /// <param name="domain">One domain, or null for the whole estate.</param>
+    /// <param name="tenantId">One organisation, or null for all of them.</param>
+    /// <param name="clientSlug">One client, or null for all of them.</param>
     public async Task<VolumeBreakdown> BreakdownAsync(
-        string? domain = null, int days = 30, CancellationToken ct = default)
+        string? domain = null, int days = 30,
+        string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
 
         var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var client = Slug(clientSlug);
         var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
             .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
@@ -189,10 +198,10 @@ public sealed class TimeSeriesService(string databasePath)
                                       AND (r.override_reason IS NULL OR r.override_reason = '')
                                      THEN r.message_count END), 0)
             FROM aggregate_records r
-            {Joins(name, null, "r")}
-            WHERE r.date_begin >= $since {Filter(name, null)}
+            {Joins(name, client, "r")}
+            WHERE r.date_begin >= $since {Filter(name, client, tenantId, "r")}
             """;
-        Bind(command, name, null, since);
+        Bind(command, name, client, since, tenantId);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return new VolumeBreakdown(); }
@@ -211,12 +220,14 @@ public sealed class TimeSeriesService(string databasePath)
     /// <param name="domain">One domain, or null for the whole estate.</param>
     /// <param name="top">How many to return, busiest first.</param>
     public async Task<IReadOnlyList<SourceCompliance>> SourcesAsync(
-        string? domain = null, int days = 30, int top = 8, CancellationToken ct = default)
+        string? domain = null, int days = 30, int top = 8,
+        string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
         if (top < 1) { throw new ArgumentOutOfRangeException(nameof(top), top, "Asking for no rows returns an empty panel with nothing to explain it."); }
 
         var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var client = Slug(clientSlug);
         var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
             .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
@@ -237,14 +248,14 @@ public sealed class TimeSeriesService(string databasePath)
                    COALESCE(SUM(CASE WHEN r.spf_auth_result = 'pass' THEN r.message_count END), 0),
                    COALESCE(SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count END), 0)
             FROM aggregate_records r
-            {Joins(name, null, "r")}
-            WHERE r.date_begin >= $since {Filter(name, null)}
+            {Joins(name, client, "r")}
+            WHERE r.date_begin >= $since {Filter(name, client, tenantId, "r")}
             GROUP BY 1
             HAVING SUM(r.message_count) > 0
             ORDER BY SUM(r.message_count) DESC
             LIMIT $top
             """;
-        Bind(command, name, null, since);
+        Bind(command, name, client, since, tenantId);
         command.Parameters.AddWithValue("$top", top);
 
         var rows = new List<SourceCompliance>();
@@ -279,10 +290,11 @@ public sealed class TimeSeriesService(string databasePath)
     /// point.
     /// </remarks>
     public async Task<(int Active, int Inactive)> DomainActivityAsync(
-        int days = 30, CancellationToken ct = default)
+        int days = 30, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
 
+        var client = Slug(clientSlug);
         var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
             .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
@@ -290,14 +302,15 @@ public sealed class TimeSeriesService(string databasePath)
         await db.OpenAsync(ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT
-              (SELECT COUNT(*) FROM domains),
+              (SELECT COUNT(*) FROM domains d {(client is null ? "" : "JOIN clients c ON c.id = d.client_id")}
+                WHERE 1 = 1 {Filter(null, client, tenantId, "d")}),
               (SELECT COUNT(DISTINCT r.domain_id)
-                 FROM aggregate_records r
-                WHERE r.date_begin >= $since AND r.message_count > 0)
+                 FROM aggregate_records r {Joins(null, client, "r")}
+                WHERE r.date_begin >= $since AND r.message_count > 0 {Filter(null, client, tenantId, "r")})
             """;
-        command.Parameters.AddWithValue("$since", since);
+        Bind(command, null, client, since, tenantId);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (0, 0); }
@@ -325,7 +338,7 @@ public sealed class TimeSeriesService(string databasePath)
     /// case where one domain alone goes silent.
     /// </remarks>
     public async Task<IReadOnlyDictionary<string, IReadOnlyList<DayPoint>>> PerDomainAsync(
-        int days = 30, CancellationToken ct = default)
+        int days = 30, string? tenantId = null, CancellationToken ct = default)
     {
         if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
 
@@ -344,9 +357,10 @@ public sealed class TimeSeriesService(string databasePath)
                 SELECT DISTINCT d.name, DATE(rep.date_begin)
                 FROM aggregate_reports rep
                 JOIN domains d ON d.id = rep.domain_id
-                WHERE rep.date_begin >= $since
+                WHERE rep.date_begin >= $since AND ($tenant IS NULL OR rep.tenant_id = $tenant)
                 """;
             command.Parameters.AddWithValue("$since", since);
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
             await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -379,10 +393,11 @@ public sealed class TimeSeriesService(string databasePath)
                                          THEN r.message_count END), 0)
                 FROM aggregate_records r
                 JOIN domains d ON d.id = r.domain_id
-                WHERE r.date_begin >= $since
+                WHERE r.date_begin >= $since AND ($tenant IS NULL OR r.tenant_id = $tenant)
                 GROUP BY d.name, DATE(r.date_begin)
                 """;
             command.Parameters.AddWithValue("$since", since);
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
             await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -437,7 +452,7 @@ public sealed class TimeSeriesService(string databasePath)
     }
 
     private async Task<IReadOnlyList<DayPoint>> QueryAsync(
-        string? domain, string? clientSlug, int days, CancellationToken ct)
+        string? domain, string? clientSlug, int days, string? tenantId, CancellationToken ct)
     {
         // A window of nothing is a caller bug, not an empty chart: silently
         // returning no points would render a blank panel with no explanation.
@@ -455,8 +470,8 @@ public sealed class TimeSeriesService(string databasePath)
         // reports: a report can arrive covering a day on which the domain sent
         // nothing, and that is a genuine zero rather than a gap. Collapsing
         // the two would lose exactly the distinction this type is for.
-        var reported = await ReportedDaysAsync(db, domain, clientSlug, since, ct).ConfigureAwait(false);
-        var counted = await CountsAsync(db, domain, clientSlug, since, ct).ConfigureAwait(false);
+        var reported = await ReportedDaysAsync(db, domain, clientSlug, since, tenantId, ct).ConfigureAwait(false);
+        var counted = await CountsAsync(db, domain, clientSlug, since, tenantId, ct).ConfigureAwait(false);
 
         var points = new List<DayPoint>(days);
         for (var day = first; day <= today; day = day.AddDays(1))
@@ -475,16 +490,16 @@ public sealed class TimeSeriesService(string databasePath)
     }
 
     private static async Task<HashSet<DateOnly>> ReportedDaysAsync(
-        SqliteConnection db, string? domain, string? clientSlug, string since, CancellationToken ct)
+        SqliteConnection db, string? domain, string? clientSlug, string since, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = $"""
             SELECT DISTINCT DATE(rep.date_begin)
             FROM aggregate_reports rep
             {Joins(domain, clientSlug, "rep")}
-            WHERE rep.date_begin >= $since {Filter(domain, clientSlug)}
+            WHERE rep.date_begin >= $since {Filter(domain, clientSlug, tenantId, "rep")}
             """;
-        Bind(command, domain, clientSlug, since);
+        Bind(command, domain, clientSlug, since, tenantId);
 
         var days = new HashSet<DateOnly>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -500,7 +515,7 @@ public sealed class TimeSeriesService(string databasePath)
     }
 
     private static async Task<Dictionary<DateOnly, DayPoint>> CountsAsync(
-        SqliteConnection db, string? domain, string? clientSlug, string since, CancellationToken ct)
+        SqliteConnection db, string? domain, string? clientSlug, string since, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
 
@@ -518,10 +533,10 @@ public sealed class TimeSeriesService(string databasePath)
                                      THEN r.message_count END), 0)
             FROM aggregate_records r
             {Joins(domain, clientSlug, "r")}
-            WHERE r.date_begin >= $since {Filter(domain, clientSlug)}
+            WHERE r.date_begin >= $since {Filter(domain, clientSlug, tenantId, "r")}
             GROUP BY DATE(r.date_begin)
             """;
-        Bind(command, domain, clientSlug, since);
+        Bind(command, domain, clientSlug, since, tenantId);
 
         var rows = new Dictionary<DateOnly, DayPoint>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -560,14 +575,23 @@ public sealed class TimeSeriesService(string databasePath)
             : $"JOIN domains d ON d.id = {alias}.domain_id"
               + (clientSlug is not null ? " JOIN clients c ON c.id = d.client_id" : "");
 
-    private static string Filter(string? domain, string? clientSlug) =>
+    /// <summary>
+    /// The organisation is filtered on the counted table itself, which carries
+    /// its own tenant_id, so scoping never depends on a join being present.
+    /// </summary>
+    private static string Filter(string? domain, string? clientSlug, string? tenantId, string alias) =>
         (domain is not null ? " AND d.name = $domain" : "")
-        + (clientSlug is not null ? " AND c.slug = $slug" : "");
+        + (clientSlug is not null ? " AND c.slug = $slug" : "")
+        + (tenantId is not null ? $" AND {alias}.tenant_id = $tenant" : "");
 
-    private static void Bind(SqliteCommand command, string? domain, string? clientSlug, string since)
+    private static void Bind(SqliteCommand command, string? domain, string? clientSlug, string since, string? tenantId)
     {
         command.Parameters.AddWithValue("$since", since);
         if (domain is not null) { command.Parameters.AddWithValue("$domain", domain); }
         if (clientSlug is not null) { command.Parameters.AddWithValue("$slug", clientSlug); }
+        if (tenantId is not null) { command.Parameters.AddWithValue("$tenant", tenantId); }
     }
+
+    private static string? Slug(string? clientSlug) =>
+        string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant();
 }

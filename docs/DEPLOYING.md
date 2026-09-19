@@ -362,6 +362,45 @@ Yes**, then **Users and groups** → add the people or the group that should
 have it. Otherwise everyone in the tenant can. Assigning a group needs an
 Entra ID P1 licence; on a free tenant assign people individually.
 
+### Organisations: who sees which clients
+
+Clients belong to an organisation, and an organisation's people see its
+clients and domains and nothing else. NRG Tech Services and NextLayerSec are
+two organisations in one install; an NRG employee never sees a NextLayerSec
+client, and a domain of the other organisation answers "nothing stored"
+exactly as a domain that does not exist would.
+
+Who belongs where is decided by Entra security groups, which the token has
+to carry:
+
+- Under the app registration, **Token configuration → Add groups claim →
+  Security groups**, with the group ID as the claim value. Without this the
+  token names no groups, everybody signed in belongs to nothing, and the
+  page says so.
+- Create one security group per organisation, and one master group for the
+  people who run the whole thing. Copy each group's **Object ID**.
+- Tell the app the master group: `Auth:MasterGroupId` in
+  `appsettings.Production.json` (or `bootstrap.sh --master-group-id <id>`).
+  Members see every organisation and get a switcher in the sidebar; with
+  "All organisations" chosen, every page shows which organisation each row
+  belongs to.
+- Tell each organisation its group, on the Settings page as a master, or
+  with `dmarc org set-group --org <slug> --group <id>`. The built-in
+  organisation is filed as `local`; rename it there too, or with
+  `dmarc org rename --org local --name "NRG Tech Services"`.
+
+A second organisation is `dmarc org add --name "NextLayerSec" --group <id>`
+(or Settings → Organisations as a master). Its clients are created with
+`--org nextlayersec`, or from the Clients page while looking at it. A
+collector for its own mailbox files new domains there with `--org
+nextlayersec` (`DMARC_ORGANISATION` in the environment file); a domain
+already known keeps its organisation whichever mailbox sees it. Assigning a
+domain to a client in another organisation moves it there, history and all,
+and only somebody who can see both can do that.
+
+Without sign-in configured there are no groups to read, and whoever is at
+the machine is treated as the master.
+
 ## 6. Ingest on a timer
 
 Reports arrive continuously; something has to fetch them. `INGEST-SETUP.md`

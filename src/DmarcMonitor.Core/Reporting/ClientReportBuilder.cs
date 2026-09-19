@@ -20,8 +20,13 @@ public sealed class ClientReportBuilder(string databasePath)
         Mode = SqliteOpenMode.ReadOnly,
     }.ToString();
 
+    /// <param name="tenantId">
+    /// The organisation the caller may see, or null for any. A client of
+    /// another organisation is reported as not found.
+    /// </param>
     public async Task<ClientReport?> BuildAsync(
-        string clientSlug, ReportPeriod period, string providerName = "Your IT provider", CancellationToken ct = default)
+        string clientSlug, ReportPeriod period, string providerName = "Your IT provider", string? tenantId = null,
+        CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
         ArgumentNullException.ThrowIfNull(period);
@@ -29,7 +34,7 @@ public sealed class ClientReportBuilder(string databasePath)
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        var client = await GetClientAsync(db, clientSlug, ct).ConfigureAwait(false);
+        var client = await GetClientAsync(db, clientSlug, tenantId, ct).ConfigureAwait(false);
         if (client is null) { return null; }
 
         var (clientId, clientName) = client.Value;
@@ -60,13 +65,16 @@ public sealed class ClientReportBuilder(string databasePath)
     }
 
     /// <summary>Every client that could be reported on, for a "generate all" run.</summary>
-    public async Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(CancellationToken ct = default)
+    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    public async Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
-        command.CommandText = "SELECT slug, name FROM clients WHERE deleted_at IS NULL ORDER BY name";
+        command.CommandText =
+            "SELECT slug, name FROM clients WHERE deleted_at IS NULL AND ($tenant IS NULL OR tenant_id = $tenant) ORDER BY name";
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         var results = new List<(string, string)>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -78,11 +86,13 @@ public sealed class ClientReportBuilder(string databasePath)
     }
 
     private static async Task<(string Id, string Name)?> GetClientAsync(
-        SqliteConnection db, string slug, CancellationToken ct)
+        SqliteConnection db, string slug, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
-        command.CommandText = "SELECT id, name FROM clients WHERE slug = $slug AND deleted_at IS NULL LIMIT 1";
+        command.CommandText =
+            "SELECT id, name FROM clients WHERE slug = $slug AND deleted_at IS NULL AND ($tenant IS NULL OR tenant_id = $tenant) LIMIT 1";
         command.Parameters.AddWithValue("$slug", slug);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }

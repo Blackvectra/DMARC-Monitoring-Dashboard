@@ -47,7 +47,7 @@ public static class DnsCommand
         Console.WriteLine($"  Secrets: {configs.Secrets.Description}");
         Console.WriteLine();
 
-        var all = await configs.ListAsync(ct).ConfigureAwait(false);
+        var all = await configs.ListAsync(ct: ct).ConfigureAwait(false);
         if (all.Count == 0)
         {
             Console.WriteLine("  No DNS providers configured. Fixes can be planned but not applied.");
@@ -170,7 +170,7 @@ public static class DnsCommand
 
         try
         {
-            var provider = await configs.BuildAsync(config, ct).ConfigureAwait(false);
+            var provider = await configs.BuildAsync(config, ct: ct).ConfigureAwait(false);
             var records = await provider.GetRecordsAsync($"_dmarc.{domain}", "TXT", ct).ConfigureAwait(false);
 
             Console.WriteLine($"{config.Provider} answered for {domain}: {records.Count} TXT record(s) at _dmarc.{domain}.");

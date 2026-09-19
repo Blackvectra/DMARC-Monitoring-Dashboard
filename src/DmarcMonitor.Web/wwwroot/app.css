@@ -177,6 +177,34 @@ a:hover { text-decoration: underline; }
     box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
 }
 
+/* ---- organisation ------------------------------------------------------ */
+
+/*
+    Which organisation this is, above the navigation, because everything
+    under it is scoped by it. A select for anybody who may see more than one;
+    a plain name for everybody else.
+*/
+.org { padding: 0 10px 8px; }
+.org-label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: .02em;
+    color: var(--dim);
+    margin-bottom: 4px;
+}
+.org-name { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+.org-switch {
+    width: 100%;
+    margin: 0;
+    padding: 6px 8px;
+    font-size: 13px;
+    font-weight: 500;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: var(--shadow);
+}
+
 .sidebar-foot { margin-top: auto; padding: 14px 10px 0; border-top: 1px solid var(--line); }
 .who { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .signout { font-size: 12px; }
@@ -726,6 +754,17 @@ button.primary {
 }
 button.primary:hover { filter: brightness(1.08); }
 button.primary:disabled { opacity: .45; cursor: default; filter: none; }
+
+/* The quiet button: a bordered field-coloured pill for a secondary action,
+   such as Save on a row or Remove beside a provider. */
+button.quiet, .triage td > button {
+    background: var(--field); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+    box-shadow: var(--shadow);
+}
+button.quiet:hover, .triage td > button:hover { border-color: var(--dim); }
+button.quiet:disabled, .triage td > button:disabled { opacity: .45; cursor: default; }
 
 .form-row input.wide { min-width: 360px; }
 .errors { margin: 0 0 6px 18px; color: var(--muted); font-size: 13px; }

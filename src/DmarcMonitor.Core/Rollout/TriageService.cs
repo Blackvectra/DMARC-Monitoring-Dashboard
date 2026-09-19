@@ -8,6 +8,12 @@ public sealed record DomainTriage
     public required string Domain { get; init; }
     public required string ClientName { get; init; }
 
+    /// <summary>The client's slug, which is what a filter or an assignment goes by.</summary>
+    public string ClientSlug { get; init; } = "";
+
+    /// <summary>The organisation the client belongs to, for a master looking across all of them.</summary>
+    public string Organisation { get; init; } = "";
+
     public string Policy { get; init; } = "none";
     public long Messages { get; init; }
     public long Passing { get; init; }
@@ -64,7 +70,8 @@ public sealed class TriageService(string databasePath)
     }.ToString();
 
     /// <param name="days">Window to judge on. Long enough to be stable, short enough to be current.</param>
-    public async Task<IReadOnlyList<DomainTriage>> GetAsync(int days = 14, CancellationToken ct = default)
+    /// <param name="tenantId">One organisation's domains, or null for every organisation's.</param>
+    public async Task<IReadOnlyList<DomainTriage>> GetAsync(int days = 14, string? tenantId = null, CancellationToken ct = default)
     {
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
@@ -89,15 +96,19 @@ public sealed class TriageService(string databasePath)
               (SELECT MAX(ar.date_end) FROM aggregate_reports ar WHERE ar.domain_id = d.id)  AS last_report,
               d.baseline_started_at,
               d.baseline_days,
-              d.policy_target
+              d.policy_target,
+              c.slug,
+              t.name
             FROM domains d
             JOIN clients c ON c.id = d.client_id
+            JOIN tenants t ON t.id = d.tenant_id
             LEFT JOIN aggregate_records r
                    ON r.domain_id = d.id AND r.date_begin >= $since
-            WHERE d.is_active = 1
-            GROUP BY d.id, d.name, c.name
+            WHERE d.is_active = 1 AND ($tenant IS NULL OR d.tenant_id = $tenant)
+            GROUP BY d.id, d.name, c.name, c.slug, t.name
             """;
         command.Parameters.AddWithValue("$since", since);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         var rows = new List<DomainTriage>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -130,6 +141,8 @@ public sealed class TriageService(string databasePath)
                 BaselineStarted = reader.IsDBNull(8) ? null : ParseDate(reader.GetString(8)),
                 BaselineDays = reader.IsDBNull(9) ? 14 : reader.GetInt32(9),
                 PolicyTarget = reader.IsDBNull(10) ? "reject" : reader.GetString(10),
+                ClientSlug = reader.GetString(11),
+                Organisation = reader.GetString(12),
             };
 
             // The judgement lives in Core and is unit tested against every

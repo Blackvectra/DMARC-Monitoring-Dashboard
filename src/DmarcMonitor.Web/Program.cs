@@ -52,6 +52,11 @@ builder.Services.AddScoped(_ => new DmarcMonitor.Core.Domains.DomainDetailServic
 // The one write path a page has. See OnboardingService for why it is an
 // exception to the read-only rule rather than a loosening of it.
 builder.Services.AddScoped<OnboardingService>();
+
+// Organisations: the layer above clients, and who may see which. Every page
+// asks OrgContext for its scope before it asks the database for anything.
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tenancy.OrganisationStore(dbPath));
+builder.Services.AddScoped<OrgContext>();
 builder.Services.AddScoped<ImportUiService>();
 builder.Services.AddScoped<ReportUiService>();
 
@@ -120,6 +125,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapLocalSignIn();
+app.MapOrganisationSwitch();
 if (AuthSetup.IsEntraConfigured(app.Configuration))
 {
     app.MapControllers();   // Microsoft.Identity.Web.UI provides sign-in/out
@@ -162,14 +168,20 @@ app.MapGet("/.well-known/mta-sts.txt", async (
 // printed, not something to read in the app. The fallback authorization
 // policy covers this endpoint like any other.
 app.MapGet("/reports/download/{slug}/{month}", async (
-    string slug, string month, ReportUiService reports, CancellationToken ct) =>
+    HttpContext context, string slug, string month, ReportUiService reports,
+    DmarcMonitor.Core.Tenancy.OrganisationStore organisations, CancellationToken ct) =>
 {
     if (!ReportUiService.TryParseMonth(month, out var period))
     {
         return Results.BadRequest("Month must look like 2026-08.");
     }
 
-    var report = await reports.BuildAsync(slug, period, ct).ConfigureAwait(false);
+    // Scoped like every page: a slug guessed for another organisation's
+    // customer is not found, not served. Resolved from the request's own
+    // principal, because there is no component here to hold an
+    // authentication state.
+    var access = OrgContext.Resolve(context.User, await organisations.ListAsync(ct).ConfigureAwait(false), app.Configuration);
+    var report = await reports.BuildAsync(slug, period, access.TenantId, ct).ConfigureAwait(false);
     if (report is null) { return Results.NotFound($"No client filed as '{slug}'."); }
 
     var html = ClientReportRenderer.ToHtml(report);

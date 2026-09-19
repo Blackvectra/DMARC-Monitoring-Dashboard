@@ -46,7 +46,7 @@ public static class ReportCommand
         List<string> slugs;
         if (all)
         {
-            var clients = await builder.GetClientsAsync(ct).ConfigureAwait(false);
+            var clients = await builder.GetClientsAsync(ct: ct).ConfigureAwait(false);
 
             // Unassigned is a worklist, not a customer. Writing a report
             // addressed to it would be a document nobody can send.
@@ -81,7 +81,7 @@ public static class ReportCommand
         {
             ct.ThrowIfCancellationRequested();
 
-            var report = await builder.BuildAsync(each, period, provider, ct).ConfigureAwait(false);
+            var report = await builder.BuildAsync(each, period, provider, ct: ct).ConfigureAwait(false);
             if (report is null)
             {
                 Console.Error.WriteLine($"  {each}: no such client.");

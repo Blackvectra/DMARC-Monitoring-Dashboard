@@ -252,7 +252,12 @@ public sealed class DomainDetailService(string databasePath)
         Mode = SqliteOpenMode.ReadOnly,
     }.ToString();
 
-    public async Task<DomainDetail?> GetAsync(string domain, int days = 30, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// The organisation the caller may see, or null for any. A domain that
+    /// belongs to another organisation comes back as null, exactly as a domain
+    /// that does not exist would: the page must not even confirm it is there.
+    /// </param>
+    public async Task<DomainDetail?> GetAsync(string domain, int days = 30, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
@@ -274,10 +279,11 @@ public sealed class DomainDetailService(string databasePath)
                 SELECT d.id, c.name, c.slug, d.baseline_started_at, d.baseline_days, d.policy_target
                 FROM domains d
                 JOIN clients c ON c.id = d.client_id
-                WHERE d.name = $name
+                WHERE d.name = $name AND ($tenant IS NULL OR d.tenant_id = $tenant)
                 LIMIT 1
                 """;
             head.Parameters.AddWithValue("$name", name);
+            head.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
             await using var reader = await head.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }

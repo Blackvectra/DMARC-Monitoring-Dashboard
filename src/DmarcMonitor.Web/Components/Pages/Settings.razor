@@ -7,6 +7,8 @@
 @inject RemediationUiService Fixes
 @inject OnboardingService Onboarding
 @inject DmarcMonitor.Core.Updates.ReleaseChannel Releases
+@inject OrgContext Org
+@inject DmarcMonitor.Core.Tenancy.OrganisationStore Organisations
 @rendermode InteractiveServer
 
 <PageTitle>Settings — DMARC Monitor</PageTitle>
@@ -74,8 +76,121 @@
                     </AuthorizeView>
                 </td>
             </tr>
+            <tr>
+                <td>Master group</td>
+                <td>
+                    @if (Configuration[OrgContext.MasterGroupKey] is { Length: > 0 } master)
+                    {
+                        <code>@master</code>
+                        <span class="muted"> — members see every organisation</span>
+                    }
+                    else
+                    {
+                        <span class="muted">not set. Set <code>@OrgContext.MasterGroupKey</code> to the object id of the
+                            Entra group whose members may see every organisation.</span>
+                    }
+                </td>
+            </tr>
+            @if (_access is not null)
+            {
+                <tr>
+                    <td>Your access</td>
+                    <td>
+                        @if (_access.IsMaster)
+                        {
+                            <span>every organisation (@(EntraConfigured ? "master group" : "no sign-in, so the machine is the boundary"))</span>
+                        }
+                        else if (_access.Visible.Count > 0)
+                        {
+                            <span>@string.Join(", ", _access.Visible.Select(o => o.Name))</span>
+                        }
+                        else
+                        {
+                            <span class="bad">none — you are in no organisation's group</span>
+                        }
+                    </td>
+                </tr>
+            }
         </tbody>
     </table>
+</section>
+
+<section>
+    <h2>Organisations</h2>
+    <p class="sub">The layer above clients. Each organisation has its own clients and domains, and the people
+       in its Entra security group see those and nothing else. Setting a group here does nothing until the
+       app registration's token configuration includes the <code>groups</code> claim.</p>
+
+    @if (_organisations is null)
+    {
+        <p class="muted">Loading…</p>
+    }
+    else
+    {
+        <table class="triage">
+            <thead>
+                <tr><th>Organisation</th><th>Slug</th><th>Entra group</th><th class="num">Clients</th><th class="num">Domains</th>@if (_access is { IsMaster: true }) { <th></th> }</tr>
+            </thead>
+            <tbody>
+                @foreach (var o in _organisations)
+                {
+                    <tr>
+                        <td>@o.Name</td>
+                        <td><code>@o.Slug</code></td>
+                        <td>
+                            @if (_access is { IsMaster: true })
+                            {
+                                <input placeholder="Group object id" value="@(_groupEdits.GetValueOrDefault(o.Slug, o.EntraGroupId ?? ""))"
+                                       @onchange="e => _groupEdits[o.Slug] = e.Value?.ToString() ?? string.Empty"
+                                       aria-label="@($"Entra group for {o.Name}")" />
+                            }
+                            else if (o.EntraGroupId is { Length: > 0 })
+                            {
+                                <code>@o.EntraGroupId</code>
+                            }
+                            else
+                            {
+                                <span class="muted">none — only the master group sees it</span>
+                            }
+                        </td>
+                        <td class="num">@o.Clients</td>
+                        <td class="num">@o.Domains</td>
+                        @if (_access is { IsMaster: true })
+                        {
+                            <td><button disabled="@_busy" @onclick="() => SaveGroupAsync(o)">Save</button></td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        @if (_organisationMessage is not null)
+        {
+            <p class="@(_organisationMessageIsError ? "bad" : "good")">@_organisationMessage</p>
+        }
+
+        @if (_access is { IsMaster: true })
+        {
+            <h3>Add an organisation</h3>
+            <div class="form-row">
+                <input placeholder="Name, e.g. NextLayerSec" @bind="_newOrganisation" @bind:event="oninput" />
+                <input placeholder="Entra group object id (optional)" @bind="_newOrganisationGroup" @bind:event="oninput" />
+                <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_newOrganisation))" @onclick="AddOrganisationAsync">Add</button>
+            </div>
+            <h3>Rename</h3>
+            <div class="form-row">
+                <select @bind="_renameSlug" aria-label="Organisation to rename">
+                    <option value="">Organisation…</option>
+                    @foreach (var o in _organisations)
+                    {
+                        <option value="@o.Slug">@o.Name</option>
+                    }
+                </select>
+                <input placeholder="New name" @bind="_renameTo" @bind:event="oninput" />
+                <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_renameSlug) || string.IsNullOrWhiteSpace(_renameTo))" @onclick="RenameOrganisationAsync">Rename</button>
+            </div>
+        }
+    }
 </section>
 
 <section>
@@ -340,12 +455,14 @@
             }
         }
 
-        if (!Db.Exists) { _providers = []; return; }
+        if (!Db.Exists) { _providers = []; _organisations = []; return; }
 
         try
         {
-            _providers = await Fixes.ProvidersAsync();
-            _clients = [.. (await Onboarding.GetClientsAsync())
+            _access = await Org.GetAsync();
+            _organisations = await Organisations.ListAsync();
+            _providers = await Fixes.ProvidersAsync(_access.TenantId);
+            _clients = [.. (await Onboarding.GetClientsAsync(_access.TenantId))
                 .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)];
         }
         catch (Exception ex)
@@ -379,7 +496,7 @@
             // The token is dropped from the page's memory the moment it is
             // stored. It is not shown back, and a re-render must not carry it.
             _secret = "";
-            _providers = await Fixes.ProvidersAsync();
+            _providers = await Fixes.ProvidersAsync(_access?.TenantId);
         }
         catch (Exception ex)
         {
@@ -400,7 +517,7 @@
             await Fixes.RemoveProviderAsync(config.ClientSlug, config.Domain);
             _providerMessage = "Removed, and its credential with it.";
             _providerMessageIsError = false;
-            _providers = await Fixes.ProvidersAsync();
+            _providers = await Fixes.ProvidersAsync(_access?.TenantId);
         }
         catch (Exception ex)
         {
@@ -415,6 +532,89 @@
 
     private bool EntraConfigured => AuthSetup.IsEntraConfigured(Configuration);
     private bool LocalModeRemote => AuthSetup.LocalModeAllowedRemotely(Configuration);
+
+    // ---- organisations --------------------------------------------------------
+
+    private DmarcMonitor.Core.Tenancy.OrganisationAccess? _access;
+    private IReadOnlyList<DmarcMonitor.Core.Tenancy.Organisation>? _organisations;
+    private readonly Dictionary<string, string> _groupEdits = new(StringComparer.Ordinal);
+    private string? _organisationMessage;
+    private bool _organisationMessageIsError;
+    private string _newOrganisation = "";
+    private string _newOrganisationGroup = "";
+    private string _renameSlug = "";
+    private string _renameTo = "";
+
+    private async Task SaveGroupAsync(DmarcMonitor.Core.Tenancy.Organisation o)
+    {
+        if (_access is not { IsMaster: true }) { return; }
+        _busy = true;
+        try
+        {
+            var group = _groupEdits.GetValueOrDefault(o.Slug, o.EntraGroupId ?? "");
+            await Organisations.SetGroupAsync(o.Slug, group);
+            _organisationMessage = string.IsNullOrWhiteSpace(group)
+                ? $"{o.Name}: group cleared, so only the master group sees it."
+                : $"{o.Name}: members of {group.Trim()} now see it. They may need to sign out and back in.";
+            _organisationMessageIsError = false;
+            _organisations = await Organisations.ListAsync();
+        }
+        catch (Exception ex)
+        {
+            _organisationMessage = ex.Message;
+            _organisationMessageIsError = true;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task AddOrganisationAsync()
+    {
+        if (_access is not { IsMaster: true }) { return; }
+        _busy = true;
+        try
+        {
+            var created = await Organisations.CreateAsync(_newOrganisation, null, _newOrganisationGroup);
+            if (created is null)
+            {
+                _organisationMessage = $"An organisation filed as '{DmarcMonitor.Core.Storage.ReportStore.Slugify(_newOrganisation)}' already exists.";
+                _organisationMessageIsError = true;
+            }
+            else
+            {
+                _organisationMessage = $"Added {created.Name}, filed as '{created.Slug}'. It appears in the sidebar switcher on the next page load.";
+                _organisationMessageIsError = false;
+                _newOrganisation = "";
+                _newOrganisationGroup = "";
+                _organisations = await Organisations.ListAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _organisationMessage = ex.Message;
+            _organisationMessageIsError = true;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task RenameOrganisationAsync()
+    {
+        if (_access is not { IsMaster: true }) { return; }
+        _busy = true;
+        try
+        {
+            var renamed = await Organisations.RenameAsync(_renameSlug, _renameTo);
+            _organisationMessage = renamed ? $"Renamed to {_renameTo.Trim()}." : "No such organisation.";
+            _organisationMessageIsError = !renamed;
+            _renameTo = "";
+            _organisations = await Organisations.ListAsync();
+        }
+        catch (Exception ex)
+        {
+            _organisationMessage = ex.Message;
+            _organisationMessageIsError = true;
+        }
+        finally { _busy = false; }
+    }
 
     /// <summary>
     /// Never renders a secret. Identifiers are fine to show and are what an

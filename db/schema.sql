@@ -101,6 +101,11 @@ CREATE TABLE tenants (
     client_limit        INTEGER,                       -- NULL = unlimited
     billing_reference   TEXT,
 
+    -- Who belongs here: the object id of an Entra security group. Matched
+    -- against the groups claim of whoever signs in. NULL means nobody but the
+    -- master group (named in configuration) can see this organisation.
+    entra_group_id      TEXT,
+
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
     deleted_at          TEXT
@@ -991,6 +996,9 @@ VALUES ('0008', datetime('now'), 'Threat indicators: record the domain names alo
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0009', datetime('now'), 'MTA-STS policies: what this product serves at mta-sts.<domain>, so the DNS record and the policy file cannot disagree');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0010', datetime('now'), 'Organisations: the Entra group that decides who belongs to each tenant');
 
 
 

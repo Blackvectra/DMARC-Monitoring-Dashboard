@@ -61,6 +61,8 @@ param(
     [string]$CertPassword,
     [string]$FallbackAddress,
     [string]$ReportingDomain,
+    [string]$MasterGroupId,
+    [string]$Organisation,
     [switch]$MakeIngestCert,
     [switch]$NoProxy,
     [switch]$NoIngestTask
@@ -220,6 +222,10 @@ try {
     if ($HostName)         { Set-Setting $cfg 'MtaSts' 'PolicyHost' $HostName }
     if ($ProviderName)     { Set-Setting $cfg 'Reporting' 'ProviderName' $ProviderName }
     if ($TlsReportAddress) { Set-Setting $cfg 'Reporting' 'TlsReportAddress' $TlsReportAddress }
+    if ($MasterGroupId) {
+        Set-Setting $cfg 'Auth' 'MasterGroupId' $MasterGroupId
+        Say "   master group: $MasterGroupId sees every organisation"
+    }
     if ($TenantId) {
         Set-Setting $cfg 'AzureAd' 'TenantId' $TenantId
         Set-Setting $cfg 'AzureAd' 'ClientId' $ClientId
@@ -297,7 +303,7 @@ try {
         # The task runs this file; its values persist across runs of this script.
         # The last two are optional: reports are attributed by the mailbox
         # itself being the one shared address unless one of them is set.
-        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = '' }
+        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = ''; DMARC_ORGANISATION = '' }
         if (Test-Path $IngestCmd) {
             foreach ($line in Get-Content $IngestCmd) {
                 if ($line -match '^set "([A-Z_]+)=(.*)"$' -and $values.Contains($Matches[1])) { $values[$Matches[1]] = $Matches[2] }
@@ -310,6 +316,7 @@ try {
         if ($CertPassword)    { $values['DMARC_CERT_PASSWORD'] = $CertPassword }
         if ($FallbackAddress) { $values['DMARC_FALLBACK_ADDRESS'] = $FallbackAddress }
         if ($ReportingDomain) { $values['DMARC_REPORTING_DOMAIN'] = $ReportingDomain }
+        if ($Organisation)    { $values['DMARC_ORGANISATION'] = $Organisation }
 
         $lines = @('@echo off', ':: Written by bootstrap.ps1. Runs as LocalService from the "DMARC ingest" task; pass --dry-run to test.')
         foreach ($k in $values.Keys) { $lines += "set `"$k=$($values[$k])`"" }
@@ -317,7 +324,7 @@ try {
         [IO.File]::WriteAllLines($IngestCmd, $lines, (New-Object Text.UTF8Encoding $false))
         Set-RestrictedAcl $IngestCmd "${ServiceSid}:RX"
 
-        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN')
+        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN', 'DMARC_ORGANISATION')
         $missing = @($values.Keys | Where-Object { $optional -notcontains $_ -and -not $values[$_] })
         if ($missing.Count -eq 0 -and -not $NoIngestTask) {
             $action = New-ScheduledTaskAction -Execute $IngestCmd
@@ -403,6 +410,13 @@ try {
         }
         Start-Sleep -Seconds 3
         $code = & curl.exe -sk -o NUL -w '%{http_code}' --resolve "${HostName}:443:127.0.0.1" "https://$HostName/"
+        # The probe is advisory, and it is the last native command the script
+        # runs: a curl that could not connect leaves its exit code in
+        # $LASTEXITCODE, which a CI step wrapper then turns into a failed step
+        # after the script has printed Done. Fail still exits through a real
+        # exit, so clearing this here loses nothing.
+        if (-not $code) { $code = '000' }
+        $global:LASTEXITCODE = 0
         switch ($code) {
             '403' { Say "   https://$HostName/ answers 403: TLS and the proxy work; sign-in is not configured yet, so only this machine is served" }
             '302' { Say "   https://$HostName/ redirects to sign-in: TLS, the proxy and Entra are all wired" }

@@ -29,6 +29,29 @@ dmarc report --client acme-corp --provider "Your Company"
 English, with no database at all. It is the fastest way to check a report
 somebody has just forwarded you.
 
+### Organisations
+
+Clients belong to an organisation, and an organisation's people see its
+clients and domains and nothing else. One install starts with one
+organisation, filed as `local`; a second company on the same install is a
+second organisation:
+
+```
+dmarc org rename --org local --name "NRG Tech Services"
+dmarc org add    --name "NextLayerSec" --group <entra security group object id>
+dmarc client add --name "Corner Post" --org nextlayersec
+dmarc client assign --domain cornerpost.example --client corner-post
+dmarc import --from C:\nextlayersec-export --org nextlayersec
+```
+
+Who belongs to which organisation is an Entra security group; the master
+group, named in `Auth:MasterGroupId`, sees them all with a switcher in the
+sidebar. Without sign-in configured, whoever is at the machine is the
+master. docs/DEPLOYING.md step 5 has the Entra side. Every page - Triage,
+Domains, Fix, Sources, Reports, Clients - is scoped to the organisation being
+looked at, and within it can be narrowed to one client. Assigning a domain to a
+client in another organisation moves it there, history and all.
+
 ---
 
 ## The web app
