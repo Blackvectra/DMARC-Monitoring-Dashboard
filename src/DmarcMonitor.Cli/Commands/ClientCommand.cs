@@ -18,7 +18,9 @@ public static class ClientCommand
         var rest = args.Skip(1).ToArray();
         var dbPath = Args.Value(rest, "--db") ?? "dmarc.db";
 
-        var store = new ReportStore(dbPath);
+        // The organisation new clients belong to. Everything else here names
+        // a client or a domain by slug, which is unique across organisations.
+        var store = new ReportStore(dbPath, Args.Value(rest, "--org") ?? ReportStore.DefaultTenantSlug);
         if (!await store.IsInitialisedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
@@ -31,27 +33,56 @@ public static class ClientCommand
             "add" => await AddAsync(store, rest, ct).ConfigureAwait(false),
             "assign" => await AssignAsync(store, rest, ct).ConfigureAwait(false),
             "auto-assign" => await AutoAssignAsync(store, rest, ct).ConfigureAwait(false),
+            "set-group" => await SetGroupAsync(store, rest, ct).ConfigureAwait(false),
             _ => Usage($"Unknown: dmarc client {action}"),
         };
     }
 
+    /// <summary>
+    /// The customer's own login: members of the group see this client and
+    /// nothing else, read only.
+    /// </summary>
+    private static async Task<int> SetGroupAsync(ReportStore store, string[] args, CancellationToken ct)
+    {
+        var client = Args.Value(args, "--client");
+        if (string.IsNullOrWhiteSpace(client))
+        {
+            return Usage("dmarc client set-group --client <slug> --group <entra group object id> [--db <path>]   (omit --group to clear it)");
+        }
+
+        var group = Args.Value(args, "--group");
+        if (!await store.SetClientGroupAsync(client, group, ct: ct).ConfigureAwait(false))
+        {
+            Console.Error.WriteLine($"No client with the slug '{client}'. See: dmarc client list");
+            return 66;
+        }
+
+        Console.WriteLine(string.IsNullOrWhiteSpace(group)
+            ? $"'{client}' has no customer login group now."
+            : $"Members of {group.Trim()} see '{client}' and nothing else, read only. They may need to sign out and back in.");
+        return 0;
+    }
+
     private static async Task<int> ListAsync(ReportStore store, CancellationToken ct)
     {
-        var clients = await store.GetClientsAsync(ct).ConfigureAwait(false);
+        var clients = await store.GetClientsAsync(ct: ct).ConfigureAwait(false);
         if (clients.Count == 0)
         {
             Console.WriteLine("No clients yet. Import some reports first, then: dmarc client add --name \"<name>\"");
             return 0;
         }
 
+        // The organisation column only earns its width once there are two.
+        var organisations = clients.Select(c => c.OrganisationSlug).Distinct(StringComparer.Ordinal).Count() > 1;
+
         Console.WriteLine();
-        Console.WriteLine($"  {"slug",-28} {"name",-32} {"domains",7} {"messages",9}");
+        Console.WriteLine($"  {"slug",-28} {"name",-32} {"domains",7} {"messages",9}{(organisations ? "  organisation" : "")}");
         foreach (var c in clients)
         {
-            Console.WriteLine($"  {c.Slug,-28} {c.Name,-32} {c.Domains,7} {c.Messages,9:N0}");
+            Console.WriteLine($"  {c.Slug,-28} {c.Name,-32} {c.Domains,7} {c.Messages,9:N0}{(organisations ? "  " + c.OrganisationSlug : "")}");
         }
 
-        var unassigned = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
+        var unassigned = await store.GetUnassignedDomainsAsync(ct: ct).ConfigureAwait(false);
         if (unassigned.Count > 0)
         {
             Console.WriteLine();
@@ -70,10 +101,10 @@ public static class ClientCommand
         var name = Args.Value(args, "--name");
         if (string.IsNullOrWhiteSpace(name))
         {
-            return Usage("dmarc client add --name \"<name>\" [--slug <slug>] [--db <path>]");
+            return Usage("dmarc client add --name \"<name>\" [--slug <slug>] [--org <organisation slug>] [--db <path>]");
         }
 
-        var slug = await store.CreateClientAsync(name, Args.Value(args, "--slug"), ct).ConfigureAwait(false);
+        var slug = await store.CreateClientAsync(name, Args.Value(args, "--slug"), store.Organisation, ct).ConfigureAwait(false);
         if (slug is null)
         {
             // Either the name reduced to nothing usable, or it is taken. Both
@@ -112,7 +143,7 @@ public static class ClientCommand
     {
         var apply = Args.Flag(args, "--apply");
 
-        var domains = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
+        var domains = await store.GetUnassignedDomainsAsync(ct: ct).ConfigureAwait(false);
         if (domains.Count == 0)
         {
             Console.WriteLine("Every domain is already filed under a client.");
@@ -122,7 +153,7 @@ public static class ClientCommand
         Console.WriteLine();
         Console.WriteLine($"  {"domain",-26} {"client",-26} {"slug",-24}");
 
-        var taken = (await store.GetClientsAsync(ct).ConfigureAwait(false))
+        var taken = (await store.GetClientsAsync(ct: ct).ConfigureAwait(false))
             .ToDictionary(c => c.Slug, c => c.Name, StringComparer.OrdinalIgnoreCase);
 
         var planned = new List<(string Domain, string Name, string Slug)>();
@@ -165,9 +196,9 @@ public static class ClientCommand
             // Null means the slug already exists, which is what happens when
             // two domains map to one client. That is the intended outcome, not
             // a failure, so the assign below runs either way.
-            await store.CreateClientAsync(name, slug, ct).ConfigureAwait(false);
+            await store.CreateClientAsync(name, slug, ct: ct).ConfigureAwait(false);
 
-            var outcome = await store.AssignDomainAsync(domain, slug, ct).ConfigureAwait(false);
+            var outcome = await store.AssignDomainAsync(domain, slug, ct: ct).ConfigureAwait(false);
             if (outcome is ReportStore.AssignOutcome.Assigned or ReportStore.AssignOutcome.AlreadyAssigned)
             {
                 filed++;
@@ -194,7 +225,7 @@ public static class ClientCommand
             return Usage("dmarc client assign --domain <domain> --client <slug> [--db <path>]");
         }
 
-        var outcome = await store.AssignDomainAsync(domain, client, ct).ConfigureAwait(false);
+        var outcome = await store.AssignDomainAsync(domain, client, ct: ct).ConfigureAwait(false);
         switch (outcome)
         {
             case ReportStore.AssignOutcome.Assigned:
@@ -209,7 +240,7 @@ public static class ClientCommand
                 // Naming a domain that is not there is nearly always a typo,
                 // and the list of what IS there is the fastest way to see it.
                 Console.Error.WriteLine($"No reports have been stored for '{domain}'.");
-                var unassigned = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
+                var unassigned = await store.GetUnassignedDomainsAsync(ct: ct).ConfigureAwait(false);
                 if (unassigned.Count > 0)
                 {
                     Console.Error.WriteLine("Unassigned domains:");
@@ -219,7 +250,7 @@ public static class ClientCommand
 
             default:
                 Console.Error.WriteLine($"No client with the slug '{client}'.");
-                var clients = await store.GetClientsAsync(ct).ConfigureAwait(false);
+                var clients = await store.GetClientsAsync(ct: ct).ConfigureAwait(false);
                 Console.Error.WriteLine("Clients:");
                 foreach (var c in clients) { Console.Error.WriteLine($"    {c.Slug}"); }
                 Console.Error.WriteLine();
@@ -233,8 +264,9 @@ public static class ClientCommand
         Console.Error.WriteLine(message);
         Console.Error.WriteLine();
         Console.Error.WriteLine("  dmarc client list");
-        Console.Error.WriteLine("  dmarc client add    --name \"<name>\" [--slug <slug>]");
+        Console.Error.WriteLine("  dmarc client add    --name \"<name>\" [--slug <slug>] [--org <organisation slug>]");
         Console.Error.WriteLine("  dmarc client assign --domain <domain> --client <slug>");
+        Console.Error.WriteLine("  dmarc client set-group --client <slug> --group <entra group object id>   (the customer's own login)");
         return 64;
     }
 }

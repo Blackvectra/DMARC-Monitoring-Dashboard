@@ -68,6 +68,16 @@ window.dmarcShell = {
         const app = document.querySelector('.app');
         if (app) { app.classList.remove('nav-open'); }
     },
+
+    /* Switching organisation is a round trip on purpose: the choice is
+       re-signed into the sign-in cookie by the server, so every page - and
+       every later request - sees the same scope. Comes back to the page it
+       left from, so the person is not dropped on the home page. */
+    switchOrg(slug) {
+        const back = location.pathname + location.search;
+        location.href = '/org/switch?slug=' + encodeURIComponent(slug || '')
+            + '&returnUrl=' + encodeURIComponent(back);
+    },
 };
 
 /*

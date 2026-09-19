@@ -46,6 +46,7 @@ public static class Program
                 "ingest" => await IngestCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "import" => await ImportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "client" => await ClientCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "org" => await OrgCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "report" => await ReportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "check" => await CheckCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -123,6 +124,16 @@ public static class Program
                 assign           File a domain, and its stored history, under a client.
                   --domain <d>   Domain as it appears in the reports.
                   --client <s>   Client slug, from 'dmarc client list'.
+                --org <slug>     Organisation a new client belongs to. Default: local
+                --db <path>      Database file. Default: dmarc.db
+
+              org                Organisations: the layer above clients. Each has its own
+                                 clients and domains, and its people - an Entra security
+                                 group - see those and nothing else.
+                list             Every organisation, with its group.
+                add              Create one.  --name <name> [--slug <slug>] [--group <id>]
+                set-group        Say which Entra group belongs to it.  --org <slug> --group <id>
+                rename           --org <slug> --name <name>
                 --db <path>      Database file. Default: dmarc.db
 
               report             Write the monthly report a client receives, as one

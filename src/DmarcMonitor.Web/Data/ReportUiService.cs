@@ -32,11 +32,16 @@ public sealed class ReportUiService(DatabaseInfo database, IConfiguration config
     public bool IsProviderNameSet =>
         _configuration["Reporting:ProviderName"] is { Length: > 0 };
 
-    public Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(CancellationToken ct = default) =>
-        _builder.GetClientsAsync(ct);
+    /// <param name="tenantId">One organisation's clients, or null for every organisation's.</param>
+    public Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(string? tenantId, CancellationToken ct = default) =>
+        _builder.GetClientsAsync(tenantId, ct);
 
-    public Task<ClientReport?> BuildAsync(string slug, ReportPeriod period, CancellationToken ct = default) =>
-        _builder.BuildAsync(slug, period, ProviderName, ct);
+    /// <param name="tenantId">
+    /// The organisation the caller may see. A client outside it is not found,
+    /// so a report URL guessed for another organisation's customer is a 404.
+    /// </param>
+    public Task<ClientReport?> BuildAsync(string slug, ReportPeriod period, string? tenantId, CancellationToken ct = default) =>
+        _builder.BuildAsync(slug, period, ProviderName, tenantId, ct);
 
     /// <summary>The months worth offering, newest first, ending with the last complete one.</summary>
     public static IReadOnlyList<(string Value, string Label)> RecentMonths(int count = 12)

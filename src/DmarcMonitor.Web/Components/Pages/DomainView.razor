@@ -4,12 +4,18 @@
 @using DmarcMonitor.Core.Reporting
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Core.Domains
+@using DmarcMonitor.Core.Storage
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
 @using DmarcMonitor.Web.Components.Charts
 @using DmarcMonitor.Web.Data
 @inject DomainDetailService Detail
 @inject TimeSeriesService Series
 @inject DnsLookup Dns
 @inject ReportStoreConnection Db
+@inject OrgContext Org
+@inject OnboardingService Onboarding
+@inject AuditLog Audit
 @rendermode InteractiveServer
 
 <PageTitle>@Domain — DMARC Monitor</PageTitle>
@@ -30,6 +36,26 @@
         }
     </div>
     <div class="head-actions">
+        @* Filing the domain from the page that shows it, rather than from a
+           list two clicks away: the moment somebody knows whose domain this
+           is, is the moment they are looking at it. *@
+        @if (_detail is not null && _clients.Count > 0 && _access is { CanOperate: true })
+        {
+            <label>
+                Client
+                <select @bind="_moveTo" aria-label="Client">
+                    <option value="">@(_detail.ClientSlug == ReportStore.UnassignedClientSlug ? "Unassigned" : _detail.ClientName)</option>
+                    @foreach (var c in _clients.Where(c => c.Slug != _detail.ClientSlug))
+                    {
+                        <option value="@c.Slug">@(AcrossOrganisations ? $"{c.OrganisationName} / {c.Name}" : c.Name)</option>
+                    }
+                </select>
+            </label>
+            @if (!string.IsNullOrEmpty(_moveTo))
+            {
+                <button class="primary" @onclick="MoveAsync">@(_detail.ClientSlug == ReportStore.UnassignedClientSlug ? "Assign" : "Move")</button>
+            }
+        }
         <label>
             Window
             <select @bind="_days" @bind:after="LoadAsync">
@@ -40,6 +66,13 @@
         </label>
     </div>
 </header>
+
+@if (_moved is not null)
+{
+    <section class="callout @(_movedIsError ? "urgent" : "fine")">
+        <h2>@_moved</h2>
+    </section>
+}
 
 @if (!Db.Exists)
 {
@@ -721,6 +754,47 @@ else
         }
     }
 
+    private OrganisationAccess? _access;
+    private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
+    private string _moveTo = "";
+    private string? _moved;
+    private bool _movedIsError;
+
+    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+
+    private async Task MoveAsync()
+    {
+        // Checked here as well as in the markup: the handler runs on the
+        // server, and a hidden button is not a permission.
+        if (string.IsNullOrEmpty(_moveTo) || _detail is null || _access is not { CanOperate: true }) { return; }
+
+        try
+        {
+            var outcome = await Onboarding.AssignAsync(_detail.Domain, _moveTo, _access.TenantId);
+            var client = _clients.FirstOrDefault(c => c.Slug == _moveTo)?.Name ?? _moveTo;
+            if (outcome == ReportStore.AssignOutcome.Assigned)
+            {
+                await Audit.RecordAsync(_access.Current?.Id, _access.User, "domain.assigned", $"{_detail.Domain} -> {_moveTo}");
+            }
+            _moved = outcome switch
+            {
+                ReportStore.AssignOutcome.Assigned => $"{_detail.Domain} is now filed under {client}, along with everything already stored for it.",
+                ReportStore.AssignOutcome.AlreadyAssigned => $"{_detail.Domain} was already filed under {client}.",
+                ReportStore.AssignOutcome.DomainNotFound => $"Nothing is stored for {_detail.Domain}.",
+                _ => $"No client filed as '{_moveTo}'.",
+            };
+            _movedIsError = outcome is not (ReportStore.AssignOutcome.Assigned or ReportStore.AssignOutcome.AlreadyAssigned);
+        }
+        catch (Exception ex)
+        {
+            _moved = ex.Message;
+            _movedIsError = true;
+        }
+
+        _moveTo = "";
+        await LoadAsync();
+    }
+
     /// <summary>True when a subdomain policy is more lenient than the domain's own.</summary>
     private static bool Weaker(string sp, string p) => Strength(sp) < Strength(p);
 
@@ -748,7 +822,14 @@ else
 
         try
         {
-            _detail = await Detail.GetAsync(Domain, _days);
+            // The scope decides whether this domain exists at all as far as
+            // this person is concerned: another organisation's domain is
+            // "nothing stored", the same page a domain nobody has reported on
+            // gets, so the URL confirms nothing.
+            _access = await Org.GetAsync();
+            _detail = await Detail.GetAsync(Domain, _days, _access.TenantId, _access.RestrictedClient);
+            _clients = _detail is null || !_access.CanOperate ? [] : [.. (await Onboarding.GetClientsAsync(_access.TenantId))
+                .Where(c => c.Slug != ReportStore.UnassignedClientSlug)];
         }
         catch (Exception ex)
         {
@@ -764,8 +845,9 @@ else
 
         try
         {
-            _series = _detail is null ? null : await Series.DomainAsync(_detail.Domain, _days);
-            _breakdown = _detail is null ? null : await Series.BreakdownAsync(_detail.Domain, _days);
+            var tenant = _access?.TenantId;
+            _series = _detail is null ? null : await Series.DomainAsync(_detail.Domain, _days, tenant);
+            _breakdown = _detail is null ? null : await Series.BreakdownAsync(_detail.Domain, _days, tenant);
         }
         catch (Exception)
         {

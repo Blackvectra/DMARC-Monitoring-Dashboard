@@ -158,6 +158,12 @@ it was sent to, and left in the mailbox rather than filed away; when none at
 all could be attributed the run exits 64 and says which address to set. Fix
 the address and the next run ingests them.
 
+With more than one organisation on the install, each organisation's mailbox
+gets its own collector run with `--org <slug>` (or `DMARC_ORGANISATION` in the
+environment file). That decides where a domain nobody has seen before is
+filed; a domain already known keeps its organisation whichever mailbox its
+reports arrive in.
+
 `--dry-run` parses everything and reports what it found, writing nothing and
 moving nothing. Run it against the live mailbox as many times as you like.
 

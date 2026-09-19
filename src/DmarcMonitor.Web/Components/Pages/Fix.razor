@@ -2,10 +2,12 @@
 @using DmarcMonitor.Core.Remediation
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Web.Data
+@using DmarcMonitor.Web.Auth
 @using Microsoft.AspNetCore.Components.Authorization
 @inject RemediationUiService Fixes
 @inject ReportStoreConnection Db
 @inject AuthenticationStateProvider Auth
+@inject OrgContext Org
 @rendermode InteractiveServer
 
 <PageTitle>Fix — DMARC Monitor</PageTitle>
@@ -201,7 +203,7 @@ else
                             {
                                 <p class="sub">Note: @w</p>
                             }
-                            @if (d.CanApply)
+                            @if (d.CanApply && _canOperate)
                             {
                                 <div class="form-row">
                                     <input class="wide" placeholder="Reason, written for the customer's report"
@@ -210,6 +212,10 @@ else
                                     <button class="primary" disabled="@(_busy || Reason(key).Trim().Length == 0)"
                                             @onclick="() => ApplyAsync(plan)">Apply</button>
                                 </div>
+                            }
+                            else if (d.CanApply)
+                            {
+                                <p class="sub">Applying this needs the operator role.</p>
                             }
                             else
                             {
@@ -328,7 +334,7 @@ else
                                 }
                             </td>
                             <td>
-                                @if (c.RolledBackAt is null)
+                                @if (c.RolledBackAt is null && _canOperate)
                                 {
                                     <div class="form-row">
                                         <input placeholder="Why"
@@ -353,6 +359,10 @@ else
     private readonly Dictionary<string, DomainFixes> _domains = new(StringComparer.OrdinalIgnoreCase);
     private int _pending;
     private bool _loaded;
+    private string? _tenant;
+
+    /// <summary>Whether this person may change DNS. A viewer sees every plan and no button.</summary>
+    private bool _canOperate;
     private IReadOnlyList<AppliedChange>? _history;
     private string? _error;
     private string? _message;
@@ -434,10 +444,13 @@ else
         _error = null;
         try
         {
-            // The list first, which is a database read and instant, then the
-            // DNS for each one behind it.
-            _rows = await Fixes.DomainsAsync();
-            _history = await Fixes.HistoryAsync();
+            // The scope first, then the list, which is a database read and
+            // instant, then the DNS for each one behind it.
+            var access = await Org.GetAsync();
+            _tenant = access.TenantId;
+            _canOperate = access.CanOperate;
+            _rows = await Fixes.DomainsAsync(_tenant, access.RestrictedClient);
+            _history = await Fixes.HistoryAsync(_tenant, access.RestrictedClient);
             _pending = _rows.Count;
             _loaded = true;
             await InvokeAsync(StateHasChanged);
@@ -454,7 +467,7 @@ else
                 // means the page cannot repaint while it waits - which is the
                 // whole point of filling the list in as answers arrive.
                 var planned = await Task.Run(
-                    () => Task.WhenAll(batch.Select(r => Fixes.PlanAsync(r.Domain, r, null))));
+                    () => Task.WhenAll(batch.Select(r => Fixes.PlanAsync(r.Domain, r, null, _tenant))));
 
                 foreach (var plan in planned) { _domains[plan.Domain] = plan; }
                 _pending -= batch.Length;
@@ -476,7 +489,7 @@ else
     {
         if (string.IsNullOrEmpty(policy) || !_domains.TryGetValue(domain, out var current)) { return; }
 
-        _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, policy);
+        _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, policy, _tenant);
     }
 
     private async Task<string> WhoAsync()
@@ -488,7 +501,8 @@ else
     private async Task ApplyAsync(ChangePlan plan)
     {
         var reason = Reason(Key(plan)).Trim();
-        if (string.IsNullOrEmpty(reason)) { return; }
+        // The handler runs on the server; a hidden button is not a permission.
+        if (string.IsNullOrEmpty(reason) || !_canOperate) { return; }
 
         _busy = true;
         try
@@ -511,7 +525,7 @@ else
     private async Task RollBackAsync(string changeId)
     {
         var reason = RollbackReason(changeId).Trim();
-        if (string.IsNullOrEmpty(reason)) { return; }
+        if (string.IsNullOrEmpty(reason) || !_canOperate) { return; }
 
         _busy = true;
         try

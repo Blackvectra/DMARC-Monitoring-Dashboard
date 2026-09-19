@@ -20,8 +20,13 @@ public sealed class ClientReportBuilder(string databasePath)
         Mode = SqliteOpenMode.ReadOnly,
     }.ToString();
 
+    /// <param name="tenantId">
+    /// The organisation the caller may see, or null for any. A client of
+    /// another organisation is reported as not found.
+    /// </param>
     public async Task<ClientReport?> BuildAsync(
-        string clientSlug, ReportPeriod period, string providerName = "Your IT provider", CancellationToken ct = default)
+        string clientSlug, ReportPeriod period, string providerName = "Your IT provider", string? tenantId = null,
+        CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
         ArgumentNullException.ThrowIfNull(period);
@@ -29,10 +34,16 @@ public sealed class ClientReportBuilder(string databasePath)
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        var client = await GetClientAsync(db, clientSlug, ct).ConfigureAwait(false);
+        var client = await GetClientAsync(db, clientSlug, tenantId, ct).ConfigureAwait(false);
         if (client is null) { return null; }
 
         var (clientId, clientName) = client.Value;
+
+        // The organisation's own name and look win over whatever the caller
+        // was configured with: NextLayerSec's reports say NextLayerSec even
+        // on an install whose default provider name is NRG's.
+        var brand = await GetBrandAsync(db, clientId, ct).ConfigureAwait(false);
+        if (brand.ProviderName is { Length: > 0 }) { providerName = brand.ProviderName; }
 
         var domains = await GetDomainHealthAsync(db, clientId, period, ct).ConfigureAwait(false);
         var sources = await GetSourcesAsync(db, clientId, period, ct).ConfigureAwait(false);
@@ -46,6 +57,9 @@ public sealed class ClientReportBuilder(string databasePath)
             Daily = daily,
             ClientName = clientName,
             ProviderName = providerName,
+            BrandColor = brand.Color,
+            BrandLogo = brand.Logo,
+            ContactBlock = brand.Contact,
             Period = period,
             Domains = domains,
             Sources = sources,
@@ -60,13 +74,16 @@ public sealed class ClientReportBuilder(string databasePath)
     }
 
     /// <summary>Every client that could be reported on, for a "generate all" run.</summary>
-    public async Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(CancellationToken ct = default)
+    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    public async Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
-        command.CommandText = "SELECT slug, name FROM clients WHERE deleted_at IS NULL ORDER BY name";
+        command.CommandText =
+            "SELECT slug, name FROM clients WHERE deleted_at IS NULL AND ($tenant IS NULL OR tenant_id = $tenant) ORDER BY name";
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         var results = new List<(string, string)>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -77,12 +94,33 @@ public sealed class ClientReportBuilder(string databasePath)
         return results;
     }
 
-    private static async Task<(string Id, string Name)?> GetClientAsync(
-        SqliteConnection db, string slug, CancellationToken ct)
+    /// <summary>How the client's organisation presents itself, all optional.</summary>
+    private static async Task<(string? ProviderName, string? Color, string? Logo, string? Contact)> GetBrandAsync(
+        SqliteConnection db, string clientId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
-        command.CommandText = "SELECT id, name FROM clients WHERE slug = $slug AND deleted_at IS NULL LIMIT 1";
+        command.CommandText = """
+            SELECT t.provider_name, t.brand_primary_color, t.brand_logo, t.brand_contact_block
+            FROM clients c JOIN tenants t ON t.id = c.tenant_id
+            WHERE c.id = $client LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$client", clientId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (null, null, null, null); }
+
+        string? At(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+        return (At(0), At(1), At(2), At(3));
+    }
+
+    private static async Task<(string Id, string Name)?> GetClientAsync(
+        SqliteConnection db, string slug, string? tenantId, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText =
+            "SELECT id, name FROM clients WHERE slug = $slug AND deleted_at IS NULL AND ($tenant IS NULL OR tenant_id = $tenant) LIMIT 1";
         command.Parameters.AddWithValue("$slug", slug);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }

@@ -32,6 +32,12 @@ public static class IngestCommand
         var maxMessages = Args.Int(args, "--max", 500);
         var dryRun = Args.Flag(args, "--dry-run");
 
+        // Which organisation a domain nobody has seen before belongs to. One
+        // collector per organisation's mailbox is the expected shape; a domain
+        // already known keeps its own organisation whatever this says.
+        var organisation = NonBlank(Args.Value(args, "--org")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_ORGANISATION"))
+            ?? ReportStore.DefaultTenantSlug;
+
         // Everything missing is reported at once. Being told about one missing
         // flag at a time, each after a failed run, is its own small misery.
         var missing = new List<string>();
@@ -67,7 +73,7 @@ public static class IngestCommand
             : $"per-domain addresses under {reportingDomain}{(fallback is null ? "" : $", falling back to {fallback}")}";
         fallback ??= string.IsNullOrWhiteSpace(reportingDomain) ? mailbox : null;
 
-        var store = new ReportStore(dbPath);
+        var store = new ReportStore(dbPath, organisation);
         if (!dryRun && !await store.IsInitialisedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
@@ -147,6 +153,10 @@ public static class IngestCommand
 
             Console.WriteLine($"Reading {mailbox}{(dryRun ? " (dry run: nothing will be written or moved)" : "")}");
             Console.WriteLine($"Attributing reports by {attributedBy}");
+            if (organisation != ReportStore.DefaultTenantSlug)
+            {
+                Console.WriteLine($"Filing new domains under the organisation '{organisation}'");
+            }
             Console.WriteLine();
 
             IngestRunResult result;
@@ -315,7 +325,7 @@ public static class IngestCommand
     /// </remarks>
     private static async Task WarnUnassignedAsync(ReportStore store, CancellationToken ct)
     {
-        var unassigned = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
+        var unassigned = await store.GetUnassignedDomainsAsync(ct: ct).ConfigureAwait(false);
         if (unassigned.Count == 0) { return; }
 
         Console.WriteLine();

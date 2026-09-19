@@ -93,7 +93,7 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
         }
 
         // Whatever was there for this scope goes, secret included.
-        foreach (var old in await ListAsync(db, clientId, domainId, ct).ConfigureAwait(false))
+        foreach (var old in await ListAsync(db, clientId, domainId, null, ct).ConfigureAwait(false))
         {
             if (old.CredentialRef is not null) { await Secrets.RemoveAsync(old.CredentialRef, ct).ConfigureAwait(false); }
             await ExecAsync(db, "DELETE FROM dns_provider_configs WHERE id = $id", ct, ("$id", old.Id)).ConfigureAwait(false);
@@ -136,7 +136,7 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
         }
 
         var removed = false;
-        foreach (var old in await ListAsync(db, client.Value.ClientId, domainId, ct).ConfigureAwait(false))
+        foreach (var old in await ListAsync(db, client.Value.ClientId, domainId, null, ct).ConfigureAwait(false))
         {
             if (old.CredentialRef is not null && Secrets.IsAvailable)
             {
@@ -159,11 +159,12 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
     }
 
     /// <summary>Every configured provider, for the settings page. Refs only; never a secret.</summary>
-    public async Task<IReadOnlyList<DnsProviderConfig>> ListAsync(CancellationToken ct = default)
+    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    public async Task<IReadOnlyList<DnsProviderConfig>> ListAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
-        return await ListAsync(db, null, null, ct).ConfigureAwait(false);
+        return await ListAsync(db, null, null, tenantId, ct).ConfigureAwait(false);
     }
 
     /// <summary>The config that applies to a domain: its own, else its client's, else null.</summary>
@@ -245,7 +246,8 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
         _ => [],
     };
 
-    private static async Task<List<DnsProviderConfig>> ListAsync(SqliteConnection db, string? clientId, string? domainId, CancellationToken ct)
+    private static async Task<List<DnsProviderConfig>> ListAsync(
+        SqliteConnection db, string? clientId, string? domainId, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -255,10 +257,12 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
             LEFT JOIN domains d ON d.id = p.domain_id
             WHERE ($client IS NULL OR p.client_id = $client)
               AND ($client IS NULL OR ($domain IS NULL AND p.domain_id IS NULL) OR p.domain_id = $domain)
+              AND ($tenant IS NULL OR p.tenant_id = $tenant)
             ORDER BY c.slug, d.name
             """;
         command.Parameters.AddWithValue("$client", (object?)clientId ?? DBNull.Value);
         command.Parameters.AddWithValue("$domain", (object?)domainId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         var result = new List<DnsProviderConfig>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);

@@ -61,13 +61,29 @@ public static class ClientReportRenderer
 
     private static void Header(StringBuilder html, ClientReport report) =>
         html.Append(CultureInfo.InvariantCulture, $"""
-            <header>
-              <p class="eyebrow">Email Protection Report</p>
+            <header{Brand(report)}>
+              {Logo(report)}<p class="eyebrow">Email Protection Report</p>
               <h1>{E(report.ClientName)}</h1>
               <p class="period">{E(report.Period.Label)} &middot; prepared by {E(report.ProviderName)}</p>
             </header>
 
             """);
+
+    /// <summary>
+    /// The organisation's colour on the header rule, when it has one. Only a
+    /// value the store validated as a plain hex ever gets here, and it is
+    /// checked again because this is interpolated into a style attribute.
+    /// </summary>
+    private static string Brand(ClientReport report) =>
+        report.BrandColor is { } c && System.Text.RegularExpressions.Regex.IsMatch(c, "^#[0-9a-fA-F]{6}$")
+            ? $" style=\"border-bottom-color:{c}\""
+            : "";
+
+    /// <summary>The logo, when there is one. A data: URL of an image type, checked again before it lands in a src.</summary>
+    private static string Logo(ClientReport report) =>
+        report.BrandLogo is { } logo && DmarcMonitor.Core.Tenancy.OrganisationBrand.IsValidLogo(logo)
+            ? $"<img class=\"logo\" src=\"{logo}\" alt=\"{E(report.ProviderName)}\" />\n              "
+            : "";
 
     private static void Summary(StringBuilder html, ReportSummary summary)
     {
@@ -478,9 +494,16 @@ public static class ClientReportRenderer
               <p>Generated {E(report.GeneratedAt.ToString("d MMMM yyyy", CultureInfo.InvariantCulture))}
               by {E(report.ProviderName)}. Covers {E(report.Period.Start.ToString("d MMM yyyy", CultureInfo.InvariantCulture))}
               to {E(report.Period.End.ToString("d MMM yyyy", CultureInfo.InvariantCulture))}.</p>
+              {Contact(report)}
             </footer>
 
             """);
+
+    /// <summary>Who to call, one paragraph per line, when the organisation said.</summary>
+    private static string Contact(ClientReport report) =>
+        string.IsNullOrWhiteSpace(report.ContactBlock)
+            ? ""
+            : "<p class=\"contact\">" + string.Join("<br />", report.ContactBlock.Split('\n').Select(l => E(l.TrimEnd('\r')))) + "</p>";
 
     // ---- helpers ------------------------------------------------------------
 
@@ -513,6 +536,8 @@ public static class ClientReportRenderer
         main { max-width:860px; margin:0 auto; background:#fff; padding:40px;
                border:1px solid var(--line); border-radius:10px; }
         header { border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:28px; }
+        .logo { display:block; max-height:48px; max-width:220px; margin:0 0 14px; }
+        .contact { margin:10px 0 0; color:var(--ink); }
         .eyebrow { margin:0; text-transform:uppercase; letter-spacing:.09em; font-size:12px;
                    font-weight:700; color:var(--muted); }
         h1 { margin:6px 0 4px; font-size:30px; line-height:1.2; }

@@ -1,8 +1,10 @@
 @page "/reports"
 @using DmarcMonitor.Core.Reporting
 @using DmarcMonitor.Web.Data
+@using DmarcMonitor.Web.Auth
 @inject ReportUiService ReportUi
 @inject ReportStoreConnection Db
+@inject OrgContext Org
 @rendermode InteractiveServer
 
 <PageTitle>Reports — DMARC Monitor</PageTitle>
@@ -122,6 +124,7 @@ else
     private ReportSummary? _summary;
     private string? _error;
     private bool _checked;
+    private string? _tenant;
 
     private string _slug = "";
     private string _month = ReportUiService.RecentMonths()[0].Value;
@@ -132,10 +135,15 @@ else
 
         try
         {
+            var access = await Org.GetAsync();
+            _tenant = access.TenantId;
+
             // Unassigned is a worklist, not a customer; a report addressed to
-            // it is a document nobody can send.
-            _clients = [.. (await ReportUi.GetClientsAsync())
-                .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)];
+            // it is a document nobody can send. A customer's own login sees
+            // only their own.
+            _clients = [.. (await ReportUi.GetClientsAsync(_tenant))
+                .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)
+                .Where(c => access.RestrictedClient is null || c.Slug.Equals(access.RestrictedClient, StringComparison.OrdinalIgnoreCase))];
 
             if (_clients.Count > 0)
             {
@@ -161,7 +169,7 @@ else
         try
         {
             ReportUiService.TryParseMonth(_month, out var period);
-            var report = await ReportUi.BuildAsync(_slug, period);
+            var report = await ReportUi.BuildAsync(_slug, period, _tenant);
 
             // A month with no data still produces a report; the preview just
             // has nothing to show, which is a different thing from failing.

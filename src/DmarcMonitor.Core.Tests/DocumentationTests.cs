@@ -201,6 +201,8 @@ public sealed class DocumentationTests
     [InlineData("DOTNET_BUNDLE_EXTRACT_BASE_DIR")]
     [InlineData("signout-callback-oidc")]
     [InlineData("ID tokens")]
+    [InlineData("Auth:MasterGroupId")]
+    [InlineData("groups claim")]
     public void DeployingCoversBothDistributionsAndTheInstaller(string phrase)
     {
         var deploying = File.ReadAllText(Path.Combine(RepoRoot().FullName, "docs", "DEPLOYING.md"));

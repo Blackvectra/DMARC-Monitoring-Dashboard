@@ -37,7 +37,9 @@ public static class ImportCommand
             return 66;
         }
 
-        var store = new ReportStore(dbPath);
+        // Domains nobody has seen before go to this organisation; known ones
+        // keep their own.
+        var store = new ReportStore(dbPath, Args.Value(args, "--org") ?? ReportStore.DefaultTenantSlug);
         if (!await store.IsInitialisedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
@@ -62,7 +64,7 @@ public static class ImportCommand
         if (result.Failed > 0) { Console.WriteLine($"  failed          {result.Failed}"); }
         if (result.StoppedEarly) { Console.WriteLine("  stopped early; run it again to carry on"); }
 
-        var unassigned = await store.GetUnassignedDomainsAsync(ct).ConfigureAwait(false);
+        var unassigned = await store.GetUnassignedDomainsAsync(ct: ct).ConfigureAwait(false);
         if (unassigned.Count > 0)
         {
             Console.WriteLine();

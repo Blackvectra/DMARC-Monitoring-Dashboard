@@ -80,15 +80,23 @@ public sealed class RemediationUiService(
     /// comes back, rather than showing nothing for the half-minute it takes
     /// to ask about ten domains.
     /// </remarks>
-    public Task<IReadOnlyList<DomainTriage>> DomainsAsync(CancellationToken ct = default) =>
-        _triage.GetAsync(ct: ct);
+    /// <param name="tenantId">One organisation's domains, or null for every organisation's.</param>
+    public Task<IReadOnlyList<DomainTriage>> DomainsAsync(string? tenantId, string? clientSlug = null, CancellationToken ct = default) =>
+        _triage.GetAsync(tenantId: tenantId, clientSlug: clientSlug, ct: ct);
 
     /// <summary>
     /// One domain, with the safe fixes and optionally a policy move planned.
     /// </summary>
-    public async Task<DomainFixes> PlanAsync(string domain, DomainTriage? triage, string? policy, CancellationToken ct = default)
+    /// <remarks>
+    /// The triage row is the proof the caller may see this domain: it came
+    /// from a scoped list. Without one, the domain is looked up within the
+    /// same scope and a domain outside it plans nothing.
+    /// </remarks>
+    public async Task<DomainFixes> PlanAsync(
+        string domain, DomainTriage? triage, string? policy, string? tenantId = null, CancellationToken ct = default)
     {
-        triage ??= (await _triage.GetAsync(ct: ct)).FirstOrDefault(t => t.Domain.Equals(domain, StringComparison.OrdinalIgnoreCase));
+        triage ??= (await _triage.GetAsync(tenantId: tenantId, ct: ct))
+            .FirstOrDefault(t => t.Domain.Equals(domain, StringComparison.OrdinalIgnoreCase));
         var published = await lookup.ReadAsync(domain, ct);
         var plans = new List<ChangePlan>();
 
@@ -246,11 +254,11 @@ public sealed class RemediationUiService(
         return await remediation.RollBackAsync(change.Id, provider, by, reason, ct);
     }
 
-    public Task<IReadOnlyList<AppliedChange>> HistoryAsync(CancellationToken ct = default) =>
-        remediation.HistoryAsync(null, 200, ct);
+    public Task<IReadOnlyList<AppliedChange>> HistoryAsync(string? tenantId, string? clientSlug = null, CancellationToken ct = default) =>
+        remediation.HistoryAsync(null, 200, tenantId, clientSlug, ct);
 
-    public Task<IReadOnlyList<DnsProviderConfig>> ProvidersAsync(CancellationToken ct = default) =>
-        providers.ListAsync(ct);
+    public Task<IReadOnlyList<DnsProviderConfig>> ProvidersAsync(string? tenantId, CancellationToken ct = default) =>
+        providers.ListAsync(tenantId, ct);
 
     public Task<DnsProviderConfig> SetProviderAsync(
         string clientSlug, string? domain, string provider, IReadOnlyDictionary<string, string> settings, string? secret,

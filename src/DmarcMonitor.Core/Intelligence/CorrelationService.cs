@@ -114,8 +114,15 @@ public sealed class CorrelationService(string databasePath)
         Mode = SqliteOpenMode.ReadOnly,
     }.ToString();
 
+    /// <param name="tenantId">
+    /// One organisation's clients, or null for every organisation's. Scoped
+    /// even though the whole point of this page is seeing across clients:
+    /// across NRG's clients is the product; across NRG's and NextLayerSec's
+    /// is a leak.
+    /// </param>
+    /// <param name="clientSlug">One client's domains only, for a customer's own login, or null.</param>
     public async Task<IReadOnlyList<FailingSource>> GetFailingSourcesAsync(
-        int days = 30, int limit = 200, CancellationToken ct = default)
+        int days = 30, int limit = 200, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
@@ -169,12 +176,16 @@ public sealed class CorrelationService(string databasePath)
             WHERE r.dmarc_result = 'fail'
               AND r.date_begin >= $since
               AND (r.override_reason IS NULL OR r.override_reason = '')
+              AND ($tenant IS NULL OR r.tenant_id = $tenant)
+              AND ($client IS NULL OR c.slug = $client)
             GROUP BY r.source_ip
             ORDER BY COUNT(DISTINCT CASE WHEN c.slug = 'unassigned' THEN d.name ELSE c.id END) DESC, failed DESC
             LIMIT $limit
             """;
         command.Parameters.AddWithValue("$since", since);
         command.Parameters.AddWithValue("$limit", limit);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$client", (object?)(string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant()) ?? DBNull.Value);
 
         var results = new List<FailingSource>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);

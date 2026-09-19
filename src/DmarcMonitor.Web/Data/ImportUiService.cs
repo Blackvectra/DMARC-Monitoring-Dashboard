@@ -18,7 +18,13 @@ namespace DmarcMonitor.Web.Data;
 /// </summary>
 public sealed class ImportUiService(DatabaseInfo database)
 {
-    private readonly ReportStore _store = new(database.Path);
+    private readonly string _path = database.Path;
+
+    /// <summary>
+    /// A store that files domains nobody has seen before under the given
+    /// organisation. Domains already known keep their own.
+    /// </summary>
+    private ReportStore Store(string organisation) => new(_path, organisation);
 
     /// <summary>
     /// Largest single file accepted from a browser.
@@ -35,9 +41,10 @@ public sealed class ImportUiService(DatabaseInfo database)
     /// <summary>Files accepted in one drop. Dropping a folder of thousands is normal.</summary>
     public const int MaxFiles = 5_000;
 
+    /// <param name="organisation">The organisation new domains are filed under, by slug.</param>
     public Task<ImportResult> ImportAsync(
-        string folder, IProgress<int>? progress = null, CancellationToken ct = default) =>
-        new ReportImporter(_store).ImportFolderAsync(folder, progress, ct);
+        string folder, string organisation, IProgress<int>? progress = null, CancellationToken ct = default) =>
+        new ReportImporter(Store(organisation)).ImportFolderAsync(folder, progress, ct);
 
     /// <summary>
     /// Imports files dropped or chosen in the browser.
@@ -49,14 +56,14 @@ public sealed class ImportUiService(DatabaseInfo database)
     /// exists for.
     /// </remarks>
     public Task<ImportResult> ImportUploadsAsync(
-        IReadOnlyList<IBrowserFile> files, IProgress<int>? progress = null, CancellationToken ct = default)
+        IReadOnlyList<IBrowserFile> files, string organisation, IProgress<int>? progress = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(files);
-        return new ReportImporter(_store).ImportAsync(ReadAsync(files, ct), progress, ct);
+        return new ReportImporter(Store(organisation)).ImportAsync(ReadAsync(files, ct), progress, ct);
     }
 
-    public Task<IReadOnlyList<string>> GetUnassignedDomainsAsync(CancellationToken ct = default) =>
-        _store.GetUnassignedDomainsAsync(ct);
+    public Task<IReadOnlyList<string>> GetUnassignedDomainsAsync(string? tenantId, CancellationToken ct = default) =>
+        Store(ReportStore.DefaultTenantSlug).GetUnassignedDomainsAsync(tenantId, ct);
 
     private static async IAsyncEnumerable<ImportFile> ReadAsync(
         IReadOnlyList<IBrowserFile> files, [EnumeratorCancellation] CancellationToken ct)

@@ -30,11 +30,19 @@ public sealed class ReportStore
     /// <summary>SQLITE_NOTADB: the file is not a database at all.</summary>
     private const int NotADatabase = 26;
 
-    public ReportStore(string databasePath)
+    /// <param name="organisation">
+    /// The organisation new domains are filed under when a report arrives for
+    /// one nobody has seen. A domain that already exists keeps its own
+    /// organisation whatever this says, so a collector for one organisation's
+    /// mailbox cannot move another's domain.
+    /// </param>
+    public ReportStore(string databasePath, string organisation = DefaultTenantSlug)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(organisation);
 
         _databasePath = databasePath;
+        _organisation = organisation.Trim().ToLowerInvariant();
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
@@ -43,6 +51,10 @@ public sealed class ReportStore
     }
 
     private readonly string _databasePath;
+    private readonly string _organisation;
+
+    /// <summary>The organisation slug new domains are filed under.</summary>
+    public string Organisation => _organisation;
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken ct)
     {
@@ -162,7 +174,7 @@ public sealed class ReportStore
         await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
         var tx = (SqliteTransaction)transaction;
 
-        var ids = await EnsureDomainAsync(connection, tx, report.Policy.Domain, ct).ConfigureAwait(false);
+        var ids = await EnsureDomainAsync(connection, tx, report.Policy.Domain, _organisation, ct).ConfigureAwait(false);
         var reportId = Guid.NewGuid().ToString("N");
         var now = Iso(DateTimeOffset.UtcNow);
 
@@ -295,7 +307,7 @@ public sealed class ReportStore
         await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
         var tx = (SqliteTransaction)transaction;
 
-        var ids = await EnsureDomainAsync(connection, tx, domain, ct).ConfigureAwait(false);
+        var ids = await EnsureDomainAsync(connection, tx, domain, _organisation, ct).ConfigureAwait(false);
         var reportId = Guid.NewGuid().ToString("N");
 
         try
@@ -345,17 +357,19 @@ public sealed class ReportStore
     }
 
     /// <summary>Domains with no client assigned: reports arriving that nobody is billed for.</summary>
-    public async Task<IReadOnlyList<string>> GetUnassignedDomainsAsync(CancellationToken ct = default)
+    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    public async Task<IReadOnlyList<string>> GetUnassignedDomainsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT d.name FROM domains d
             JOIN clients c ON c.id = d.client_id
-            WHERE c.slug = $slug
+            WHERE c.slug = $slug AND ($tenant IS NULL OR d.tenant_id = $tenant)
             ORDER BY d.name
             """;
         command.Parameters.AddWithValue("$slug", UnassignedClientSlug);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         var result = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -366,8 +380,63 @@ public sealed class ReportStore
         return result;
     }
 
+    /// <summary>A domain, who it is filed under, and which organisation that is.</summary>
+    public sealed record DomainSummary(string Domain, string ClientSlug, string ClientName, string OrganisationSlug, string OrganisationName);
+
+    /// <summary>Every domain, for moving one between clients.</summary>
+    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    public async Task<IReadOnlyList<DomainSummary>> GetDomainsAsync(string? tenantId = null, CancellationToken ct = default)
+    {
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT d.name, c.slug, c.name, t.slug, t.name
+            FROM domains d
+            JOIN clients c ON c.id = d.client_id
+            JOIN tenants t ON t.id = d.tenant_id
+            WHERE ($tenant IS NULL OR d.tenant_id = $tenant)
+            ORDER BY d.name
+            """;
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+
+        var result = new List<DomainSummary>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            result.Add(new DomainSummary(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
+        }
+        return result;
+    }
+
     /// <summary>A client and how much is filed under it.</summary>
-    public sealed record ClientSummary(string Slug, string Name, int Domains, long Messages);
+    /// <param name="OrganisationSlug">The organisation it belongs to.</param>
+    /// <param name="EntraGroupId">The customer's own login group, or null.</param>
+    public sealed record ClientSummary(
+        string Slug, string Name, int Domains, long Messages,
+        string OrganisationSlug = "", string OrganisationName = "", string? EntraGroupId = null);
+
+    /// <summary>
+    /// Records the customer's own login group for a client. Its members see
+    /// this client and nothing else, read only. Null clears it.
+    /// </summary>
+    public async Task<bool> SetClientGroupAsync(string clientSlug, string? entraGroupId, string? tenantId = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE clients SET entra_group_id = $group, updated_at = $now
+            WHERE slug = $slug AND slug <> $unassigned AND ($tenant IS NULL OR tenant_id = $tenant)
+            """;
+        command.Parameters.AddWithValue("$group", string.IsNullOrWhiteSpace(entraGroupId) ? DBNull.Value : entraGroupId.Trim());
+        command.Parameters.AddWithValue("$now", Iso(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$slug", clientSlug.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$unassigned", UnassignedClientSlug);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0;
+    }
 
     /// <summary>Why an assignment did not happen, or that it did.</summary>
     public enum AssignOutcome
@@ -411,7 +480,8 @@ public sealed class ReportStore
     ];
 
     /// <summary>Every client, with the Unassigned one included: unbilled work is worth seeing.</summary>
-    public async Task<IReadOnlyList<ClientSummary>> GetClientsAsync(CancellationToken ct = default)
+    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    public async Task<IReadOnlyList<ClientSummary>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -421,19 +491,25 @@ public sealed class ReportStore
         command.CommandText = """
             SELECT c.slug, c.name,
                    COUNT(DISTINCT d.id)                  AS domains,
-                   COALESCE(SUM(r.message_count), 0)     AS messages
+                   COALESCE(SUM(r.message_count), 0)     AS messages,
+                   t.slug, t.name, c.entra_group_id
             FROM clients c
+            JOIN tenants t ON t.id = c.tenant_id
             LEFT JOIN domains d ON d.client_id = c.id
             LEFT JOIN aggregate_records r ON r.domain_id = d.id
-            GROUP BY c.id, c.slug, c.name
-            ORDER BY c.name
+            WHERE ($tenant IS NULL OR c.tenant_id = $tenant)
+            GROUP BY c.id, c.slug, c.name, t.slug, t.name, c.entra_group_id
+            ORDER BY t.name, c.name
             """;
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         var result = new List<ClientSummary>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
-            result.Add(new ClientSummary(reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3)));
+            result.Add(new ClientSummary(
+                reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3),
+                reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
         return result;
     }
@@ -441,7 +517,13 @@ public sealed class ReportStore
     /// <summary>
     /// Creates a client. Returns its slug, or null when that slug is taken.
     /// </summary>
-    public async Task<string?> CreateClientAsync(string name, string? slug = null, CancellationToken ct = default)
+    /// <param name="organisation">
+    /// The organisation it belongs to, by slug. The store's own organisation
+    /// when not given. An organisation that does not exist yet is created
+    /// under that name, which is how the first one comes to exist at all.
+    /// </param>
+    public async Task<string?> CreateClientAsync(
+        string name, string? slug = null, string? organisation = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
 
@@ -456,13 +538,9 @@ public sealed class ReportStore
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-        var tenantId = await EnsureRowAsync(connection, transaction,
-            "SELECT id FROM tenants WHERE slug = $slug",
-            """
-            INSERT INTO tenants (id, name, slug, deployment_mode, status, secret_backend, created_at, updated_at)
-            VALUES ($id, 'Local', $slug, 'self_hosted', 'active', 'dpapi', $now, $now)
-            """,
-            DefaultTenantSlug, now, ct).ConfigureAwait(false);
+        var tenantId = await EnsureTenantAsync(connection, transaction,
+            string.IsNullOrWhiteSpace(organisation) ? _organisation : organisation.Trim().ToLowerInvariant(), now, ct)
+            .ConfigureAwait(false);
 
         await using (var exists = connection.CreateCommand())
         {
@@ -498,7 +576,19 @@ public sealed class ReportStore
     /// <summary>
     /// Files a domain, and everything already stored for it, under a client.
     /// </summary>
-    public async Task<AssignOutcome> AssignDomainAsync(string domain, string clientSlug, CancellationToken ct = default)
+    /// <remarks>
+    /// The client's organisation comes with it: assigning a domain to a
+    /// NextLayerSec client moves it out of NRG Tech Services, history and all.
+    /// That is the one way a domain changes organisation, and it is a
+    /// deliberate act by somebody who could see both.
+    /// </remarks>
+    /// <param name="tenantId">
+    /// When given, the domain must belong to this organisation, so a person
+    /// scoped to one organisation cannot pull a domain out of another by
+    /// naming it.
+    /// </param>
+    public async Task<AssignOutcome> AssignDomainAsync(
+        string domain, string clientSlug, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
         ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
@@ -509,12 +599,16 @@ public sealed class ReportStore
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-        string domainId, currentClientId;
+        string domainId, currentClientId, currentTenantId;
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = transaction;
-            lookup.CommandText = "SELECT id, client_id FROM domains WHERE name = $name LIMIT 1";
+            lookup.CommandText = """
+                SELECT id, client_id, tenant_id FROM domains
+                WHERE name = $name AND ($tenant IS NULL OR tenant_id = $tenant) LIMIT 1
+                """;
             lookup.Parameters.AddWithValue("$name", name);
+            lookup.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
             await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (!await reader.ReadAsync(ct).ConfigureAwait(false))
             {
@@ -523,20 +617,31 @@ public sealed class ReportStore
             }
             domainId = reader.GetString(0);
             currentClientId = reader.GetString(1);
+            currentTenantId = reader.GetString(2);
         }
 
-        string clientId;
+        string clientId, clientTenantId;
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = transaction;
-            lookup.CommandText = "SELECT id FROM clients WHERE slug = $slug LIMIT 1";
+            // Unassigned exists once per organisation; the domain's own is the
+            // one meant. Any other slug is unique across organisations.
+            lookup.CommandText = """
+                SELECT id, tenant_id FROM clients
+                WHERE slug = $slug AND (slug <> $unassigned OR tenant_id = $current)
+                LIMIT 1
+                """;
             lookup.Parameters.AddWithValue("$slug", slug);
-            if (await lookup.ExecuteScalarAsync(ct).ConfigureAwait(false) is not string found)
+            lookup.Parameters.AddWithValue("$unassigned", UnassignedClientSlug);
+            lookup.Parameters.AddWithValue("$current", currentTenantId);
+            await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false))
             {
                 await transaction.RollbackAsync(ct).ConfigureAwait(false);
                 return AssignOutcome.ClientNotFound;
             }
-            clientId = found;
+            clientId = reader.GetString(0);
+            clientTenantId = reader.GetString(1);
         }
 
         if (clientId == currentClientId)
@@ -550,8 +655,9 @@ public sealed class ReportStore
         await using (var move = connection.CreateCommand())
         {
             move.Transaction = transaction;
-            move.CommandText = "UPDATE domains SET client_id = $client, updated_at = $now WHERE id = $domain";
+            move.CommandText = "UPDATE domains SET client_id = $client, tenant_id = $tenant, updated_at = $now WHERE id = $domain";
             move.Parameters.AddWithValue("$client", clientId);
+            move.Parameters.AddWithValue("$tenant", clientTenantId);
             move.Parameters.AddWithValue("$now", now);
             move.Parameters.AddWithValue("$domain", domainId);
             await move.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -564,8 +670,9 @@ public sealed class ReportStore
 
             // The table name is from this constant list, never from a caller,
             // so there is nothing here to inject; the values stay parameters.
-            update.CommandText = $"UPDATE {table} SET client_id = $client WHERE domain_id = $domain";
+            update.CommandText = $"UPDATE {table} SET client_id = $client, tenant_id = $tenant WHERE domain_id = $domain";
             update.Parameters.AddWithValue("$client", clientId);
+            update.Parameters.AddWithValue("$tenant", clientTenantId);
             update.Parameters.AddWithValue("$domain", domainId);
             await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
@@ -673,17 +780,18 @@ public sealed class ReportStore
     private sealed record DomainIds(string TenantId, string ClientId, string DomainId);
 
     /// <summary>
-    /// Resolves a domain to its ids, creating the tenant, the Unassigned
+    /// Resolves a domain to its ids, creating the organisation, its Unassigned
     /// client and the domain row as needed.
     /// </summary>
     private static async Task<DomainIds> EnsureDomainAsync(
-        SqliteConnection connection, SqliteTransaction tx, string domain, CancellationToken ct)
+        SqliteConnection connection, SqliteTransaction tx, string domain, string organisation, CancellationToken ct)
     {
         var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
         var now = Iso(DateTimeOffset.UtcNow);
 
-        // An existing domain keeps whatever client it was assigned to, so
-        // onboarding is never undone by a later report arriving.
+        // An existing domain keeps whatever client - and organisation - it
+        // was assigned to, so onboarding is never undone by a later report
+        // arriving, whichever mailbox it arrived in.
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = tx;
@@ -696,16 +804,12 @@ public sealed class ReportStore
             }
         }
 
-        var tenantId = await EnsureRowAsync(connection, tx,
-            "SELECT id FROM tenants WHERE slug = $slug",
-            """
-            INSERT INTO tenants (id, name, slug, deployment_mode, status, secret_backend, created_at, updated_at)
-            VALUES ($id, 'Local', $slug, 'self_hosted', 'active', 'dpapi', $now, $now)
-            """,
-            DefaultTenantSlug, now, ct).ConfigureAwait(false);
+        var tenantId = await EnsureTenantAsync(connection, tx, organisation, now, ct).ConfigureAwait(false);
 
+        // Unassigned is per organisation: NRG's unfiled domains are NRG's
+        // worklist, not NextLayerSec's.
         var clientId = await EnsureRowAsync(connection, tx,
-            "SELECT id FROM clients WHERE slug = $slug",
+            $"SELECT id FROM clients WHERE slug = $slug AND tenant_id = '{tenantId}'",
             $"""
             INSERT INTO clients (id, tenant_id, name, slug, status, collection_method, created_at, updated_at)
             VALUES ($id, '{tenantId}', 'Unassigned', $slug, 'onboarding', 'central_mailbox', $now, $now)
@@ -730,6 +834,22 @@ public sealed class ReportStore
 
         return new DomainIds(tenantId, clientId, domainId);
     }
+
+    /// <summary>
+    /// The organisation's row, created under its slug as a name when it does
+    /// not exist yet. The built-in one is called Local until somebody renames
+    /// it; any other is expected to have been created deliberately, and being
+    /// created here is only so a report is never refused for want of a row.
+    /// </summary>
+    private static Task<string> EnsureTenantAsync(
+        SqliteConnection connection, SqliteTransaction tx, string slug, string now, CancellationToken ct) =>
+        EnsureRowAsync(connection, tx,
+            "SELECT id FROM tenants WHERE slug = $slug",
+            $"""
+            INSERT INTO tenants (id, name, slug, deployment_mode, status, secret_backend, created_at, updated_at)
+            VALUES ($id, {(slug == DefaultTenantSlug ? "'Local'" : "$slug")}, $slug, 'self_hosted', 'active', 'dpapi', $now, $now)
+            """,
+            slug, now, ct);
 
     private static async Task<string> EnsureRowAsync(
         SqliteConnection connection, SqliteTransaction tx,

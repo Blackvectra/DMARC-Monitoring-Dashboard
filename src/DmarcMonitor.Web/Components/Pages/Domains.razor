@@ -1,8 +1,13 @@
 @page "/domains"
 @using DmarcMonitor.Core.Rollout
+@using DmarcMonitor.Core.Storage
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
 @using DmarcMonitor.Web.Data
 @inject TriageService Triage
 @inject ReportStoreConnection Db
+@inject OrgContext Org
+@inject OnboardingService Onboarding
 @rendermode InteractiveServer
 
 <PageTitle>Domains — DMARC Monitor</PageTitle>
@@ -14,6 +19,19 @@
            what needs doing, which is the one to open when you do not already know what you are after.</p>
     </div>
     <div class="head-actions">
+        @if (_clients.Count > 1 && _access?.RestrictedClient is null)
+        {
+            <label>
+                Client
+                <select @bind="_client" aria-label="Client">
+                    <option value="">All clients</option>
+                    @foreach (var c in _clients)
+                    {
+                        <option value="@c.Slug">@c.Name</option>
+                    }
+                </select>
+            </label>
+        }
         <label>
             Window
             <select @bind="_days" @bind:after="LoadAsync">
@@ -63,7 +81,7 @@ else
             Group by client
         </label>
 
-        @if (!string.IsNullOrWhiteSpace(_filter))
+        @if (!string.IsNullOrWhiteSpace(_filter) || !string.IsNullOrEmpty(_client))
         {
             <span class="muted">@Filtered.Count of @_rows.Count</span>
         }
@@ -73,13 +91,18 @@ else
     {
         <p class="muted">Nothing matches “@_filter”.</p>
     }
-    else if (_byClient)
+    else if (_byClient && string.IsNullOrEmpty(_client))
     {
         @* One section per customer. This is the view that matters as the book
            grows: an MSP is asked "how is Morton doing", not "how is
            mortonnd.gov doing", and a flat alphabetical list of eighty domains
-           cannot answer that without the reader doing the grouping by eye. *@
-        @foreach (var group in Filtered.GroupBy(r => r.ClientName).OrderBy(g => g.Key, StringComparer.Ordinal))
+           cannot answer that without the reader doing the grouping by eye.
+           Across organisations the grouping is by organisation first, so two
+           customers with the same name in different organisations do not
+           collapse into one heading. *@
+        @foreach (var group in Filtered
+            .GroupBy(r => (AcrossOrganisations ? r.Organisation + " / " : "") + r.ClientName)
+            .OrderBy(g => g.Key, StringComparer.Ordinal))
         {
             <section>
                 <h2>
@@ -107,6 +130,7 @@ else
                 <tr>
                     <th></th>
                     <th>Domain</th>
+                    @if (!_byClient && AcrossOrganisations) { <th>Organisation</th> }
                     @if (!_byClient) { <th>Client</th> }
                     <th>Policy</th>
                     <th class="num">Messages</th>
@@ -121,6 +145,7 @@ else
                     <tr>
                         <td><span class="pip @Css(row.Level)" title="@row.Headline"></span></td>
                         <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
+                        @if (!_byClient && AcrossOrganisations) { <td class="muted">@row.Organisation</td> }
                         @if (!_byClient) { <td class="muted">@row.ClientName</td> }
                         <td><code>p=@row.Policy</code></td>
                         <td class="num">@row.Messages.ToString("N0")</td>
@@ -144,11 +169,16 @@ else
 }
 
 @code {
+    private OrganisationAccess? _access;
+    private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
     private IReadOnlyList<DomainTriage>? _rows;
     private string? _error;
     private string _filter = "";
+    private string _client = "";
     private int _days = 30;
     private bool _byClient;
+
+    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
 
     // Alphabetical, not by urgency. Triage already ranks; this exists to find
     // a named domain, and a list that reorders itself as data changes is the
@@ -156,6 +186,7 @@ else
     private IReadOnlyList<DomainTriage> Filtered =>
         _rows is null ? []
         : [.. _rows
+            .Where(r => string.IsNullOrEmpty(_client) || r.ClientSlug.Equals(_client, StringComparison.OrdinalIgnoreCase))
             .Where(r => string.IsNullOrWhiteSpace(_filter)
                      || r.Domain.Contains(_filter, StringComparison.OrdinalIgnoreCase)
                      || r.ClientName.Contains(_filter, StringComparison.OrdinalIgnoreCase))
@@ -170,7 +201,21 @@ else
 
         try
         {
-            _rows = await Triage.GetAsync(_days);
+            _access = await Org.GetAsync();
+            var tenant = _access.TenantId;
+
+            _clients = [.. (await Onboarding.GetClientsAsync(tenant))
+                .Where(c => c.Slug != ReportStore.UnassignedClientSlug || c.Domains > 0)];
+            if (!string.IsNullOrEmpty(_client) && _clients.All(c => c.Slug != _client)) { _client = ""; }
+
+            // Grouped by default once there is something to group: a book of
+            // one client per domain gains nothing from it, a book of clients
+            // with several domains each is unreadable without it.
+            if (_rows is null) { _byClient = _clients.Count > 1 && _clients.Any(c => c.Domains > 1); }
+
+            if (_access.RestrictedClient is { } only) { _client = only; }
+
+            _rows = await Triage.GetAsync(_days, tenant, _access.RestrictedClient);
         }
         catch (Exception ex)
         {

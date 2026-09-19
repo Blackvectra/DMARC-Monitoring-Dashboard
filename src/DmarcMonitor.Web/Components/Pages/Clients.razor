@@ -1,8 +1,12 @@
 @page "/clients"
 @using DmarcMonitor.Core.Storage
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
 @using DmarcMonitor.Web.Data
 @inject OnboardingService Onboarding
 @inject ReportStoreConnection Db
+@inject OrgContext Org
+@inject AuditLog Audit
 @rendermode InteractiveServer
 
 <PageTitle>Clients — DMARC Monitor</PageTitle>
@@ -11,7 +15,8 @@
     <div>
         <h1>Clients</h1>
         <p class="sub">Reports arrive for domains before anybody gets round to onboarding them, so they
-           are kept under Unassigned rather than refused. That makes Unassigned a worklist.</p>
+           are kept under Unassigned rather than refused. That makes Unassigned a worklist. Every domain
+           belongs to one client, and every client to one organisation.</p>
     </div>
 </header>
 
@@ -51,52 +56,84 @@ else
             <p>Reports are being stored for these, and nobody is being billed for them. They will not
                appear on a client's report until they are assigned.</p>
         </section>
+    }
 
+    @if (CanOperate)
+    {
         <section>
-            <h2>Assign a domain</h2>
+            <h2>@(_unassigned.Count > 0 ? "Assign a domain" : "Move a domain")</h2>
+            @* Every domain, not only the unfiled ones: a customer that changes
+               hands, or a domain onboarded under the wrong name, has to be movable
+               without a terminal. Unassigned ones come first, because that is the
+               worklist. *@
             <div class="form-row">
-                <select @bind="_assignDomain">
+                <select @bind="_assignDomain" aria-label="Domain">
                     <option value="">Choose a domain…</option>
-                    @foreach (var d in _unassigned)
+                    @foreach (var d in _domains.OrderBy(d => d.ClientSlug == ReportStore.UnassignedClientSlug ? 0 : 1).ThenBy(d => d.Domain, StringComparer.Ordinal))
                     {
-                        <option value="@d">@d</option>
+                        <option value="@d.Domain">@d.Domain @(d.ClientSlug == ReportStore.UnassignedClientSlug ? "(unassigned)" : $"— {d.ClientName}")</option>
                     }
                 </select>
-                <select @bind="_assignClient">
+                <select @bind="_assignClient" aria-label="Client">
                     <option value="">Choose a client…</option>
-                    @foreach (var c in _clients.Where(c => c.Slug != ReportStore.UnassignedClientSlug))
+                    @foreach (var c in Assignable)
                     {
-                        <option value="@c.Slug">@c.Name</option>
+                        <option value="@c.Slug">@(AcrossOrganisations ? $"{c.OrganisationName} / {c.Name}" : c.Name)</option>
                     }
                 </select>
-                <button class="primary" disabled="@(!CanAssign)" @onclick="AssignAsync">Assign</button>
+                <button class="primary" disabled="@(!CanAssign)" @onclick="AssignAsync">@(_unassigned.Count > 0 ? "Assign" : "Move")</button>
             </div>
-            @if (_clients.Count(c => c.Slug != ReportStore.UnassignedClientSlug) == 0)
+            @if (!Assignable.Any())
             {
                 <p class="sub">No clients yet. Add one below first.</p>
             }
+            else if (AcrossOrganisations)
+            {
+                <p class="sub">Assigning a domain to a client in another organisation moves it there, history and all.</p>
+            }
         </section>
+
+        <section>
+            <h2>Add a client</h2>
+            <div class="form-row">
+                <input placeholder="Client name, e.g. Morton, ND" @bind="_newName" @bind:event="oninput" />
+                @if (_access is { IsMaster: true, Visible.Count: > 1 })
+                {
+                    @* A master looking across organisations has to say which one
+                       the new client belongs to; anybody else has exactly one. *@
+                    <select @bind="_newOrganisation" aria-label="Organisation">
+                        @foreach (var o in _access.Visible)
+                        {
+                            <option value="@o.Slug">@o.Name</option>
+                        }
+                    </select>
+                }
+                <button class="primary" disabled="@string.IsNullOrWhiteSpace(_newName)" @onclick="AddAsync">Add</button>
+            </div>
+            @if (!string.IsNullOrWhiteSpace(_newName))
+            {
+                @* Shown before the click, because the slug ends up in report
+                   filenames and cannot be changed afterwards. *@
+                <p class="sub">Will be filed as <code>@ReportStore.Slugify(_newName)</code></p>
+            }
+        </section>
+    }
+    else
+    {
+        <p class="sub">Assigning domains and adding clients needs the operator role. You can read everything here.</p>
     }
 
     <section>
-        <h2>Add a client</h2>
-        <div class="form-row">
-            <input placeholder="Client name, e.g. Morton, ND" @bind="_newName" @bind:event="oninput" />
-            <button class="primary" disabled="@string.IsNullOrWhiteSpace(_newName)" @onclick="AddAsync">Add</button>
-        </div>
-        @if (!string.IsNullOrWhiteSpace(_newName))
-        {
-            @* Shown before the click, because the slug ends up in report
-               filenames and cannot be changed afterwards. *@
-            <p class="sub">Will be filed as <code>@ReportStore.Slugify(_newName)</code></p>
-        }
-    </section>
-
-    <section>
         <h2>Everyone</h2>
+        @if (CanAdminister)
+        {
+            <p class="sub">A customer's own login: the members of the Entra group named against a client see that
+               client and nothing else, read only. Guests in your directory work.</p>
+        }
         <table class="triage">
             <thead>
                 <tr>
+                    @if (AcrossOrganisations) { <th>Organisation</th> }
                     <th>Client</th>
                     <th>Slug</th>
                     <th class="num">Domains</th>
@@ -105,6 +142,7 @@ else
                        scopes and no labels is how somebody concludes one of
                        them is broken. *@
                     <th class="num">Messages (all time)</th>
+                    @if (CanAdminister) { <th>Customer login group</th><th></th> }
                 </tr>
             </thead>
             <tbody>
@@ -115,10 +153,28 @@ else
                 {
                     var unassigned = c.Slug == ReportStore.UnassignedClientSlug;
                     <tr class="@(unassigned && c.Domains > 0 ? "act" : "")">
+                        @if (AcrossOrganisations) { <td class="muted">@c.OrganisationName</td> }
                         <td>@c.Name</td>
                         <td><code>@c.Slug</code></td>
                         <td class="num">@c.Domains</td>
                         <td class="num">@c.Messages.ToString("N0")</td>
+                        @if (CanAdminister)
+                        {
+                            <td>
+                                @if (!unassigned)
+                                {
+                                    <input placeholder="Entra group object id" aria-label="@($"Customer login group for {c.Name}")"
+                                           value="@_groupEdits.GetValueOrDefault(c.Slug, c.EntraGroupId ?? "")"
+                                           @onchange="e => _groupEdits[c.Slug] = e.Value?.ToString() ?? string.Empty" />
+                                }
+                            </td>
+                            <td>
+                                @if (!unassigned)
+                                {
+                                    <button @onclick="() => SaveGroupAsync(c)">Save</button>
+                                }
+                            </td>
+                        }
                     </tr>
                 }
             </tbody>
@@ -127,19 +183,30 @@ else
 }
 
 @code {
+    private OrganisationAccess? _access;
     private IReadOnlyList<ReportStore.ClientSummary>? _clients;
+    private IReadOnlyList<ReportStore.DomainSummary> _domains = [];
     private IReadOnlyList<string> _unassigned = [];
+    private readonly Dictionary<string, string> _groupEdits = new(StringComparer.Ordinal);
     private string? _error;
 
     private string? _message;
     private bool _messageIsError;
 
     private string _newName = "";
+    private string _newOrganisation = "";
     private string _assignDomain = "";
     private string _assignClient = "";
 
+    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+    private bool CanOperate => _access is { CanOperate: true };
+    private bool CanAdminister => _access is { CanAdminister: true };
+
+    private IEnumerable<ReportStore.ClientSummary> Assignable =>
+        (_clients ?? []).Where(c => c.Slug != ReportStore.UnassignedClientSlug);
+
     private bool CanAssign =>
-        !string.IsNullOrWhiteSpace(_assignDomain) && !string.IsNullOrWhiteSpace(_assignClient);
+        CanOperate && !string.IsNullOrWhiteSpace(_assignDomain) && !string.IsNullOrWhiteSpace(_assignClient);
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
@@ -150,12 +217,19 @@ else
 
         try
         {
-            _clients = await Onboarding.GetClientsAsync();
-            _unassigned = await Onboarding.GetUnassignedDomainsAsync();
+            _access = await Org.GetAsync();
+            var tenant = _access.TenantId;
+
+            _clients = await Onboarding.GetClientsAsync(tenant);
+            _domains = await Onboarding.GetDomainsAsync(tenant);
+            _unassigned = await Onboarding.GetUnassignedDomainsAsync(tenant);
+
+            if (string.IsNullOrEmpty(_newOrganisation)) { _newOrganisation = OrgContext.OrganisationFor(_access); }
         }
         catch (Exception ex)
         {
             _clients = [];
+            _domains = [];
             _unassigned = [];
             _error = ex.Message;
         }
@@ -163,12 +237,14 @@ else
 
     private async Task AddAsync()
     {
+        // Checked here as well as in the markup: the handler runs on the
+        // server, and a hidden form is not a permission.
         var name = _newName.Trim();
-        if (name.Length == 0) { return; }
+        if (name.Length == 0 || !CanOperate) { return; }
 
         try
         {
-            var slug = await Onboarding.CreateClientAsync(name);
+            var slug = await Onboarding.CreateClientAsync(name, _newOrganisation);
             if (slug is null)
             {
                 // Two reasons, two different fixes, so they are not merged
@@ -181,6 +257,7 @@ else
             else
             {
                 Set($"Added {name}, filed as '{slug}'.", isError: false);
+                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "", "client.added", $"{name} ({slug}) in {_newOrganisation}");
                 _newName = "";
             }
         }
@@ -198,7 +275,7 @@ else
 
         try
         {
-            var outcome = await Onboarding.AssignAsync(_assignDomain, _assignClient);
+            var outcome = await Onboarding.AssignAsync(_assignDomain, _assignClient, _access?.TenantId);
             Set(outcome switch
             {
                 ReportStore.AssignOutcome.Assigned =>
@@ -210,7 +287,38 @@ else
                 _ => $"No client filed as '{_assignClient}'.",
             }, isError: outcome is not (ReportStore.AssignOutcome.Assigned or ReportStore.AssignOutcome.AlreadyAssigned));
 
+            if (outcome == ReportStore.AssignOutcome.Assigned)
+            {
+                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "", "domain.assigned", $"{_assignDomain} -> {_assignClient}");
+            }
+
             _assignDomain = "";
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task SaveGroupAsync(ReportStore.ClientSummary c)
+    {
+        if (!CanAdminister) { return; }
+
+        try
+        {
+            var group = _groupEdits.GetValueOrDefault(c.Slug, c.EntraGroupId ?? "").Trim();
+            var saved = await Onboarding.SetClientGroupAsync(c.Slug, group, _access?.TenantId);
+            Set(!saved ? $"No client filed as '{c.Slug}'."
+                : group.Length == 0 ? $"{c.Name}: customer login cleared."
+                : $"{c.Name}: members of {group} now see this client only. They may need to sign out and back in.",
+                isError: !saved);
+            if (saved)
+            {
+                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "", "client.login-group",
+                    $"{c.Slug}: {(group.Length == 0 ? "cleared" : group)}");
+            }
         }
         catch (Exception ex)
         {
