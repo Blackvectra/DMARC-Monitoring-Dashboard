@@ -354,6 +354,17 @@ jobs:
           if (-not (Test-Path C:\dmarc\dmarc-ingest.cer)) { throw 'no dmarc-ingest.cer' }
           if (-not (Get-ScheduledTask -TaskName 'DMARC ingest' -ErrorAction SilentlyContinue)) { throw 'no DMARC ingest task' }
 
+          # The secrets are readable by the service and administrators only:
+          # nothing inherited from C:\, and LocalService (S-1-5-19) is named.
+          foreach ($f in @('C:\dmarc\data\ingest.pfx', 'C:\dmarc\ingest.cmd', 'C:\dmarc\app\appsettings.Production.json')) {
+            $acl = Get-Acl $f
+            $sids = $acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }
+            "$f -> $($sids -join ' ')"
+            if ($acl.Access | Where-Object IsInherited) { throw "$f still inherits its ACL" }
+            if ($sids -notcontains 'S-1-5-19') { throw "$f is not readable by LocalService" }
+            if ($sids -contains 'S-1-5-32-545') { throw "$f is readable by every user" }
+          }
+
           # The collector gets past its own validation with the certificate
           # that was made; a made-up tenant fails authentication (77).
           $p = Start-Process -FilePath cmd.exe -ArgumentList '/c', 'C:\dmarc\ingest.cmd --dry-run' -Wait -PassThru -NoNewWindow

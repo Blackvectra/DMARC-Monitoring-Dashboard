@@ -90,6 +90,22 @@ $Caddyfile = Join-Path $Root 'Caddyfile'
 function Say([string]$Text) { Write-Host $Text }
 function Fail([string]$Text, [int]$Code = 1) { Write-Error $Text -ErrorAction Continue; exit $Code }
 
+# icacls takes accounts by SID on every language of Windows; the English display
+# names ('Administrators', 'NT AUTHORITY\LocalService') only resolve on an
+# English one, and icacls would fail quietly under Out-Null.
+$ServiceSid = '*S-1-5-19'      # NT AUTHORITY\LocalService
+$SystemSid = '*S-1-5-18'       # SYSTEM
+$AdminsSid = '*S-1-5-32-544'   # BUILTIN\Administrators
+function Grant-Acl([string]$Path, [string]$Grant) {
+    & icacls.exe $Path /grant $Grant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not grant '$Grant' on $Path" 70 }
+}
+# Only SYSTEM, administrators and the service account (with the given rights) see the file.
+function Set-RestrictedAcl([string]$Path, [string]$ServiceGrant) {
+    & icacls.exe $Path /inheritance:r /grant:r "${SystemSid}:F" "${AdminsSid}:F" $ServiceGrant /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not restrict $Path" 70 }
+}
+
 if (-not $NoProxy -and -not $HostName) { Fail '-HostName is required (it is what the certificate is for). Use -NoProxy to skip Caddy.' 64 }
 if ($HostName -and $HostName -notmatch '^[A-Za-z0-9.-]+$') { Fail '-HostName must be a bare hostname, e.g. dmarc.example.com' 64 }
 if ([bool]$TenantId -ne [bool]$ClientId) { Fail '-TenantId and -ClientId go together; the app treats sign-in as configured only when both are set' 64 }
@@ -170,8 +186,8 @@ try {
 
     # The service account may write data and read everything else. Done before
     # the database is created, so the file inherits it.
-    & icacls.exe $DataDir /grant "${ServiceAccount}:(OI)(CI)M" /Q | Out-Null
-    foreach ($dir in @($AppDir, $BinDir, $DotnetDir)) { & icacls.exe $dir /grant "${ServiceAccount}:(OI)(CI)RX" /Q | Out-Null }
+    Grant-Acl $DataDir "${ServiceSid}:(OI)(CI)M"
+    foreach ($dir in @($AppDir, $BinDir, $DotnetDir)) { Grant-Acl $dir "${ServiceSid}:(OI)(CI)RX" }
 
     $db = Join-Path $DataDir 'dmarc.db'
     if (-not (Test-Path $db)) {
@@ -215,7 +231,7 @@ try {
     }
     [IO.File]::WriteAllText($Settings, ($cfg | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
     # Only the service and administrators read the configuration.
-    & icacls.exe $Settings /inheritance:r /grant:r 'SYSTEM:F' 'Administrators:F' "${ServiceAccount}:R" /Q | Out-Null
+    Set-RestrictedAcl $Settings "${ServiceSid}:R"
 
     # ---- 5. the service --------------------------------------------------------
     Say '== service'
@@ -239,7 +255,8 @@ try {
         if ($code -match '^(2|3|4)') { $answered = $true; break }
     }
     if (-not $answered) {
-        Say '   the service did not answer on 127.0.0.1:5000. See: Get-EventLog -LogName Application -Source dmarc-web -Newest 20'
+        Say '   the service did not answer on 127.0.0.1:5000. See what it logged:'
+        Say "   Get-WinEvent -LogName Application -MaxEvents 40 | Where-Object { `$_.ProviderName -match 'dmarc|\.NET Runtime' } | Format-List TimeCreated, ProviderName, Message"
         exit 1
     }
     Say "   answers on 127.0.0.1:5000 (HTTP $code)"
@@ -254,15 +271,20 @@ try {
             $CertPassword = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
             $cert = New-SelfSignedCertificate -Subject 'CN=DMARC Monitor ingest' -CertStoreLocation 'Cert:\LocalMachine\My' `
                 -KeyExportPolicy Exportable -KeySpec Signature -NotAfter (Get-Date).AddYears(2)
+            # Addressed by store path, not by the returned object: under PowerShell 7
+            # the PKI module runs through the compatibility layer and hands back a
+            # copy without its key.
+            $certStorePath = "Cert:\LocalMachine\My\$($cert.Thumbprint)"
             try {
-                Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString $CertPassword -AsPlainText -Force) | Out-Null
+                Export-PfxCertificate -Cert $certStorePath -FilePath $pfx -Password (ConvertTo-SecureString $CertPassword -AsPlainText -Force) | Out-Null
                 $cer = Join-Path $Root 'dmarc-ingest.cer'
-                Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+                Export-Certificate -Cert $certStorePath -FilePath $cer | Out-Null
             } finally {
-                # The private key lives in the .pfx from here; nothing else needs it in the store.
-                Remove-Item -Path $cert.PSPath -Force
+                # The private key lives in the .pfx from here; -DeleteKey takes the
+                # store's copy of the key with it (the certificate provider ignores -Force).
+                Remove-Item -Path $certStorePath -DeleteKey
             }
-            & icacls.exe $pfx /inheritance:r /grant:r 'SYSTEM:F' 'Administrators:F' "${ServiceAccount}:R" /Q | Out-Null
+            Set-RestrictedAcl $pfx "${ServiceSid}:R"
             Say "   private half: $pfx (readable by the service; password goes in $IngestCmd)"
             Say "   public half:  $cer  <- upload this under the ingest app registration, Certificates & secrets"
             Say "   expires:      $($cert.NotAfter.ToString('yyyy-MM-dd'))"
@@ -293,7 +315,7 @@ try {
         foreach ($k in $values.Keys) { $lines += "set `"$k=$($values[$k])`"" }
         $lines += "`"$Cli`" ingest --db `"$db`" --mailbox `"%DMARC_MAILBOX%`" %* >> `"$(Join-Path $DataDir 'ingest.log')`" 2>&1"
         [IO.File]::WriteAllLines($IngestCmd, $lines, (New-Object Text.UTF8Encoding $false))
-        & icacls.exe $IngestCmd /inheritance:r /grant:r 'SYSTEM:F' 'Administrators:F' "${ServiceAccount}:RX" /Q | Out-Null
+        Set-RestrictedAcl $IngestCmd "${ServiceSid}:RX"
 
         $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN')
         $missing = @($values.Keys | Where-Object { $optional -notcontains $_ -and -not $values[$_] })
@@ -342,7 +364,12 @@ try {
         if ($Email) { $caddyLines += '{'; $caddyLines += "    email $Email"; $caddyLines += '}'; $caddyLines += '' }
         $caddyLines += "$HostName {"; $caddyLines += '    reverse_proxy 127.0.0.1:5000'; $caddyLines += '}'
         [IO.File]::WriteAllLines($Caddyfile, $caddyLines, (New-Object Text.UTF8Encoding $false))
-        & $caddy validate --config $Caddyfile --adapter caddyfile 2>&1 | Out-Null
+        # Caddy logs to stderr even when the file is fine. Windows PowerShell 5.1
+        # turns redirected native stderr into errors that 'Stop' would throw on,
+        # so the preference is relaxed for this one call and the exit code decides.
+        $eap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & $caddy validate --config $Caddyfile --adapter caddyfile 2>&1 | Out-Null } finally { $ErrorActionPreference = $eap }
         if ($LASTEXITCODE -ne 0) { Fail "Caddy rejected $Caddyfile" 65 }
 
         $xml = @"
