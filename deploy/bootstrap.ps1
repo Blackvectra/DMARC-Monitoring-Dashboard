@@ -208,6 +208,8 @@ try {
         Set-Setting $cfg 'AzureAd' 'TenantId' $TenantId
         Set-Setting $cfg 'AzureAd' 'ClientId' $ClientId
         Say "   sign-in: Microsoft Entra (tenant $TenantId)"
+    } elseif ($cfg.AzureAd.TenantId -and $cfg.AzureAd.ClientId) {
+        Say "   sign-in: Microsoft Entra (tenant $($cfg.AzureAd.TenantId), unchanged)"
     } else {
         Say '   sign-in: not configured - the app serves only this machine until -TenantId/-ClientId are given'
     }
@@ -387,7 +389,8 @@ try {
 # ---- done -------------------------------------------------------------------
 Say ''
 Say 'Done.'
-if (-not $TenantId) {
+$signInConfigured = $TenantId -or ((Test-Path $Settings) -and ((Get-Content -Raw $Settings | ConvertFrom-Json).AzureAd.TenantId))
+if (-not $signInConfigured) {
     $h = if ($HostName) { $HostName } else { '<host>' }
     Say @"
 Next: sign-in. In Entra, App registrations -> New registration:

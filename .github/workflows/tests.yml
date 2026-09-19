@@ -281,8 +281,12 @@ jobs:
           cat ingest.out; echo "exit $code"; test "$code" = 77
           grep -q 'Attributing reports by the shared address dmarc@example.com' ingest.out
 
-          # Running it again only applies configuration.
-          sudo ./deploy/bootstrap.sh --from-dir . --host localhost --email ci@example.com --provider-name "CI again" | grep -q 'already installed'
+          # Running it again only applies configuration. Captured to a file
+          # rather than piped into grep -q, which would close the pipe on the
+          # first match and kill the script half way with SIGPIPE.
+          sudo ./deploy/bootstrap.sh --from-dir . --host localhost --email ci@example.com --provider-name "CI again" > second-run.out
+          cat second-run.out
+          grep -q 'already installed' second-run.out
           sudo grep -q '"ProviderName": "CI again"' /opt/dmarc/app/appsettings.Production.json
           systemctl is-active dmarc-web
 
@@ -358,7 +362,10 @@ jobs:
           if (-not (Select-String -Path C:\dmarc\data\ingest.log -Pattern 'Attributing reports by the shared address dmarc@example.com' -Quiet)) { throw 'attribution line missing' }
 
           # Running it again only applies configuration.
-          $out = (.\deploy\bootstrap.ps1 -FromDir . -HostName localhost -Email ci@example.com -ProviderName 'CI again') | Out-String
+          # The script talks through Write-Host (the information stream), which
+          # an assignment does not capture; *>&1 folds every stream into one.
+          $out = (.\deploy\bootstrap.ps1 -FromDir . -HostName localhost -Email ci@example.com -ProviderName 'CI again' *>&1) | Out-String
+          $out
           if ($out -notmatch 'already installed') { throw 'second run did not detect the install' }
           if ((Get-Content C:\dmarc\app\appsettings.Production.json -Raw) -notmatch '"ProviderName":\s*"CI again"') { throw 'configuration was not applied' }
           if ((Get-Service dmarc-web).Status -ne 'Running') { throw 'dmarc-web is not running after the second run' }

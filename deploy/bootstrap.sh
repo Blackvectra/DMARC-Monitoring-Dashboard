@@ -326,9 +326,12 @@ echo "== configuration"
 [[ -n "$HOST" ]]               && settings_set "MtaSts:PolicyHost" "$HOST"
 [[ -n "$PROVIDER_NAME" ]]      && settings_set "Reporting:ProviderName" "$PROVIDER_NAME"
 [[ -n "$TLS_REPORT_ADDRESS" ]] && settings_set "Reporting:TlsReportAddress" "$TLS_REPORT_ADDRESS"
+existing_tenant="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); a=d.get("AzureAd",{}); print(a.get("TenantId","") if a.get("ClientId") else "")' "$SETTINGS" 2>/dev/null || true)"
 if [[ -n "$TENANT_ID" ]]; then
     settings_set "AzureAd:TenantId" "$TENANT_ID" "AzureAd:ClientId" "$CLIENT_ID"
     echo "   sign-in: Microsoft Entra (tenant ${TENANT_ID})"
+elif [[ -n "$existing_tenant" ]]; then
+    echo "   sign-in: Microsoft Entra (tenant ${existing_tenant}, unchanged)"
 else
     echo "   sign-in: not configured - the app serves only this machine until --tenant-id/--client-id are given"
 fi
@@ -339,10 +342,16 @@ chown "${USER_NAME}:${USER_NAME}" "$SETTINGS"; chmod 0600 "$SETTINGS"
 # alternative is an instance that says "local trial mode" until somebody
 # remembers.
 systemctl restart dmarc-web
+ok=false
 for _ in $(seq 1 30); do
     sleep 1
-    curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/ 2>/dev/null | grep -qE '^(2|3|4)' && break
+    if curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/ 2>/dev/null | grep -qE '^(2|3|4)'; then ok=true; break; fi
 done
+if [[ "$ok" != true ]]; then
+    echo "dmarc-web was restarted but does not answer on 127.0.0.1:5000. See why with: journalctl -u dmarc-web -n 50" >&2
+    echo "(a wrong --tenant-id/--client-id pair, or a broken appsettings.Production.json, are the usual causes)" >&2
+    exit 1
+fi
 
 # ---- 7. the collector -------------------------------------------------------
 if [[ "$MAKE_CERT" == true ]]; then
@@ -407,7 +416,10 @@ if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK
     missing=()
     for key in DMARC_MAILBOX DMARC_TENANT_ID DMARC_CLIENT_ID DMARC_CERT_PATH; do
         v="$(env_get "$key")"
-        [[ -n "$v" && "$v" != "dmarc@example.com" ]] || missing+=("$key")
+        [[ -n "$v" ]] || { missing+=("$key"); continue; }
+        # The template's placeholder counts as unset - unless that exact
+        # address was given on this run, in which case it is the mailbox.
+        [[ "$key" == DMARC_MAILBOX && -z "$MAILBOX" && "$v" == "dmarc@example.com" ]] && missing+=("$key")
     done
     pfx_path="$(env_get DMARC_CERT_PATH)"
     if [[ -n "$pfx_path" ]] && ! sudo -u "$USER_NAME" test -r "$pfx_path"; then
@@ -473,7 +485,7 @@ cat <<DONE
 
 Done.
 DONE
-if [[ -z "$TENANT_ID" ]]; then
+if [[ -z "$TENANT_ID" && -z "$existing_tenant" ]]; then
     cat <<DONE
 Next: sign-in. In Entra, App registrations -> New registration:
   name DMARC Monitor, single tenant, Redirect URI (Web) https://${HOST:-<host>}/signin-oidc
