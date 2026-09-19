@@ -273,7 +273,7 @@ jobs:
           test "$(sudo stat -c '%a %U' /opt/dmarc/data/ingest.pfx)" = "600 dmarc"
           test -f "$HOME/dmarc-ingest.cer"
           test "$(sudo stat -c '%a %U' /etc/dmarc-ingest.env)" = "600 root"
-          sudo grep -q '^DMARC_TENANT_ID=11111111' /etc/dmarc-ingest.env
+          sudo grep -q '^DMARC_TENANT_ID="11111111' /etc/dmarc-ingest.env
           set +e
           sudo bash -c 'set -a; . /etc/dmarc-ingest.env; exec sudo -E -H -u dmarc dmarc ingest --db /opt/dmarc/data/dmarc.db --mailbox "$DMARC_MAILBOX" --dry-run' > ingest.out 2>&1
           code=$?
@@ -318,6 +318,11 @@ jobs:
       - name: One command, from nothing
         shell: pwsh
         run: |
+          # The runner image has IIS holding port 80 through http.sys, which
+          # a fresh server would not. The script refuses to install Caddy over
+          # a taken port and says so; here IIS is simply not wanted.
+          Stop-Service -Name W3SVC -Force -ErrorAction SilentlyContinue
+          Set-Service -Name W3SVC -StartupType Disabled -ErrorAction SilentlyContinue
           .\deploy\bootstrap.ps1 -FromDir . -HostName localhost -Email ci@example.com -ProviderName CI `
             -TenantId common -ClientId 00000000-0000-0000-0000-000000000000 `
             -MakeIngestCert -Mailbox dmarc@example.com `

@@ -605,6 +605,11 @@ What it sets up, and where:
 Same arguments, PowerShell spelling: `-TenantId`, `-ClientId`, `-Mailbox`,
 `-IngestTenantId`, `-IngestClientId`, `-MakeIngestCert`, `-FromDir`, `-NoProxy`.
 
+Caddy needs ports 80 and 443. On a machine with IIS installed they belong to
+`http.sys`, and the script stops before installing Caddy and says so; either
+`Stop-Service W3SVC` and disable it, or run with `-NoProxy` and put IIS in
+front yourself (`Proxy:Behind` is already `true`).
+
 The one genuine difference is the secret store: on Windows it is DPAPI, keyed
 to the account that writes the secret. The service runs as `LocalService`, so
 a provider token stored from an administrator's console with `dmarc dns set`

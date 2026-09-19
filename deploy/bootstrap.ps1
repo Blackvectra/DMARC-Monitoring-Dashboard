@@ -68,6 +68,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# A password on a command line is visible to every account on the machine for
+# as long as this runs; the environment is not. -CertPassword still works.
+if (-not $CertPassword -and $env:DMARC_CERT_PASSWORD) { $CertPassword = $env:DMARC_CERT_PASSWORD }
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -306,6 +310,20 @@ try {
     # ---- 7. Caddy in front -----------------------------------------------------
     if (-not $NoProxy) {
         Say '== proxy'
+        # Caddy needs 80 and 443. On a machine with IIS they belong to
+        # http.sys, which shows as the System process (pid 4), and Caddy's
+        # own error for that is a sentence about socket access permissions.
+        if (-not (Get-Service -Name 'caddy' -ErrorAction SilentlyContinue)) {
+            foreach ($port in 80, 443) {
+                $taken = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($taken) {
+                    $pid_ = $taken.OwningProcess
+                    $name = (Get-Process -Id $pid_ -ErrorAction SilentlyContinue).ProcessName
+                    $hint = if ($pid_ -eq 4) { 'pid 4 is http.sys, usually IIS: Stop-Service W3SVC; Set-Service W3SVC -StartupType Disabled' } else { "stop $name, or run with -NoProxy and put your own proxy in front" }
+                    Fail "port $port is already taken by $name (pid $pid_). Caddy needs 80 and 443. $hint" 69
+                }
+            }
+        }
         $caddy = Join-Path $BinDir 'caddy.exe'
         if (-not (Test-Path $caddy)) {
             Say '   fetching Caddy'

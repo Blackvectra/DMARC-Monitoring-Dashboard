@@ -42,9 +42,15 @@
 #                               Entra sign-in (docs/DEPLOYING.md step 5). Until both
 #                               are set the app serves nothing but this machine.
 #   --mailbox <address> --ingest-tenant-id <id> --ingest-client-id <id>
-#   --cert <path.pfx> [--cert-password <pw>]
-#                               The collector (docs/INGEST-SETUP.md). The timer is
-#                               enabled once all four are known.
+#   --cert <path.pfx>           The collector (docs/INGEST-SETUP.md). The .pfx is
+#                               copied under the install root, owned by the service
+#                               account. The timer is enabled once all four are known.
+#   --cert-password-file <f>    The .pfx password, read from a file. Or set
+#                               DMARC_CERT_PASSWORD in the environment
+#                               (sudo --preserve-env=DMARC_CERT_PASSWORD). There is a
+#                               --cert-password <pw> too, but a password on a command
+#                               line is visible to every account on the machine in
+#                               `ps` for as long as this runs.
 #   --fallback-address <a>      Optional. The one shared address every domain reports
 #                               to; defaults to the mailbox itself.
 #   --reporting-domain <d>      Optional. Per-domain report addresses live under
@@ -66,13 +72,22 @@ USER_NAME="${DMARC_USER:-dmarc}"
 HOST=""; EMAIL=""; RELEASE="latest"; FROM_DIR=""
 PROVIDER_NAME=""; TLS_REPORT_ADDRESS=""
 TENANT_ID=""; CLIENT_ID=""
-MAILBOX=""; INGEST_TENANT_ID=""; INGEST_CLIENT_ID=""; CERT=""; CERT_PASSWORD=""
+MAILBOX=""; INGEST_TENANT_ID=""; INGEST_CLIENT_ID=""; CERT=""; CERT_PASSWORD="${DMARC_CERT_PASSWORD:-}"
 FALLBACK_ADDRESS=""; REPORTING_DOMAIN=""
 MAKE_CERT=false; PROXY=true; UPDATE_AGENT=true
 
-usage() { sed -n '2,/^$/p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() {
+    if [[ -f "$0" ]]; then sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    else echo "options: see https://github.com/${REPO}/blob/main/deploy/bootstrap.sh"; fi
+}
 
 need_value() { [[ -n "${2:-}" && "${2:0:2}" != "--" ]] || { echo "$1 needs a value" >&2; exit 64; }; }
+
+# Everything below is one function, called on the last line. Piped through
+# bash, the script is otherwise executed as it arrives, and a connection that
+# drops half way runs half a script - packages installed, a unit downloaded,
+# nothing after. Parsed whole first, it either runs or does not.
+main() {
 
 while (( $# )); do
     case "$1" in
@@ -88,7 +103,11 @@ while (( $# )); do
         --ingest-tenant-id)   need_value "$1" "${2:-}"; INGEST_TENANT_ID="$2"; shift 2 ;;
         --ingest-client-id)   need_value "$1" "${2:-}"; INGEST_CLIENT_ID="$2"; shift 2 ;;
         --cert)               need_value "$1" "${2:-}"; CERT="$2"; shift 2 ;;
-        --cert-password)      need_value "$1" "${2:-}"; CERT_PASSWORD="$2"; shift 2 ;;
+        --cert-password)      need_value "$1" "${2:-}"; CERT_PASSWORD="$2"; shift 2
+                              echo "note: --cert-password puts the password in this process's command line; prefer --cert-password-file or DMARC_CERT_PASSWORD" >&2 ;;
+        --cert-password-file) need_value "$1" "${2:-}"
+                              [[ -r "$2" ]] || { echo "--cert-password-file: cannot read $2" >&2; exit 66; }
+                              IFS= read -r CERT_PASSWORD < "$2" || true; shift 2 ;;
         --fallback-address)   need_value "$1" "${2:-}"; FALLBACK_ADDRESS="$2"; shift 2 ;;
         --reporting-domain)   need_value "$1" "${2:-}"; REPORTING_DOMAIN="$2"; shift 2 ;;
         --make-ingest-cert)   MAKE_CERT=true; shift ;;
@@ -107,6 +126,10 @@ if [[ "$PROXY" == true && -z "$HOST" ]]; then
 fi
 if [[ -n "$HOST" && ! "$HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
     echo "--host must be a bare hostname, e.g. dmarc.example.com (no scheme, no path)" >&2
+    exit 64
+fi
+if [[ -n "$EMAIL" && ! "$EMAIL" =~ ^[^[:space:]{}\"]+@[^[:space:]{}\"]+$ ]]; then
+    echo "--email must be one address, e.g. you@example.com" >&2
     exit 64
 fi
 if [[ -n "$TENANT_ID" && -z "$CLIENT_ID" ]] || [[ -z "$TENANT_ID" && -n "$CLIENT_ID" ]]; then
@@ -262,23 +285,41 @@ with open(path, "w") as f:
 PY
 }
 
-env_set() {        # env_set KEY value  (in /etc/dmarc-ingest.env, created if missing)
-    python3 - "$INGEST_ENV" "$1" "$2" <<'PY'
-import os, sys
-path, key, value = sys.argv[1:4]
+env_set() {        # env_set KEY value  (in /etc/dmarc-ingest.env, created 0600 if missing)
+    # The value goes in through the environment, not python's argv: one of
+    # them is the certificate password, and argv is readable in `ps` by every
+    # account on the machine for as long as the interpreter runs.
+    ENV_FILE="$INGEST_ENV" ENV_KEY="$1" ENV_VALUE="$2" python3 - <<'PY'
+import os, re, sys
+path, key, value = os.environ["ENV_FILE"], os.environ["ENV_KEY"], os.environ["ENV_VALUE"]
+if "\n" in value or "\r" in value:
+    sys.exit(f"{key}: a value with a line break cannot be stored")
+# Double-quoted, with the characters both systemd's EnvironmentFile= parser
+# and bash treat specially escaped, so both read back exactly what was given.
+quoted = '"' + re.sub(r'([\\"$`])', r'\\\1', value) + '"'
 lines = open(path).read().splitlines() if os.path.exists(path) else []
 out, done = [], False
 for line in lines:
     if line.startswith(key + "="):
-        out.append(f"{key}={value}"); done = True
+        out.append(f"{key}={quoted}"); done = True
     else:
         out.append(line)
 if not done:
-    out.append(f"{key}={value}")
-with open(path, "w") as f:
+    out.append(f"{key}={quoted}")
+# Created with its final mode rather than chmod'ed after: the file holds a
+# password from its first write, and the umask would have made it 0644.
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     f.write("\n".join(out) + "\n")
 os.chmod(path, 0o600)
 PY
+}
+
+env_get() {        # env_get KEY  -> the stored value, unquoted
+    local v
+    v="$(grep "^$1=" "$INGEST_ENV" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    v="${v%\"}"; v="${v#\"}"
+    printf '%s' "$v"
 }
 
 echo "== configuration"
@@ -314,19 +355,40 @@ if [[ "$MAKE_CERT" == true ]]; then
         openssl req -x509 -newkey rsa:2048 -sha256 -days 730 -nodes \
             -subj "/CN=DMARC Monitor ingest" \
             -keyout "${WORK}/ingest.key" -out "${WORK}/ingest.crt" 2>/dev/null
-        openssl pkcs12 -export -inkey "${WORK}/ingest.key" -in "${WORK}/ingest.crt" \
-            -out "$PFX" -passout "pass:${CERT_PASSWORD}"
+        # The password reaches openssl through the environment (env:NAME),
+        # never its command line; umask keeps the .pfx private from the moment
+        # it exists, and the owner is set before anything else can happen.
+        ( umask 077 && CERT_PASSWORD="$CERT_PASSWORD" openssl pkcs12 -export \
+            -inkey "${WORK}/ingest.key" -in "${WORK}/ingest.crt" -out "$PFX" -passout env:CERT_PASSWORD )
         chown "${USER_NAME}:${USER_NAME}" "$PFX"; chmod 0600 "$PFX"
+        # Recorded first. Everything after this can fail without leaving a
+        # .pfx whose password nobody has.
+        env_set DMARC_CERT_PATH "$PFX"
+        env_set DMARC_CERT_PASSWORD "$CERT_PASSWORD"
+        CERT="$PFX"
         # The public half, where the person who ran this can pick it up.
+        openssl x509 -in "${WORK}/ingest.crt" -outform der -out "${WORK}/ingest.cer"
         CER_DIR="${SUDO_USER:+$(getent passwd "$SUDO_USER" | cut -d: -f6)}"
         CER="${CER_DIR:-/root}/dmarc-ingest.cer"
-        openssl x509 -in "${WORK}/ingest.crt" -outform der -out "$CER"
-        [[ -n "${SUDO_USER:-}" ]] && chown "$SUDO_USER" "$CER"
+        if cp "${WORK}/ingest.cer" "$CER" 2>/dev/null; then
+            [[ -n "${SUDO_USER:-}" ]] && chown "$SUDO_USER" "$CER"
+        else
+            CER="${ROOT}/dmarc-ingest.cer"; cp "${WORK}/ingest.cer" "$CER"
+        fi
         echo "   private half: ${PFX} (owned by ${USER_NAME}, password in ${INGEST_ENV})"
         echo "   public half:  ${CER}  <- upload this under the ingest app registration, Certificates & secrets"
         echo "   expires:      $(openssl x509 -in "${WORK}/ingest.crt" -noout -enddate | cut -d= -f2)"
-        CERT="$PFX"
     fi
+fi
+
+# A certificate handed in from elsewhere goes where the service can read it,
+# owned by the service, and the recorded path is that copy: a path in
+# somebody's home directory works today and fails the day that account goes.
+if [[ -n "$CERT" && "$CERT" != "${ROOT}/data/ingest.pfx" ]]; then
+    [[ -f "$CERT" ]] || { echo "--cert: no such file: ${CERT}" >&2; exit 66; }
+    install -o "$USER_NAME" -g "$USER_NAME" -m 0600 "$CERT" "${ROOT}/data/ingest.pfx"
+    echo "   copied ${CERT} to ${ROOT}/data/ingest.pfx (owned by ${USER_NAME}, mode 0600)"
+    CERT="${ROOT}/data/ingest.pfx"
 fi
 
 if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK_ADDRESS$REPORTING_DOMAIN" ]]; then
@@ -344,9 +406,14 @@ if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK
     # collector with no tenant is an hourly error in the journal.
     missing=()
     for key in DMARC_MAILBOX DMARC_TENANT_ID DMARC_CLIENT_ID DMARC_CERT_PATH; do
-        v="$(grep "^${key}=" "$INGEST_ENV" 2>/dev/null | cut -d= -f2- || true)"
+        v="$(env_get "$key")"
         [[ -n "$v" && "$v" != "dmarc@example.com" ]] || missing+=("$key")
     done
+    pfx_path="$(env_get DMARC_CERT_PATH)"
+    if [[ -n "$pfx_path" ]] && ! sudo -u "$USER_NAME" test -r "$pfx_path"; then
+        echo "   ${pfx_path} is not readable by ${USER_NAME}; the collector will fail until it is" >&2
+        missing+=("a readable DMARC_CERT_PATH")
+    fi
     if (( ${#missing[@]} == 0 )); then
         systemctl enable --now dmarc-ingest.timer >/dev/null
         echo "   dmarc-ingest.timer enabled (hourly). Dry-run first:"
@@ -361,11 +428,14 @@ if [[ "$PROXY" == true ]]; then
     echo "== proxy"
     CADDYFILE=/etc/caddy/Caddyfile
     mkdir -p /etc/caddy
+    # Rendered and validated aside, then installed: a Caddyfile that fails
+    # validation must not have replaced one that was serving.
     {
         if [[ -n "$EMAIL" ]]; then printf '{\n    email %s\n}\n\n' "$EMAIL"; fi
         printf '%s {\n    reverse_proxy 127.0.0.1:5000\n}\n' "$HOST"
-    } > "$CADDYFILE"
-    caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null
+    } > "${WORK}/Caddyfile"
+    caddy validate --config "${WORK}/Caddyfile" --adapter caddyfile >/dev/null
+    install -m 0644 "${WORK}/Caddyfile" "$CADDYFILE"
     systemctl enable --now caddy >/dev/null
     systemctl reload caddy 2>/dev/null || true
     sleep 2
@@ -416,10 +486,14 @@ Then, here:
   ${SELF} --host ${HOST:-<host>} --tenant-id <directory id> --client-id <application id>
 DONE
 fi
-if [[ ! -f "$INGEST_ENV" ]] || grep -q '^DMARC_TENANT_ID=$' "$INGEST_ENV" 2>/dev/null; then
+if [[ ! -f "$INGEST_ENV" ]] || [[ -z "$(env_get DMARC_TENANT_ID)" ]]; then
     cat <<DONE
 Mailbox collection: docs/INGEST-SETUP.md. When the ingest app registration exists:
   ${SELF} --host ${HOST:-<host>} --make-ingest-cert --mailbox dmarc@example.com \\
       --ingest-tenant-id <directory id> --ingest-client-id <ingest application id>
 DONE
 fi
+
+}
+
+main "$@"
