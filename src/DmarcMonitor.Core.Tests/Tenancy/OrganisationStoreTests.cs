@@ -84,6 +84,89 @@ public sealed class OrganisationStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task EachRoleHasItsOwnGroupAndTheyDoNotOverwriteEachOther()
+    {
+        await _store.CreateAsync("NRG Tech Services", slug: "nrg");
+
+        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Admin, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Operator, "11111111-1111-1111-1111-111111111111"));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Viewer, " bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb "));
+
+        var org = await _store.GetAsync("nrg");
+        Assert.NotNull(org);
+        Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", org.AdminGroupId);
+        Assert.Equal("11111111-1111-1111-1111-111111111111", org.EntraGroupId);
+        Assert.Equal("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", org.ViewerGroupId);
+
+        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Viewer, null));
+        org = await _store.GetAsync("nrg");
+        Assert.Null(org!.ViewerGroupId);
+        Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", org.AdminGroupId);
+    }
+
+    [Fact]
+    public async Task BrandingRoundTripsAndClears()
+    {
+        await _store.CreateAsync("NextLayerSec", slug: "nls");
+
+        var brand = new OrganisationBrand(
+            "#0F766E",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "NextLayerSec",
+            "dmarc@nextlayersec.io\n+1 555 0100");
+        await _store.SetBrandAsync("nls", brand);
+
+        var org = await _store.GetAsync("nls");
+        Assert.NotNull(org);
+        Assert.Equal("#0f766e", org.Brand.PrimaryColor);   // stored lowercase, so the CSS is stable
+        Assert.Equal("NextLayerSec", org.Brand.ProviderName);
+        Assert.StartsWith("data:image/png;base64,", org.Brand.Logo);
+        Assert.Contains("+1 555 0100", org.Brand.ContactBlock);
+
+        await _store.SetBrandAsync("nls", OrganisationBrand.None);
+        Assert.True((await _store.GetAsync("nls"))!.Brand.IsEmpty);
+    }
+
+    [Fact]
+    public async Task ABrandThatWouldEscapeIntoTheMarkupIsRefused()
+    {
+        // The colour lands in a style attribute and the logo in an img src,
+        // so neither is taken on trust.
+        await _store.CreateAsync("NextLayerSec", slug: "nls");
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _store.SetBrandAsync("nls", new OrganisationBrand("red; background:url(x)", null, null, null)));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _store.SetBrandAsync("nls", new OrganisationBrand("#abc", null, null, null)));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _store.SetBrandAsync("nls", new OrganisationBrand(null, "javascript:alert(1)", null, null)));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _store.SetBrandAsync("nls", new OrganisationBrand(null, "data:text/html;base64,PHNjcmlwdD4=", null, null)));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _store.SetBrandAsync("nls", new OrganisationBrand(null, "data:image/png;base64," + new string('A', OrganisationBrand.MaxLogoLength), null, null)));
+
+        Assert.True((await _store.GetAsync("nls"))!.Brand.IsEmpty);
+    }
+
+    [Fact]
+    public async Task ACustomerLoginGroupIsListedAgainstItsClientAndOrganisation()
+    {
+        await _store.CreateAsync("NRG Tech Services", slug: "nrg");
+        var reports = new ReportStore(_dbPath, "nrg");
+        await reports.CreateClientAsync("Morton, ND", "morton-nd");
+
+        Assert.True(await reports.SetClientGroupAsync("morton-nd", " cccccccc-cccc-cccc-cccc-cccccccccccc "));
+
+        var group = Assert.Single(await _store.ClientGroupsAsync());
+        Assert.Equal("nrg", group.OrganisationSlug);
+        Assert.Equal("morton-nd", group.ClientSlug);
+        Assert.Equal("cccccccc-cccc-cccc-cccc-cccccccccccc", group.EntraGroupId);
+
+        Assert.True(await reports.SetClientGroupAsync("morton-nd", null));
+        Assert.Empty(await _store.ClientGroupsAsync());
+    }
+
+    [Fact]
     public async Task AClientCreatedForAnUnknownOrganisationBringsItIntoBeing()
     {
         // Named after its slug until somebody renames it: a report is never

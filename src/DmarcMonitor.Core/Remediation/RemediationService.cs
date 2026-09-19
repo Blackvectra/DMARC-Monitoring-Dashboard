@@ -437,7 +437,7 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     /// <summary>The audit trail, newest first. For one domain, or all of them.</summary>
     /// <param name="tenantId">One organisation's changes, or null for every organisation's.</param>
     public async Task<IReadOnlyList<AppliedChange>> HistoryAsync(
-        string? domain = null, int limit = 100, string? tenantId = null, CancellationToken ct = default)
+        string? domain = null, int limit = 100, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
@@ -445,9 +445,11 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         await using var command = db.CreateCommand();
         command.CommandText = ChangeSelect
             + " WHERE ($domain IS NULL OR d.name = $domain) AND ($tenant IS NULL OR ch.tenant_id = $tenant)"
+            + " AND ($client IS NULL OR c.slug = $client)"
             + " ORDER BY ch.applied_at DESC LIMIT $limit";
         command.Parameters.AddWithValue("$domain", (object?)domain?.Trim().ToLowerInvariant() ?? DBNull.Value);
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$client", (object?)(string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant()) ?? DBNull.Value);
         command.Parameters.AddWithValue("$limit", limit);
 
         var result = new List<AppliedChange>();

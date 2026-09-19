@@ -57,6 +57,9 @@ builder.Services.AddScoped<OnboardingService>();
 // asks OrgContext for its scope before it asks the database for anything.
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tenancy.OrganisationStore(dbPath));
 builder.Services.AddScoped<OrgContext>();
+
+// Who did what. Written by the pages that change setup, read on Settings.
+builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Tenancy.AuditLog(dbPath));
 builder.Services.AddScoped<ImportUiService>();
 builder.Services.AddScoped<ReportUiService>();
 
@@ -180,7 +183,15 @@ app.MapGet("/reports/download/{slug}/{month}", async (
     // customer is not found, not served. Resolved from the request's own
     // principal, because there is no component here to hold an
     // authentication state.
-    var access = OrgContext.Resolve(context.User, await organisations.ListAsync(ct).ConfigureAwait(false), app.Configuration);
+    var access = OrgContext.Resolve(
+        context.User, await organisations.ListAsync(ct).ConfigureAwait(false), app.Configuration,
+        await organisations.ClientGroupsAsync(ct).ConfigureAwait(false));
+    if (access.RestrictedClient is { } only && !only.Equals(slug, StringComparison.OrdinalIgnoreCase))
+    {
+        // A customer's login gets their own report and nobody else's.
+        return Results.NotFound($"No client filed as '{slug}'.");
+    }
+
     var report = await reports.BuildAsync(slug, period, access.TenantId, ct).ConfigureAwait(false);
     if (report is null) { return Results.NotFound($"No client filed as '{slug}'."); }
 

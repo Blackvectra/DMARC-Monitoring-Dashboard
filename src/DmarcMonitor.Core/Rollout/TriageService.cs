@@ -71,7 +71,9 @@ public sealed class TriageService(string databasePath)
 
     /// <param name="days">Window to judge on. Long enough to be stable, short enough to be current.</param>
     /// <param name="tenantId">One organisation's domains, or null for every organisation's.</param>
-    public async Task<IReadOnlyList<DomainTriage>> GetAsync(int days = 14, string? tenantId = null, CancellationToken ct = default)
+    /// <param name="clientSlug">One client's domains, or null for every client's.</param>
+    public async Task<IReadOnlyList<DomainTriage>> GetAsync(
+        int days = 14, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
@@ -104,11 +106,12 @@ public sealed class TriageService(string databasePath)
             JOIN tenants t ON t.id = d.tenant_id
             LEFT JOIN aggregate_records r
                    ON r.domain_id = d.id AND r.date_begin >= $since
-            WHERE d.is_active = 1 AND ($tenant IS NULL OR d.tenant_id = $tenant)
+            WHERE d.is_active = 1 AND ($tenant IS NULL OR d.tenant_id = $tenant) AND ($client IS NULL OR c.slug = $client)
             GROUP BY d.id, d.name, c.name, c.slug, t.name
             """;
         command.Parameters.AddWithValue("$since", since);
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$client", (object?)(string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant()) ?? DBNull.Value);
 
         var rows = new List<DomainTriage>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);

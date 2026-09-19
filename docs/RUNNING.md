@@ -52,6 +52,26 @@ Domains, Fix, Sources, Reports, Clients - is scoped to the organisation being
 looked at, and within it can be narrowed to one client. Assigning a domain to a
 client in another organisation moves it there, history and all.
 
+### Roles, customer logins and branding
+
+Within an organisation a group per role says what its members may do: a
+**viewer** reads, an **operator** also assigns domains, imports and applies
+fixes, an **admin** also runs the organisation's settings. A client can have a
+group of its own, whose members see that one client read only — the customer's
+own login. Each organisation can dress the app in its own colour, logo, name
+and contact details.
+
+```
+dmarc org set-group --org nextlayersec --role admin  --group <id>
+dmarc org set-group --org nextlayersec --role viewer --group <id>
+dmarc client set-group --client corner-post --group <id>
+dmarc org brand --org nextlayersec --colour '#0f766e' --provider-name "NextLayerSec" \
+    --contact 'dmarc@nextlayersec.io' --logo ./logo.png
+```
+
+All of it is on the Settings and Clients pages too, for an admin.
+docs/DEPLOYING.md step 5 has the table and the Entra side.
+
 ---
 
 ## The web app

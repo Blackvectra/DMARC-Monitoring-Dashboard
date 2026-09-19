@@ -34,8 +34,77 @@ public static class OrgCommand
             "add" => await AddAsync(store, rest, ct).ConfigureAwait(false),
             "set-group" => await SetGroupAsync(store, rest, ct).ConfigureAwait(false),
             "rename" => await RenameAsync(store, rest, ct).ConfigureAwait(false),
+            "brand" => await BrandAsync(store, rest, ct).ConfigureAwait(false),
             _ => Usage($"Unknown: dmarc org {action}"),
         };
+    }
+
+    /// <summary>
+    /// How the organisation looks: the accent colour and logo in the sidebar,
+    /// and how it names itself on the reports it sends.
+    /// </summary>
+    private static async Task<int> BrandAsync(OrganisationStore store, string[] args, CancellationToken ct)
+    {
+        var slug = Args.Value(args, "--org");
+        if (string.IsNullOrWhiteSpace(slug))
+        {
+            return Usage("dmarc org brand --org <slug> [--colour #rrggbb] [--provider-name <n>] [--contact <text>] [--logo <image file>] [--clear] [--db <path>]");
+        }
+
+        var existing = await store.GetAsync(slug, ct).ConfigureAwait(false);
+        if (existing is null)
+        {
+            Console.Error.WriteLine($"No organisation with the slug '{slug}'. See: dmarc org list");
+            return 66;
+        }
+
+        var brand = Args.Flag(args, "--clear") ? OrganisationBrand.None : existing.Brand;
+        if ((Args.Value(args, "--colour") ?? Args.Value(args, "--color")) is { } colour)
+        {
+            brand = brand with { PrimaryColor = colour };
+        }
+        if (Args.Value(args, "--provider-name") is { } provider) { brand = brand with { ProviderName = provider }; }
+        if (Args.Value(args, "--contact") is { } contact) { brand = brand with { ContactBlock = contact.Replace("\\n", "\n", StringComparison.Ordinal) }; }
+        if (Args.Value(args, "--logo") is { } logoPath)
+        {
+            if (!File.Exists(logoPath))
+            {
+                Console.Error.WriteLine($"No such file: {logoPath}");
+                return 66;
+            }
+            var type = Path.GetExtension(logoPath).ToLowerInvariant() switch
+            {
+                ".png" => "image/png",
+                ".jpg" or ".jpeg" => "image/jpeg",
+                ".gif" => "image/gif",
+                ".webp" => "image/webp",
+                ".svg" => "image/svg+xml",
+                _ => null,
+            };
+            if (type is null)
+            {
+                Console.Error.WriteLine("The logo has to be a .png, .jpg, .gif, .webp or .svg file.");
+                return 65;
+            }
+            brand = brand with { Logo = $"data:{type};base64,{Convert.ToBase64String(await File.ReadAllBytesAsync(logoPath, ct).ConfigureAwait(false))}" };
+        }
+
+        try
+        {
+            await store.SetBrandAsync(slug, brand, ct).ConfigureAwait(false);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 65;
+        }
+
+        Console.WriteLine($"'{slug}' now looks like this:");
+        Console.WriteLine($"  colour        {brand.PrimaryColor ?? "(default)"}");
+        Console.WriteLine($"  logo          {(brand.Logo is null ? "(none)" : $"{brand.Logo.Length / 1000} KB")}");
+        Console.WriteLine($"  provider name {brand.ProviderName ?? "(from configuration)"}");
+        Console.WriteLine($"  contact       {(brand.ContactBlock is null ? "(none)" : brand.ContactBlock.Replace("\n", " / ", StringComparison.Ordinal))}");
+        return 0;
     }
 
     private static async Task<int> ListAsync(OrganisationStore store, CancellationToken ct)
@@ -90,19 +159,28 @@ public static class OrgCommand
         var slug = Args.Value(args, "--org");
         if (string.IsNullOrWhiteSpace(slug))
         {
-            return Usage("dmarc org set-group --org <slug> --group <entra group object id> [--db <path>]   (omit --group to clear it)");
+            return Usage("dmarc org set-group --org <slug> --group <entra group object id> [--role operator|admin|viewer] [--db <path>]   (omit --group to clear it)");
         }
 
+        var role = (Args.Value(args, "--role") ?? "operator").ToLowerInvariant() switch
+        {
+            "operator" => OrganisationRole.Operator,
+            "admin" => OrganisationRole.Admin,
+            "viewer" => OrganisationRole.Viewer,
+            var other => throw new ArgumentException($"--role {other}: one of operator, admin, viewer."),
+        };
+
         var group = Args.Value(args, "--group");
-        if (!await store.SetGroupAsync(slug, group, ct).ConfigureAwait(false))
+        if (!await store.SetGroupAsync(slug, role, group, ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"No organisation with the slug '{slug}'. See: dmarc org list");
             return 66;
         }
 
+        var roleName = role.ToString().ToLowerInvariant();
         Console.WriteLine(string.IsNullOrWhiteSpace(group)
-            ? $"'{slug}' has no group now; only the master group sees it."
-            : $"Members of {group.Trim()} now see '{slug}'. Anybody already signed in sees it after signing out and back in.");
+            ? $"'{slug}' has no {roleName} group now."
+            : $"Members of {group.Trim()} are {roleName}s of '{slug}'. Anybody already signed in sees it after signing out and back in.");
         return 0;
     }
 
@@ -131,8 +209,9 @@ public static class OrgCommand
         Console.Error.WriteLine();
         Console.Error.WriteLine("  dmarc org list");
         Console.Error.WriteLine("  dmarc org add       --name \"<name>\" [--slug <slug>] [--group <id>]");
-        Console.Error.WriteLine("  dmarc org set-group --org <slug> --group <entra group object id>");
+        Console.Error.WriteLine("  dmarc org set-group --org <slug> --group <entra group object id> [--role operator|admin|viewer]");
         Console.Error.WriteLine("  dmarc org rename    --org <slug> --name \"<name>\"");
+        Console.Error.WriteLine("  dmarc org brand     --org <slug> [--colour #rrggbb] [--provider-name <n>] [--contact <text>] [--logo <file>]");
         return 64;
     }
 }

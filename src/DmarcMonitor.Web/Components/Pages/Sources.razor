@@ -121,7 +121,7 @@ else
             // Across this organisation's clients, which is the point of the
             // page, and never across organisations, which would be a leak.
             var access = await Org.GetAsync();
-            _rows = await Correlation.GetFailingSourcesAsync(_days, tenantId: access.TenantId);
+            _rows = await Correlation.GetFailingSourcesAsync(_days, tenantId: access.TenantId, clientSlug: access.RestrictedClient);
             _crossClient = [.. _rows.Where(r => r.IsCrossClient)];
         }
         catch (Exception ex)

@@ -117,6 +117,15 @@ public sealed record ClientReport
     public required string ClientName { get; init; }
     public required string ProviderName { get; init; }
     public required ReportPeriod Period { get; init; }
+
+    /// <summary>The organisation's accent colour, #rrggbb, or null for the default.</summary>
+    public string? BrandColor { get; init; }
+
+    /// <summary>The organisation's logo as a data: URL, or null for none.</summary>
+    public string? BrandLogo { get; init; }
+
+    /// <summary>Who to contact, printed in the footer. Null for none.</summary>
+    public string? ContactBlock { get; init; }
     public DateTimeOffset GeneratedAt { get; init; } = DateTimeOffset.UtcNow;
 
     public IReadOnlyList<ReportDomainHealth> Domains { get; init; } = [];

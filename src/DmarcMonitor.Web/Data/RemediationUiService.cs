@@ -81,8 +81,8 @@ public sealed class RemediationUiService(
     /// to ask about ten domains.
     /// </remarks>
     /// <param name="tenantId">One organisation's domains, or null for every organisation's.</param>
-    public Task<IReadOnlyList<DomainTriage>> DomainsAsync(string? tenantId, CancellationToken ct = default) =>
-        _triage.GetAsync(tenantId: tenantId, ct: ct);
+    public Task<IReadOnlyList<DomainTriage>> DomainsAsync(string? tenantId, string? clientSlug = null, CancellationToken ct = default) =>
+        _triage.GetAsync(tenantId: tenantId, clientSlug: clientSlug, ct: ct);
 
     /// <summary>
     /// One domain, with the safe fixes and optionally a policy move planned.
@@ -254,8 +254,8 @@ public sealed class RemediationUiService(
         return await remediation.RollBackAsync(change.Id, provider, by, reason, ct);
     }
 
-    public Task<IReadOnlyList<AppliedChange>> HistoryAsync(string? tenantId, CancellationToken ct = default) =>
-        remediation.HistoryAsync(null, 200, tenantId, ct);
+    public Task<IReadOnlyList<AppliedChange>> HistoryAsync(string? tenantId, string? clientSlug = null, CancellationToken ct = default) =>
+        remediation.HistoryAsync(null, 200, tenantId, clientSlug, ct);
 
     public Task<IReadOnlyList<DnsProviderConfig>> ProvidersAsync(string? tenantId, CancellationToken ct = default) =>
         providers.ListAsync(tenantId, ct);

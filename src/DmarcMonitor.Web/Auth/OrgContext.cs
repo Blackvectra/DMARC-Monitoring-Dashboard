@@ -31,7 +31,8 @@ public sealed class OrgContext(
     {
         var state = await auth.GetAuthenticationStateAsync().ConfigureAwait(false);
         var all = await organisations.ListAsync(ct).ConfigureAwait(false);
-        return Resolve(state.User, all, configuration);
+        var clientGroups = await organisations.ClientGroupsAsync(ct).ConfigureAwait(false);
+        return Resolve(state.User, all, configuration, clientGroups);
     }
 
     /// <summary>
@@ -41,7 +42,9 @@ public sealed class OrgContext(
     public static string OrganisationFor(OrganisationAccess access) =>
         access.Current?.Slug ?? DmarcMonitor.Core.Storage.ReportStore.DefaultTenantSlug;
 
-    public static OrganisationAccess Resolve(ClaimsPrincipal user, IReadOnlyList<Organisation> all, IConfiguration configuration) =>
+    public static OrganisationAccess Resolve(
+        ClaimsPrincipal user, IReadOnlyList<Organisation> all, IConfiguration configuration,
+        IReadOnlyList<ClientGroup>? clientGroups = null) =>
         OrganisationAccess.Resolve(
             all,
             GroupIds(user),
@@ -50,7 +53,9 @@ public sealed class OrgContext(
             // No sign-in means the machine is the boundary, and whoever is at
             // it sees everything - the same rule local mode applies to the
             // rest of the data.
-            everyoneIsMaster: !AuthSetup.IsEntraConfigured(configuration));
+            everyoneIsMaster: !AuthSetup.IsEntraConfigured(configuration),
+            clientGroups,
+            user: user.Identity?.Name ?? Environment.UserName);
 
     /// <summary>
     /// The group object ids in the token, under either name Entra uses.
@@ -87,7 +92,11 @@ public static class OrganisationSwitch
             HttpContext context, string? slug, string? returnUrl,
             OrganisationStore organisations, IConfiguration configuration, CancellationToken ct) =>
         {
-            var access = OrgContext.Resolve(context.User, await organisations.ListAsync(ct).ConfigureAwait(false), configuration);
+            var access = OrgContext.Resolve(
+                context.User,
+                await organisations.ListAsync(ct).ConfigureAwait(false),
+                configuration,
+                await organisations.ClientGroupsAsync(ct).ConfigureAwait(false));
 
             var wanted = string.IsNullOrWhiteSpace(slug) ? null : slug.Trim().ToLowerInvariant();
             var chosen = wanted is null

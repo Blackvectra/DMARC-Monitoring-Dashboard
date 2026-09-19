@@ -33,8 +33,34 @@ public static class ClientCommand
             "add" => await AddAsync(store, rest, ct).ConfigureAwait(false),
             "assign" => await AssignAsync(store, rest, ct).ConfigureAwait(false),
             "auto-assign" => await AutoAssignAsync(store, rest, ct).ConfigureAwait(false),
+            "set-group" => await SetGroupAsync(store, rest, ct).ConfigureAwait(false),
             _ => Usage($"Unknown: dmarc client {action}"),
         };
+    }
+
+    /// <summary>
+    /// The customer's own login: members of the group see this client and
+    /// nothing else, read only.
+    /// </summary>
+    private static async Task<int> SetGroupAsync(ReportStore store, string[] args, CancellationToken ct)
+    {
+        var client = Args.Value(args, "--client");
+        if (string.IsNullOrWhiteSpace(client))
+        {
+            return Usage("dmarc client set-group --client <slug> --group <entra group object id> [--db <path>]   (omit --group to clear it)");
+        }
+
+        var group = Args.Value(args, "--group");
+        if (!await store.SetClientGroupAsync(client, group, ct: ct).ConfigureAwait(false))
+        {
+            Console.Error.WriteLine($"No client with the slug '{client}'. See: dmarc client list");
+            return 66;
+        }
+
+        Console.WriteLine(string.IsNullOrWhiteSpace(group)
+            ? $"'{client}' has no customer login group now."
+            : $"Members of {group.Trim()} see '{client}' and nothing else, read only. They may need to sign out and back in.");
+        return 0;
     }
 
     private static async Task<int> ListAsync(ReportStore store, CancellationToken ct)
@@ -240,6 +266,7 @@ public static class ClientCommand
         Console.Error.WriteLine("  dmarc client list");
         Console.Error.WriteLine("  dmarc client add    --name \"<name>\" [--slug <slug>] [--org <organisation slug>]");
         Console.Error.WriteLine("  dmarc client assign --domain <domain> --client <slug>");
+        Console.Error.WriteLine("  dmarc client set-group --client <slug> --group <entra group object id>   (the customer's own login)");
         return 64;
     }
 }

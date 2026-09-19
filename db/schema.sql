@@ -101,10 +101,20 @@ CREATE TABLE tenants (
     client_limit        INTEGER,                       -- NULL = unlimited
     billing_reference   TEXT,
 
-    -- Who belongs here: the object id of an Entra security group. Matched
-    -- against the groups claim of whoever signs in. NULL means nobody but the
-    -- master group (named in configuration) can see this organisation.
+    -- Who belongs here: the object ids of Entra security groups, matched
+    -- against the groups claim of whoever signs in. Operators (entra_group_id)
+    -- assign domains, apply fixes and import; admins also run the
+    -- organisation's settings; viewers read. NULL throughout means nobody but
+    -- the master group (named in configuration) can see this organisation.
     entra_group_id      TEXT,
+    admin_group_id      TEXT,
+    viewer_group_id     TEXT,
+
+    -- White-label: the sidebar and the reports carry these.
+    brand_primary_color TEXT,
+    brand_logo          TEXT,                          -- data: URL, small
+    provider_name       TEXT,                          -- "prepared by ..."
+    brand_contact_block TEXT,                          -- report footer
 
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
@@ -138,6 +148,10 @@ CREATE TABLE clients (
     client_app_id       TEXT,                          -- app registration in THEIR tenant
     cert_thumbprint     TEXT,
     mailbox_address     TEXT,
+
+    -- The customer's own login: members of this group (guests in the MSP's
+    -- directory, usually) see this client and nothing else, read only.
+    entra_group_id      TEXT,
 
     -- White-label report branding
     brand_logo_path     TEXT,
@@ -999,6 +1013,28 @@ VALUES ('0009', datetime('now'), 'MTA-STS policies: what this product serves at 
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0010', datetime('now'), 'Organisations: the Entra group that decides who belongs to each tenant');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0011', datetime('now'), 'Roles within an organisation, customer login groups, white-label branding, and an audit log');
+
+
+-- ============================================================================
+--  AUDIT LOG
+-- ============================================================================
+
+-- Who did what, for the settings page and for anybody asking afterwards.
+-- Not the DNS change trail, which dns_changes keeps in full; this is the
+-- rest: organisations, groups, clients, providers, imports.
+CREATE TABLE audit_log (
+    id                  INTEGER PRIMARY KEY,
+    tenant_id           TEXT,                          -- NULL for platform-wide
+    at                  TEXT NOT NULL,
+    actor               TEXT NOT NULL,
+    action              TEXT NOT NULL,
+    detail              TEXT
+);
+
+CREATE INDEX ix_audit_tenant_at ON audit_log(tenant_id, at DESC);
 
 
 

@@ -39,6 +39,12 @@ public sealed class ClientReportBuilder(string databasePath)
 
         var (clientId, clientName) = client.Value;
 
+        // The organisation's own name and look win over whatever the caller
+        // was configured with: NextLayerSec's reports say NextLayerSec even
+        // on an install whose default provider name is NRG's.
+        var brand = await GetBrandAsync(db, clientId, ct).ConfigureAwait(false);
+        if (brand.ProviderName is { Length: > 0 }) { providerName = brand.ProviderName; }
+
         var domains = await GetDomainHealthAsync(db, clientId, period, ct).ConfigureAwait(false);
         var sources = await GetSourcesAsync(db, clientId, period, ct).ConfigureAwait(false);
         var changes = await GetChangesAsync(db, clientId, period, ct).ConfigureAwait(false);
@@ -51,6 +57,9 @@ public sealed class ClientReportBuilder(string databasePath)
             Daily = daily,
             ClientName = clientName,
             ProviderName = providerName,
+            BrandColor = brand.Color,
+            BrandLogo = brand.Logo,
+            ContactBlock = brand.Contact,
             Period = period,
             Domains = domains,
             Sources = sources,
@@ -83,6 +92,25 @@ public sealed class ClientReportBuilder(string databasePath)
             results.Add((reader.GetString(0), reader.GetString(1)));
         }
         return results;
+    }
+
+    /// <summary>How the client's organisation presents itself, all optional.</summary>
+    private static async Task<(string? ProviderName, string? Color, string? Logo, string? Contact)> GetBrandAsync(
+        SqliteConnection db, string clientId, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT t.provider_name, t.brand_primary_color, t.brand_logo, t.brand_contact_block
+            FROM clients c JOIN tenants t ON t.id = c.tenant_id
+            WHERE c.id = $client LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$client", clientId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return (null, null, null, null); }
+
+        string? At(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+        return (At(0), At(1), At(2), At(3));
     }
 
     private static async Task<(string Id, string Name)?> GetClientAsync(

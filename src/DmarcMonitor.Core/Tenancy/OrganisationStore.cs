@@ -8,8 +8,9 @@ namespace DmarcMonitor.Core.Tenancy;
 /// The organisations, read and written.
 /// </summary>
 /// <remarks>
-/// Writes here are setup, like onboarding a client: naming an organisation
-/// and saying which group belongs to it. Nothing here touches report data.
+/// Writes here are setup, like onboarding a client: naming an organisation,
+/// saying which groups belong to it, and how it looks. Nothing here touches
+/// report data.
 /// </remarks>
 public sealed class OrganisationStore(string databasePath)
 {
@@ -22,7 +23,9 @@ public sealed class OrganisationStore(string databasePath)
     private const string Select = """
         SELECT t.id, t.name, t.slug, t.entra_group_id,
                (SELECT COUNT(*) FROM clients c WHERE c.tenant_id = t.id AND c.deleted_at IS NULL AND c.slug <> 'unassigned'),
-               (SELECT COUNT(*) FROM domains d WHERE d.tenant_id = t.id AND d.deleted_at IS NULL)
+               (SELECT COUNT(*) FROM domains d WHERE d.tenant_id = t.id AND d.deleted_at IS NULL),
+               t.admin_group_id, t.viewer_group_id,
+               t.brand_primary_color, t.brand_logo, t.provider_name, t.brand_contact_block
         FROM tenants t
         WHERE t.deleted_at IS NULL
         """;
@@ -55,6 +58,29 @@ public sealed class OrganisationStore(string databasePath)
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         return await reader.ReadAsync(ct).ConfigureAwait(false) ? Row(reader) : null;
+    }
+
+    /// <summary>Every client with a login group of its own, across organisations.</summary>
+    public async Task<IReadOnlyList<ClientGroup>> ClientGroupsAsync(CancellationToken ct = default)
+    {
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT t.slug, c.slug, c.name, c.entra_group_id
+            FROM clients c JOIN tenants t ON t.id = c.tenant_id
+            WHERE c.entra_group_id IS NOT NULL AND c.entra_group_id <> '' AND c.deleted_at IS NULL
+            ORDER BY t.slug, c.slug
+            """;
+
+        var result = new List<ClientGroup>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            result.Add(new ClientGroup(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+        }
+        return result;
     }
 
     /// <summary>
@@ -97,14 +123,64 @@ public sealed class OrganisationStore(string databasePath)
         return new Organisation(id, name.Trim(), wanted, Clean(entraGroupId), 0, 0);
     }
 
-    /// <summary>Records which group belongs to an organisation. Null clears it.</summary>
+    /// <summary>Records which group operates an organisation. Null clears it.</summary>
     public Task<bool> SetGroupAsync(string slug, string? entraGroupId, CancellationToken ct = default) =>
-        UpdateAsync(slug, "entra_group_id = $value", (object?)Clean(entraGroupId) ?? DBNull.Value, ct);
+        SetGroupAsync(slug, OrganisationRole.Operator, entraGroupId, ct);
+
+    /// <summary>Records which group holds a role in an organisation. Null clears it.</summary>
+    public Task<bool> SetGroupAsync(string slug, OrganisationRole role, string? entraGroupId, CancellationToken ct = default)
+    {
+        var column = role switch
+        {
+            OrganisationRole.Admin => "admin_group_id",
+            OrganisationRole.Operator => "entra_group_id",
+            OrganisationRole.Viewer => "viewer_group_id",
+            _ => throw new ArgumentOutOfRangeException(nameof(role), role, "A group holds the viewer, operator or admin role."),
+        };
+        return UpdateAsync(slug, $"{column} = $value", (object?)Clean(entraGroupId) ?? DBNull.Value, ct);
+    }
 
     public Task<bool> RenameAsync(string slug, string name, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         return UpdateAsync(slug, "name = $value", name.Trim(), ct);
+    }
+
+    /// <summary>
+    /// Sets how an organisation looks. Refuses a colour that is not a plain
+    /// hex or a logo that is not a small image, because both land in markup.
+    /// </summary>
+    public async Task<bool> SetBrandAsync(string slug, OrganisationBrand brand, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(slug);
+        ArgumentNullException.ThrowIfNull(brand);
+
+        if (!OrganisationBrand.IsValidColor(Clean(brand.PrimaryColor)))
+        {
+            throw new ArgumentException("The colour must be a six-digit hex such as #4f46e5.", nameof(brand));
+        }
+        if (!OrganisationBrand.IsValidLogo(Clean(brand.Logo)))
+        {
+            throw new ArgumentException($"The logo must be a PNG, JPEG, GIF, WebP or SVG image of at most {OrganisationBrand.MaxLogoLength / 1000} KB.", nameof(brand));
+        }
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            UPDATE tenants
+            SET brand_primary_color = $color, brand_logo = $logo, provider_name = $provider, brand_contact_block = $contact,
+                updated_at = $now
+            WHERE slug = $slug AND deleted_at IS NULL
+            """;
+        command.Parameters.AddWithValue("$color", (object?)Clean(brand.PrimaryColor)?.ToLowerInvariant() ?? DBNull.Value);
+        command.Parameters.AddWithValue("$logo", (object?)Clean(brand.Logo) ?? DBNull.Value);
+        command.Parameters.AddWithValue("$provider", (object?)Clean(brand.ProviderName) ?? DBNull.Value);
+        command.Parameters.AddWithValue("$contact", (object?)Clean(brand.ContactBlock) ?? DBNull.Value);
+        command.Parameters.AddWithValue("$now", Iso(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$slug", slug.Trim().ToLowerInvariant());
+        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0;
     }
 
     private async Task<bool> UpdateAsync(string slug, string set, object value, CancellationToken ct)
@@ -115,7 +191,7 @@ public sealed class OrganisationStore(string databasePath)
         await db.OpenAsync(ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
-        // The SET clause is one of the two literals above, never caller input.
+        // The SET clause is one of the literals above, never caller input.
         command.CommandText = $"UPDATE tenants SET {set}, updated_at = $now WHERE slug = $slug AND deleted_at IS NULL";
         command.Parameters.AddWithValue("$value", value);
         command.Parameters.AddWithValue("$now", Iso(DateTimeOffset.UtcNow));
@@ -128,7 +204,14 @@ public sealed class OrganisationStore(string databasePath)
     private static Organisation Row(SqliteDataReader r) => new(
         r.GetString(0), r.GetString(1), r.GetString(2),
         r.IsDBNull(3) ? null : r.GetString(3),
-        r.GetInt32(4), r.GetInt32(5));
+        r.GetInt32(4), r.GetInt32(5),
+        r.IsDBNull(6) ? null : r.GetString(6),
+        r.IsDBNull(7) ? null : r.GetString(7),
+        new OrganisationBrand(
+            r.IsDBNull(8) ? null : r.GetString(8),
+            r.IsDBNull(9) ? null : r.GetString(9),
+            r.IsDBNull(10) ? null : r.GetString(10),
+            r.IsDBNull(11) ? null : r.GetString(11)));
 
     private static string Iso(DateTimeOffset value) =>
         value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);

@@ -6,6 +6,7 @@
 @inject ImportUiService Importer
 @inject ReportStoreConnection Db
 @inject OrgContext Org
+@inject AuditLog Audit
 @rendermode InteractiveServer
 
 <PageTitle>Import — DMARC Monitor</PageTitle>
@@ -26,6 +27,14 @@
         <h2>No database yet</h2>
         <p>Create it first, then come back:</p>
         <pre>dmarc init-db --db @Db.Path</pre>
+    </div>
+}
+else if (_access is { CanOperate: false })
+{
+    <div class="empty">
+        <h2>Importing needs the operator role</h2>
+        <p>You can read everything in @(_access.Current?.Name ?? "this organisation"), but bringing reports in
+           changes it. Ask an admin to add you to the operator group.</p>
     </div>
 }
 else
@@ -228,6 +237,9 @@ else
 
     private async Task RunAsync(Func<IProgress<int>, CancellationToken, Task<ImportResult>> import)
     {
+        // The handler runs on the server; a hidden panel is not a permission.
+        if (_access is not { CanOperate: true }) { return; }
+
         _problem = null;
         _result = null;
         _filesRead = 0;
@@ -244,6 +256,11 @@ else
 
             _result = await import(progress, _cts.Token);
             _unassigned = await Importer.GetUnassignedDomainsAsync(_access?.TenantId);
+            if (_result.Stored > 0)
+            {
+                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "", "reports.imported",
+                    $"{_result.Stored} report(s) stored under {Organisation}");
+            }
         }
         catch (OperationCanceledException)
         {

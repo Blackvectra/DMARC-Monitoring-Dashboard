@@ -203,7 +203,7 @@ else
                             {
                                 <p class="sub">Note: @w</p>
                             }
-                            @if (d.CanApply)
+                            @if (d.CanApply && _canOperate)
                             {
                                 <div class="form-row">
                                     <input class="wide" placeholder="Reason, written for the customer's report"
@@ -212,6 +212,10 @@ else
                                     <button class="primary" disabled="@(_busy || Reason(key).Trim().Length == 0)"
                                             @onclick="() => ApplyAsync(plan)">Apply</button>
                                 </div>
+                            }
+                            else if (d.CanApply)
+                            {
+                                <p class="sub">Applying this needs the operator role.</p>
                             }
                             else
                             {
@@ -330,7 +334,7 @@ else
                                 }
                             </td>
                             <td>
-                                @if (c.RolledBackAt is null)
+                                @if (c.RolledBackAt is null && _canOperate)
                                 {
                                     <div class="form-row">
                                         <input placeholder="Why"
@@ -356,6 +360,9 @@ else
     private int _pending;
     private bool _loaded;
     private string? _tenant;
+
+    /// <summary>Whether this person may change DNS. A viewer sees every plan and no button.</summary>
+    private bool _canOperate;
     private IReadOnlyList<AppliedChange>? _history;
     private string? _error;
     private string? _message;
@@ -439,9 +446,11 @@ else
         {
             // The scope first, then the list, which is a database read and
             // instant, then the DNS for each one behind it.
-            _tenant = (await Org.GetAsync()).TenantId;
-            _rows = await Fixes.DomainsAsync(_tenant);
-            _history = await Fixes.HistoryAsync(_tenant);
+            var access = await Org.GetAsync();
+            _tenant = access.TenantId;
+            _canOperate = access.CanOperate;
+            _rows = await Fixes.DomainsAsync(_tenant, access.RestrictedClient);
+            _history = await Fixes.HistoryAsync(_tenant, access.RestrictedClient);
             _pending = _rows.Count;
             _loaded = true;
             await InvokeAsync(StateHasChanged);
@@ -492,7 +501,8 @@ else
     private async Task ApplyAsync(ChangePlan plan)
     {
         var reason = Reason(Key(plan)).Trim();
-        if (string.IsNullOrEmpty(reason)) { return; }
+        // The handler runs on the server; a hidden button is not a permission.
+        if (string.IsNullOrEmpty(reason) || !_canOperate) { return; }
 
         _busy = true;
         try
@@ -515,7 +525,7 @@ else
     private async Task RollBackAsync(string changeId)
     {
         var reason = RollbackReason(changeId).Trim();
-        if (string.IsNullOrEmpty(reason)) { return; }
+        if (string.IsNullOrEmpty(reason) || !_canOperate) { return; }
 
         _busy = true;
         try

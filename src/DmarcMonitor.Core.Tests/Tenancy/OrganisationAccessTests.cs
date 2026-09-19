@@ -131,4 +131,111 @@ public sealed class OrganisationAccessTests
         Assert.False(access.IsMaster);
         Assert.False(access.HasAccess);
     }
+
+    // ---- roles ---------------------------------------------------------------
+
+    private const string NrgAdmins = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    private const string NrgViewers = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    private const string CustomerGroup = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+    private static readonly Organisation Roled =
+        new("t-nrg", "NRG Tech Services", "nrg-tech-services", NrgGroup, 3, 10, NrgAdmins, NrgViewers);
+
+    private static readonly IReadOnlyList<Organisation> Roles = [Roled, Nls];
+
+    [Fact]
+    public void AViewerReadsAndDoesNotOperate()
+    {
+        var access = OrganisationAccess.Resolve(Roles, [NrgViewers], MasterGroup, null, everyoneIsMaster: false);
+
+        Assert.Equal(OrganisationRole.Viewer, access.CurrentRole);
+        Assert.False(access.CanOperate);
+        Assert.False(access.CanAdminister);
+        Assert.Equal("t-nrg", access.TenantId);
+    }
+
+    [Fact]
+    public void AnOperatorOperatesButDoesNotAdminister()
+    {
+        var access = OrganisationAccess.Resolve(Roles, [NrgGroup], MasterGroup, null, everyoneIsMaster: false);
+
+        Assert.Equal(OrganisationRole.Operator, access.CurrentRole);
+        Assert.True(access.CanOperate);
+        Assert.False(access.CanAdminister);
+    }
+
+    [Fact]
+    public void AnAdminDoesBoth()
+    {
+        var access = OrganisationAccess.Resolve(Roles, [NrgAdmins], MasterGroup, null, everyoneIsMaster: false);
+
+        Assert.Equal(OrganisationRole.Admin, access.CurrentRole);
+        Assert.True(access.CanOperate);
+        Assert.True(access.CanAdminister);
+    }
+
+    [Fact]
+    public void TheStrongestGroupWins()
+    {
+        // Somebody in all three groups is an admin, not a viewer. Adding
+        // somebody to a stronger group must not require removing them from
+        // the weaker one first.
+        var access = OrganisationAccess.Resolve(Roles, [NrgViewers, NrgGroup, NrgAdmins], MasterGroup, null, everyoneIsMaster: false);
+
+        Assert.Equal(OrganisationRole.Admin, access.CurrentRole);
+    }
+
+    [Fact]
+    public void AMasterIsMasterOfEveryOrganisation()
+    {
+        var access = OrganisationAccess.Resolve(Roles, [MasterGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
+
+        Assert.Equal(OrganisationRole.Master, access.CurrentRole);
+        Assert.True(access.CanAdminister);
+        Assert.Null(access.RestrictedClient);
+    }
+
+    [Fact]
+    public void ACustomerSeesOneClientReadOnly()
+    {
+        // The customer's own login: read only, and confined to their client.
+        ClientGroup[] clients = [new("nrg-tech-services", "morton-nd", "Morton, ND", CustomerGroup)];
+
+        var access = OrganisationAccess.Resolve(Roles, [CustomerGroup], MasterGroup, null, everyoneIsMaster: false, clients);
+
+        Assert.Same(Roled, access.Current);
+        Assert.Equal(OrganisationRole.Viewer, access.CurrentRole);
+        Assert.False(access.CanOperate);
+        Assert.Equal("morton-nd", access.RestrictedClient);
+        Assert.Single(access.Visible);
+    }
+
+    [Fact]
+    public void BeingStaffBeatsBeingACustomer()
+    {
+        // An employee who is also in a customer group must not be locked into
+        // that one client.
+        ClientGroup[] clients = [new("nrg-tech-services", "morton-nd", "Morton, ND", CustomerGroup)];
+
+        var access = OrganisationAccess.Resolve(Roles, [CustomerGroup, NrgGroup], MasterGroup, null, everyoneIsMaster: false, clients);
+
+        Assert.Equal(OrganisationRole.Operator, access.CurrentRole);
+        Assert.Null(access.RestrictedClient);
+    }
+
+    [Fact]
+    public void ACustomerOfAnotherOrganisationIsNotConfinedHere()
+    {
+        // The restriction belongs to the organisation the client is in. In
+        // any other organisation it must not leak in as a filter.
+        ClientGroup[] clients = [new("nextlayersec", "acme", "Acme", CustomerGroup)];
+
+        var access = OrganisationAccess.Resolve(Roles, [CustomerGroup, NrgGroup], MasterGroup, "nrg-tech-services", everyoneIsMaster: false, clients);
+
+        Assert.Same(Roled, access.Current);
+        Assert.Null(access.RestrictedClient);
+
+        var atTheirOwn = access with { Current = Nls };
+        Assert.Equal("acme", atTheirOwn.RestrictedClient);
+    }
 }

@@ -50,9 +50,11 @@
     /* The one accent. Links, the active nav item, primary buttons, the chart
        line. Everything interactive is this colour and nothing else is. */
     --accent: #4f46e5;
-    --accent-bg: #eef2ff;
     --link: var(--accent);
     --ontrack: var(--accent);   /* a rollout in progress is information, not a warning */
+    /* The tint behind an accent chip is derived, so an organisation's own
+       colour set on .app carries through without a second token. */
+    --accent-bg: color-mix(in srgb, var(--accent) 12%, var(--panel));
 
     /* Status colours, and a tint of each for the chip behind the word. The
        tint does the work on a page; the full colour is kept for a dot or a
@@ -98,7 +100,7 @@
     --hover: #18181b;
 
     --accent: #818cf8;
-    --accent-bg: #1e1b4b;
+    --accent-bg: color-mix(in srgb, var(--accent) 18%, var(--panel));
 
     --urgent: #f87171;  --urgent-bg: #2a1215;
     --act: #fb923c;     --act-bg: #2a1a0f;
@@ -193,6 +195,10 @@ a:hover { text-decoration: underline; }
     margin-bottom: 4px;
 }
 .org-name { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+.org-role { font-size: 11px; color: var(--dim); margin-top: 6px; }
+
+/* An organisation's own logo takes the brand's place, sized to the column. */
+.brand-logo { display: block; max-height: 36px; max-width: 100%; }
 .org-switch {
     width: 100%;
     margin: 0;

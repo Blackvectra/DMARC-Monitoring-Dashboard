@@ -19,7 +19,7 @@
            what needs doing, which is the one to open when you do not already know what you are after.</p>
     </div>
     <div class="head-actions">
-        @if (_clients.Count > 1)
+        @if (_clients.Count > 1 && _access?.RestrictedClient is null)
         {
             <label>
                 Client
@@ -213,7 +213,9 @@ else
             // with several domains each is unreadable without it.
             if (_rows is null) { _byClient = _clients.Count > 1 && _clients.Any(c => c.Domains > 1); }
 
-            _rows = await Triage.GetAsync(_days, tenant);
+            if (_access.RestrictedClient is { } only) { _client = only; }
+
+            _rows = await Triage.GetAsync(_days, tenant, _access.RestrictedClient);
         }
         catch (Exception ex)
         {

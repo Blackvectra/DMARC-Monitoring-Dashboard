@@ -257,7 +257,12 @@ public sealed class DomainDetailService(string databasePath)
     /// belongs to another organisation comes back as null, exactly as a domain
     /// that does not exist would: the page must not even confirm it is there.
     /// </param>
-    public async Task<DomainDetail?> GetAsync(string domain, int days = 30, string? tenantId = null, CancellationToken ct = default)
+    /// <param name="clientSlug">
+    /// The one client the caller is confined to, or null. A domain of another
+    /// client comes back as null, like a domain that does not exist.
+    /// </param>
+    public async Task<DomainDetail?> GetAsync(
+        string domain, int days = 30, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
@@ -268,7 +273,7 @@ public sealed class DomainDetailService(string databasePath)
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        string domainId, clientName, clientSlug;
+        string domainId, clientName, owningClient;
         DateTimeOffset? baseline;
         int baselineDays;
         string target;
@@ -279,18 +284,19 @@ public sealed class DomainDetailService(string databasePath)
                 SELECT d.id, c.name, c.slug, d.baseline_started_at, d.baseline_days, d.policy_target
                 FROM domains d
                 JOIN clients c ON c.id = d.client_id
-                WHERE d.name = $name AND ($tenant IS NULL OR d.tenant_id = $tenant)
+                WHERE d.name = $name AND ($tenant IS NULL OR d.tenant_id = $tenant) AND ($client IS NULL OR c.slug = $client)
                 LIMIT 1
                 """;
             head.Parameters.AddWithValue("$name", name);
             head.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            head.Parameters.AddWithValue("$client", (object?)(string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant()) ?? DBNull.Value);
 
             await using var reader = await head.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
 
             domainId = reader.GetString(0);
             clientName = reader.GetString(1);
-            clientSlug = reader.GetString(2);
+            owningClient = reader.GetString(2);
             baseline = reader.IsDBNull(3) ? null : ParseDate(reader.GetString(3));
             baselineDays = reader.IsDBNull(4) ? 14 : reader.GetInt32(4);
             target = reader.IsDBNull(5) ? "reject" : reader.GetString(5);
@@ -308,7 +314,7 @@ public sealed class DomainDetailService(string databasePath)
         {
             Domain = name,
             ClientName = clientName,
-            ClientSlug = clientSlug,
+            ClientSlug = owningClient,
             Policy = policy,
             SubdomainPolicy = subPolicy,
             Pct = pct,

@@ -411,7 +411,32 @@ public sealed class ReportStore
 
     /// <summary>A client and how much is filed under it.</summary>
     /// <param name="OrganisationSlug">The organisation it belongs to.</param>
-    public sealed record ClientSummary(string Slug, string Name, int Domains, long Messages, string OrganisationSlug = "", string OrganisationName = "");
+    /// <param name="EntraGroupId">The customer's own login group, or null.</param>
+    public sealed record ClientSummary(
+        string Slug, string Name, int Domains, long Messages,
+        string OrganisationSlug = "", string OrganisationName = "", string? EntraGroupId = null);
+
+    /// <summary>
+    /// Records the customer's own login group for a client. Its members see
+    /// this client and nothing else, read only. Null clears it.
+    /// </summary>
+    public async Task<bool> SetClientGroupAsync(string clientSlug, string? entraGroupId, string? tenantId = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE clients SET entra_group_id = $group, updated_at = $now
+            WHERE slug = $slug AND slug <> $unassigned AND ($tenant IS NULL OR tenant_id = $tenant)
+            """;
+        command.Parameters.AddWithValue("$group", string.IsNullOrWhiteSpace(entraGroupId) ? DBNull.Value : entraGroupId.Trim());
+        command.Parameters.AddWithValue("$now", Iso(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$slug", clientSlug.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$unassigned", UnassignedClientSlug);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0;
+    }
 
     /// <summary>Why an assignment did not happen, or that it did.</summary>
     public enum AssignOutcome
@@ -467,13 +492,13 @@ public sealed class ReportStore
             SELECT c.slug, c.name,
                    COUNT(DISTINCT d.id)                  AS domains,
                    COALESCE(SUM(r.message_count), 0)     AS messages,
-                   t.slug, t.name
+                   t.slug, t.name, c.entra_group_id
             FROM clients c
             JOIN tenants t ON t.id = c.tenant_id
             LEFT JOIN domains d ON d.client_id = c.id
             LEFT JOIN aggregate_records r ON r.domain_id = d.id
             WHERE ($tenant IS NULL OR c.tenant_id = $tenant)
-            GROUP BY c.id, c.slug, c.name, t.slug, t.name
+            GROUP BY c.id, c.slug, c.name, t.slug, t.name, c.entra_group_id
             ORDER BY t.name, c.name
             """;
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
@@ -484,7 +509,7 @@ public sealed class ReportStore
         {
             result.Add(new ClientSummary(
                 reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3),
-                reader.GetString(4), reader.GetString(5)));
+                reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
         return result;
     }

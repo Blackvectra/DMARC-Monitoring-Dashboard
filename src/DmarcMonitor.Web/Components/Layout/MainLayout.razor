@@ -20,9 +20,14 @@
     here is never wired up and does nothing when clicked. That is how the first
     version shipped, and only driving it in a real browser caught it - both
     buttons rendered perfectly and neither worked.
+
+    White-label: the organisation being looked at lends the shell its colour
+    and its logo. The colour only ever comes from the store, which refuses
+    anything but a six-digit hex, and it is checked again here because it is
+    written into a style attribute.
 *@
 
-<div class="app">
+<div class="app" style="@Accent">
     @* Only shown on a narrow screen, by CSS. *@
     <button class="nav-toggle" onclick="dmarcShell.toggleNav()" aria-label="Toggle navigation">
         ☰ Menu
@@ -34,8 +39,15 @@
 
     <nav class="sidebar">
         <div class="brand">
-            <span class="brand-mark">DM</span>
-            <span class="brand-name">DMARC Monitor</span>
+            @if (Logo is not null)
+            {
+                <img class="brand-logo" src="@Logo" alt="@(_access?.Current?.Name ?? "DMARC Monitor")" />
+            }
+            else
+            {
+                <span class="brand-mark">DM</span>
+                <span class="brand-name">@(_access?.Current?.Name ?? "DMARC Monitor")</span>
+            }
         </div>
 
         @* Which organisation this is. A switcher for anybody who may see more
@@ -58,11 +70,14 @@
                         }
                     </select>
                 }
-                else if (_access.Current is not null)
+                else if (_access.Current is not null && Logo is not null)
                 {
                     <p class="org-label">Organisation</p>
                     <p class="org-name">@_access.Current.Name</p>
                 }
+                @* What this person may do here, said plainly: a viewer who
+                   cannot find the Apply button should know it is not missing. *@
+                <p class="org-role">@RoleLabel</p>
             </div>
         }
 
@@ -74,12 +89,16 @@
         <NavLink class="nav-item" href="sources">Sources</NavLink>
         <NavLink class="nav-item" href="reports">Reports</NavLink>
 
-        @* What you set once, or when a client is onboarded. *@
-        <p class="nav-group">Setup</p>
-        <NavLink class="nav-item" href="clients">Clients</NavLink>
-        <NavLink class="nav-item" href="import">Import</NavLink>
-        <NavLink class="nav-item" href="settings">Settings</NavLink>
-        <NavLink class="nav-item" href="updates">Updates</NavLink>
+        @* What you set once, or when a client is onboarded. A customer's own
+           login gets none of it; there is nothing there for them. *@
+        @if (_access is not { RestrictedClient: not null })
+        {
+            <p class="nav-group">Setup</p>
+            <NavLink class="nav-item" href="clients">Clients</NavLink>
+            <NavLink class="nav-item" href="import">Import</NavLink>
+            <NavLink class="nav-item" href="settings">Settings</NavLink>
+            <NavLink class="nav-item" href="updates">Updates</NavLink>
+        }
 
         <div class="sidebar-foot">
             <AuthorizeView>
@@ -137,6 +156,22 @@
     private OrganisationAccess? _access;
 
     private bool EntraConfigured => DmarcMonitor.Web.Auth.AuthSetup.IsEntraConfigured(Configuration);
+
+    private string? Logo =>
+        _access?.Current?.Brand.Logo is { } logo && OrganisationBrand.IsValidLogo(logo) ? logo : null;
+
+    private string Accent =>
+        _access?.Current?.Brand.PrimaryColor is { } c && OrganisationBrand.IsValidColor(c) ? $"--accent: {c};" : "";
+
+    private string RoleLabel => _access?.CurrentRole switch
+    {
+        OrganisationRole.Master => "master: every organisation",
+        OrganisationRole.Admin => "admin",
+        OrganisationRole.Operator => "operator",
+        OrganisationRole.Viewer when _access.RestrictedClient is not null => "your organisation's view, read only",
+        OrganisationRole.Viewer => "viewer, read only",
+        _ => "",
+    };
 
     protected override async Task OnInitializedAsync()
     {

@@ -338,10 +338,11 @@ public sealed class TimeSeriesService(string databasePath)
     /// case where one domain alone goes silent.
     /// </remarks>
     public async Task<IReadOnlyDictionary<string, IReadOnlyList<DayPoint>>> PerDomainAsync(
-        int days = 30, string? tenantId = null, CancellationToken ct = default)
+        int days = 30, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
 
+        var client = Slug(clientSlug);
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
         var first = today.AddDays(-(days - 1));
         var since = first.ToDateTime(TimeOnly.MinValue)
@@ -357,10 +358,13 @@ public sealed class TimeSeriesService(string databasePath)
                 SELECT DISTINCT d.name, DATE(rep.date_begin)
                 FROM aggregate_reports rep
                 JOIN domains d ON d.id = rep.domain_id
+                JOIN clients c ON c.id = d.client_id
                 WHERE rep.date_begin >= $since AND ($tenant IS NULL OR rep.tenant_id = $tenant)
+                  AND ($slug IS NULL OR c.slug = $slug)
                 """;
             command.Parameters.AddWithValue("$since", since);
             command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$slug", (object?)client ?? DBNull.Value);
 
             await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -393,11 +397,14 @@ public sealed class TimeSeriesService(string databasePath)
                                          THEN r.message_count END), 0)
                 FROM aggregate_records r
                 JOIN domains d ON d.id = r.domain_id
+                JOIN clients c ON c.id = d.client_id
                 WHERE r.date_begin >= $since AND ($tenant IS NULL OR r.tenant_id = $tenant)
+                  AND ($slug IS NULL OR c.slug = $slug)
                 GROUP BY d.name, DATE(r.date_begin)
                 """;
             command.Parameters.AddWithValue("$since", since);
             command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$slug", (object?)client ?? DBNull.Value);
 
             await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))

@@ -166,6 +166,112 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
+
+    // ---- roles ---------------------------------------------------------------
+
+    [Fact]
+    public async Task AViewerReadsTheDataAndIsOfferedNothingToChange()
+    {
+        var client = As("reader@example.com", TwoOrganisationApp.NrgViewers);
+
+        var triage = await client.GetStringAsync("/");
+        Assert.Contains("acme.com", triage, StringComparison.Ordinal);
+        Assert.Contains("viewer, read only", triage, StringComparison.Ordinal);
+
+        // The controls that write are not drawn, and the page says why rather
+        // than leaving somebody hunting for a button that was never there.
+        var clients = await client.GetStringAsync("/clients");
+        Assert.Contains("needs the operator role", clients, StringComparison.Ordinal);
+        Assert.DoesNotContain("Add a client", clients, StringComparison.Ordinal);
+
+        var import = await client.GetStringAsync("/import");
+        Assert.Contains("Importing needs the operator role", import, StringComparison.Ordinal);
+        Assert.DoesNotContain("Drop report files here", import, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnOperatorGetsTheControlsButNotTheOrganisationsSettings()
+    {
+        var client = As("nrg@example.com", TwoOrganisationApp.NrgGroup);
+
+        var clients = await client.GetStringAsync("/clients");
+        Assert.Contains("Add a client", clients, StringComparison.Ordinal);
+        Assert.DoesNotContain("Customer login group", clients, StringComparison.Ordinal);
+
+        var settings = await client.GetStringAsync("/settings");
+        Assert.DoesNotContain("Add an organisation", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain("Recent activity", settings, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnAdminRunsTheirOwnOrganisationAndNobodyElses()
+    {
+        var html = await As("admin@example.com", TwoOrganisationApp.NrgAdmins).GetStringAsync("/settings");
+
+        Assert.Contains("Recent activity", html, StringComparison.Ordinal);
+        Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
+
+        // Creating organisations stays with the master group.
+        Assert.DoesNotContain("Add an organisation", html, StringComparison.Ordinal);
+
+        // And the customer-login column, which is an admin's to set.
+        Assert.Contains("Customer login group", await As("admin@example.com", TwoOrganisationApp.NrgAdmins).GetStringAsync("/clients"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ACustomerSeesTheirOwnClientAndNoSetupAtAll()
+    {
+        var client = As("customer@acme.example", TwoOrganisationApp.AcmeGroup);
+
+        var triage = await client.GetStringAsync("/");
+        Assert.Contains("acme.com", triage, StringComparison.Ordinal);
+        Assert.DoesNotContain("cornerpost.example", triage, StringComparison.Ordinal);
+
+        // No Clients, Import, Settings or Updates: there is nothing there for
+        // a customer, and the client picker would offer them other people's.
+        Assert.DoesNotContain("nav-group\">Setup", triage, StringComparison.Ordinal);
+        Assert.DoesNotContain("href=\"import\"", triage, StringComparison.Ordinal);
+        Assert.Contains("read only", triage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ACustomerCannotReachAnotherClientsReportOrDomain()
+    {
+        var client = As("customer@acme.example", TwoOrganisationApp.AcmeGroup);
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/reports/download/acme-corp/2026-08")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/reports/download/corner-post/2026-08")).StatusCode);
+
+        var domain = await client.GetStringAsync("/domains/cornerpost.example");
+        Assert.Contains("Nothing stored for", domain, StringComparison.Ordinal);
+    }
+
+    // ---- white label ---------------------------------------------------------
+
+    [Fact]
+    public async Task AnOrganisationsColourAndLogoDressTheShell()
+    {
+        var html = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetStringAsync("/");
+
+        Assert.Contains("--accent: #0f766e;", html, StringComparison.Ordinal);
+        Assert.Contains("class=\"brand-logo\"", html, StringComparison.Ordinal);
+
+        // NextLayerSec has no branding, so it keeps the default mark.
+        var plain = await As("nls@example.com", TwoOrganisationApp.NlsGroup).GetStringAsync("/");
+        Assert.DoesNotContain("--accent:", plain, StringComparison.Ordinal);
+        Assert.Contains("brand-mark", plain, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AClientReportCarriesTheOrganisationsNameAndContact()
+    {
+        var response = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetAsync("/reports/download/acme-corp/2026-08");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
+        Assert.Contains("dmarc@nrgtechservices.com", html, StringComparison.Ordinal);
+        Assert.Contains("#0f766e", html, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
@@ -177,6 +283,13 @@ public sealed class TwoOrganisationApp : WebApplicationFactory<Program>
     public const string NrgGroup = "11111111-1111-1111-1111-111111111111";
     public const string NlsGroup = "22222222-2222-2222-2222-222222222222";
     public const string MasterGroup = "99999999-9999-9999-9999-999999999999";
+    public const string NrgAdmins = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    public const string NrgViewers = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    public const string AcmeGroup = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+    /// <summary>A one-pixel PNG: enough to prove the logo reaches the markup.</summary>
+    private const string Logo =
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"dmarc-orgs-web-{Guid.NewGuid():N}.db");
     private readonly string _secretsDir = Path.Combine(Path.GetTempPath(), $"dmarc-orgs-web-secrets-{Guid.NewGuid():N}");
@@ -223,10 +336,17 @@ public sealed class TwoOrganisationApp : WebApplicationFactory<Program>
         await nrg.AssignDomainAsync("acme.com", (await nrg.CreateClientAsync("Acme Corp"))!);
         await nls.AssignDomainAsync("cornerpost.example", (await nls.CreateClientAsync("Corner Post"))!);
 
-        // The built-in organisation, named and given its group, the way an
+        // The built-in organisation, named and given its groups, the way an
         // operator would from the settings page.
         await orgs.RenameAsync(ReportStore.DefaultTenantSlug, "NRG Tech Services");
         await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, NrgGroup);
+        await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, OrganisationRole.Admin, NrgAdmins);
+        await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, OrganisationRole.Viewer, NrgViewers);
+        await orgs.SetBrandAsync(ReportStore.DefaultTenantSlug, new OrganisationBrand(
+            "#0F766E", Logo, "NRG Tech Services", "dmarc@nrgtechservices.com\n+1 555 0100"));
+
+        // Acme's own people, who see Acme and nothing else.
+        await nrg.SetClientGroupAsync("acme-corp", AcmeGroup);
     }
 
     private static AggregateReport Report(string domain, DateTimeOffset begin)

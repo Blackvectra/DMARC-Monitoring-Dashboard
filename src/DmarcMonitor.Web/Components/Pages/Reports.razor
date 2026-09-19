@@ -135,12 +135,15 @@ else
 
         try
         {
-            _tenant = (await Org.GetAsync()).TenantId;
+            var access = await Org.GetAsync();
+            _tenant = access.TenantId;
 
             // Unassigned is a worklist, not a customer; a report addressed to
-            // it is a document nobody can send.
+            // it is a document nobody can send. A customer's own login sees
+            // only their own.
             _clients = [.. (await ReportUi.GetClientsAsync(_tenant))
-                .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)];
+                .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)
+                .Where(c => access.RestrictedClient is null || c.Slug.Equals(access.RestrictedClient, StringComparison.OrdinalIgnoreCase))];
 
             if (_clients.Count > 0)
             {

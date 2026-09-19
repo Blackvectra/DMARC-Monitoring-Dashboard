@@ -47,4 +47,8 @@ public sealed class OnboardingService(DatabaseInfo database)
     public Task<ReportStore.AssignOutcome> AssignAsync(
         string domain, string clientSlug, string? tenantId, CancellationToken ct = default) =>
         _store.AssignDomainAsync(domain, clientSlug, tenantId, ct);
+
+    /// <summary>The customer's own login group for a client. Null clears it.</summary>
+    public Task<bool> SetClientGroupAsync(string clientSlug, string? entraGroupId, string? tenantId, CancellationToken ct = default) =>
+        _store.SetClientGroupAsync(clientSlug, entraGroupId, tenantId, ct);
 }

@@ -15,6 +15,7 @@
 @inject ReportStoreConnection Db
 @inject OrgContext Org
 @inject OnboardingService Onboarding
+@inject AuditLog Audit
 @rendermode InteractiveServer
 
 <PageTitle>@Domain — DMARC Monitor</PageTitle>
@@ -38,7 +39,7 @@
         @* Filing the domain from the page that shows it, rather than from a
            list two clicks away: the moment somebody knows whose domain this
            is, is the moment they are looking at it. *@
-        @if (_detail is not null && _clients.Count > 0)
+        @if (_detail is not null && _clients.Count > 0 && _access is { CanOperate: true })
         {
             <label>
                 Client
@@ -763,12 +764,18 @@ else
 
     private async Task MoveAsync()
     {
-        if (string.IsNullOrEmpty(_moveTo) || _detail is null) { return; }
+        // Checked here as well as in the markup: the handler runs on the
+        // server, and a hidden button is not a permission.
+        if (string.IsNullOrEmpty(_moveTo) || _detail is null || _access is not { CanOperate: true }) { return; }
 
         try
         {
-            var outcome = await Onboarding.AssignAsync(_detail.Domain, _moveTo, _access?.TenantId);
+            var outcome = await Onboarding.AssignAsync(_detail.Domain, _moveTo, _access.TenantId);
             var client = _clients.FirstOrDefault(c => c.Slug == _moveTo)?.Name ?? _moveTo;
+            if (outcome == ReportStore.AssignOutcome.Assigned)
+            {
+                await Audit.RecordAsync(_access.Current?.Id, _access.User, "domain.assigned", $"{_detail.Domain} -> {_moveTo}");
+            }
             _moved = outcome switch
             {
                 ReportStore.AssignOutcome.Assigned => $"{_detail.Domain} is now filed under {client}, along with everything already stored for it.",
@@ -820,8 +827,8 @@ else
             // "nothing stored", the same page a domain nobody has reported on
             // gets, so the URL confirms nothing.
             _access = await Org.GetAsync();
-            _detail = await Detail.GetAsync(Domain, _days, _access.TenantId);
-            _clients = _detail is null ? [] : [.. (await Onboarding.GetClientsAsync(_access.TenantId))
+            _detail = await Detail.GetAsync(Domain, _days, _access.TenantId, _access.RestrictedClient);
+            _clients = _detail is null || !_access.CanOperate ? [] : [.. (await Onboarding.GetClientsAsync(_access.TenantId))
                 .Where(c => c.Slug != ReportStore.UnassignedClientSlug)];
         }
         catch (Exception ex)

@@ -30,7 +30,7 @@
         @* One client at a time, when there is more than one to choose from.
            The whole page follows it: the dial, the chart, the rows. An MSP is
            asked "how is Morton doing", and the answer must not be the estate. *@
-        @if (_clients.Count > 1)
+        @if (_clients.Count > 1 && _access?.RestrictedClient is null)
         {
             <label>
                 Client
@@ -377,7 +377,11 @@ else
                 .Where(c => c.Slug != ReportStore.UnassignedClientSlug || c.Domains > 0)];
             if (!string.IsNullOrEmpty(_client) && _clients.All(c => c.Slug != _client)) { _client = ""; }
 
-            _rows = await Triage.GetAsync(_days, tenant);
+            // A customer's own login is confined to their client, whatever
+            // the picker would have said.
+            if (_access.RestrictedClient is { } only) { _client = only; }
+
+            _rows = await Triage.GetAsync(_days, tenant, string.IsNullOrEmpty(_client) ? null : _client);
         }
         catch (Exception ex)
         {
@@ -395,7 +399,7 @@ else
             var client = string.IsNullOrEmpty(_client) ? null : _client;
 
             _series = await Series.EstateAsync(_days, tenant, client);
-            _sparks = await Series.PerDomainAsync(_days, tenant);
+            _sparks = await Series.PerDomainAsync(_days, tenant, client);
             _breakdown = await Series.BreakdownAsync(days: _days, tenantId: tenant, clientSlug: client);
 
             // One more than the panel shows, so "N more not shown" can be

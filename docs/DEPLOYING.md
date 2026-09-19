@@ -389,6 +389,67 @@ to carry:
   organisation is filed as `local`; rename it there too, or with
   `dmarc org rename --org local --name "NRG Tech Services"`.
 
+#### Roles within an organisation
+
+Each organisation has up to three groups, one per role. The strongest group
+somebody is in wins, so adding a person to a stronger group never means
+removing them from the weaker one first.
+
+| Role | Group | May |
+| --- | --- | --- |
+| Viewer | `--role viewer` | Read every page in scope. Nothing else. |
+| Operator | `--role operator` (the default) | Also assign and move domains, add clients, import reports, apply and roll back DNS changes. |
+| Admin | `--role admin` | Also set this organisation's groups, branding and DNS providers, and read its activity log. |
+| Master | `Auth:MasterGroupId` | Every organisation, and creating new ones. |
+
+```bash
+dmarc org set-group --org nrg-tech-services --role admin    --group <id>
+dmarc org set-group --org nrg-tech-services --role operator --group <id>
+dmarc org set-group --org nrg-tech-services --role viewer   --group <id>
+```
+
+An admin can do the same from **Settings → Organisations → Edit** for their
+own organisation. The sidebar says which role the person has, so a viewer
+who cannot find the Apply button knows it is not missing.
+
+#### A customer's own login
+
+A client can have a group of its own. Its members see that one client, read
+only, with no Clients, Import, Settings or Updates in the sidebar, and every
+other client of the organisation answers "nothing stored" the way a domain
+that does not exist would. Guests invited into your directory work, so a
+customer signs in with their own email address.
+
+```bash
+dmarc client set-group --client morton-nd --group <id>
+```
+
+Or **Clients → Customer login group** as an admin. Somebody who is also in a
+staff group keeps the staff role: being a customer never takes access away.
+
+#### White-label
+
+Per organisation: an accent colour, a logo in the sidebar, the name the
+reports are prepared by, and a contact block for their footer. Set it under
+**Settings → Organisations → Edit**, or:
+
+```bash
+dmarc org brand --org nextlayersec --colour '#0f766e' \
+    --provider-name "NextLayerSec" --contact 'dmarc@nextlayersec.io\n+1 555 0100' \
+    --logo ./nextlayersec.png
+```
+
+The colour has to be a six-digit hex and the logo a PNG, JPEG, GIF, WebP or
+SVG of at most 200 KB: both end up in markup, so anything else is refused.
+`--clear` puts an organisation back to the default look.
+
+#### Who changed what
+
+Changes made through the web app - organisations, groups, branding, clients,
+customer logins, DNS providers and imports - are recorded with who made them.
+Admins and masters read it under **Settings → Recent activity**. DNS changes
+keep their own, fuller trail on the Fix page.
+
 A second organisation is `dmarc org add --name "NextLayerSec" --group <id>`
 (or Settings → Organisations as a master). Its clients are created with
 `--org nextlayersec`, or from the Clients page while looking at it. A
