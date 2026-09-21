@@ -300,7 +300,7 @@ public static class ClientReportRenderer
         foreach (var s in sources)
         {
             var elsewhere = s.OtherClientsAffected > 0
-                ? $"Yes - {s.OtherClientsAffected} other organisation(s)"
+                ? $"Yes - {s.OtherClientsAffected} other customer(s)"
                 : "No";
 
             // Both figures again. An address that sent twelve messages and
@@ -367,8 +367,12 @@ public static class ClientReportRenderer
 
     private static void Legitimate(StringBuilder html, ClientReport report)
     {
-        var sources = report.LegitimateSources;
-        if (sources.Count == 0) { return; }
+        // Gathered by service rather than listed by address. A mailbox on
+        // Microsoft 365 sends from hundreds of Microsoft's addresses, and a
+        // customer shown six hundred of them learns nothing and loses the
+        // dozen rows that were worth reading.
+        var senders = report.LegitimateSenders;
+        if (senders.Count == 0) { return; }
 
         html.Append("""
             <section>
@@ -376,7 +380,7 @@ public static class ClientReportRenderer
               <p class="note">Everything below is sending legitimately. If you do not recognise one of these,
               tell us: a service nobody remembers signing up for is worth knowing about.</p>
               <table>
-                <thead><tr><th>Source</th><th class="n">Messages</th><th>Domains</th></tr></thead>
+                <thead><tr><th>Sender</th><th class="n">Messages</th><th>Domains</th></tr></thead>
                 <tbody>
 
             """);
@@ -384,11 +388,18 @@ public static class ClientReportRenderer
         // Long tails are common and nobody reads past the first handful; the
         // rest is summarised rather than dropped, so the totals still add up.
         const int Shown = 15;
-        foreach (var s in sources.Take(Shown))
+        foreach (var s in senders.Take(Shown))
         {
+            // A service says how many addresses it came from, because that is
+            // the number that used to fill the table. An unrecognised address
+            // says nothing extra: "1 address" beside an address is noise.
+            var detail = s.IsService
+                ? $"""<br><span class="note">{N(s.Addresses)} address(es)</span>"""
+                : "";
+
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="ok">
-                      <td class="mono">{E(s.SourceIp)}</td>
+                      <td class="{(s.IsService ? "" : "mono")}">{E(s.Name)}{detail}</td>
                       <td class="n">{N(s.Messages)}</td>
                       <td class="mono">{E(string.Join(", ", s.Domains))}</td>
                     </tr>
@@ -396,12 +407,12 @@ public static class ClientReportRenderer
                 """);
         }
 
-        if (sources.Count > Shown)
+        if (senders.Count > Shown)
         {
-            var rest = sources.Skip(Shown).ToList();
+            var rest = senders.Skip(Shown).ToList();
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="rest">
-                      <td colspan="2">and {N(rest.Count)} more source(s)</td>
+                      <td colspan="2">and {N(rest.Count)} more sender(s)</td>
                       <td class="n">{N(rest.Sum(s => s.Messages))} message(s)</td>
                     </tr>
 

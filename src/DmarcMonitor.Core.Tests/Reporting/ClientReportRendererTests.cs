@@ -208,8 +208,50 @@ public sealed class ClientReportRendererTests
 
         var html = ClientReportRenderer.ToHtml(Report(sources: sources, messages: 2000, passing: 2000));
 
-        Assert.Contains("and 5 more source(s)", html, StringComparison.Ordinal);
+        // Twenty addresses none of which belong to a service anybody knows, so
+        // twenty rows: nothing is merged on a guess.
+        Assert.Contains("and 5 more sender(s)", html, StringComparison.Ordinal);
         Assert.Contains("500 message(s)", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GathersOneServicesAddressesIntoOneRow()
+    {
+        // The reason this exists. A real client's August had 630 clean
+        // sources, 618 of them Microsoft's load balancers; the table printed
+        // fifteen of those and hid the twelve rows that were worth reading
+        // behind "and 606 more". Gathered, Microsoft is one line and the
+        // twelve are all visible.
+        var microsoft = Enumerable.Range(1, 40).Select(i => new ReportSource
+        {
+            SourceIp = $"40.107.220.{i}",
+            Messages = 10,
+            Passing = 10,
+            Failing = 0,
+            Domains = ["acme.com"],
+        });
+
+        var theOneThatMatters = new ReportSource
+        {
+            SourceIp = "203.0.113.9",
+            Messages = 5,
+            Passing = 5,
+            Failing = 0,
+            Domains = ["acme.com"],
+        };
+
+        var html = ClientReportRenderer.ToHtml(
+            Report(sources: [.. microsoft, theOneThatMatters], messages: 405, passing: 405));
+
+        Assert.Contains("Microsoft 365", html, StringComparison.Ordinal);
+        Assert.Contains("40 address(es)", html, StringComparison.Ordinal);
+
+        // Forty-one sources, two rows: no long tail to hide anything behind.
+        Assert.DoesNotContain("more sender(s)", html, StringComparison.Ordinal);
+        Assert.Contains("203.0.113.9", html, StringComparison.Ordinal);
+
+        // And the individual Microsoft addresses are gone from the document.
+        Assert.DoesNotContain("40.107.220.1<", html, StringComparison.Ordinal);
     }
 
     [Fact]
