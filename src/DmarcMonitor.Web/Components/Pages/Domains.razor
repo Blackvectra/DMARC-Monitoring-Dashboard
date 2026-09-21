@@ -287,10 +287,21 @@ else
     /// </remarks>
     private long _busiest;
 
-    private double Width(long messages)
+    /// <summary>
+    /// The bar's width, written invariantly.
+    /// </summary>
+    /// <remarks>
+    /// Through Chart.Percent rather than interpolated as a double, because a
+    /// server whose locale uses a comma for the decimal point would emit
+    /// "width:90,69%" - which a browser drops as an invalid declaration,
+    /// leaving every bar at its default width. The page still renders, so it
+    /// would read as a styling quirk rather than as a broken chart, and
+    /// nobody developing on an en-US machine would ever see it.
+    /// </remarks>
+    private string Width(long messages)
     {
         _ = Filtered;   // whose computation is also what sets the scale
-        return Chart.BarWidth(messages, _busiest);
+        return Chart.Percent(Chart.BarWidth(messages, _busiest));
     }
 
     // Alphabetical, not by urgency. Triage already ranks; this exists to find

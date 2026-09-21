@@ -312,6 +312,21 @@ public static class Chart
         return Math.Round(Math.Clamp(percent, floor, 100), 2);
     }
 
+    /// <summary>
+    /// A percentage written the way a stylesheet needs it, whatever the
+    /// machine's locale.
+    /// </summary>
+    /// <remarks>
+    /// A server whose locale writes decimals with a comma renders
+    /// "width:33,3%", which a browser drops as an invalid declaration -
+    /// leaving every bar at its default width. The page still draws, which is
+    /// what makes this worth a named function rather than a ToString at each
+    /// call site: it reads as a styling quirk rather than as a chart that is
+    /// wrong, and nobody on an en-US machine will ever see it.
+    /// </remarks>
+    public static string Percent(double value) =>
+        value.ToString("0.##", CultureInfo.InvariantCulture);
+
     /// <summary>The horizontal center of bucket <paramref name="index"/>.</summary>
     /// <remarks>
     /// A single bucket sits in the middle rather than at the left edge: one

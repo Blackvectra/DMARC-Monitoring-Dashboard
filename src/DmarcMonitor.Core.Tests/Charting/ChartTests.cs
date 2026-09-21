@@ -468,4 +468,45 @@ public sealed class ChartTests
     {
         Assert.Equal(100, Chart.BarWidth(9_000, 4_000));
     }
+
+    [Fact]
+    public void AWidthIsWrittenTheWayAStylesheetNeedsItWhateverTheLocale()
+    {
+        // On a server whose locale writes decimals with a comma, "width:33,3%"
+        // is dropped by the browser as an invalid declaration and every bar
+        // falls back to its default width. The page still renders, so it reads
+        // as a styling quirk rather than a broken chart - and nobody
+        // developing or running CI on an en-US machine will ever see it.
+        //
+        // This is not hypothetical: the volume bars shipped with exactly that
+        // bug, written a few feet from the component that already carried a
+        // comment warning about it.
+        // Built rather than named: the test project runs in
+        // globalization-invariant mode, where new CultureInfo("de-DE") throws
+        // and a test that needs ICU would pass or fail on how the runner was
+        // configured rather than on the code.
+        var comma = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+        comma.NumberFormat.NumberDecimalSeparator = ",";
+
+        var original = CultureInfo.CurrentCulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = comma;
+
+            // First that the hazard is really present, so this cannot pass by
+            // being run somewhere it could never have failed.
+            Assert.Contains(",", 33.33.ToString(), StringComparison.Ordinal);
+
+            // Then that the formatter is immune to it.
+            Assert.Equal("33.33", Chart.Percent(33.33));
+            Assert.Equal("100", Chart.Percent(100));
+            Assert.Equal("2", Chart.Percent(2));
+            Assert.DoesNotContain(",", Chart.Percent(Chart.BarWidth(11, 60_000)), StringComparison.Ordinal);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
+    }
 }

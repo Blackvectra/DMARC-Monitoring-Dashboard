@@ -55,8 +55,20 @@ public sealed class DomainsTableUnreadTests : IClassFixture<SeededApp>
         // invalid declaration - leaving every bar at its default width. The
         // page still renders, so it would look like a styling quirk rather
         // than a bug.
-        Assert.DoesNotContain("width:0,", html, StringComparison.Ordinal);
-        Assert.Matches(@"width:\d+(\.\d+)?%", html);
+        //
+        // Asserted over every width on the page, not a single spelling of it.
+        // This started as DoesNotContain("width:0,"), which is narrow enough
+        // to pass on an en-US runner against a page that had the bug - and it
+        // did. Chart.Percent is where the rule lives now, and ChartTests runs
+        // it under a comma-decimal locale, which is the test that can really
+        // catch it.
+        var widths = System.Text.RegularExpressions.Regex.Matches(html, @"width:([^;""]+)")
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+
+        Assert.NotEmpty(widths);
+        Assert.All(widths, w => Assert.DoesNotContain(",", w, StringComparison.Ordinal));
+        Assert.All(widths, w => Assert.Matches(@"^\d+(\.\d+)?%$", w));
     }
 
     [Fact]
