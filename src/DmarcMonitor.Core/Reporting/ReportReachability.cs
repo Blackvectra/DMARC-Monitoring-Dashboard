@@ -44,6 +44,19 @@ public sealed record DomainReachability
     /// <summary>Reports held for this domain, ever.</summary>
     public int ReportsHeld { get; init; }
 
+    /// <summary>
+    /// How many organizations on this install hold a domain of this name.
+    /// </summary>
+    /// <remarks>
+    /// Normally one. Two is legitimate - two MSPs sharing an install can each
+    /// look after example.com for their own customer, which is why the schema
+    /// says UNIQUE(tenant_id, name). It is also what a mistyped <c>--org</c> on
+    /// a collector produces, and that version is a customer's reports quietly
+    /// accruing to a book nobody is reading. The two cannot be told apart from
+    /// here, so this is reported rather than judged.
+    /// </remarks>
+    public int OrganizationsHolding { get; init; } = 1;
+
     /// <summary>When the newest arrived, or null when none ever has.</summary>
     public DateTimeOffset? LastReport { get; init; }
 }
@@ -152,6 +165,8 @@ public static class ReportReachability
 
         var findings = new List<HygieneFinding>();
 
+        HeldTwice(findings, domain);
+
         if (domain.Destinations.Count == 0)
         {
             findings.Add(new HygieneFinding
@@ -172,6 +187,42 @@ public static class ReportReachability
         Arriving(findings, domain, now);
 
         return [.. findings.OrderByDescending(f => f.Severity)];
+    }
+
+    /// <summary>
+    /// The same domain name held by more than one organization.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Legitimate and expected when two MSPs share an install: the schema says
+    /// UNIQUE(tenant_id, name) precisely so each can look after example.com for
+    /// their own customer. It is also exactly what a mistyped <c>--org</c> on a
+    /// collector produces, and that version is silent - reports land in a
+    /// second book, the customer's real domain simply stops growing, and the
+    /// domain an operator is looking at reads as a quiet month.
+    /// </para>
+    /// <para>
+    /// Nothing here can tell the two apart, so this reports rather than judges:
+    /// tidy, not a weakness, and the fix says what to look at rather than what
+    /// to do. Getting this wrong in the confident direction would mean telling
+    /// somebody to delete a domain that is another customer's.
+    /// </para>
+    /// </remarks>
+    private static void HeldTwice(List<HygieneFinding> findings, DomainReachability domain)
+    {
+        if (domain.OrganizationsHolding <= 1) { return; }
+
+        findings.Add(new HygieneFinding
+        {
+            Severity = HygieneSeverity.Tidy,
+            Record = "reporting",
+            Problem = $"{domain.OrganizationsHolding} organizations on this install hold a domain called "
+                    + $"{domain.Domain}. That is how two MSPs each look after the same name for their own "
+                    + "customer, and it is also what a collector run under the wrong --org leaves behind - "
+                    + "in which case one copy quietly stops growing while somebody reads it as a quiet month.",
+            Fix = "Check both are meant to exist. If one came from a mistyped --org, move its reports and "
+                + "remove it; correct the collector's --org either way, or it will happen again tonight.",
+        });
     }
 
     /// <summary>

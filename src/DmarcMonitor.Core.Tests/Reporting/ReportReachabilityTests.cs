@@ -27,6 +27,7 @@ public sealed class ReportReachabilityTests
         Dictionary<string, string?>? authorizations = null,
         int reportsHeld = 12,
         int lastReportDaysAgo = 1,
+        int organizationsHolding = 1,
         bool dnsFailed = false) => new()
         {
             Domain = name,
@@ -38,6 +39,7 @@ public sealed class ReportReachabilityTests
                     [$"{name}._report._dmarc.msp.example"] = "v=DMARC1",
                 },
             ReportsHeld = reportsHeld,
+            OrganizationsHolding = organizationsHolding,
             LastReport = reportsHeld == 0 ? null : Now.AddDays(-lastReportDaysAgo),
             DnsFailed = dnsFailed,
         };
@@ -296,6 +298,62 @@ public sealed class ReportReachabilityTests
     public void ADomainReportingCleanlyProducesNothing()
     {
         Assert.Empty(ReportReachability.Assess(Domain(), Now));
+    }
+
+    // ---- the same name in two organizations -----------------------------------
+    //
+    // Domains used to be resolved by name across the whole install, so a
+    // collector run under the wrong --org still filed correctly. Now that each
+    // organization holds its own row, the same typo makes a second copy instead
+    // - and that is silent: the customer's real domain simply stops growing,
+    // and an operator reads it as a quiet month. This is the finding that makes
+    // it visible.
+
+    [Fact]
+    public void ADomainHeldByTwoOrganizationsIsPointedAtRatherThanJudged()
+    {
+        // Two MSPs each looking after example.com for their own customer is
+        // legitimate - it is why the schema says UNIQUE(tenant_id, name).
+        // Nothing here can tell that apart from a mistyped --org, so it reports
+        // and does not instruct. The confident version of this would be telling
+        // somebody to delete another customer's domain.
+        var f = Assert.Single(ReportReachability.Assess(Domain(organizationsHolding: 2), Now));
+
+        Assert.Equal(HygieneSeverity.Tidy, f.Severity);
+        Assert.Contains("2 organizations", f.Problem, StringComparison.Ordinal);
+        Assert.Contains("--org", f.Problem, StringComparison.Ordinal);
+        Assert.Contains("Check both are meant to exist", f.Fix, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OneOrganizationHoldingItSaysNothing()
+    {
+        Assert.Empty(ReportReachability.Assess(Domain(organizationsHolding: 1), Now));
+    }
+
+    [Fact]
+    public void TheDuplicateIsStillReportedOnADomainThatIsAlsoBroken()
+    {
+        // It is raised before the no-rua case returns early, because a domain
+        // duplicated by a typo is very likely also the one with nothing
+        // arriving - and finding out about the second copy only after fixing
+        // the first would be two trips.
+        var findings = ReportReachability.Assess(Domain(rua: null, organizationsHolding: 2), Now);
+
+        Assert.Contains(findings, f => f.Problem.Contains("2 organizations", StringComparison.Ordinal));
+        Assert.Contains(findings, f => f.Problem.Contains("publishes no rua", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ADomainWhoseDnsFailedSaysOnlyThat()
+    {
+        // A failed lookup establishes nothing, and stacking a second finding on
+        // top of "we could not read it" is a sentence about something nobody
+        // checked.
+        var f = Assert.Single(
+            ReportReachability.Assess(Domain(dnsFailed: true, organizationsHolding: 2), Now));
+
+        Assert.Contains("could not be read", f.Problem, StringComparison.Ordinal);
     }
 
     [Fact]

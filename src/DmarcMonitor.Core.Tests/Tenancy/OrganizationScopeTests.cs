@@ -204,15 +204,43 @@ public sealed class OrganizationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task AKnownDomainKeepsItsOrganizationWhicheverCollectorSeesIt()
+    public async Task AnotherOrganizationsCollectorCannotTouchThisOnesDomain()
     {
-        // NextLayerSec's collector receiving a report for an NRG domain must
-        // not pull it across.
+        // NextLayerSec's collector receiving a report for a domain NRG also
+        // manages must not reach NRG's copy of it.
+        //
+        // This used to pass for the opposite reason. Domains were resolved by
+        // name across the whole install, so the report landed on NRG's row and
+        // the test asserted NRG's count had gone up - correct as long as one
+        // organization exists, and wrong the moment two do: whoever saw a
+        // domain first owned it for ever, and the second MSP's customer's mail
+        // was written into the first MSP's book with nothing to show for it.
+        //
+        // Now each organization holds its own row, which is what
+        // UNIQUE(tenant_id, name) has said since the schema was written. NRG's
+        // figure does not move at all.
         var nlsStore = new ReportStore(_dbPath, "nextlayersec");
         await nlsStore.SaveAggregateAsync(Report("acme.com", "192.0.2.12", 7, 0), "again", null);
 
         var nrg = await new TriageService(_dbPath).GetAsync(30, _nrg);
-        Assert.Equal(112, Assert.Single(nrg).Messages);
+        Assert.Equal(105, Assert.Single(nrg).Messages);
+    }
+
+    [Fact]
+    public async Task EachOrganizationGetsItsOwnRowForTheSameDomainName()
+    {
+        // The other half: NextLayerSec's report is not lost, it is theirs.
+        var nlsStore = new ReportStore(_dbPath, "nextlayersec");
+        await nlsStore.SaveAggregateAsync(Report("shared.example", "192.0.2.20", 9, 0), "nls", null);
+
+        var nrgStore = new ReportStore(_dbPath);
+        await nrgStore.SaveAggregateAsync(Report("shared.example", "192.0.2.21", 4, 0), "nrg", null);
+
+        var nls = await new TriageService(_dbPath).GetAsync(30, _nls);
+        var nrg = await new TriageService(_dbPath).GetAsync(30, _nrg);
+
+        Assert.Equal(9, Assert.Single(nls, d => d.Domain == "shared.example").Messages);
+        Assert.Equal(4, Assert.Single(nrg, d => d.Domain == "shared.example").Messages);
     }
 
     private static AggregateReport Report(string domain, string ip, int passing, int failing)

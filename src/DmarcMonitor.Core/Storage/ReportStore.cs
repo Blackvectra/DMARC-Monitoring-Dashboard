@@ -789,22 +789,32 @@ public sealed class ReportStore
         var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
         var now = Iso(DateTimeOffset.UtcNow);
 
-        // An existing domain keeps whatever client - and organization - it
+        // The organization is resolved first, because the domain is looked up
+        // within it. This used to resolve the name across the whole install,
+        // which meant the first organization ever to see a domain owned it for
+        // ever: a second MSP importing their own customer's reports had them
+        // written into the first one's book, under the first one's client, and
+        // nothing said so. The schema has said UNIQUE(tenant_id, name) rather
+        // than UNIQUE(name) since it was written; this is the lookup finally
+        // agreeing with it.
+        var tenantId = await EnsureTenantAsync(connection, tx, organization, now, ct).ConfigureAwait(false);
+
+        // Within the organization, an existing domain keeps whatever client it
         // was assigned to, so onboarding is never undone by a later report
         // arriving, whichever mailbox it arrived in.
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = tx;
-            lookup.CommandText = "SELECT id, tenant_id, client_id FROM domains WHERE name = $name LIMIT 1";
+            lookup.CommandText =
+                "SELECT id, tenant_id, client_id FROM domains WHERE name = $name AND tenant_id = $tenant LIMIT 1";
             lookup.Parameters.AddWithValue("$name", name);
+            lookup.Parameters.AddWithValue("$tenant", tenantId);
             await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
                 return new DomainIds(reader.GetString(1), reader.GetString(2), reader.GetString(0));
             }
         }
-
-        var tenantId = await EnsureTenantAsync(connection, tx, organization, now, ct).ConfigureAwait(false);
 
         // Unassigned is per organization: NRG's unfiled domains are NRG's
         // worklist, not NextLayerSec's.

@@ -43,7 +43,7 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
         var held = await HeldAsync(domain, ct).ConfigureAwait(false);
         var results = new List<DomainReachability>(held.Count);
 
-        foreach (var (name, reports, last) in held)
+        foreach (var (name, reports, last, organizations) in held)
         {
             ct.ThrowIfCancellationRequested();
             progress?.Report(name);
@@ -58,6 +58,7 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
                     DnsFailed = true,
                     ReportsHeld = reports,
                     LastReport = last,
+                    OrganizationsHolding = organizations,
                 });
 
                 continue;
@@ -87,6 +88,7 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
                 Authorizations = authorizations,
                 ReportsHeld = reports,
                 LastReport = last,
+                OrganizationsHolding = organizations,
             });
         }
 
@@ -115,10 +117,10 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
     }
 
     /// <summary>Every active domain, with how much has ever arrived for it.</summary>
-    private async Task<List<(string Domain, int Reports, DateTimeOffset? Last)>> HeldAsync(
+    private async Task<List<(string Name, int Reports, DateTimeOffset? Last, int Organizations)>> HeldAsync(
         string? domain, CancellationToken ct)
     {
-        var found = new List<(string, int, DateTimeOffset?)>();
+        var found = new List<(string Name, int Reports, DateTimeOffset? Last, int Organizations)>();
 
         await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -132,7 +134,12 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
         command.CommandText = """
             SELECT d.name,
                    (SELECT COUNT(*) FROM aggregate_reports a WHERE a.domain_id = d.id),
-                   (SELECT MAX(a.date_end) FROM aggregate_reports a WHERE a.domain_id = d.id)
+                   (SELECT MAX(a.date_end) FROM aggregate_reports a WHERE a.domain_id = d.id),
+                   -- Counted across every organization on purpose, not within
+                   -- the scoped one: the whole point is to notice a second copy
+                   -- the caller cannot see.
+                   (SELECT COUNT(DISTINCT o.tenant_id) FROM domains o
+                     WHERE o.name = d.name AND o.deleted_at IS NULL)
             FROM domains d
             WHERE d.is_active = 1 AND d.deleted_at IS NULL
               AND ($domain IS NULL OR LOWER(d.name) = $domain)
@@ -156,7 +163,7 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
                 last = new DateTimeOffset(parsed, TimeSpan.Zero);
             }
 
-            found.Add((reader.GetString(0), reader.GetInt32(1), last));
+            found.Add((reader.GetString(0), reader.GetInt32(1), last, reader.GetInt32(3)));
         }
 
         return found;

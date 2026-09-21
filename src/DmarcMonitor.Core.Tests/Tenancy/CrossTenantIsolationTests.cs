@@ -169,6 +169,18 @@ public sealed class CrossTenantIsolationTests : IDisposable
     }
 
     [Fact]
+    public async Task ReachabilityCountsTheCopyTheCallerCannotSee()
+    {
+        // Deliberately counted across every organization rather than within the
+        // scoped one. The whole value is noticing a second copy the caller is
+        // not allowed to look at - which is what a collector run under the
+        // wrong --org leaves behind, silently.
+        var mine = await new ReachabilityService(_dbPath, tenantId: "t-a").RunAsync(domain: "example.com");
+
+        Assert.Equal(2, Assert.Single(mine).OrganizationsHolding);
+    }
+
+    [Fact]
     public async Task ReachabilityListsOnlyOneOrganizationsDomains()
     {
         var mine = await new ReachabilityService(_dbPath, tenantId: "t-a").RunAsync(domain: "example.com");
