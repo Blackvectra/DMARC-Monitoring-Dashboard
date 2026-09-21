@@ -253,6 +253,76 @@ than a weekly job that has been quietly ageing reports out all along.
 
 ---
 
+## Getting the rows out
+
+    dmarc export --days 7 --failures-only
+    dmarc export --format csv --out book.csv
+    dmarc export --org acme --domain example.com --days 30
+
+The screens here are opinionated, and that is also their limit. "Every address
+that hit these three domains, aligned on SPF only, in a six-hour window" is a
+question no fixed view answers, and it should not need a code change to ask. So
+rather than grow a query language, this hands the rows over in a shape every
+other tool already reads and lets **jq, a spreadsheet, OpenSearch or Splunk be
+the query language**.
+
+Rows go to stdout, so it pipes. Everything it says about itself goes to stderr,
+so that still works when it does:
+
+    dmarc export --days 7 --failures-only | jq -r .source_ip | sort | uniq -c | sort -rn
+
+`--format csv` for a spreadsheet. Fields beginning `=`, `+`, `-` or `@` are
+prefixed with a quote on the way out: these rows carry strings off other
+people's mail, and a header that begins `=cmd` is a real thing to hand somebody
+as a file they will double-click.
+
+### The columns
+
+One row per `aggregate_records` row, with the reporter and the policy that was
+published at the time joined on. Two pairs matter:
+
+| | |
+|---|---|
+| `dkim_aligned` / `spf_aligned` | what the receiver's DMARC evaluation concluded |
+| `dkim_auth` / `spf_auth` | whether the mechanism authenticated at all |
+
+They are separate because a valid signature over the wrong domain is a **pass**
+at authentication and a **fail** at alignment. Collapsing them is what makes
+DMARC data read as a self-contradiction, and an export that did it would carry
+the confusion into whatever you query with.
+
+### Shipping to an index
+
+`--after-id` starts after a row id, and every run prints the one to use next
+time. Rows are never rewritten once stored — a reporter resending a report is
+refused by the dedup key rather than merged — so "everything above the last id I
+shipped" is exactly the new mail:
+
+    dmarc export --after-id "$(cat .watermark)" --out new.ndjson
+    # ...ship new.ndjson, then store the id the run printed
+
+For OpenSearch, `_bulk` wants an action line before each document, and giving it
+`_id` from the row makes a re-run idempotent rather than doubling the data:
+
+    dmarc export --after-id 41232 \
+      | jq -c '{index:{_index:"dmarc",_id:.id}},.' \
+      | curl -s -H 'Content-Type: application/x-ndjson' \
+             --data-binary @- https://opensearch.example/_bulk
+
+That is the supported way to **run both**: keep the retention window here short
+enough that one SQLite file stays quick, and let an index hold the long tail.
+See [COMPARISON.md](COMPARISON.md) for what each side is actually better at.
+
+It opens the database read-only, so it is safe to run while the collector has
+it.
+
+**`--org` is not optional if it matters.** With no organization named it
+exports every one, which is what an operator running it by hand wants and is
+the wrong thing to hand a customer. Two organizations on one install can each
+manage a domain of the same name.
+
+---
+
 ## Can each domain's reports actually reach you?
 
     dmarc reachability

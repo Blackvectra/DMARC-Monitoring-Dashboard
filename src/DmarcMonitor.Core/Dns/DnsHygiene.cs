@@ -635,7 +635,57 @@ public static class DnsHygiene
         }
 
         MtaStsCoversTheMailServers(findings, policy, published.MxHosts);
+        MtaStsLastsLongEnough(findings, policy);
     }
+
+    /// <summary>
+    /// Whether the policy is cached long enough to be worth having.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// max_age is not a housekeeping value - it is the whole of the protection
+    /// between fetches. MTA-STS is trust on first use: a sender honours the
+    /// policy it holds, and an attacker who can interfere with the network can
+    /// also stop the next fetch succeeding. All they have to do then is wait
+    /// for the cached copy to expire, and the sender goes back to accepting
+    /// whatever certificate and whichever host it is offered.
+    /// </para>
+    /// <para>
+    /// So a one-day max_age means a one-day wait. RFC 8461 §3.2 asks for weeks
+    /// for exactly this reason. A domain in enforce mode with a short max_age
+    /// reads as fully protected everywhere in this product and in every other
+    /// one, and is a day of patience away from not being.
+    /// </para>
+    /// <para>
+    /// Only raised under enforce. In testing nothing is enforced whatever the
+    /// max_age is, and the testing finding above already says the thing worth
+    /// saying.
+    /// </para>
+    /// </remarks>
+    private static void MtaStsLastsLongEnough(List<HygieneFinding> findings, MtaStsPolicy policy)
+    {
+        const int week = 604800;
+
+        if (!string.Equals(policy.Mode, MtaStsMode.Enforce, StringComparison.OrdinalIgnoreCase)) { return; }
+        if (policy.MaxAgeSeconds >= week) { return; }
+
+        var days = Math.Max(1, policy.MaxAgeSeconds / 86400);
+
+        findings.Add(new HygieneFinding
+        {
+            Severity = HygieneSeverity.Weakness,
+            Record = "MTA-STS",
+            Problem = $"The policy is enforced but expires after {Plural(days, "day")}. A sender only "
+                    + "honours the copy it holds, so an attacker who can block the next fetch has to wait "
+                    + $"{Plural(days, "day")} for this domain to stop being protected at all.",
+            Fix = $"Raise max_age to at least 604800 (one week); 1209600 or more is the usual choice. "
+                + "Lower it deliberately and briefly before changing MX records, then put it back.",
+            Reference = "RFC 8461 §3.2",
+        });
+    }
+
+    private static string Plural(int count, string noun) =>
+        count == 1 ? $"1 {noun}" : $"{count} {noun}s";
 
     /// <summary>
     /// Whether the policy lists the mail servers the domain actually uses.

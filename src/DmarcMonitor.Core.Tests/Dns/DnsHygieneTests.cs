@@ -450,10 +450,15 @@ public sealed class DnsHygieneTests
     // have gone on reporting enforce off a two-day-old memory.
 
     private static DmarcMonitor.Core.Remediation.ServedPolicy Serving(string mode, params string[] mx) =>
+        ServingFor(mode, MtaStsPolicy.DefaultMaxAgeSeconds, mx);
+
+    private static DmarcMonitor.Core.Remediation.ServedPolicy ServingFor(
+        string mode, int maxAge, params string[] mx) =>
         new(true, new MtaStsPolicy
         {
             Mode = mode,
             Mx = mx.Length > 0 ? mx : ["acme-com.mail.protection.outlook.com"],
+            MaxAgeSeconds = maxAge,
             Id = "20260921",
         }, null);
 
@@ -480,6 +485,78 @@ public sealed class DnsHygieneTests
         Assert.Equal(HygieneSeverity.Tidy, note.Severity);
         Assert.Contains("senders act on the file they cached", note.Problem, StringComparison.Ordinal);
         Assert.StartsWith("Nothing", note.Fix, StringComparison.Ordinal);
+    }
+
+    // ---- how long the policy lasts, which is the whole of the protection -----
+    //
+    // Found in a real TLS report. ndaco.org was moved to enforce and served
+    // max_age 86400, and every tool including this one called it protected.
+    // MTA-STS is trust on first use: a sender honours the copy it holds, and
+    // somebody who can interfere with the network can also stop the next fetch
+    // succeeding. A one-day max_age is a one-day wait before the domain is back
+    // to accepting whatever host and certificate it is offered.
+
+    [Fact]
+    public void AnEnforcedPolicyThatExpiresInADayIsAWeakness()
+    {
+        var findings = Assess(
+            Published(served: ServingFor(MtaStsMode.Enforce, 86400)),
+            Observed(mode: "Enforce"));
+
+        var note = Assert.Single(findings, f => f.Record == "MTA-STS");
+
+        Assert.Equal(HygieneSeverity.Weakness, note.Severity);
+        Assert.Contains("expires after 1 day", note.Problem, StringComparison.Ordinal);
+        Assert.Contains("604800", note.Fix, StringComparison.Ordinal);
+        Assert.Equal("RFC 8461 §3.2", note.Reference);
+    }
+
+    [Fact]
+    public void AWeekIsLongEnoughAndIsNotComplainedAbout()
+    {
+        // The boundary, from the side that must stay quiet. A check that fires
+        // on the RFC's own floor is one an operator learns to ignore.
+        var findings = Assess(
+            Published(served: ServingFor(MtaStsMode.Enforce, 604800)),
+            Observed(mode: "Enforce"));
+
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("expires after", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ADayShortOfAWeekStillCounts()
+    {
+        var findings = Assess(
+            Published(served: ServingFor(MtaStsMode.Enforce, 604799)),
+            Observed(mode: "Enforce"));
+
+        Assert.Contains(findings, f => f.Problem.Contains("expires after 6 days", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheDurationIsNotRaisedAgainstAPolicyThatEnforcesNothing()
+    {
+        // In testing mode nothing is enforced whatever the max_age is, and the
+        // testing finding already says the thing worth saying. Two findings
+        // where one is true is how a check list stops being read.
+        var findings = Assess(
+            Published(served: ServingFor(MtaStsMode.Testing, 3600)),
+            Observed(mode: "Testing"));
+
+        var note = Assert.Single(findings, f => f.Record == "MTA-STS");
+        Assert.Contains("testing mode", note.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AVeryShortDurationIsStillDescribedInWholeDays()
+    {
+        // An hour rounds to zero days, and "expires after 0 days" reads as a
+        // bug rather than a finding.
+        var findings = Assess(
+            Published(served: ServingFor(MtaStsMode.Enforce, 3600)),
+            Observed(mode: "Enforce"));
+
+        Assert.Contains(findings, f => f.Problem.Contains("expires after 1 day", StringComparison.Ordinal));
     }
 
     [Fact]

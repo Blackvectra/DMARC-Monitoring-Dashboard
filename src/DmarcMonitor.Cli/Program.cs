@@ -53,6 +53,7 @@ public static class Program
                 "simulate" => await SimulateCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "reachability" => await ReachabilityCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "export" => await ExportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -224,7 +225,28 @@ public static class Program
                 --by <name>           Who is doing this. Default: the signed-in user.
                 --db <path>           Database file. Default: dmarc.db
 
-              fix                Fix what 'check' found, in the customer's DNS. A dry run
+              export             Write the stored records out for something else to query.
+                                 The screens here are opinionated, and that is also their
+                                 limit - "every address that hit these three domains,
+                                 aligned on SPF only, in a six-hour window" is a question
+                                 no fixed view answers. This hands the rows to jq, a
+                                 spreadsheet, OpenSearch or Splunk and lets those be the
+                                 query language. It is also how to keep retention here
+                                 short and let an index hold the long tail.
+                                 Rows go to stdout, so it pipes; everything it says about
+                                 itself goes to stderr.
+                --format <f>     ndjson (default) or csv. ndjson is what _bulk, jq and HEC
+                                 read, and a row at a time rather than one huge array.
+                --out <path>     Write to a file instead of stdout.
+                --org <slug>     One organization. --client <slug>, --domain <d> narrow it
+                                 further.
+                --days <n>       How far back. Default: everything held.
+                --failures-only  Only the rows that did not pass DMARC.
+                --after-id <n>   Start after this row id, for shipping only what is new.
+                                 Every run prints the number to use next time.
+                --db <path>      Database file. Default: dmarc.db
+
+              fix              Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
                                  client's report under "what we did".
@@ -311,6 +333,9 @@ public static class Program
               dmarc reachability --quiet
               dmarc prune                                    # what would go
               dmarc prune --apply
+              dmarc export --days 7 --failures-only | jq -r .source_ip | sort | uniq -c
+              dmarc export --format csv --out book.csv
+              dmarc export --after-id 41232 | jq -c '{index:{_index:"dmarc",_id:.id}},.'
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"
               dmarc ingest --mailbox dmarc@example.com --dry-run
