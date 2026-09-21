@@ -51,6 +51,12 @@ purpose. Linux is cheaper and is what the rest of this document assumes.
 
 ### AWS or Azure
 
+**On AWS specifically**, [`AWS.md`](AWS.md) is the console-by-console version
+of this page: the IAM role that lets you skip SSH entirely, the security
+group, the instance, the Elastic IP, and then the part this page does not
+cover at all — requiring MFA and passkeys so the thing is safe to leave open
+on 443 for a phone.
+
 Either. Both come to roughly the same money for the same machine, and the
 right answer is the one whose console you already have open - which, for you,
 is AWS.

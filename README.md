@@ -29,6 +29,8 @@ a client report without a mailbox or an app registration.
 | [docs/RUNNING.md](docs/RUNNING.md) | Day-to-day use. Read this first. |
 | [docs/INGEST-SETUP.md](docs/INGEST-SETUP.md) | Pointing it at a mailbox: Entra app registration, permissions, the application access policy. |
 | [docs/DEPLOYING.md](docs/DEPLOYING.md) | Putting it on a server: systemd, TLS, updates, MTA-STS hosting. |
+| [docs/AWS.md](docs/AWS.md) | One EC2 instance, start to finish, reachable from work, home and a phone — with Entra sign-in, MFA and passkeys. |
+| [docs/FEATURE-MATRIX.md](docs/FEATURE-MATRIX.md) | What this has against what DMARC platforms generally have, and what it deliberately does not. |
 | [docs/OPEN-ISSUES.md](docs/OPEN-ISSUES.md) | What is known to be unfinished. |
 
 ## What it monitors
