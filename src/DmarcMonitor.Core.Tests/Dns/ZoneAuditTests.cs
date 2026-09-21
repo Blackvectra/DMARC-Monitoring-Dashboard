@@ -449,6 +449,43 @@ public sealed class ZoneAuditTests
         Assert.Contains("mcleanelectric.com._report._dmarc", broken.Fix, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void AnAuthorizationForADomainNobodyMonitorsIsWorthASecondLook()
+    {
+        // The transposed name. "ndgaa.com" beside "ndgga.com" reads correctly
+        // in a column of near-identical rows, and the domain it was meant for
+        // gets no reports at all while the record looks present.
+        var evidence = Live(signing: [], windowDays: 45) with
+        {
+            Monitored = ["ndgga.com", "ndaco.org"],
+        };
+
+        var findings = Assess(
+            """
+            ndgaa.com._report._dmarc	1800	IN	TXT	"v=DMARC1;"
+            ndaco.org._report._dmarc	1800	IN	TXT	"v=DMARC1;"
+            """,
+            evidence);
+
+        var stray = Assert.Single(findings, f => f.Problem.Contains("ndgaa.com", StringComparison.Ordinal));
+
+        Assert.Equal(HygieneSeverity.Tidy, stray.Severity);
+        Assert.Equal(FindingSource.ZoneAndReports, stray.Source);
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("ndaco.org", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void NothingIsSaidAboutAuthorizationsWhenTheBookWasNotConsulted()
+    {
+        // With no database every authorization would otherwise be reported as
+        // pointing at a stranger, which is the whole book flagged at once.
+        var findings = Assess("""
+            other.example._report._dmarc	1800	IN	TXT	"v=DMARC1;"
+            """);
+
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("not a domain this install monitors", StringComparison.Ordinal));
+    }
+
     // ---- delegation ---------------------------------------------------------------
 
     [Fact]

@@ -51,6 +51,7 @@ public static class Program
                 "check" => await CheckCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "audit" => await AuditCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "simulate" => await SimulateCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "reachability" => await ReachabilityCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -196,6 +197,16 @@ public static class Program
                 --db <path>      Database file. Default: dmarc.db
                                  Exits non-zero when the change would cost mail.
 
+              reachability       Which domains' reports can actually get back here. Both
+                                 ways this breaks are silent: a receiver that looks for the
+                                 RFC 7489 authorization record and does not find it declines
+                                 to send and tells nobody, and a domain whose rua points at
+                                 a mailbox nothing collects looks perfect in DNS and
+                                 produces nothing. Run it after onboarding a domain.
+                --domain <d>     One domain. Default: every domain in the book.
+                --quiet          Only the domains with something wrong.
+                --db <path>      Database file. Default: dmarc.db
+
               fix                Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
@@ -280,6 +291,7 @@ public static class Program
               dmarc check --domain example.com
               dmarc audit --zone example.com.txt
               dmarc simulate --domain example.com --policy quarantine
+              dmarc reachability --quiet
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"
               dmarc ingest --mailbox dmarc@example.com --dry-run

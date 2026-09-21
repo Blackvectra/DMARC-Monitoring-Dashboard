@@ -134,6 +134,7 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
         var delegation = await _lookup.NsAsync(zone.Origin, ct).ConfigureAwait(false);
 
         var (seen, windowDays, reportsRead) = await ReportsAsync(zone.Origin, ct).ConfigureAwait(false);
+        var monitored = await MonitoredAsync(ct).ConfigureAwait(false);
 
         var readings = new Dictionary<string, SelectorEvidence>(StringComparer.OrdinalIgnoreCase);
 
@@ -166,6 +167,7 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
             SeenSigning = seen,
             ReportsRead = reportsRead,
             ReportWindowDays = windowDays,
+            Monitored = monitored,
         };
 
         return new ZoneAuditReport(
@@ -199,6 +201,45 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
             // A database that cannot be read is not a domain with no reports.
             // Everything that leans on the reports stays silent instead.
             return ([], 0, false);
+        }
+    }
+
+    /// <summary>
+    /// Every domain this install watches, for judging the reporting
+    /// authorizations a zone publishes on other domains' behalf.
+    /// </summary>
+    /// <remarks>
+    /// Empty when there is no database, which leaves the check silent rather
+    /// than reporting every authorization as pointing at a stranger.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> MonitoredAsync(CancellationToken ct)
+    {
+        if (_databasePath is null || !File.Exists(_databasePath)) { return []; }
+
+        try
+        {
+            var names = new List<string>();
+
+            await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = _databasePath,
+                Mode = SqliteOpenMode.ReadOnly,
+            }.ToString());
+
+            await db.OpenAsync(ct).ConfigureAwait(false);
+
+            await using var command = db.CreateCommand();
+            command.CommandText =
+                "SELECT LOWER(name) FROM domains WHERE is_active = 1 AND deleted_at IS NULL";
+
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false)) { names.Add(reader.GetString(0)); }
+
+            return names;
+        }
+        catch (SqliteException)
+        {
+            return [];
         }
     }
 

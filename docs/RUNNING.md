@@ -214,6 +214,35 @@ Exit code is 1 when anything breaking was found, so it can gate a pipeline.
 
 ---
 
+## Can each domain's reports actually reach you?
+
+    dmarc reachability
+    dmarc reachability --quiet            # only the domains with something wrong
+    dmarc reachability --domain example.com
+
+Both ways this breaks are silent, which is why it needs a standing check rather
+than a glance at the DNS.
+
+**The authorization record.** When a client's `rua` points at a mailbox in your
+domain, RFC 7489 §7.1 requires *your* domain to publish
+`<client>._report._dmarc.<your-domain>` containing `v=DMARC1`. A receiver that
+checks and finds nothing **declines to send and tells nobody** — so a broken
+customer is indistinguishable from a quiet one. The version is case-sensitive:
+`v=dmarc1` authorizes nothing.
+
+**A mailbox nothing collects.** A domain can publish a perfect DMARC record
+pointing `rua` at an address the collector does not read. Its DNS looks right,
+it produces nothing here, and at `p=reject` it is refusing mail with the
+evidence going somewhere nobody looks.
+
+Run it after onboarding a domain — that is when this breaks. The other half of
+the check lives in `dmarc audit`: given a zone file and the database, it flags
+`_report._dmarc` records authorizing domains you do **not** monitor, which is
+how a transposed name is found. `ndgaa.com` beside `ndgga.com` reads correctly
+in a column of near-identical rows.
+
+---
+
 ## Before changing a policy
 
 `dmarc simulate` replays the reports already held against a record you have not
