@@ -233,6 +233,27 @@ public sealed class ReportReachabilityTests
     }
 
     [Fact]
+    public void AnAuthorizationLookupThatFailedIsNotBlamedForTheSilence()
+    {
+        // Two findings that must not be welded together. When the
+        // authorization record could not be READ, nothing is known about it -
+        // so telling the operator that a missing authorization is why no
+        // reports arrive, and to go and publish one, is a claim on no
+        // evidence and sends them to fix something that may be correct.
+        var findings = ReportReachability.Assess(
+            Domain(reportsHeld: 0, authorizations: new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["acme.com._report._dmarc.msp.example"] = null,
+            }),
+            Now);
+
+        var arriving = Assert.Single(findings, f => f.Problem.Contains("ever arrived", StringComparison.Ordinal));
+
+        Assert.DoesNotContain("missing authorization", arriving.Problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("Publish the authorization record", arriving.Fix, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ADomainThatUsedToReportAndHasGoneQuietIsAWeakness()
     {
         var findings = ReportReachability.Assess(Domain(lastReportDaysAgo: 21), Now);

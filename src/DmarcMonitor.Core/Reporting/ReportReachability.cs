@@ -239,7 +239,15 @@ public static class ReportReachability
         {
             // Only worth saying once the authorization question is settled: a
             // domain that is not authorized already has its explanation above.
-            var unauthorized = findings.Exists(f => f.Reference.StartsWith("RFC 7489 §7.1", StringComparison.Ordinal));
+            //
+            // Severity, not the citation. A lookup that could not answer also
+            // cites §7.1, and blaming the silence on a missing authorization
+            // when nobody could read the record is a claim on no evidence -
+            // and sends the operator to publish something that may already be
+            // there and correct. Only the established faults are Breaking.
+            var unauthorized = findings.Exists(
+                f => f.Severity == HygieneSeverity.Breaking
+                     && f.Reference.StartsWith("RFC 7489 §7.1", StringComparison.Ordinal));
 
             findings.Add(new HygieneFinding
             {

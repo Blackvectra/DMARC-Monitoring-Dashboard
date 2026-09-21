@@ -126,6 +126,9 @@ public static class ZoneFile
         // record in the file into a name under itself.
         var absolute = UsesAbsoluteNames(lines);
 
+        // Whether a leading space means what BIND says it means.
+        var indented = IndentCarriesMeaning(lines);
+
         var records = new List<ZoneRecord>();
         var problems = new List<ZoneProblem>();
 
@@ -142,7 +145,10 @@ public static class ZoneFile
             // its own and belongs to whichever name came before it. This is
             // ordinary in a hand-written zone and has to be read before the
             // line is tokenized, because tokenizing throws the spacing away.
-            var inherits = lines[i].Length > 0 && char.IsWhiteSpace(lines[i][0]);
+            //
+            // Unless the whole file is indented, in which case it is not
+            // saying that at all - see IndentCarriesMeaning.
+            var inherits = indented && lines[i].Length > 0 && char.IsWhiteSpace(lines[i][0]);
 
             var tokens = new List<Token>();
             var depth = 0;
@@ -467,6 +473,49 @@ public static class ZoneFile
         }
 
         return any;
+    }
+
+    /// <summary>
+    /// Whether a leading space in this file means what BIND says it means.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// In a zone file a line that starts with whitespace has no owner name and
+    /// belongs to whichever name came before it. That is real and this parser
+    /// honours it - a multi-line SOA and a second record for the same name
+    /// both rely on it.
+    /// </para>
+    /// <para>
+    /// But this also reads text somebody pasted into a box, and text copied
+    /// out of a document, a ticket or a chat arrives uniformly indented. Taken
+    /// literally, every line then inherits from the line above and the first
+    /// one has nothing to inherit from, so the whole file yields no records at
+    /// all and a page full of "no owner name". What the operator sees is a
+    /// tool that cannot read their zone.
+    /// </para>
+    /// <para>
+    /// The distinction is whether ANY record line is flush against the margin.
+    /// If one is, indentation is carrying meaning and is honoured. If none is,
+    /// it cannot be - there is no line for the first record to inherit from -
+    /// so it is a paste artifact and is ignored.
+    /// </para>
+    /// </remarks>
+    private static bool IndentCarriesMeaning(string[] lines)
+    {
+        foreach (var line in lines)
+        {
+            if (line.Length == 0 || char.IsWhiteSpace(line[0])) { continue; }
+
+            var trimmed = line.TrimStart();
+            if (trimmed.Length == 0 || trimmed.StartsWith(';')) { continue; }
+
+            // A flush line that is not a comment. Somewhere in this file a
+            // record starts at the margin, so an indented one beside it is
+            // making the statement BIND says it is.
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
