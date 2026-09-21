@@ -5,7 +5,12 @@ name: Release
 # a half-hour answer. This produces the two things somebody actually installs.
 on:
   push:
-    tags: ['v*']
+    # Both cases. These filters are case-SENSITIVE, and a tag of V1.0.0
+    # matched nothing at all: the release was created, said "Latest", and
+    # carried no files, so every install command pointed at a 404. A tag
+    # that silently produces an empty release is the worst shape this can
+    # fail in, because the page looks right.
+    tags: ['v*', 'V*']
   workflow_dispatch:
 
 permissions:
@@ -45,8 +50,19 @@ jobs:
           # The tag is the version. A manual run has no tag, so it gets one
           # that is obviously not a release rather than a plausible number.
           ref="${{ github.ref_name }}"
-          if [[ "$ref" == v* ]]; then
-            echo "number=${ref#v}" >> "$GITHUB_OUTPUT"
+          if [[ "$ref" == v* || "$ref" == V* ]]; then
+            number="${ref#[vV]}"
+
+            # Refuse a tag that is not a version rather than stamping the
+            # build with whatever was typed. dotnet takes -p:Version= on
+            # trust, so "v1.0" or "vFinal" would either fail deep in the
+            # build or produce a binary that misreports itself.
+            if [[ ! "$number" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Tag '$ref' is not a version. Expected v1.2.3, so the build can be stamped with 1.2.3." >&2
+              exit 64
+            fi
+
+            echo "number=$number" >> "$GITHUB_OUTPUT"
           else
             echo "number=0.0.0-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
@@ -130,8 +146,19 @@ jobs:
         id: version
         run: |
           ref="${{ github.ref_name }}"
-          if [[ "$ref" == v* ]]; then
-            echo "number=${ref#v}" >> "$GITHUB_OUTPUT"
+          if [[ "$ref" == v* || "$ref" == V* ]]; then
+            number="${ref#[vV]}"
+
+            # Refuse a tag that is not a version rather than stamping the
+            # build with whatever was typed. dotnet takes -p:Version= on
+            # trust, so "v1.0" or "vFinal" would either fail deep in the
+            # build or produce a binary that misreports itself.
+            if [[ ! "$number" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Tag '$ref' is not a version. Expected v1.2.3, so the build can be stamped with 1.2.3." >&2
+              exit 64
+            fi
+
+            echo "number=$number" >> "$GITHUB_OUTPUT"
           else
             echo "number=0.0.0-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
@@ -162,7 +189,7 @@ jobs:
   release:
     name: Attach to the release
     needs: [cli, web]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
     runs-on: ubuntu-latest
 
     steps:
