@@ -248,12 +248,26 @@ public sealed class PageTests : IClassFixture<SeededApp>
     {
         // NaN or Infinity in a path attribute renders as an empty chart with
         // nothing logged anywhere, which is the hardest kind of wrong to spot.
+        //
+        // The assertion says where it found one. It failed once on CI and
+        // could not be reproduced in ten local runs, and "Assert.DoesNotContain
+        // NaN" on a whole page names neither the route nor the attribute, so
+        // there was nothing to work from. Every division behind these charts
+        // is guarded, so if it happens again the surrounding markup is the
+        // evidence that says which one is not.
         foreach (var route in new[] { "/", "/domains/acme.com", "/domains/signed.example" })
         {
             var html = await Client().GetStringAsync(route);
 
-            Assert.DoesNotContain("NaN", html, StringComparison.Ordinal);
-            Assert.DoesNotContain("Infinity", html, StringComparison.Ordinal);
+            foreach (var bad in new[] { "NaN", "Infinity" })
+            {
+                var at = html.IndexOf(bad, StringComparison.Ordinal);
+                if (at < 0) { continue; }
+
+                var from = Math.Max(0, at - 220);
+                var to = Math.Min(html.Length, at + 220);
+                Assert.Fail($"{route} emitted {bad} at offset {at}:\n…{html[from..to]}…");
+            }
         }
     }
 
