@@ -111,7 +111,11 @@ public static class CheckCommand
             ScanResult? stored = null;
             if (scanner is not null)
             {
-                stored = await scanner.SaveAsync(domain, published, ct).ConfigureAwait(false);
+                // No tenant: this is a command-line run by the operator, who sees
+                // the whole book. A request on behalf of a signed-in person
+                // never passes null here.
+                stored = await scanner.SaveAsync(domain, published, tenantId: null, ct)
+                    .ConfigureAwait(false);
                 if (stored.Stored) { saved++; } else { skipped++; }
                 if (stored.Changed) { changed++; }
             }

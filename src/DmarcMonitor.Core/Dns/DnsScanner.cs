@@ -100,7 +100,7 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
             ct.ThrowIfCancellationRequested();
 
             var published = await _lookup.ReadAsync(name, ct).ConfigureAwait(false);
-            var result = await SaveAsync(name, published, ct).ConfigureAwait(false);
+            var result = await SaveAsync(name, published, tenantId, ct).ConfigureAwait(false);
 
             results.Add(result);
             progress?.Report(result);
@@ -119,8 +119,15 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
     /// should not disagree about what was published - which they could, a
     /// second apart, on a record somebody is editing.
     /// </remarks>
+    /// <param name="tenantId">
+    /// The organization whose domain this is, or null for every one. A domain
+    /// name is unique per organization and not globally, so a reading saved
+    /// without it can land on another organization's row of the same name, and
+    /// the selectors read from the reports can be another organization's too.
+    /// </param>
     public async Task<ScanResult> SaveAsync(
-        string domain, PublishedRecords published, CancellationToken ct = default)
+        string domain, PublishedRecords published, string? tenantId = null,
+        CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
         ArgumentNullException.ThrowIfNull(published);
@@ -134,7 +141,7 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
         // asks about keys in a zone nobody owns.
         if (!published.LookupFailed && !published.DomainDoesNotExist)
         {
-            foreach (var (selector, lastSeen) in await SelectorsSeenSigningAsync(name, ct).ConfigureAwait(false))
+            foreach (var (selector, lastSeen) in await SelectorsSeenSigningAsync(name, tenantId, ct).ConfigureAwait(false))
             {
                 ct.ThrowIfCancellationRequested();
                 var key = await _lookup.DkimAsync(name, selector, ct).ConfigureAwait(false);
@@ -142,7 +149,7 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
             }
         }
 
-        var save = await _store.SaveAsync(name, published, readings, ct).ConfigureAwait(false);
+        var save = await _store.SaveAsync(name, published, readings, tenantId, ct).ConfigureAwait(false);
 
         var status = published switch
         {
@@ -203,8 +210,13 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
     /// and drawn as a broken key forever.
     /// </para>
     /// </remarks>
+    /// <param name="tenantId">
+    /// One organization's copy of this domain, or null for every one. Two
+    /// organizations on one install may each hold a domain of the same name,
+    /// and merging their reports would show one of them the other's selectors.
+    /// </param>
     public async Task<IReadOnlyList<(string Selector, DateTimeOffset LastSeen)>> SelectorsSeenSigningAsync(
-        string domain, CancellationToken ct = default)
+        string domain, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
@@ -226,10 +238,12 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
               AND (LOWER(r.dkim_domain) = LOWER(d.name)
                 OR LOWER(r.dkim_domain) LIKE '%.' || LOWER(d.name))
               AND r.date_begin >= $since
+              AND ($tenant IS NULL OR d.tenant_id = $tenant)
             GROUP BY r.dkim_selector
             ORDER BY r.dkim_selector
             """;
         command.Parameters.AddWithValue("$domain", domain);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
         command.Parameters.AddWithValue("$since", DateTimeOffset.UtcNow.AddDays(-SelectorWindowDays)
             .UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
 

@@ -279,9 +279,14 @@ public sealed class DnsSnapshotStore(string databasePath)
     /// domain that has some.
     /// </para>
     /// </remarks>
+    /// <param name="scopeTenantId">
+    /// The organization this reading belongs to, or null for every one. A
+    /// domain name is unique per organization, so without it a reading can
+    /// land on another organization's row of the same name.
+    /// </param>
     public async Task<SnapshotSave> SaveAsync(
         string domain, PublishedRecords published, IReadOnlyList<SelectorReading>? dkim = null,
-        CancellationToken ct = default)
+        string? scopeTenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
         ArgumentNullException.ThrowIfNull(published);
@@ -299,7 +304,7 @@ public sealed class DnsSnapshotStore(string databasePath)
         await using var db = new SqliteConnection(WritableConnection);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        var (domainId, tenantId, clientId) = await IdsAsync(db, name, ct).ConfigureAwait(false);
+        var (domainId, tenantId, clientId) = await IdsAsync(db, name, scopeTenantId, ct).ConfigureAwait(false);
         if (domainId is null) { return new SnapshotSave(Stored: false, Changed: false); }
 
         await using var transaction = (SqliteTransaction)await db.BeginTransactionAsync(ct).ConfigureAwait(false);
@@ -540,13 +545,33 @@ public sealed class DnsSnapshotStore(string databasePath)
         }
     }
 
+    /// <summary>
+    /// The row a domain name refers to, inside one organization.
+    /// </summary>
+    /// <remarks>
+    /// The tenant is part of the key, not decoration. A domain name is unique
+    /// per organization and not globally - UNIQUE(tenant_id, name), and
+    /// deliberately, so two MSPs on one install can each manage example.com
+    /// for their own customer. Resolving by name alone takes whichever row
+    /// SQLite hands back first, so a scan run for one organization wrote its
+    /// readings and DKIM selectors onto the other's domain - leaving one of
+    /// them reading "never checked" for ever while the other was written
+    /// twice.
+    ///
+    /// Null means every organization, which is what a command-line run by the
+    /// operator wants and what a request on behalf of a signed-in person never
+    /// does.
+    /// </remarks>
     private static async Task<(string? Domain, string? Tenant, string? Client)> IdsAsync(
-        SqliteConnection db, string name, CancellationToken ct)
+        SqliteConnection db, string name, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText =
-            "SELECT id, tenant_id, client_id FROM domains WHERE name = $name AND deleted_at IS NULL LIMIT 1";
+            "SELECT id, tenant_id, client_id FROM domains "
+            + "WHERE name = $name AND deleted_at IS NULL "
+            + "  AND ($tenant IS NULL OR tenant_id = $tenant) LIMIT 1";
         command.Parameters.AddWithValue("$name", name);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         return await reader.ReadAsync(ct).ConfigureAwait(false)

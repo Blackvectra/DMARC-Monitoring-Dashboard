@@ -13,10 +13,22 @@ namespace DmarcMonitor.Core.Reporting;
 /// than as absent, because the two lead somewhere opposite and the absent one
 /// is an instruction to publish a record that may already be there.
 /// </summary>
-public sealed class ReachabilityService(string databasePath, DnsLookup? lookup = null)
+public sealed class ReachabilityService(string databasePath, DnsLookup? lookup = null, string? tenantId = null)
 {
     private readonly string _databasePath = NotBlank(databasePath);
     private readonly DnsLookup _lookup = lookup ?? new DnsLookup();
+
+    /// <summary>
+    /// The organization this runs for, or null for every one.
+    /// </summary>
+    /// <remarks>
+    /// A domain name is unique per organization and not globally, so a
+    /// query keyed on the name alone answers with another organization's
+    /// data whenever both hold a domain of the same name. Null is right for
+    /// a command-line run by the operator; anything serving a signed-in
+    /// person passes their organization.
+    /// </remarks>
+    private readonly string? _tenantId = string.IsNullOrWhiteSpace(tenantId) ? null : tenantId;
 
     private static string NotBlank(string value)
     {
@@ -124,8 +136,10 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
             FROM domains d
             WHERE d.is_active = 1 AND d.deleted_at IS NULL
               AND ($domain IS NULL OR LOWER(d.name) = $domain)
+              AND ($tenant IS NULL OR d.tenant_id = $tenant)
             ORDER BY d.name
             """;
+        command.Parameters.AddWithValue("$tenant", (object?)_tenantId ?? DBNull.Value);
         command.Parameters.AddWithValue(
             "$domain", string.IsNullOrWhiteSpace(domain)
                 ? DBNull.Value

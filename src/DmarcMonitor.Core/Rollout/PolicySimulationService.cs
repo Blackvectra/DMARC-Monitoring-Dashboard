@@ -21,9 +21,21 @@ public sealed record CurrentPolicy(
 /// Kept apart from <see cref="PolicySimulator"/>, which is pure and where every
 /// rule worth arguing about lives. This only reads rows.
 /// </summary>
-public sealed class PolicySimulationService(string databasePath)
+public sealed class PolicySimulationService(string databasePath, string? tenantId = null)
 {
     private readonly string _databasePath = NotBlank(databasePath);
+
+    /// <summary>
+    /// The organization this runs for, or null for every one.
+    /// </summary>
+    /// <remarks>
+    /// A domain name is unique per organization and not globally, so a
+    /// query keyed on the name alone answers with another organization's
+    /// data whenever both hold a domain of the same name. Null is right for
+    /// a command-line run by the operator; anything serving a signed-in
+    /// person passes their organization.
+    /// </remarks>
+    private readonly string? _tenantId = string.IsNullOrWhiteSpace(tenantId) ? null : tenantId;
 
     private static string NotBlank(string value)
     {
@@ -62,9 +74,11 @@ public sealed class PolicySimulationService(string databasePath)
             WHERE LOWER(d.name) = $domain
               AND d.is_active = 1 AND d.deleted_at IS NULL
               AND r.date_begin >= $since
+              AND ($tenant IS NULL OR d.tenant_id = $tenant)
             """;
         command.Parameters.AddWithValue("$domain", domain.Trim().TrimEnd('.').ToLowerInvariant());
         command.Parameters.AddWithValue("$since", Since(windowDays));
+        command.Parameters.AddWithValue("$tenant", (object?)_tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -111,12 +125,14 @@ public sealed class PolicySimulationService(string databasePath)
             FROM aggregate_reports a
             JOIN domains d ON d.id = a.domain_id
             WHERE LOWER(d.name) = $domain AND a.date_begin >= $since
+              AND ($tenant IS NULL OR d.tenant_id = $tenant)
             GROUP BY a.domain_id
             ORDER BY MAX(a.date_end) DESC
             LIMIT 1
             """;
         command.Parameters.AddWithValue("$domain", domain.Trim().TrimEnd('.').ToLowerInvariant());
         command.Parameters.AddWithValue("$since", Since(windowDays));
+        command.Parameters.AddWithValue("$tenant", (object?)_tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
