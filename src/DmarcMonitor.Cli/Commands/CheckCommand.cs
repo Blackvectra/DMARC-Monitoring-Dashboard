@@ -119,21 +119,7 @@ public static class CheckCommand
             // anything about, because there is no record to ask for - only
             // selectors, and only the reports know which. Saving is what
             // looks them up, so this is where it gets reported.
-            if (stored is { Stored: false })
-            {
-                // Checking a prospect's domain is the commonest use of this
-                // command, and there is nothing to attach a reading to until
-                // reports for it arrive. Silence here would look like it was
-                // saved.
-                Console.WriteLine("    not stored: no reports have arrived for this domain, so it is not in the book yet");
-            }
-            else if (stored is not null)
-            {
-                Console.WriteLine(stored.Selectors == 0
-                    ? "    no DKIM selector seen signing in the last 30 days, so none was checked"
-                    : $"    {stored.Selectors} DKIM selector(s) checked"
-                      + (stored.Changed ? ", records changed since the last reading" : ""));
-            }
+            if (stored is not null) { Console.WriteLine("    " + SaveNote(stored)); }
 
             if (findings.Count == 0)
             {
@@ -179,6 +165,43 @@ public static class CheckCommand
 
         // Breaking findings exit non-zero so this can gate a pipeline.
         return worst >= (int)HygieneSeverity.Breaking ? 1 : 0;
+    }
+
+    /// <summary>
+    /// The one line <c>--save</c> adds under a domain, saying what was stored
+    /// and, when nothing was, why.
+    /// </summary>
+    /// <remarks>
+    /// Separate and testable because the reason is the part that is easy to
+    /// get wrong, and wrong in a way nobody would notice. "No DKIM selector
+    /// seen signing" is a statement about what the reports contain. Printed
+    /// because the apex lookup timed out, it is a fact nobody established -
+    /// the same mistake as drawing a cross for a record that was never read,
+    /// which is what the rest of this feature exists to avoid.
+    /// </remarks>
+    internal static string SaveNote(ScanResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (!result.Stored)
+        {
+            // Checking a prospect's domain is the commonest use of this
+            // command, and there is nothing to attach a reading to until
+            // reports for it arrive. Silence would look like it was saved.
+            return "not stored: no reports have arrived for this domain, so it is not in the book yet";
+        }
+
+        return result.Status switch
+        {
+            DnsCheckStatus.Failed =>
+                "DNS could not be read, so nothing was recorded about its records or its DKIM selectors",
+            DnsCheckStatus.NoSuchDomain =>
+                "the resolver says this name does not exist, so there was nothing to read",
+            _ when result.Selectors == 0 =>
+                "no DKIM selector seen signing in the last 30 days, so none was checked",
+            _ => $"{result.Selectors} DKIM selector(s) checked"
+                 + (result.Changed ? ", records changed since the last reading" : ""),
+        };
     }
 
     /// <summary>
