@@ -385,6 +385,38 @@ try {
         }
     }
 
+    # ---- 6b. the nightly DNS scan ----------------------------------------------
+    #
+    # What fills the SPF, DKIM and DMARC columns on the domains page. Unlike
+    # the collector this is registered unconditionally: it needs no mailbox,
+    # no app registration and no certificate, only the database and public
+    # DNS. Left for somebody to switch on later it would be a feature that
+    # shows three dashes forever with nothing on screen explaining why.
+    Say '== nightly DNS scan'
+    $DnsCmd = Join-Path $Root 'dns-scan.cmd'
+    $dnsLines = @(
+        '@echo off',
+        ':: Written by bootstrap.ps1. Reads each domain''s published DNS and stores it.',
+        ':: Run it by hand any time; it needs no configuration.',
+        "`"$Cli`" check --all --save --db `"$db`" >> `"$(Join-Path $DataDir 'dns-scan.log')`" 2>&1",
+        ':: check exits 1 when it finds a breaking fault in somebody else''s records,',
+        ':: which is the command doing its job. Only a real failure should mark the',
+        ':: task failed, so anything below 2 is reported as success.',
+        'if %ERRORLEVEL% LEQ 1 exit /b 0',
+        'exit /b %ERRORLEVEL%')
+    [IO.File]::WriteAllLines($DnsCmd, $dnsLines, (New-Object Text.UTF8Encoding $false))
+    Set-RestrictedAcl $DnsCmd "${ServiceSid}:RX"
+
+    # Nightly, at an hour nobody is looking, with the window spread so a room
+    # full of these installs does not hit the same resolver on the same
+    # minute. StartWhenAvailable catches up a machine that was switched off.
+    $dnsAction = New-ScheduledTaskAction -Execute $DnsCmd
+    $dnsTrigger = New-ScheduledTaskTrigger -Daily -At '03:20' -RandomDelay (New-TimeSpan -Minutes 30)
+    $dnsPrincipal = New-ScheduledTaskPrincipal -UserId $ServiceAccount -LogonType ServiceAccount -RunLevel Limited
+    $dnsSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1) -StartWhenAvailable -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName 'DMARC DNS scan' -Action $dnsAction -Trigger $dnsTrigger -Principal $dnsPrincipal -Settings $dnsSettings -Force | Out-Null
+    Say "   task 'DMARC DNS scan' registered (nightly). Run it now with: Start-ScheduledTask -TaskName 'DMARC DNS scan'"
+
     # ---- 7. Caddy in front -----------------------------------------------------
     if (-not $NoProxy) {
         Say '== proxy'

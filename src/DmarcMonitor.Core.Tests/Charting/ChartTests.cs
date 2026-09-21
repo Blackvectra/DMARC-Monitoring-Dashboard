@@ -427,4 +427,45 @@ public sealed class ChartTests
         Assert.Equal(2, placed.Count);
         Assert.Equal(1, placed.Count(p => p.Slice.Label == "rejected"));
     }
+
+    // ---- volume bars ------------------------------------------------------
+
+    [Fact]
+    public void TheBusiestRowFillsItsBar()
+    {
+        Assert.Equal(100, Chart.BarWidth(5_000, 5_000));
+    }
+
+    [Fact]
+    public void ABarIsProportionalInTheOrdinaryCase()
+    {
+        Assert.Equal(25, Chart.BarWidth(1_000, 4_000));
+    }
+
+    [Fact]
+    public void ARowWithMailNeverDrawsAsARowWithout()
+    {
+        // Eleven messages beside sixty thousand earns a bar 0.02% wide, which
+        // renders as nothing and is then indistinguishable from a domain that
+        // sent none. Those are different facts, and the second is the one an
+        // operator is looking for.
+        var sliver = Chart.BarWidth(11, 60_000);
+
+        Assert.True(sliver > 0, "a domain that sent mail must not draw as one that sent none");
+        Assert.Equal(0, Chart.BarWidth(0, 60_000));
+    }
+
+    [Fact]
+    public void NothingSentAnywhereDrawsNothing()
+    {
+        // Every row at zero: no division by it, and no bar claiming a share
+        // of a total that does not exist.
+        Assert.Equal(0, Chart.BarWidth(0, 0));
+    }
+
+    [Fact]
+    public void ARowLargerThanTheScaleIsClampedRatherThanOverflowing()
+    {
+        Assert.Equal(100, Chart.BarWidth(9_000, 4_000));
+    }
 }

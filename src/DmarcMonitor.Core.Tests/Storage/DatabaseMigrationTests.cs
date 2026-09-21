@@ -52,6 +52,17 @@ public sealed class DatabaseMigrationTests : IDisposable
                      .Where(m => string.CompareOrdinal(m.Version, upToVersion) >= 0)
                      .OrderByDescending(m => m.Version, StringComparer.Ordinal))
         {
+            // Indexes first. SQLite refuses to drop a column an index still
+            // mentions, and the message - "error in index <name> after drop
+            // column" - names the index rather than the migration, so this is
+            // worth getting right here instead of in whoever adds one next.
+            foreach (var index in IndexesIn(migration.Sql))
+            {
+                await using var drop = db.CreateCommand();
+                drop.CommandText = $"DROP INDEX IF EXISTS {index}";
+                await drop.ExecuteNonQueryAsync();
+            }
+
             foreach (var (table, column) in ColumnsAddedIn(migration.Sql))
             {
                 await using var drop = db.CreateCommand();
@@ -79,6 +90,13 @@ public sealed class DatabaseMigrationTests : IDisposable
         sql.Split('\n')
            .Where(line => line.TrimStart().StartsWith("CREATE TABLE ", StringComparison.OrdinalIgnoreCase))
            .Select(line => line.Trim()["CREATE TABLE ".Length..].Split(' ', '(')[0]);
+
+    /// <summary>The indexes a migration creates, unique or not.</summary>
+    private static IEnumerable<string> IndexesIn(string sql) =>
+        System.Text.RegularExpressions.Regex
+            .Matches(sql, @"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            .Select(m => m.Groups[1].Value);
 
     /// <summary>The columns a migration adds to tables that already existed.</summary>
     private static IEnumerable<(string Table, string Column)> ColumnsAddedIn(string sql) =>

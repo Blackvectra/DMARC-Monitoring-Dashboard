@@ -288,6 +288,30 @@ public static class Chart
             .ToString("0", CultureInfo.InvariantCulture) + "%";
     }
 
+    /// <summary>
+    /// How wide one bar in a column of bars should be, as a percentage of the
+    /// widest of them.
+    /// </summary>
+    /// <remarks>
+    /// The floor is the point. A domain that sent eleven messages beside one
+    /// that sent sixty thousand earns a bar 0.02% wide, which renders as
+    /// nothing at all - visually identical to a domain that sent none. Those
+    /// are different facts, and the second is the one worth noticing, so a
+    /// row with any mail at all keeps a visible sliver. The number beside the
+    /// bar is what anybody reads for the quantity; the bar is only there to
+    /// rank the column by eye.
+    /// </remarks>
+    /// <param name="value">This row's count.</param>
+    /// <param name="max">The largest count among the rows drawn together.</param>
+    /// <param name="floor">The narrowest a non-zero bar is allowed to be.</param>
+    public static double BarWidth(long value, long max, double floor = 2)
+    {
+        if (value <= 0 || max <= 0) { return 0; }
+
+        var percent = value * 100.0 / max;
+        return Math.Round(Math.Clamp(percent, floor, 100), 2);
+    }
+
     /// <summary>The horizontal center of bucket <paramref name="index"/>.</summary>
     /// <remarks>
     /// A single bucket sits in the middle rather than at the left edge: one

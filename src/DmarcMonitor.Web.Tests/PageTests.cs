@@ -550,6 +550,18 @@ public sealed class SeededApp : WebApplicationFactory<Program>
     /// <summary>The token stored for the seeded provider. Must never appear in any page.</summary>
     public const string ProviderToken = "cf-token-KEEP-OUT-OF-PAGES-9f8e7d";
 
+    /// <summary>
+    /// This instance's database, for a test that needs to put something in it
+    /// that no report can carry.
+    /// </summary>
+    /// <remarks>
+    /// Safe to write to: xUnit builds one fixture per test class, so each
+    /// class gets its own file. Writing to it from a test would be a trap
+    /// only if the fixture were shared across classes, which a collection
+    /// fixture is and this is not.
+    /// </remarks>
+    public string DatabasePath => _dbPath;
+
     public SeededApp() => Seed().GetAwaiter().GetResult();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)

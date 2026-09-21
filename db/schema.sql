@@ -254,6 +254,14 @@ CREATE TABLE domains (
     current_pct             INTEGER,
     last_report_at          TEXT,
 
+    -- When the DNS was last read, and how that attempt went. Kept here rather
+    -- than in dns_snapshots because that table is content-addressed and can
+    -- only hold readings that differ from the one before, and because a failed
+    -- lookup must never be written as a snapshot saying the domain publishes
+    -- nothing. See 0012-dns-freshness.sql.
+    dns_checked_at          TEXT,
+    dns_check_status        TEXT,                        -- ok / failed / nxdomain
+
     onboarded_at            TEXT,
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL,
@@ -525,7 +533,16 @@ CREATE TABLE dns_snapshots (
     tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain_id           TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+
+    -- captured_at is when this state was FIRST seen; last_seen_at is when it
+    -- was last observed. Both are needed because the rows are deduplicated by
+    -- content: a domain that goes A -> B -> A inserts no third row, and A
+    -- keeps its original captured_at, so ordering by captured_at would name B
+    -- as the current state of a domain publishing A. "Unchanged since" is
+    -- measured from the first; "which reading is current" is picked by the
+    -- second.
     captured_at         TEXT NOT NULL,
+    last_seen_at        TEXT,
 
     spf_record          TEXT,
     dmarc_record        TEXT,
@@ -535,6 +552,16 @@ CREATE TABLE dns_snapshots (
     mx_records          TEXT,                          -- JSON array, ordered by preference
 
     -- Parsed convenience fields so queries don't regex TEXT columns
+    --
+    -- spf_record_count exists because more than one v=spf1 record at an apex
+    -- is a fault on its own - RFC 7208 section 4.5 has the receiver return
+    -- permerror, so every SPF check fails however correct either record is -
+    -- and spf_record above holds one of them.
+    --
+    -- DKIM has no column here: dkim_selectors below records each observed
+    -- selector with its own key_status and last_seen, and a count in this row
+    -- would be a second copy of that, free to disagree with it.
+    spf_record_count    INTEGER,
     spf_lookup_count    INTEGER,
     spf_all_mechanism   TEXT,                          -- -all / ~all / ?all / missing
     dmarc_p             TEXT,
@@ -549,6 +576,7 @@ CREATE TABLE dns_snapshots (
 );
 
 CREATE INDEX ix_dns_snap_domain ON dns_snapshots(domain_id, captured_at DESC);
+CREATE INDEX ix_dns_snap_latest ON dns_snapshots(domain_id, last_seen_at DESC);
 CREATE UNIQUE INDEX ux_dns_snap_dedup ON dns_snapshots(domain_id, content_hash);
 
 
@@ -1016,6 +1044,9 @@ VALUES ('0010', datetime('now'), 'Organizations: the Entra group that decides wh
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0011', datetime('now'), 'Roles within an organization, customer login groups, white-label branding, and an audit log');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0012', datetime('now'), 'DNS freshness: when a domain was last read and whether that read worked, so a status chip can tell an old tick from a current one');
 
 
 -- ============================================================================
