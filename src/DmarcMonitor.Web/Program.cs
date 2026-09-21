@@ -94,6 +94,10 @@ var app = builder.Build();
 // First, so everything after it sees the caller's real address and scheme.
 app.UseProxyHeaders();
 
+// Before anything that can write a response, including the error handler and
+// the static files below, so every byte this app sends carries them.
+app.UseSecurityHeaders();
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/error", createScopeForErrors: true);

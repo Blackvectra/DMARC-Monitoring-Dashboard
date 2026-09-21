@@ -170,11 +170,9 @@ public static class AuthSetup
 
             await context.SignInAsync(LocalScheme, new ClaimsPrincipal(identity)).ConfigureAwait(false);
 
-            var returnUrl = context.Request.Query["returnUrl"].ToString();
             // Only ever redirect within this site: an open redirect here would
             // be a phishing primitive on an otherwise internal tool.
-            context.Response.Redirect(
-                returnUrl.StartsWith('/') && !returnUrl.StartsWith("//", StringComparison.Ordinal) ? returnUrl : "/");
+            context.Response.Redirect(LocalUrl.OrRoot(context.Request.Query["returnUrl"].ToString()));
         }).AllowAnonymous();
     }
 }

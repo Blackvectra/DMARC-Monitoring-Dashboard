@@ -130,8 +130,7 @@ public static class OrganizationSwitch
 
             // Only ever within this site: an open redirect on an internal tool
             // is a phishing primitive.
-            var back = returnUrl ?? "/";
-            return Results.Redirect(back.StartsWith('/') && !back.StartsWith("//", StringComparison.Ordinal) ? back : "/");
+            return Results.Redirect(LocalUrl.OrRoot(returnUrl));
         });
     }
 }
