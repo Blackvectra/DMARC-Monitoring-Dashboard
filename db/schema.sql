@@ -538,11 +538,17 @@ CREATE TABLE dns_snapshots (
     -- was last observed. Both are needed because the rows are deduplicated by
     -- content: a domain that goes A -> B -> A inserts no third row, and A
     -- keeps its original captured_at, so ordering by captured_at would name B
-    -- as the current state of a domain publishing A. "Unchanged since" is
-    -- measured from the first; "which reading is current" is picked by the
-    -- second.
+    -- as the current state of a domain publishing A.
+    --
+    -- last_seen_seq, not last_seen_at, is what "current" is picked by. No
+    -- timestamp can do that job: two readings stored in the same tick tie, and
+    -- the tie falls to insertion order, which is backwards for a revert - the
+    -- current row is the older one. Whatever resolution the clock has, a
+    -- machine fast enough to beat it exists. The counter is bumped on every
+    -- observation of a domain, whether it inserts a row or touches one.
     captured_at         TEXT NOT NULL,
     last_seen_at        TEXT,
+    last_seen_seq       INTEGER,
 
     spf_record          TEXT,
     dmarc_record        TEXT,
@@ -576,7 +582,7 @@ CREATE TABLE dns_snapshots (
 );
 
 CREATE INDEX ix_dns_snap_domain ON dns_snapshots(domain_id, captured_at DESC);
-CREATE INDEX ix_dns_snap_latest ON dns_snapshots(domain_id, last_seen_at DESC);
+CREATE INDEX ix_dns_snap_latest ON dns_snapshots(domain_id, last_seen_seq DESC);
 CREATE UNIQUE INDEX ux_dns_snap_dedup ON dns_snapshots(domain_id, content_hash);
 
 

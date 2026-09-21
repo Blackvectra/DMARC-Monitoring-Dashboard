@@ -135,6 +135,31 @@ public sealed class DnsSnapshotStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task WhichReadingIsCurrentDoesNotDependOnTheClock()
+    {
+        // The revert case again, with the clock taken out of it. Two readings
+        // stored in the same tick are not exotic: a fast machine does three of
+        // these inside one millisecond, which is how CI found this when a
+        // slower laptop could not. Whatever resolution the timestamp has,
+        // something faster than it exists, so ordering must not be decided by
+        // a timestamp at all.
+        var domain = await DomainAsync();
+        var first = Good(domain);
+        var second = Good(domain) with { DmarcRecord = "v=DMARC1; p=reject; rua=mailto:d@example.net" };
+
+        await _store.SaveAsync(domain, first);
+        await _store.SaveAsync(domain, second);
+        await _store.SaveAsync(domain, first);
+
+        // Force the pathological tie rather than waiting to be unlucky: every
+        // reading recorded at the same instant, so only the sequence can say
+        // which came last.
+        await ExecuteAsync("UPDATE dns_snapshots SET last_seen_at = '2026-01-01 00:00:00'");
+
+        Assert.Equal("quarantine", (await _store.LatestAsync())[domain].DmarcPolicy);
+    }
+
+    [Fact]
     public async Task AChangedRecordDoesBecomeASecondRow()
     {
         var domain = await DomainAsync();
@@ -314,6 +339,17 @@ public sealed class DnsSnapshotStoreTests : IDisposable
     {
         using var rsa = System.Security.Cryptography.RSA.Create(2048);
         return Convert.ToBase64String(rsa.ExportSubjectPublicKeyInfo());
+    }
+
+    private async Task ExecuteAsync(string sql)
+    {
+        await using var db = new SqliteConnection(
+            new SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString());
+        await db.OpenAsync();
+
+        await using var command = db.CreateCommand();
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync();
     }
 
     private async Task<long> CountAsync(string sql) =>

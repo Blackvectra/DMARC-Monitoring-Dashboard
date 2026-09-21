@@ -24,23 +24,34 @@ ALTER TABLE domains ADD COLUMN dns_check_status TEXT;   -- ok / failed / nxdomai
 -- the snapshot afterwards.
 ALTER TABLE dns_snapshots ADD COLUMN spf_record_count INTEGER;
 
--- Which of a domain's stored readings is the current one.
+-- When each stored reading was last observed, and which of them is current.
 --
--- captured_at cannot answer that, and the reason is subtle enough to be worth
+-- captured_at answers neither, and the reason is subtle enough to be worth
 -- writing down. The rows are deduplicated by content, so a domain that goes
 -- from record A to record B and back to A inserts no third row - A is already
 -- there - and A keeps the captured_at of the first time it was seen, months
 -- before B. Ordering by captured_at then names B as the current state of a
--- domain that is publishing A.
+-- domain that is publishing A. So captured_at keeps meaning "when this state
+-- was first seen", which is what "unchanged since" has to be measured from,
+-- and last_seen_at records when it was last observed.
 --
--- So captured_at keeps meaning "when this state was first seen", which is
--- what "unchanged since" has to be measured from, and last_seen_at means
--- "when this state was last observed", which is what "current" has to be
--- picked by. The same pair dkim_selectors has always had.
+-- last_seen_at still cannot decide which row is current, and no timestamp
+-- can. Two readings stored in the same tick tie, and the tie then falls to
+-- insertion order, which is exactly backwards for a revert: the row that is
+-- current is the older one. Whatever resolution the clock has, a machine fast
+-- enough to beat it exists - this was found by CI doing three writes inside
+-- one millisecond on hardware where a laptop took longer.
+--
+-- So ordering is decided by a counter this code controls, bumped on every
+-- observation of a domain whether it inserts a row or touches one. No clock,
+-- no ties, no dependence on how fast the machine is.
 ALTER TABLE dns_snapshots ADD COLUMN last_seen_at TEXT;
-UPDATE dns_snapshots SET last_seen_at = captured_at WHERE last_seen_at IS NULL;
+ALTER TABLE dns_snapshots ADD COLUMN last_seen_seq INTEGER;
 
-CREATE INDEX ix_dns_snap_latest ON dns_snapshots(domain_id, last_seen_at DESC);
+UPDATE dns_snapshots SET last_seen_at = captured_at WHERE last_seen_at IS NULL;
+UPDATE dns_snapshots SET last_seen_seq = rowid WHERE last_seen_seq IS NULL;
+
+CREATE INDEX ix_dns_snap_latest ON dns_snapshots(domain_id, last_seen_seq DESC);
 
 -- DKIM keeps no column here at all. DNS cannot be asked which selectors a
 -- domain has - there is nothing to enumerate and no wildcard to walk - so the

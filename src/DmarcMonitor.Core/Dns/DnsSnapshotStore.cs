@@ -170,13 +170,14 @@ public sealed class DnsSnapshotStore(string databasePath)
 
         await using (var command = db.CreateCommand())
         {
-            // Picked by last_seen_at, not captured_at. The rows are
-            // deduplicated by content, so a domain that reverts to a record
-            // it published before updates that old row rather than inserting
-            // a new one - and that row keeps the captured_at of months ago.
-            // Ordering by captured_at would then name the abandoned record as
-            // current. rowid breaks a tie between two readings stored in the
-            // same second, which is what a refresh clicked twice produces.
+            // Picked by last_seen_seq, not by either timestamp. The rows are
+            // deduplicated by content, so a domain that reverts to a record it
+            // published before updates that old row rather than inserting a
+            // new one, and that row keeps the captured_at of months ago -
+            // ordering by captured_at would name the abandoned record as
+            // current. last_seen_at cannot decide it either: two readings in
+            // the same tick tie, and the tie falls to insertion order, which
+            // is backwards for exactly that revert. The counter has no ties.
             command.CommandText = """
                 SELECT d.id, d.name, d.dns_checked_at, d.dns_check_status,
                        s.captured_at, s.spf_record, s.spf_record_count, s.spf_lookup_count,
@@ -185,7 +186,7 @@ public sealed class DnsSnapshotStore(string databasePath)
                 LEFT JOIN dns_snapshots s
                        ON s.id = (SELECT x.id FROM dns_snapshots x
                                    WHERE x.domain_id = d.id
-                                   ORDER BY x.last_seen_at DESC, x.rowid DESC LIMIT 1)
+                                   ORDER BY x.last_seen_seq DESC LIMIT 1)
                 JOIN clients c ON c.id = d.client_id
                 WHERE d.is_active = 1 AND d.deleted_at IS NULL
                   AND ($tenant IS NULL OR d.tenant_id = $tenant)
@@ -351,15 +352,24 @@ public sealed class DnsSnapshotStore(string databasePath)
         var previous = await LatestHashAsync(db, transaction, domainId, ct).ConfigureAwait(false);
         var changed = previous is not null && !string.Equals(previous, hash, StringComparison.Ordinal);
 
+        // The next place in this domain's order of observations. Read and
+        // written inside the transaction, which SQLite serialises against
+        // other writers, so two scans cannot land on the same number.
+        var seq = await NextSequenceAsync(db, transaction, domainId, ct).ConfigureAwait(false);
+
         // The same state seen again is not a new observation, and inserting a
         // second row for it would make the history say the record changed on
-        // a day it did not. Only how recently it was seen moves.
+        // a day it did not. Only when it was last seen, and its place in the
+        // order, move.
         await using (var seen = db.CreateCommand())
         {
             seen.Transaction = transaction;
-            seen.CommandText =
-                "UPDATE dns_snapshots SET last_seen_at = $at WHERE domain_id = $domain AND content_hash = $hash";
-            seen.Parameters.AddWithValue("$at", Precise(now));
+            seen.CommandText = """
+                UPDATE dns_snapshots SET last_seen_at = $at, last_seen_seq = $seq
+                WHERE domain_id = $domain AND content_hash = $hash
+                """;
+            seen.Parameters.AddWithValue("$at", Stamp(now));
+            seen.Parameters.AddWithValue("$seq", seq);
             seen.Parameters.AddWithValue("$domain", domainId);
             seen.Parameters.AddWithValue("$hash", hash);
 
@@ -367,7 +377,7 @@ public sealed class DnsSnapshotStore(string databasePath)
             {
                 await InsertAsync(
                     db, transaction, domainId, tenantId, clientId,
-                    published, spf, all, dmarc, hash, now, ct).ConfigureAwait(false);
+                    published, spf, all, dmarc, hash, now, seq, ct).ConfigureAwait(false);
             }
         }
 
@@ -398,7 +408,7 @@ public sealed class DnsSnapshotStore(string databasePath)
         command.CommandText = """
             SELECT content_hash FROM dns_snapshots
             WHERE domain_id = $domain
-            ORDER BY last_seen_at DESC, rowid DESC
+            ORDER BY last_seen_seq DESC
             LIMIT 1
             """;
         command.Parameters.AddWithValue("$domain", domainId);
@@ -406,21 +416,43 @@ public sealed class DnsSnapshotStore(string databasePath)
         return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
     }
 
+    /// <summary>
+    /// The next place in a domain's order of observations.
+    /// </summary>
+    /// <remarks>
+    /// A counter rather than a clock. Two readings stored in the same tick
+    /// tie on any timestamp, and the tie then falls to insertion order, which
+    /// is exactly backwards for a domain that has reverted to a record it
+    /// published before: the row that is current is the older one. Whatever
+    /// resolution the timestamp has, a machine fast enough to beat it exists.
+    /// </remarks>
+    private static async Task<long> NextSequenceAsync(
+        SqliteConnection db, SqliteTransaction transaction, string domainId, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT COALESCE(MAX(last_seen_seq), 0) + 1 FROM dns_snapshots WHERE domain_id = $domain";
+        command.Parameters.AddWithValue("$domain", domainId);
+
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture);
+    }
+
     private static async Task InsertAsync(
         SqliteConnection db, SqliteTransaction transaction, string domainId, string tenantId, string clientId,
         PublishedRecords published, string? spf, string? all, DmarcRecord? dmarc, string hash,
-        DateTimeOffset now, CancellationToken ct)
+        DateTimeOffset now, long seq, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO dns_snapshots
-                (id, tenant_id, client_id, domain_id, captured_at, last_seen_at,
+                (id, tenant_id, client_id, domain_id, captured_at, last_seen_at, last_seen_seq,
                  spf_record, spf_record_count, dmarc_record, mta_sts_record, tls_rpt_record,
                  spf_lookup_count, spf_all_mechanism,
                  dmarc_p, dmarc_sp, dmarc_pct, dmarc_adkim, dmarc_aspf, dmarc_rua,
                  content_hash)
-            VALUES ($id, $tenant, $client, $domain, $at, $seen,
+            VALUES ($id, $tenant, $client, $domain, $at, $at, $seq,
                     $spf, $spfCount, $dmarc, $mtaSts, $tlsRpt,
                     $lookups, $all,
                     $p, $sp, $pct, $adkim, $aspf, $rua,
@@ -431,7 +463,7 @@ public sealed class DnsSnapshotStore(string databasePath)
         command.Parameters.AddWithValue("$client", clientId);
         command.Parameters.AddWithValue("$domain", domainId);
         command.Parameters.AddWithValue("$at", Stamp(now));
-        command.Parameters.AddWithValue("$seen", Precise(now));
+        command.Parameters.AddWithValue("$seq", seq);
         command.Parameters.AddWithValue("$spf", (object?)spf ?? DBNull.Value);
         command.Parameters.AddWithValue("$spfCount", published.SpfRecords.Count);
         command.Parameters.AddWithValue("$dmarc", (object?)published.DmarcRecord ?? DBNull.Value);
@@ -533,24 +565,6 @@ public sealed class DnsSnapshotStore(string databasePath)
 
     private static string Stamp(DateTimeOffset when) =>
         when.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-
-    /// <summary>
-    /// The same stamp to the millisecond, for the one column whose job is to
-    /// order rows against each other.
-    /// </summary>
-    /// <remarks>
-    /// Every other timestamp in this database is to the second, which is
-    /// plenty for "when did this happen" and not enough for "which of these
-    /// two is newer". Two readings stored in the same second - a refresh
-    /// clicked twice, or a test - tie, and the tie is broken by rowid, which
-    /// is insertion order and therefore says the wrong thing about a domain
-    /// that has just reverted to a record it published before. Milliseconds
-    /// make the tie vanish. Still sorts and parses beside a second-precision
-    /// value, because the extra digits come after a value that would
-    /// otherwise be a prefix of it.
-    /// </remarks>
-    private static string Precise(DateTimeOffset when) =>
-        when.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
 
     private static DateTimeOffset? ParseDate(string raw) =>
         DateTime.TryParse(raw, CultureInfo.InvariantCulture,
