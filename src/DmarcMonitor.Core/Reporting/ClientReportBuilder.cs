@@ -21,8 +21,8 @@ public sealed class ClientReportBuilder(string databasePath)
     }.ToString();
 
     /// <param name="tenantId">
-    /// The organisation the caller may see, or null for any. A client of
-    /// another organisation is reported as not found.
+    /// The organization the caller may see, or null for any. A client of
+    /// another organization is reported as not found.
     /// </param>
     public async Task<ClientReport?> BuildAsync(
         string clientSlug, ReportPeriod period, string providerName = "Your IT provider", string? tenantId = null,
@@ -39,7 +39,7 @@ public sealed class ClientReportBuilder(string databasePath)
 
         var (clientId, clientName) = client.Value;
 
-        // The organisation's own name and look win over whatever the caller
+        // The organization's own name and look win over whatever the caller
         // was configured with: NextLayerSec's reports say NextLayerSec even
         // on an install whose default provider name is NRG's.
         var brand = await GetBrandAsync(db, clientId, ct).ConfigureAwait(false);
@@ -74,7 +74,7 @@ public sealed class ClientReportBuilder(string databasePath)
     }
 
     /// <summary>Every client that could be reported on, for a "generate all" run.</summary>
-    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
@@ -94,7 +94,7 @@ public sealed class ClientReportBuilder(string databasePath)
         return results;
     }
 
-    /// <summary>How the client's organisation presents itself, all optional.</summary>
+    /// <summary>How the client's organization presents itself, all optional.</summary>
     private static async Task<(string? ProviderName, string? Color, string? Logo, string? Contact)> GetBrandAsync(
         SqliteConnection db, string clientId, CancellationToken ct)
     {
@@ -332,7 +332,7 @@ public sealed class ClientReportBuilder(string databasePath)
                    -- mail that failed, not the mail that worked. Taken across
                    -- every row, a source that authenticates legitimately most
                    -- of the time and fails once with no authentication at all
-                   -- is labelled a misconfigured service of the client's own,
+                   -- is labeled a misconfigured service of the client's own,
                    -- and the one message that was actually unprovable
                    -- disappears into a maintenance note.
                    COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
@@ -384,7 +384,7 @@ public sealed class ClientReportBuilder(string databasePath)
     /// What was actually changed for this client, from the audit trail.
     /// </summary>
     /// <remarks>
-    /// Rolled-back changes are included and labelled. Hiding them would make
+    /// Rolled-back changes are included and labeled. Hiding them would make
     /// the report a sales document rather than a record: a change that was
     /// applied and then reverted is exactly the kind of thing a client should
     /// hear from their provider rather than discover.

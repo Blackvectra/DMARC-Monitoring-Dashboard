@@ -53,7 +53,7 @@ public sealed class DnsHygieneTests
         Target = target,
         Messages = messages,
         Ranges = [.. Enumerable.Range(0, ranges).Select(i =>
-            new AuthorisedRange(System.Net.IPNetwork.Parse($"192.0.{i}.0/24")))],
+            new AuthorizedRange(System.Net.IPNetwork.Parse($"192.0.{i}.0/24")))],
     };
 
     private static IReadOnlyList<HygieneFinding> Assess(
@@ -166,7 +166,7 @@ public sealed class DnsHygieneTests
     }
 
     [Fact]
-    public void PlusAllIsBreakingBecauseItAuthorisesEverybody()
+    public void PlusAllIsBreakingBecauseItAuthorizesEverybody()
     {
         var findings = Assess(Published(spf: ["v=spf1 include:spf.protection.outlook.com +all"]));
 
@@ -178,7 +178,7 @@ public sealed class DnsHygieneTests
     [Fact]
     public void QuestionAllIsAWeaknessRatherThanABreakage()
     {
-        // Neutral is not an authorisation, so it is not the same as +all.
+        // Neutral is not an authorization, so it is not the same as +all.
         var findings = Assess(Published(spf: ["v=spf1 include:spf.protection.outlook.com ?all"]));
 
         Assert.Equal(HygieneSeverity.Weakness,

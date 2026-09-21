@@ -22,9 +22,9 @@ public sealed class ImportUiService(DatabaseInfo database)
 
     /// <summary>
     /// A store that files domains nobody has seen before under the given
-    /// organisation. Domains already known keep their own.
+    /// organization. Domains already known keep their own.
     /// </summary>
-    private ReportStore Store(string organisation) => new(_path, organisation);
+    private ReportStore Store(string organization) => new(_path, organization);
 
     /// <summary>
     /// Largest single file accepted from a browser.
@@ -41,10 +41,10 @@ public sealed class ImportUiService(DatabaseInfo database)
     /// <summary>Files accepted in one drop. Dropping a folder of thousands is normal.</summary>
     public const int MaxFiles = 5_000;
 
-    /// <param name="organisation">The organisation new domains are filed under, by slug.</param>
+    /// <param name="organization">The organization new domains are filed under, by slug.</param>
     public Task<ImportResult> ImportAsync(
-        string folder, string organisation, IProgress<int>? progress = null, CancellationToken ct = default) =>
-        new ReportImporter(Store(organisation)).ImportFolderAsync(folder, progress, ct);
+        string folder, string organization, IProgress<int>? progress = null, CancellationToken ct = default) =>
+        new ReportImporter(Store(organization)).ImportFolderAsync(folder, progress, ct);
 
     /// <summary>
     /// Imports files dropped or chosen in the browser.
@@ -56,10 +56,10 @@ public sealed class ImportUiService(DatabaseInfo database)
     /// exists for.
     /// </remarks>
     public Task<ImportResult> ImportUploadsAsync(
-        IReadOnlyList<IBrowserFile> files, string organisation, IProgress<int>? progress = null, CancellationToken ct = default)
+        IReadOnlyList<IBrowserFile> files, string organization, IProgress<int>? progress = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(files);
-        return new ReportImporter(Store(organisation)).ImportAsync(ReadAsync(files, ct), progress, ct);
+        return new ReportImporter(Store(organization)).ImportAsync(ReadAsync(files, ct), progress, ct);
     }
 
     public Task<IReadOnlyList<string>> GetUnassignedDomainsAsync(string? tenantId, CancellationToken ct = default) =>

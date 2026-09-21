@@ -20,6 +20,10 @@ public static class MtaStsCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--domain", "--mode", "--mx", "--policy-host", "!--i-have-checked") is var bad and not 0) { return bad; }
+
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
         var dbPath = Args.Value(rest, "--db") ?? "dmarc.db";
@@ -29,7 +33,7 @@ public static class MtaStsCommand
         // the commonest reason to run it.
         if (action == "check") { return await CheckAsync(rest, ct).ConfigureAwait(false); }
 
-        if (!await new ReportStore(dbPath).IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await new ReportStore(dbPath).IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;

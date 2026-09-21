@@ -27,7 +27,7 @@ public sealed class DataProtectionTests
         try
         {
             var dbPath = Path.Combine(dir, "dmarc.db");
-            await new ReportStore(dbPath).InitialiseAsync(DatabaseSchema.Sql);
+            await new ReportStore(dbPath).InitializeAsync(DatabaseSchema.Sql);
 
             using var app = new KeyedApp(dbPath);
             var client = app.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });

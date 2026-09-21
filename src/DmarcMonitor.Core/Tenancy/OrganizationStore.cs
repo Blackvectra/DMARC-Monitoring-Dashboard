@@ -5,14 +5,14 @@ using Microsoft.Data.Sqlite;
 namespace DmarcMonitor.Core.Tenancy;
 
 /// <summary>
-/// The organisations, read and written.
+/// The organizations, read and written.
 /// </summary>
 /// <remarks>
-/// Writes here are setup, like onboarding a client: naming an organisation,
+/// Writes here are setup, like onboarding a client: naming an organization,
 /// saying which groups belong to it, and how it looks. Nothing here touches
 /// report data.
 /// </remarks>
-public sealed class OrganisationStore(string databasePath)
+public sealed class OrganizationStore(string databasePath)
 {
     private readonly string _connectionString = new SqliteConnectionStringBuilder
     {
@@ -30,8 +30,8 @@ public sealed class OrganisationStore(string databasePath)
         WHERE t.deleted_at IS NULL
         """;
 
-    /// <summary>Every organisation, by name.</summary>
-    public async Task<IReadOnlyList<Organisation>> ListAsync(CancellationToken ct = default)
+    /// <summary>Every organization, by name.</summary>
+    public async Task<IReadOnlyList<Organization>> ListAsync(CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
@@ -39,13 +39,13 @@ public sealed class OrganisationStore(string databasePath)
         await using var command = db.CreateCommand();
         command.CommandText = Select + " ORDER BY t.name";
 
-        var result = new List<Organisation>();
+        var result = new List<Organization>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false)) { result.Add(Row(reader)); }
         return result;
     }
 
-    public async Task<Organisation?> GetAsync(string slug, CancellationToken ct = default)
+    public async Task<Organization?> GetAsync(string slug, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(slug);
 
@@ -60,7 +60,7 @@ public sealed class OrganisationStore(string databasePath)
         return await reader.ReadAsync(ct).ConfigureAwait(false) ? Row(reader) : null;
     }
 
-    /// <summary>Every client with a login group of its own, across organisations.</summary>
+    /// <summary>Every client with a login group of its own, across organizations.</summary>
     public async Task<IReadOnlyList<ClientGroup>> ClientGroupsAsync(CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
@@ -84,9 +84,9 @@ public sealed class OrganisationStore(string databasePath)
     }
 
     /// <summary>
-    /// Creates an organisation. Returns it, or null when the slug is taken.
+    /// Creates an organization. Returns it, or null when the slug is taken.
     /// </summary>
-    public async Task<Organisation?> CreateAsync(
+    public async Task<Organization?> CreateAsync(
         string name, string? slug = null, string? entraGroupId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
@@ -120,21 +120,21 @@ public sealed class OrganisationStore(string databasePath)
             await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        return new Organisation(id, name.Trim(), wanted, Clean(entraGroupId), 0, 0);
+        return new Organization(id, name.Trim(), wanted, Clean(entraGroupId), 0, 0);
     }
 
-    /// <summary>Records which group operates an organisation. Null clears it.</summary>
+    /// <summary>Records which group operates an organization. Null clears it.</summary>
     public Task<bool> SetGroupAsync(string slug, string? entraGroupId, CancellationToken ct = default) =>
-        SetGroupAsync(slug, OrganisationRole.Operator, entraGroupId, ct);
+        SetGroupAsync(slug, OrganizationRole.Operator, entraGroupId, ct);
 
-    /// <summary>Records which group holds a role in an organisation. Null clears it.</summary>
-    public Task<bool> SetGroupAsync(string slug, OrganisationRole role, string? entraGroupId, CancellationToken ct = default)
+    /// <summary>Records which group holds a role in an organization. Null clears it.</summary>
+    public Task<bool> SetGroupAsync(string slug, OrganizationRole role, string? entraGroupId, CancellationToken ct = default)
     {
         var column = role switch
         {
-            OrganisationRole.Admin => "admin_group_id",
-            OrganisationRole.Operator => "entra_group_id",
-            OrganisationRole.Viewer => "viewer_group_id",
+            OrganizationRole.Admin => "admin_group_id",
+            OrganizationRole.Operator => "entra_group_id",
+            OrganizationRole.Viewer => "viewer_group_id",
             _ => throw new ArgumentOutOfRangeException(nameof(role), role, "A group holds the viewer, operator or admin role."),
         };
         return UpdateAsync(slug, $"{column} = $value", (object?)Clean(entraGroupId) ?? DBNull.Value, ct);
@@ -147,21 +147,21 @@ public sealed class OrganisationStore(string databasePath)
     }
 
     /// <summary>
-    /// Sets how an organisation looks. Refuses a colour that is not a plain
+    /// Sets how an organization looks. Refuses a color that is not a plain
     /// hex or a logo that is not a small image, because both land in markup.
     /// </summary>
-    public async Task<bool> SetBrandAsync(string slug, OrganisationBrand brand, CancellationToken ct = default)
+    public async Task<bool> SetBrandAsync(string slug, OrganizationBrand brand, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(slug);
         ArgumentNullException.ThrowIfNull(brand);
 
-        if (!OrganisationBrand.IsValidColor(Clean(brand.PrimaryColor)))
+        if (!OrganizationBrand.IsValidColor(Clean(brand.PrimaryColor)))
         {
-            throw new ArgumentException("The colour must be a six-digit hex such as #4f46e5.", nameof(brand));
+            throw new ArgumentException("The color must be a six-digit hex such as #4f46e5.", nameof(brand));
         }
-        if (!OrganisationBrand.IsValidLogo(Clean(brand.Logo)))
+        if (!OrganizationBrand.IsValidLogo(Clean(brand.Logo)))
         {
-            throw new ArgumentException($"The logo must be a PNG, JPEG, GIF, WebP or SVG image of at most {OrganisationBrand.MaxLogoLength / 1000} KB.", nameof(brand));
+            throw new ArgumentException($"The logo must be a PNG, JPEG, GIF, WebP or SVG image of at most {OrganizationBrand.MaxLogoLength / 1000} KB.", nameof(brand));
         }
 
         await using var db = new SqliteConnection(_connectionString);
@@ -201,13 +201,13 @@ public sealed class OrganisationStore(string databasePath)
 
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private static Organisation Row(SqliteDataReader r) => new(
+    private static Organization Row(SqliteDataReader r) => new(
         r.GetString(0), r.GetString(1), r.GetString(2),
         r.IsDBNull(3) ? null : r.GetString(3),
         r.GetInt32(4), r.GetInt32(5),
         r.IsDBNull(6) ? null : r.GetString(6),
         r.IsDBNull(7) ? null : r.GetString(7),
-        new OrganisationBrand(
+        new OrganizationBrand(
             r.IsDBNull(8) ? null : r.GetString(8),
             r.IsDBNull(9) ? null : r.GetString(9),
             r.IsDBNull(10) ? null : r.GetString(10),

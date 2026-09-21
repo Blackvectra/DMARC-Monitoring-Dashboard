@@ -22,7 +22,7 @@ public sealed class ReportImporterTests : IDisposable
     {
         Directory.CreateDirectory(_dir);
         _dbPath = Path.Combine(_dir, "dmarc.db");
-        new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
     }
 
     private static string Fixture(string name) => Path.Combine(AppContext.BaseDirectory, "Fixtures", name);

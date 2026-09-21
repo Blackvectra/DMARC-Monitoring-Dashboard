@@ -45,11 +45,11 @@ public sealed class DatabaseSchemaTests
         try
         {
             var store = new ReportStore(path);
-            await store.InitialiseAsync(DatabaseSchema.Sql);
+            await store.InitializeAsync(DatabaseSchema.Sql);
 
-            Assert.True(await store.IsInitialisedAsync());
+            Assert.True(await store.IsInitializedAsync());
 
-            // And it is the whole schema, not just the tables IsInitialised
+            // And it is the whole schema, not just the tables IsInitialized
             // happens to look for.
             await using var connection = new SqliteConnection(
                 new SqliteConnectionStringBuilder { DataSource = path }.ToString());

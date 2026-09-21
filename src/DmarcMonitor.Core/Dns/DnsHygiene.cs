@@ -273,7 +273,7 @@ public static class DnsHygiene
             {
                 Severity = HygieneSeverity.Tidy,
                 Record = "SPF",
-                Problem = $"include:{dead} resolves to no SPF record. It authorises nothing and still "
+                Problem = $"include:{dead} resolves to no SPF record. It authorizes nothing and still "
                         + "spends one of the ten lookups.",
                 Fix = $"Remove include:{dead}.",
                 Reference = "RFC 7208 §4.6.4",
@@ -298,7 +298,7 @@ public static class DnsHygiene
             {
                 Severity = HygieneSeverity.Breaking,
                 Record = "SPF",
-                Problem = "The record ends in +all, which authorises every address on the internet to send "
+                Problem = "The record ends in +all, which authorizes every address on the internet to send "
                         + "as this domain. It is worse than having no SPF record.",
                 Fix = "Change it to -all.",
                 Reference = "RFC 7208 §5.1",
@@ -360,7 +360,7 @@ public static class DnsHygiene
             {
                 Severity = HygieneSeverity.Tidy,
                 Record = "SPF",
-                Problem = $"include:{include.Target} ({include.Service}) authorises "
+                Problem = $"include:{include.Target} ({include.Service}) authorizes "
                         + $"{include.Ranges.Count} address range(s) and no mail has been seen from any of "
                         + $"them in the {observed.WindowDays} days of reports held. It still costs a DNS lookup.",
                 Fix = $"Confirm the business no longer uses {include.Service} before removing it. Plenty "

@@ -136,7 +136,7 @@ public sealed class RolloutAssessmentTests
     [Fact]
     public void StaleDataOutranksEvenMailBeingLost()
     {
-        // Every other judgement is computed from reports. If those stopped
+        // Every other judgment is computed from reports. If those stopped
         // arriving a week ago, the rest of this page is describing the past.
         var verdict = RolloutAssessment.Assess(
             State(policy: "reject", messages: 1000, passing: 500, failingSources: 9, lastReportDaysAgo: 10));
@@ -175,6 +175,28 @@ public sealed class RolloutAssessmentTests
 
         Assert.Equal(TriageLevel.Fine, verdict.Level);
         Assert.Empty(verdict.Headline);
+    }
+
+    [Theory]
+    [InlineData("reject")]
+    [InlineData("quarantine")]
+    public void ADomainAtNoneIsNeverToldToJumpStraightToReject(string target)
+    {
+        // Found on real data. mortonnd.gov sat at p=none with 498 messages
+        // and everything authenticating, and triage said "Ready to move to
+        // p=reject". The very next command answered:
+        //
+        //   [REFUSED] Refusing to move mortonnd.gov from p=none straight to
+        //   p=reject. Go to p=quarantine first.
+        //
+        // The planner is right and the advice was wrong. Whatever the target,
+        // the next step from p=none is p=quarantine.
+        var verdict = RolloutAssessment.Assess(
+            State(policy: "none", messages: 1000, passing: 1000, target: target));
+
+        Assert.Equal(TriageLevel.Act, verdict.Level);
+        Assert.Contains("p=quarantine", verdict.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("Ready to move to p=reject", verdict.Headline, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -300,7 +322,7 @@ public sealed class RolloutAssessmentTests
     [Fact]
     public void EveryVerdictExceptFineExplainsItself()
     {
-        // A level with no sentence is a coloured dot an operator has to guess
+        // A level with no sentence is a colored dot an operator has to guess
         // at, which is the thing this page exists to replace.
         DomainState[] states =
         [

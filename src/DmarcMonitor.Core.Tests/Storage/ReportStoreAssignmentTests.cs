@@ -8,7 +8,7 @@ namespace DmarcMonitor.Core.Tests.Storage;
 /// Onboarding a domain: moving it off Unassigned and onto a real client.
 ///
 /// The interesting part is not the domains row, it is everything filed against
-/// it. Reports already stored carry a denormalised client_id, so an assignment
+/// it. Reports already stored carry a denormalized client_id, so an assignment
 /// that updates only the domain leaves the history behind and the new client's
 /// report comes back empty — which reads as a domain that has never sent mail
 /// rather than as a broken assignment.
@@ -21,7 +21,7 @@ public sealed class ReportStoreAssignmentTests : IDisposable
     public ReportStoreAssignmentTests()
     {
         _store = new ReportStore(_dbPath);
-        _store.InitialiseAsync(File.ReadAllText(FindSchema())).GetAwaiter().GetResult();
+        _store.InitializeAsync(File.ReadAllText(FindSchema())).GetAwaiter().GetResult();
     }
 
     public void Dispose()
@@ -111,7 +111,7 @@ public sealed class ReportStoreAssignmentTests : IDisposable
     [Fact]
     public async Task EveryTableThatCarriesBothIdsIsHandled()
     {
-        // The guard. A table added later with a denormalised client_id and a
+        // The guard. A table added later with a denormalized client_id and a
         // domain_id would silently keep pointing at the old client, and the
         // symptom — a client report missing a section — would look like a
         // reporting bug rather than an assignment one.

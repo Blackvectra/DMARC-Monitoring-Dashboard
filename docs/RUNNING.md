@@ -29,12 +29,12 @@ dmarc report --client acme-corp --provider "Your Company"
 English, with no database at all. It is the fastest way to check a report
 somebody has just forwarded you.
 
-### Organisations
+### Organizations
 
-Clients belong to an organisation, and an organisation's people see its
+Clients belong to an organization, and an organization's people see its
 clients and domains and nothing else. One install starts with one
-organisation, filed as `local`; a second company on the same install is a
-second organisation:
+organization, filed as `local`; a second company on the same install is a
+second organization:
 
 ```
 dmarc org rename --org local --name "NRG Tech Services"
@@ -44,28 +44,28 @@ dmarc client assign --domain cornerpost.example --client corner-post
 dmarc import --from C:\nextlayersec-export --org nextlayersec
 ```
 
-Who belongs to which organisation is an Entra security group; the master
+Who belongs to which organization is an Entra security group; the master
 group, named in `Auth:MasterGroupId`, sees them all with a switcher in the
 sidebar. Without sign-in configured, whoever is at the machine is the
 master. docs/DEPLOYING.md step 5 has the Entra side. Every page - Triage,
-Domains, Fix, Sources, Reports, Clients - is scoped to the organisation being
+Domains, Fix, Sources, Reports, Clients - is scoped to the organization being
 looked at, and within it can be narrowed to one client. Assigning a domain to a
-client in another organisation moves it there, history and all.
+client in another organization moves it there, history and all.
 
 ### Roles, customer logins and branding
 
-Within an organisation a group per role says what its members may do: a
+Within an organization a group per role says what its members may do: a
 **viewer** reads, an **operator** also assigns domains, imports and applies
-fixes, an **admin** also runs the organisation's settings. A client can have a
+fixes, an **admin** also runs the organization's settings. A client can have a
 group of its own, whose members see that one client read only — the customer's
-own login. Each organisation can dress the app in its own colour, logo, name
+own login. Each organization can dress the app in its own color, logo, name
 and contact details.
 
 ```
 dmarc org set-group --org nextlayersec --role admin  --group <id>
 dmarc org set-group --org nextlayersec --role viewer --group <id>
 dmarc client set-group --client corner-post --group <id>
-dmarc org brand --org nextlayersec --colour '#0f766e' --provider-name "NextLayerSec" \
+dmarc org brand --org nextlayersec --color '#0f766e' --provider-name "NextLayerSec" \
     --contact 'dmarc@nextlayersec.io' --logo ./logo.png
 ```
 
@@ -138,7 +138,7 @@ Three ways, all of which end in the same place:
 click it. A single report somebody forwarded, a folder of them, or a whole
 mailbox export as one zip - including a zip of attachments that are themselves
 gzipped, which is what an export usually is. Importing the same thing twice is
-safe: reports already stored are recognised and skipped rather than doubled.
+safe: reports already stored are recognized and skipped rather than doubled.
 
 **Import a folder or an export on the server.** For an export already on the
 machine, or one too large to upload. Same page, at the bottom, or from the
@@ -167,7 +167,7 @@ dmarc import --from C:\dmarc-export.zip
 ```
 
 or the Import page, which runs the same code. Re-importing the same folder is
-safe — reports already stored are recognised and skipped — so an interrupted
+safe — reports already stored are recognized and skipped — so an interrupted
 import is resumed by running it again.
 
 ---

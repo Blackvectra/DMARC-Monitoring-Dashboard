@@ -95,7 +95,7 @@ public static class AggregateReportParser
 
         var policy = new PolicyPublished
         {
-            Domain = NormaliseDomain(domain),
+            Domain = NormalizeDomain(domain),
             P = ParsePolicy(Text(Child(policyEl, "p"))) ?? DmarcPolicy.None,
             Sp = ParsePolicy(Text(Child(policyEl, "sp"))),
             Pct = ParsePct(Text(Child(policyEl, "pct"))),
@@ -147,7 +147,7 @@ public static class AggregateReportParser
         var spfResults = new List<AuthResult>();
         foreach (var el in Children(authEl, "spf"))
         {
-            var d = NormaliseDomain(Text(Child(el, "domain")));
+            var d = NormalizeDomain(Text(Child(el, "domain")));
             if (string.IsNullOrEmpty(d)) { continue; }
             spfResults.Add(new AuthResult
             {
@@ -164,7 +164,7 @@ public static class AggregateReportParser
         var dkimResults = new List<AuthResult>();
         foreach (var el in Children(authEl, "dkim"))
         {
-            var d = NormaliseDomain(Text(Child(el, "domain")));
+            var d = NormalizeDomain(Text(Child(el, "domain")));
             if (string.IsNullOrEmpty(d)) { continue; }
             dkimResults.Add(new AuthResult
             {
@@ -182,9 +182,9 @@ public static class AggregateReportParser
             Dkim = ParseDmarcResult(Text(Child(evalEl, "dkim"))),
             Spf = ParseDmarcResult(Text(Child(evalEl, "spf"))),
             Overrides = overrides,
-            HeaderFrom = NormaliseDomain(Text(Child(identEl, "header_from"))),
-            EnvelopeFrom = NormaliseDomain(Text(Child(identEl, "envelope_from"))),
-            EnvelopeTo = NormaliseDomain(Text(Child(identEl, "envelope_to"))),
+            HeaderFrom = NormalizeDomain(Text(Child(identEl, "header_from"))),
+            EnvelopeFrom = NormalizeDomain(Text(Child(identEl, "envelope_from"))),
+            EnvelopeTo = NormalizeDomain(Text(Child(identEl, "envelope_to"))),
             SpfResults = spfResults,
             DkimResults = dkimResults,
         };
@@ -216,7 +216,7 @@ public static class AggregateReportParser
     /// as authenticating for somebody else. Found by running the parser
     /// against real mail rather than against XML written to match it.
     /// </remarks>
-    private static string NormaliseDomain(string raw) =>
+    private static string NormalizeDomain(string raw) =>
         raw.Trim().TrimEnd('.').ToLowerInvariant();
 
     // ---- value parsing ------------------------------------------------------
@@ -256,7 +256,7 @@ public static class AggregateReportParser
 
     /// <summary>
     /// Anything that is not an explicit pass is a failure. Treating a blank or
-    /// unrecognised value as a pass would inflate the one number an operator
+    /// unrecognized value as a pass would inflate the one number an operator
     /// repeats to other people.
     /// </summary>
     private static DmarcResult ParseDmarcResult(string raw) =>

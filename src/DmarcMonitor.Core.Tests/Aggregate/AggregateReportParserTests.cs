@@ -206,7 +206,7 @@ public sealed class AggregateReportParserTests
     [InlineData("neutral")]
     public void TreatsAnythingThatIsNotAPassAsAFailure(string value)
     {
-        // Counting a blank or unrecognised alignment result as a pass would
+        // Counting a blank or unrecognized alignment result as a pass would
         // inflate the headline figure an operator repeats to other people.
         var xml = $"""
             <feedback>
@@ -265,7 +265,7 @@ public sealed class AggregateReportParserTests
     }
 
     [Fact]
-    public void KeepsAnUnrecognisedOverrideTypeRatherThanFailing()
+    public void KeepsAnUnrecognizedOverrideTypeRatherThanFailing()
     {
         const string xml = """
             <feedback>

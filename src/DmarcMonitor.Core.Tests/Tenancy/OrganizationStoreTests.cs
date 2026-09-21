@@ -4,15 +4,15 @@ using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Tests.Tenancy;
 
-public sealed class OrganisationStoreTests : IDisposable
+public sealed class OrganizationStoreTests : IDisposable
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"dmarc-orgs-{Guid.NewGuid():N}.db");
-    private readonly OrganisationStore _store;
+    private readonly OrganizationStore _store;
 
-    public OrganisationStoreTests()
+    public OrganizationStoreTests()
     {
-        new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
-        _store = new OrganisationStore(_dbPath);
+        new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        _store = new OrganizationStore(_dbPath);
     }
 
     public void Dispose()
@@ -25,7 +25,7 @@ public sealed class OrganisationStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task CreatesListsAndFindsAnOrganisation()
+    public async Task CreatesListsAndFindsAnOrganization()
     {
         var created = await _store.CreateAsync("NextLayerSec", entraGroupId: "  22222222-2222-2222-2222-222222222222 ");
 
@@ -72,7 +72,7 @@ public sealed class OrganisationStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ClientsAndDomainsAreCountedPerOrganisation()
+    public async Task ClientsAndDomainsAreCountedPerOrganization()
     {
         var nls = await _store.CreateAsync("NextLayerSec");
         var reports = new ReportStore(_dbPath, "nextlayersec");
@@ -88,9 +88,9 @@ public sealed class OrganisationStoreTests : IDisposable
     {
         await _store.CreateAsync("NRG Tech Services", slug: "nrg");
 
-        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Admin, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
-        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Operator, "11111111-1111-1111-1111-111111111111"));
-        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Viewer, " bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb "));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Admin, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Operator, "11111111-1111-1111-1111-111111111111"));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Viewer, " bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb "));
 
         var org = await _store.GetAsync("nrg");
         Assert.NotNull(org);
@@ -98,7 +98,7 @@ public sealed class OrganisationStoreTests : IDisposable
         Assert.Equal("11111111-1111-1111-1111-111111111111", org.EntraGroupId);
         Assert.Equal("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", org.ViewerGroupId);
 
-        Assert.True(await _store.SetGroupAsync("nrg", OrganisationRole.Viewer, null));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Viewer, null));
         org = await _store.GetAsync("nrg");
         Assert.Null(org!.ViewerGroupId);
         Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", org.AdminGroupId);
@@ -109,7 +109,7 @@ public sealed class OrganisationStoreTests : IDisposable
     {
         await _store.CreateAsync("NextLayerSec", slug: "nls");
 
-        var brand = new OrganisationBrand(
+        var brand = new OrganizationBrand(
             "#0F766E",
             "data:image/png;base64,iVBORw0KGgo=",
             "NextLayerSec",
@@ -123,33 +123,33 @@ public sealed class OrganisationStoreTests : IDisposable
         Assert.StartsWith("data:image/png;base64,", org.Brand.Logo);
         Assert.Contains("+1 555 0100", org.Brand.ContactBlock);
 
-        await _store.SetBrandAsync("nls", OrganisationBrand.None);
+        await _store.SetBrandAsync("nls", OrganizationBrand.None);
         Assert.True((await _store.GetAsync("nls"))!.Brand.IsEmpty);
     }
 
     [Fact]
     public async Task ABrandThatWouldEscapeIntoTheMarkupIsRefused()
     {
-        // The colour lands in a style attribute and the logo in an img src,
+        // The color lands in a style attribute and the logo in an img src,
         // so neither is taken on trust.
         await _store.CreateAsync("NextLayerSec", slug: "nls");
 
         await Assert.ThrowsAsync<ArgumentException>(
-            () => _store.SetBrandAsync("nls", new OrganisationBrand("red; background:url(x)", null, null, null)));
+            () => _store.SetBrandAsync("nls", new OrganizationBrand("red; background:url(x)", null, null, null)));
         await Assert.ThrowsAsync<ArgumentException>(
-            () => _store.SetBrandAsync("nls", new OrganisationBrand("#abc", null, null, null)));
+            () => _store.SetBrandAsync("nls", new OrganizationBrand("#abc", null, null, null)));
         await Assert.ThrowsAsync<ArgumentException>(
-            () => _store.SetBrandAsync("nls", new OrganisationBrand(null, "javascript:alert(1)", null, null)));
+            () => _store.SetBrandAsync("nls", new OrganizationBrand(null, "javascript:alert(1)", null, null)));
         await Assert.ThrowsAsync<ArgumentException>(
-            () => _store.SetBrandAsync("nls", new OrganisationBrand(null, "data:text/html;base64,PHNjcmlwdD4=", null, null)));
+            () => _store.SetBrandAsync("nls", new OrganizationBrand(null, "data:text/html;base64,PHNjcmlwdD4=", null, null)));
         await Assert.ThrowsAsync<ArgumentException>(
-            () => _store.SetBrandAsync("nls", new OrganisationBrand(null, "data:image/png;base64," + new string('A', OrganisationBrand.MaxLogoLength), null, null)));
+            () => _store.SetBrandAsync("nls", new OrganizationBrand(null, "data:image/png;base64," + new string('A', OrganizationBrand.MaxLogoLength), null, null)));
 
         Assert.True((await _store.GetAsync("nls"))!.Brand.IsEmpty);
     }
 
     [Fact]
-    public async Task ACustomerLoginGroupIsListedAgainstItsClientAndOrganisation()
+    public async Task ACustomerLoginGroupIsListedAgainstItsClientAndOrganization()
     {
         await _store.CreateAsync("NRG Tech Services", slug: "nrg");
         var reports = new ReportStore(_dbPath, "nrg");
@@ -158,7 +158,7 @@ public sealed class OrganisationStoreTests : IDisposable
         Assert.True(await reports.SetClientGroupAsync("morton-nd", " cccccccc-cccc-cccc-cccc-cccccccccccc "));
 
         var group = Assert.Single(await _store.ClientGroupsAsync());
-        Assert.Equal("nrg", group.OrganisationSlug);
+        Assert.Equal("nrg", group.OrganizationSlug);
         Assert.Equal("morton-nd", group.ClientSlug);
         Assert.Equal("cccccccc-cccc-cccc-cccc-cccccccccccc", group.EntraGroupId);
 
@@ -167,11 +167,11 @@ public sealed class OrganisationStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task AClientCreatedForAnUnknownOrganisationBringsItIntoBeing()
+    public async Task AClientCreatedForAnUnknownOrganizationBringsItIntoBeing()
     {
         // Named after its slug until somebody renames it: a report is never
         // refused for want of a row, and the name is one command away.
-        await new ReportStore(_dbPath).CreateClientAsync("Acme", organisation: "acme-msp");
+        await new ReportStore(_dbPath).CreateClientAsync("Acme", organization: "acme-msp");
 
         var org = Assert.Single(await _store.ListAsync());
         Assert.Equal("acme-msp", org.Slug);

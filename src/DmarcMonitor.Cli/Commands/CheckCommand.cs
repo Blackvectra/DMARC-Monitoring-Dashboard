@@ -17,6 +17,10 @@ public static class CheckCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--domain", "!--all") is var bad and not 0) { return bad; }
+
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var single = Args.Value(args, "--domain");
         var all = Args.Flag(args, "--all");
@@ -69,7 +73,7 @@ public static class CheckCommand
             var published = await lookup.ReadAsync(domain, ct).ConfigureAwait(false);
             var seen = observed.TryGetValue(domain, out var o) ? o : new ObservedSending();
 
-            // Resolve each include to the addresses it authorises and match
+            // Resolve each include to the addresses it authorizes and match
             // them against what has actually sent. Only attempted with a
             // database: with no reports there is nothing to match against, and
             // calling an include unused on no evidence is the worst answer
@@ -115,7 +119,7 @@ public static class CheckCommand
     }
 
     /// <summary>
-    /// What each include authorises, and how much of it has been used.
+    /// What each include authorizes, and how much of it has been used.
     /// </summary>
     /// <remarks>
     /// Matched by address rather than by name, because that is the only link

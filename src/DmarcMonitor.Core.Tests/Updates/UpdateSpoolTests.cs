@@ -76,7 +76,7 @@ public sealed class UpdateSpoolTests : IDisposable
         var request = JsonSerializer.Deserialize<UpdateRequest>(text);
 
         Assert.NotNull(request);
-        // Normalised to the tag form, so the helper never has to guess.
+        // Normalized to the tag form, so the helper never has to guess.
         Assert.Equal("v1.3.0", request.Version);
         Assert.Equal("matthew@nextlayersec.io", request.RequestedBy);
 

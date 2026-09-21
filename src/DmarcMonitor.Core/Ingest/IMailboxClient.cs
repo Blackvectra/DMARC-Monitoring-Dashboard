@@ -55,7 +55,7 @@ public sealed record MailAttachment
 /// The mailbox operations ingest needs.
 ///
 /// An interface rather than a Graph client directly, because the pipeline is
-/// where the behaviour worth testing lives: deduplication, attribution,
+/// where the behavior worth testing lives: deduplication, attribution,
 /// surviving a malformed message, and making progress through a backlog. None
 /// of that should need a tenant to exercise.
 /// </summary>

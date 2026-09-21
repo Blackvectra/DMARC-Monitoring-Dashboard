@@ -101,19 +101,90 @@ $Extensions = @($Extensions | ForEach-Object {
 
 # ---- connect --------------------------------------------------------------
 
-try {
-    # Reuse the running Outlook if there is one, so this does not start a
-    # second instance and trip the security prompt.
-    $outlook = [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application')
-} catch {
+# Two ways in, and when both fail the reason each gave IS the diagnosis.
+# Printing "could not talk to Outlook, open Outlook" and throwing the
+# exceptions away sent people to stare at an Outlook that was open the whole
+# time - the one thing the message told them to check.
+#
+# Three causes look identical from here and share no fix:
+#   - the new Outlook (olk.exe) registers no COM class at all
+#   - an elevated shell cannot reach an Outlook running as the ordinary user
+#   - PowerShell 7 has no Marshal::GetActiveObject, so only the second way works
+$attempts = New-Object 'System.Collections.Generic.List[string]'
+$outlook = $null
+
+$hasGetActiveObject = @(
+    [Runtime.InteropServices.Marshal].GetMethods() | Where-Object { $_.Name -eq 'GetActiveObject' }
+).Count -gt 0
+
+if ($hasGetActiveObject) {
     try {
+        # Reuse the running Outlook if there is one, so this does not start a
+        # second instance and trip the security prompt.
+        $outlook = [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application')
+    } catch {
+        $attempts.Add("attach to a running Outlook: $($_.Exception.Message)")
+    }
+} else {
+    # Worth saying, and worth saying it is not the problem: the API was never
+    # ported to .NET Core. The way below works on PowerShell 7 regardless.
+    $attempts.Add("attach to a running Outlook: PowerShell $($PSVersionTable.PSVersion) has no Marshal::GetActiveObject, which is .NET Framework only. Harmless on its own - the next way does not need it.")
+}
+
+if (-not $outlook) {
+    try {
+        # Outlook is a single-instance COM server, so this attaches to the one
+        # already running rather than starting a second.
         $outlook = New-Object -ComObject Outlook.Application
     } catch {
-        Write-Host ""
-        Write-Host "Could not talk to Outlook." -ForegroundColor Red
-        Write-Host "Open Outlook on this machine, wait for it to finish loading, then run this again."
-        exit 1
+        $attempts.Add("start Outlook through COM: $($_.Exception.Message)")
     }
+}
+
+if (-not $outlook) {
+    $classic    = @(Get-Process -Name outlook -ErrorAction SilentlyContinue).Count
+    $newOutlook = @(Get-Process -Name olk     -ErrorAction SilentlyContinue).Count
+    $registered = Test-Path 'Registry::HKEY_CLASSES_ROOT\Outlook.Application\CLSID'
+    $elevated   = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                      [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    Write-Host ""
+    Write-Host "Could not talk to Outlook." -ForegroundColor Red
+
+    Write-Host ""
+    Write-Host "What was tried:" -ForegroundColor DarkGray
+    foreach ($attempt in $attempts) { Write-Host "    $attempt" }
+
+    Write-Host ""
+    Write-Host "What is true on this machine:" -ForegroundColor DarkGray
+    Write-Host ("    classic Outlook running     {0}" -f $(if ($classic)    { "yes ($classic)" } else { 'no' }))
+    Write-Host ("    new Outlook running         {0}" -f $(if ($newOutlook) { "yes ($newOutlook)" } else { 'no' }))
+    Write-Host ("    Outlook.Application in COM  {0}" -f $(if ($registered) { 'registered' } else { 'NOT registered' }))
+    Write-Host ("    this shell                  PowerShell {0} ({1}), {2}" -f `
+        $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $(if ($elevated) { 'elevated' } else { 'not elevated' }))
+
+    Write-Host ""
+    if ($newOutlook -and -not $classic) {
+        Write-Host "The new Outlook cannot be automated: it has no COM interface, so no script can read it." -ForegroundColor Yellow
+        Write-Host "Turn the 'New Outlook' toggle off, at the top right of its window, to go back to classic"
+        Write-Host "Outlook, then run this again. If classic Outlook is not on this machine at all, export from"
+        Write-Host "the provider instead, or point the collector at the mailbox - see docs/INGEST-SETUP.md."
+    } elseif (-not $registered) {
+        Write-Host "Nothing has registered Outlook.Application, so the classic desktop Outlook is not installed." -ForegroundColor Yellow
+        Write-Host "This script needs it. Outlook on the web and the new Outlook cannot be read by any script."
+    } elseif ($elevated -and $classic) {
+        Write-Host "This shell is elevated and Outlook is not, and COM will not cross that line." -ForegroundColor Yellow
+        Write-Host "Run this in an ordinary PowerShell window. It needs no administrator rights."
+    } elseif ($classic) {
+        Write-Host "Outlook is running but refused the connection." -ForegroundColor Yellow
+        Write-Host "That usually means it is mid-something: a dialog waiting to be answered, a profile still"
+        Write-Host "loading, or a repair running. Bring it to the front, clear whatever it wants, then re-run."
+    } else {
+        Write-Host "Outlook is not running. Open it, wait for it to finish loading, then run this again." -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    exit 1
 }
 
 $namespace = $outlook.GetNamespace('MAPI')

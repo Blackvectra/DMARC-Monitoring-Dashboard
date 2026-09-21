@@ -212,7 +212,7 @@ client's own mail that is at risk.
 
 One value needs handling first: 933 messages carry an `envelope_from` of
 `<>`, the null return path used for bounces and delivery notifications. It
-survives `NormaliseDomain` unchanged and would render literally. Dormant while
+survives `NormalizeDomain` unchanged and would render literally. Dormant while
 nothing reads the field; visible the moment something does.
 
 `discovery_method` and `testing` arrive in DMARCbis reports and are ignored.

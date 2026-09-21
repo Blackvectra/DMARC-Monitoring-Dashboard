@@ -8,7 +8,7 @@ namespace DmarcMonitor.Core.Tests.Reporting;
 /// <summary>
 /// Assembling a client report from stored data.
 ///
-/// The judgement being tested is the one the whole product turns on: telling a
+/// The judgment being tested is the one the whole product turns on: telling a
 /// misconfigured service of the client's own apart from somebody sending as
 /// the client. Getting it backwards sends an operator to fix a mail service
 /// that is fine while an impersonation attempt is filed as maintenance.
@@ -21,7 +21,7 @@ public sealed class ClientReportBuilderTests : IDisposable
     public ClientReportBuilderTests()
     {
         _store = new ReportStore(_dbPath);
-        _store.InitialiseAsync(File.ReadAllText(FindSchema())).GetAwaiter().GetResult();
+        _store.InitializeAsync(File.ReadAllText(FindSchema())).GetAwaiter().GetResult();
     }
 
     public void Dispose()

@@ -204,7 +204,7 @@ public sealed class TlsReportParserTests
     }
 
     [Fact]
-    public void KeepsAnUnrecognisedResultTypeVerbatim()
+    public void KeepsAnUnrecognizedResultTypeVerbatim()
     {
         // A value the RFC does not define must not be silently discarded:
         // it is still the only description of what went wrong.

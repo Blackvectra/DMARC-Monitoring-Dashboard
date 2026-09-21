@@ -52,7 +52,7 @@ public sealed class DmarcPolicyPlannerTests
     }
 
     [Fact]
-    public void RefusesAPolicyItDoesNotRecognise()
+    public void RefusesAPolicyItDoesNotRecognize()
     {
         var plan = DmarcPolicyPlanner.Advance("example.com", Live, "block");
 

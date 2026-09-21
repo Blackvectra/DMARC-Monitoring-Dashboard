@@ -42,8 +42,8 @@
 #                               Entra sign-in (docs/DEPLOYING.md step 5). Until both
 #                               are set the app serves nothing but this machine.
 #   --master-group-id <id>      The Entra security group whose members see every
-#                               organisation (docs/DEPLOYING.md step 5).
-#   --organisation <slug>       The organisation this machine's collector files new
+#                               organization (docs/DEPLOYING.md step 5).
+#   --organization <slug>       The organization this machine's collector files new
 #                               domains under. Default: local.
 #   --mailbox <address> --ingest-tenant-id <id> --ingest-client-id <id>
 #   --cert <path.pfx>           The collector (docs/INGEST-SETUP.md). The .pfx is
@@ -75,7 +75,7 @@ USER_NAME="${DMARC_USER:-dmarc}"
 
 HOST=""; EMAIL=""; RELEASE="latest"; FROM_DIR=""
 PROVIDER_NAME=""; TLS_REPORT_ADDRESS=""
-TENANT_ID=""; CLIENT_ID=""; MASTER_GROUP_ID=""; ORGANISATION=""
+TENANT_ID=""; CLIENT_ID=""; MASTER_GROUP_ID=""; ORGANIZATION=""
 MAILBOX=""; INGEST_TENANT_ID=""; INGEST_CLIENT_ID=""; CERT=""; CERT_PASSWORD="${DMARC_CERT_PASSWORD:-}"
 FALLBACK_ADDRESS=""; REPORTING_DOMAIN=""
 MAKE_CERT=false; PROXY=true; UPDATE_AGENT=true
@@ -83,6 +83,22 @@ MAKE_CERT=false; PROXY=true; UPDATE_AGENT=true
 usage() {
     if [[ -f "$0" ]]; then sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     else echo "options: see https://github.com/${REPO}/blob/main/deploy/bootstrap.sh"; fi
+}
+
+# Downloads a file, retrying the failures worth retrying.
+#
+# Every download here is from somebody else's CDN - Microsoft's, Caddy's,
+# GitHub's - and any of them can answer 5xx for a few seconds. A single curl
+# turns that into a dead install: most of the way through, then a failure at
+# the proxy step and a half-built machine to work out by hand. CI hit exactly
+# that, a 504 from GitHub on the WinSW download, which is what a real server
+# would get on a bad afternoon.
+#
+# --retry covers connection failures and 5xx; --retry-all-errors would also
+# retry a 404, which is an answer rather than a hiccup and should be reported
+# at once.
+fetch() {
+    curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 20 "$@"
 }
 
 need_value() { [[ -n "${2:-}" && "${2:0:2}" != "--" ]] || { echo "$1 needs a value" >&2; exit 64; }; }
@@ -104,7 +120,10 @@ while (( $# )); do
         --tenant-id)          need_value "$1" "${2:-}"; TENANT_ID="$2"; shift 2 ;;
         --client-id)          need_value "$1" "${2:-}"; CLIENT_ID="$2"; shift 2 ;;
         --master-group-id)    need_value "$1" "${2:-}"; MASTER_GROUP_ID="$2"; shift 2 ;;
-        --organisation)       need_value "$1" "${2:-}"; ORGANISATION="$2"; shift 2 ;;
+        # --organisation is still taken: the older spelling appears in pages
+        # and notes people have already copied commands out of.
+        --organization|--organisation)
+                              need_value "$1" "${2:-}"; ORGANIZATION="$2"; shift 2 ;;
         --mailbox)            need_value "$1" "${2:-}"; MAILBOX="$2"; shift 2 ;;
         --ingest-tenant-id)   need_value "$1" "${2:-}"; INGEST_TENANT_ID="$2"; shift 2 ;;
         --ingest-client-id)   need_value "$1" "${2:-}"; INGEST_CLIENT_ID="$2"; shift 2 ;;
@@ -193,14 +212,14 @@ install_caddy_static() {
     [[ "$ARCH" == linux-arm64 ]] && arch=arm64
     echo "   Caddy: static binary (no package in this distribution)"
     local tmp; tmp="$(mktemp)"
-    curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${arch}" -o "$tmp"
+    fetch "https://caddyserver.com/api/download?os=linux&arch=${arch}" -o "$tmp"
     install -m 0755 "$tmp" /usr/bin/caddy
     rm -f "$tmp"
     getent group caddy >/dev/null || groupadd --system caddy
     id caddy >/dev/null 2>&1 || useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
         --shell /usr/sbin/nologin --comment "Caddy web server" caddy
     mkdir -p /etc/caddy
-    curl -fsSL https://raw.githubusercontent.com/caddyserver/dist/master/init/caddy.service \
+    fetch https://raw.githubusercontent.com/caddyserver/dist/master/init/caddy.service \
         -o /etc/systemd/system/caddy.service
     systemctl daemon-reload
 }
@@ -231,7 +250,7 @@ elif [[ ! -e "${ROOT}/app" ]]; then
     echo "== release ${RELEASE}"
     TAG="$RELEASE"
     if [[ "$TAG" == latest ]]; then
-        TAG="$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/latest" \
+        TAG="$(fetch -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/latest" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))')" || TAG=""
         [[ -n "$TAG" ]] || { echo "could not find the latest release of ${REPO}. Is there one? Pass --release <tag>, or --from-dir with the files." >&2; exit 69; }
         echo "   latest is ${TAG}"
@@ -239,7 +258,7 @@ elif [[ ! -e "${ROOT}/app" ]]; then
     BASE="https://github.com/${REPO}/releases/download/${TAG}"
     for name in dmarc-web.zip "dmarc-${ARCH}" dmarc-deploy.tar.gz; do
         echo "   fetching ${name}"
-        curl -fsSL "${BASE}/${name}" -o "${WORK}/${name}" || {
+        fetch "${BASE}/${name}" -o "${WORK}/${name}" || {
             echo "could not download ${BASE}/${name}. If the repository is private, download the files in a browser and use --from-dir." >&2
             exit 69
         }
@@ -332,7 +351,7 @@ echo "== configuration"
 [[ -n "$HOST" ]]               && settings_set "MtaSts:PolicyHost" "$HOST"
 [[ -n "$PROVIDER_NAME" ]]      && settings_set "Reporting:ProviderName" "$PROVIDER_NAME"
 [[ -n "$TLS_REPORT_ADDRESS" ]] && settings_set "Reporting:TlsReportAddress" "$TLS_REPORT_ADDRESS"
-[[ -n "$MASTER_GROUP_ID" ]]    && settings_set "Auth:MasterGroupId" "$MASTER_GROUP_ID" && echo "   master group: ${MASTER_GROUP_ID} sees every organisation"
+[[ -n "$MASTER_GROUP_ID" ]]    && settings_set "Auth:MasterGroupId" "$MASTER_GROUP_ID" && echo "   master group: ${MASTER_GROUP_ID} sees every organization"
 existing_tenant="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); a=d.get("AzureAd",{}); print(a.get("TenantId","") if a.get("ClientId") else "")' "$SETTINGS" 2>/dev/null || true)"
 if [[ -n "$TENANT_ID" ]]; then
     settings_set "AzureAd:TenantId" "$TENANT_ID" "AzureAd:ClientId" "$CLIENT_ID"
@@ -407,7 +426,7 @@ if [[ -n "$CERT" && "$CERT" != "${ROOT}/data/ingest.pfx" ]]; then
     CERT="${ROOT}/data/ingest.pfx"
 fi
 
-if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK_ADDRESS$REPORTING_DOMAIN$ORGANISATION" ]]; then
+if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK_ADDRESS$REPORTING_DOMAIN$ORGANIZATION" ]]; then
     echo "== collector"
     [[ -n "$MAILBOX" ]]          && env_set DMARC_MAILBOX "$MAILBOX"
     [[ -n "$INGEST_TENANT_ID" ]] && env_set DMARC_TENANT_ID "$INGEST_TENANT_ID"
@@ -416,7 +435,7 @@ if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK
     [[ -n "$CERT_PASSWORD" ]]    && env_set DMARC_CERT_PASSWORD "$CERT_PASSWORD"
     [[ -n "$FALLBACK_ADDRESS" ]] && env_set DMARC_FALLBACK_ADDRESS "$FALLBACK_ADDRESS"
     [[ -n "$REPORTING_DOMAIN" ]] && env_set DMARC_REPORTING_DOMAIN "$REPORTING_DOMAIN"
-    [[ -n "$ORGANISATION" ]]     && env_set DMARC_ORGANISATION "$ORGANISATION"
+    [[ -n "$ORGANIZATION" ]]     && env_set DMARC_ORGANIZATION "$ORGANIZATION"
     chmod 0600 "$INGEST_ENV"
 
     # Enabled only when everything it needs is known; a timer firing a

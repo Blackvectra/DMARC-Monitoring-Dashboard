@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Aggregate;
 
 namespace DmarcMonitor.Core.Reporting;
 
@@ -65,6 +66,25 @@ public sealed record ReportSource
     public bool IsClean => Failing == 0;
 }
 
+/// <summary>
+/// Clean sources gathered under one service, for the report's "what sends
+/// mail as you" list.
+/// </summary>
+/// <param name="Name">The service, or the address itself when it is not one we recognize.</param>
+/// <param name="IsService">
+/// True when <paramref name="Name"/> names a service rather than repeating an
+/// address, so the report can say "17 addresses" for the one and nothing for
+/// the other.
+/// </param>
+public sealed record ReportSender
+{
+    public required string Name { get; init; }
+    public bool IsService { get; init; }
+    public int Addresses { get; init; }
+    public long Messages { get; init; }
+    public IReadOnlyList<string> Domains { get; init; } = [];
+}
+
 /// <summary>A DNS change actually made for this client during the period.</summary>
 public sealed record ReportChange
 {
@@ -118,10 +138,10 @@ public sealed record ClientReport
     public required string ProviderName { get; init; }
     public required ReportPeriod Period { get; init; }
 
-    /// <summary>The organisation's accent colour, #rrggbb, or null for the default.</summary>
+    /// <summary>The organization's accent color, #rrggbb, or null for the default.</summary>
     public string? BrandColor { get; init; }
 
-    /// <summary>The organisation's logo as a data: URL, or null for none.</summary>
+    /// <summary>The organization's logo as a data: URL, or null for none.</summary>
     public string? BrandLogo { get; init; }
 
     /// <summary>Who to contact, printed in the footer. Null for none.</summary>
@@ -151,7 +171,7 @@ public sealed record ClientReport
     /// </summary>
     /// <remarks>
     /// Counted in Messages and deliberately absent from the source tables,
-    /// because a mailing list breaking authentication is expected behaviour
+    /// because a mailing list breaking authentication is expected behavior
     /// rather than a finding. That makes the tables sum to less than the
     /// headline, and a client who adds them up and finds a gap has no way to
     /// know it was deliberate.
@@ -180,6 +200,34 @@ public sealed record ClientReport
     /// </remarks>
     public IReadOnlyList<ReportSource> LegitimateSources =>
         [.. Sources.Where(s => s.IsClean).OrderByDescending(s => s.Messages)];
+
+    /// <summary>
+    /// The same sources, gathered under the service they belong to.
+    /// </summary>
+    /// <remarks>
+    /// One real domain's August had 630 clean sources, of which 618 were
+    /// Microsoft's load balancers. Listed individually, fifteen were printed
+    /// and the other 606 became "and 606 more" - a customer being shown their
+    /// own mail host as six hundred anonymous addresses, with the dozen
+    /// sources that were actually worth reading buried underneath. Gathered,
+    /// it is "Microsoft 365, 1,756 messages" and then those dozen.
+    ///
+    /// Only services <see cref="SenderCatalog"/> recognizes are gathered;
+    /// everything else keeps its own address and its own row, so nothing is
+    /// merged on a guess.
+    /// </remarks>
+    public IReadOnlyList<ReportSender> LegitimateSenders =>
+        [.. LegitimateSources
+            .GroupBy(s => SenderCatalog.Label(s.SourceIp), StringComparer.OrdinalIgnoreCase)
+            .Select(g => new ReportSender
+            {
+                Name = g.Key,
+                IsService = SenderCatalog.Identify(g.First().SourceIp) is not null,
+                Addresses = g.Count(),
+                Messages = g.Sum(s => s.Messages),
+                Domains = [.. g.SelectMany(s => s.Domains).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal)],
+            })
+            .OrderByDescending(s => s.Messages)];
 
     /// <summary>
     /// Sources that have never once sent authenticated mail for this client.

@@ -9,23 +9,23 @@ namespace DmarcMonitor.Core.Tests.Tenancy;
 /// so it is tested as a table rather than by signing in as twelve different
 /// people. Every case here is a person, their groups, and what they get.
 /// </summary>
-public sealed class OrganisationAccessTests
+public sealed class OrganizationAccessTests
 {
     private const string NrgGroup = "11111111-1111-1111-1111-111111111111";
     private const string NlsGroup = "22222222-2222-2222-2222-222222222222";
     private const string MasterGroup = "99999999-9999-9999-9999-999999999999";
 
-    private static readonly Organisation Nrg = new("t-nrg", "NRG Tech Services", "nrg-tech-services", NrgGroup, 3, 10);
-    private static readonly Organisation Nls = new("t-nls", "NextLayerSec", "nextlayersec", NlsGroup, 2, 2);
-    private static readonly Organisation Ungrouped = new("t-x", "Nobody's", "nobodys", null, 0, 0);
+    private static readonly Organization Nrg = new("t-nrg", "NRG Tech Services", "nrg-tech-services", NrgGroup, 3, 10);
+    private static readonly Organization Nls = new("t-nls", "NextLayerSec", "nextlayersec", NlsGroup, 2, 2);
+    private static readonly Organization Ungrouped = new("t-x", "Nobody's", "nobodys", null, 0, 0);
 
-    private static readonly IReadOnlyList<Organisation> All = [Nrg, Nls, Ungrouped];
+    private static readonly IReadOnlyList<Organization> All = [Nrg, Nls, Ungrouped];
 
     [Fact]
     public void AnInstallWithNoSignInSeesEverything()
     {
         // The machine is the boundary, as it is for the rest of local mode.
-        var access = OrganisationAccess.Resolve(All, [], masterGroupId: null, chosenSlug: null, everyoneIsMaster: true);
+        var access = OrganizationAccess.Resolve(All, [], masterGroupId: null, chosenSlug: null, everyoneIsMaster: true);
 
         Assert.True(access.IsMaster);
         Assert.Equal(3, access.Visible.Count);
@@ -35,9 +35,9 @@ public sealed class OrganisationAccessTests
     }
 
     [Fact]
-    public void TheMasterGroupSeesEveryOrganisationAtOnce()
+    public void TheMasterGroupSeesEveryOrganizationAtOnce()
     {
-        var access = OrganisationAccess.Resolve(All, [MasterGroup], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, [MasterGroup], MasterGroup, null, everyoneIsMaster: false);
 
         Assert.True(access.IsMaster);
         Assert.Equal(3, access.Visible.Count);
@@ -47,9 +47,9 @@ public sealed class OrganisationAccessTests
     }
 
     [Fact]
-    public void AMasterCanNarrowToOneOrganisation()
+    public void AMasterCanNarrowToOneOrganization()
     {
-        var access = OrganisationAccess.Resolve(All, [MasterGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, [MasterGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
 
         Assert.Same(Nls, access.Current);
         Assert.Equal("t-nls", access.TenantId);
@@ -57,9 +57,9 @@ public sealed class OrganisationAccessTests
     }
 
     [Fact]
-    public void AnEmployeeOfOneOrganisationSeesOnlyIt()
+    public void AnEmployeeOfOneOrganizationSeesOnlyIt()
     {
-        var access = OrganisationAccess.Resolve(All, [NrgGroup], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, [NrgGroup], MasterGroup, null, everyoneIsMaster: false);
 
         Assert.False(access.IsMaster);
         Assert.Single(access.Visible);
@@ -69,15 +69,15 @@ public sealed class OrganisationAccessTests
     }
 
     [Fact]
-    public void SomebodyInTwoOrganisationsLandsInTheFirstAndMaySwitch()
+    public void SomebodyInTwoOrganizationsLandsInTheFirstAndMaySwitch()
     {
-        var access = OrganisationAccess.Resolve(All, [NlsGroup, NrgGroup], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, [NlsGroup, NrgGroup], MasterGroup, null, everyoneIsMaster: false);
 
         Assert.Equal(2, access.Visible.Count);
         Assert.Same(Nrg, access.Current);   // list order, not group order
         Assert.True(access.CanSwitch);
 
-        var switched = OrganisationAccess.Resolve(All, [NlsGroup, NrgGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
+        var switched = OrganizationAccess.Resolve(All, [NlsGroup, NrgGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
         Assert.Same(Nls, switched.Current);
     }
 
@@ -87,12 +87,12 @@ public sealed class OrganisationAccessTests
         // The important case. Signed in, belongs to nothing: the scope must
         // match no row, so a page that forgot to check renders empty rather
         // than rendering everyone's data.
-        var access = OrganisationAccess.Resolve(All, ["33333333-3333-3333-3333-333333333333"], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, ["33333333-3333-3333-3333-333333333333"], MasterGroup, null, everyoneIsMaster: false);
 
         Assert.False(access.HasAccess);
         Assert.Empty(access.Visible);
         Assert.Null(access.Current);
-        Assert.Equal(OrganisationAccess.NoAccessTenantId, access.TenantId);
+        Assert.Equal(OrganizationAccess.NoAccessTenantId, access.TenantId);
         Assert.NotNull(access.TenantId);
     }
 
@@ -100,25 +100,25 @@ public sealed class OrganisationAccessTests
     public void AChoiceOutsideWhatIsVisibleIsIgnored()
     {
         // A stale cookie from before somebody was removed from a group.
-        var access = OrganisationAccess.Resolve(All, [NrgGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, [NrgGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
 
         Assert.Same(Nrg, access.Current);
     }
 
     [Fact]
-    public void AnOrganisationWithNoGroupIsSeenOnlyByTheMaster()
+    public void AnOrganizationWithNoGroupIsSeenOnlyByTheMaster()
     {
-        var employee = OrganisationAccess.Resolve(All, [NrgGroup, NlsGroup], MasterGroup, null, everyoneIsMaster: false);
+        var employee = OrganizationAccess.Resolve(All, [NrgGroup, NlsGroup], MasterGroup, null, everyoneIsMaster: false);
         Assert.DoesNotContain(Ungrouped, employee.Visible);
 
-        var master = OrganisationAccess.Resolve(All, [MasterGroup], MasterGroup, null, everyoneIsMaster: false);
+        var master = OrganizationAccess.Resolve(All, [MasterGroup], MasterGroup, null, everyoneIsMaster: false);
         Assert.Contains(Ungrouped, master.Visible);
     }
 
     [Fact]
     public void GroupIdsMatchWhateverTheirCase()
     {
-        var access = OrganisationAccess.Resolve(All, [NrgGroup.ToUpperInvariant()], MasterGroup.ToUpperInvariant(), null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, [NrgGroup.ToUpperInvariant()], MasterGroup.ToUpperInvariant(), null, everyoneIsMaster: false);
 
         Assert.Same(Nrg, access.Current);
     }
@@ -126,7 +126,7 @@ public sealed class OrganisationAccessTests
     [Fact]
     public void NoMasterGroupConfiguredMeansNobodyIsMaster()
     {
-        var access = OrganisationAccess.Resolve(All, [MasterGroup], masterGroupId: null, chosenSlug: null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(All, [MasterGroup], masterGroupId: null, chosenSlug: null, everyoneIsMaster: false);
 
         Assert.False(access.IsMaster);
         Assert.False(access.HasAccess);
@@ -138,17 +138,17 @@ public sealed class OrganisationAccessTests
     private const string NrgViewers = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
     private const string CustomerGroup = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 
-    private static readonly Organisation Roled =
+    private static readonly Organization Roled =
         new("t-nrg", "NRG Tech Services", "nrg-tech-services", NrgGroup, 3, 10, NrgAdmins, NrgViewers);
 
-    private static readonly IReadOnlyList<Organisation> Roles = [Roled, Nls];
+    private static readonly IReadOnlyList<Organization> Roles = [Roled, Nls];
 
     [Fact]
     public void AViewerReadsAndDoesNotOperate()
     {
-        var access = OrganisationAccess.Resolve(Roles, [NrgViewers], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(Roles, [NrgViewers], MasterGroup, null, everyoneIsMaster: false);
 
-        Assert.Equal(OrganisationRole.Viewer, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Viewer, access.CurrentRole);
         Assert.False(access.CanOperate);
         Assert.False(access.CanAdminister);
         Assert.Equal("t-nrg", access.TenantId);
@@ -157,9 +157,9 @@ public sealed class OrganisationAccessTests
     [Fact]
     public void AnOperatorOperatesButDoesNotAdminister()
     {
-        var access = OrganisationAccess.Resolve(Roles, [NrgGroup], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(Roles, [NrgGroup], MasterGroup, null, everyoneIsMaster: false);
 
-        Assert.Equal(OrganisationRole.Operator, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Operator, access.CurrentRole);
         Assert.True(access.CanOperate);
         Assert.False(access.CanAdminister);
     }
@@ -167,9 +167,9 @@ public sealed class OrganisationAccessTests
     [Fact]
     public void AnAdminDoesBoth()
     {
-        var access = OrganisationAccess.Resolve(Roles, [NrgAdmins], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(Roles, [NrgAdmins], MasterGroup, null, everyoneIsMaster: false);
 
-        Assert.Equal(OrganisationRole.Admin, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Admin, access.CurrentRole);
         Assert.True(access.CanOperate);
         Assert.True(access.CanAdminister);
     }
@@ -180,17 +180,17 @@ public sealed class OrganisationAccessTests
         // Somebody in all three groups is an admin, not a viewer. Adding
         // somebody to a stronger group must not require removing them from
         // the weaker one first.
-        var access = OrganisationAccess.Resolve(Roles, [NrgViewers, NrgGroup, NrgAdmins], MasterGroup, null, everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(Roles, [NrgViewers, NrgGroup, NrgAdmins], MasterGroup, null, everyoneIsMaster: false);
 
-        Assert.Equal(OrganisationRole.Admin, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Admin, access.CurrentRole);
     }
 
     [Fact]
-    public void AMasterIsMasterOfEveryOrganisation()
+    public void AMasterIsMasterOfEveryOrganization()
     {
-        var access = OrganisationAccess.Resolve(Roles, [MasterGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
+        var access = OrganizationAccess.Resolve(Roles, [MasterGroup], MasterGroup, "nextlayersec", everyoneIsMaster: false);
 
-        Assert.Equal(OrganisationRole.Master, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Master, access.CurrentRole);
         Assert.True(access.CanAdminister);
         Assert.Null(access.RestrictedClient);
     }
@@ -201,10 +201,10 @@ public sealed class OrganisationAccessTests
         // The customer's own login: read only, and confined to their client.
         ClientGroup[] clients = [new("nrg-tech-services", "morton-nd", "Morton, ND", CustomerGroup)];
 
-        var access = OrganisationAccess.Resolve(Roles, [CustomerGroup], MasterGroup, null, everyoneIsMaster: false, clients);
+        var access = OrganizationAccess.Resolve(Roles, [CustomerGroup], MasterGroup, null, everyoneIsMaster: false, clients);
 
         Assert.Same(Roled, access.Current);
-        Assert.Equal(OrganisationRole.Viewer, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Viewer, access.CurrentRole);
         Assert.False(access.CanOperate);
         Assert.Equal("morton-nd", access.RestrictedClient);
         Assert.Single(access.Visible);
@@ -217,20 +217,20 @@ public sealed class OrganisationAccessTests
         // that one client.
         ClientGroup[] clients = [new("nrg-tech-services", "morton-nd", "Morton, ND", CustomerGroup)];
 
-        var access = OrganisationAccess.Resolve(Roles, [CustomerGroup, NrgGroup], MasterGroup, null, everyoneIsMaster: false, clients);
+        var access = OrganizationAccess.Resolve(Roles, [CustomerGroup, NrgGroup], MasterGroup, null, everyoneIsMaster: false, clients);
 
-        Assert.Equal(OrganisationRole.Operator, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Operator, access.CurrentRole);
         Assert.Null(access.RestrictedClient);
     }
 
     [Fact]
-    public void ACustomerOfAnotherOrganisationIsNotConfinedHere()
+    public void ACustomerOfAnotherOrganizationIsNotConfinedHere()
     {
-        // The restriction belongs to the organisation the client is in. In
-        // any other organisation it must not leak in as a filter.
+        // The restriction belongs to the organization the client is in. In
+        // any other organization it must not leak in as a filter.
         ClientGroup[] clients = [new("nextlayersec", "acme", "Acme", CustomerGroup)];
 
-        var access = OrganisationAccess.Resolve(Roles, [CustomerGroup, NrgGroup], MasterGroup, "nrg-tech-services", everyoneIsMaster: false, clients);
+        var access = OrganizationAccess.Resolve(Roles, [CustomerGroup, NrgGroup], MasterGroup, "nrg-tech-services", everyoneIsMaster: false, clients);
 
         Assert.Same(Roled, access.Current);
         Assert.Null(access.RestrictedClient);

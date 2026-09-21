@@ -34,7 +34,7 @@ public sealed class AlignmentTests
     [InlineData("training.knowbe4.com", "nrgtechservices.com")]
     [InlineData("mailchimpapp.net", "acme.com")]
     [InlineData("sendgrid.net", "acme.com")]
-    public void ADifferentOrganisationNeverAligns(string auth, string from)
+    public void ADifferentOrganizationNeverAligns(string auth, string from)
     {
         Assert.Equal(AlignmentVerdict.Unrelated, Alignment.Classify(auth, from));
         Assert.False(Alignment.Aligns(auth, from, strict: true));

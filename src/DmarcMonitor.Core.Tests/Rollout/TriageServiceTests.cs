@@ -23,7 +23,7 @@ public sealed class TriageServiceTests : IDisposable
     public TriageServiceTests()
     {
         _store = new ReportStore(_dbPath);
-        _store.InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        _store.InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
     }
 
     public void Dispose()
@@ -113,7 +113,7 @@ public sealed class TriageServiceTests : IDisposable
     [Fact]
     public async Task EveryRowCarriesTheSentenceRolloutAssessmentWouldGive()
     {
-        // The list must not paraphrase the judgement, or the list and the
+        // The list must not paraphrase the judgment, or the list and the
         // domain page end up describing the same domain differently.
         await StoreAsync("acme.com", "reject", 1,
             Row("192.0.2.1", 800, "pass", "acme.com"),
@@ -161,7 +161,7 @@ public sealed class TriageServiceTests : IDisposable
     [Fact]
     public async Task ASilentDomainOutranksOneThatIsMerelyFailing()
     {
-        // Every other judgement is computed from reports. If those stopped,
+        // Every other judgment is computed from reports. If those stopped,
         // everything below is describing the past.
         await StoreAsync("silent.com", "reject", 90, Row("192.0.2.1", 100, "pass", "silent.com"));
         await StoreAsync("failing.com", "none", 1,

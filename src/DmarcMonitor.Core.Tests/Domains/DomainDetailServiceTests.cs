@@ -22,7 +22,7 @@ public sealed class DomainDetailServiceTests : IDisposable
     public DomainDetailServiceTests()
     {
         _store = new ReportStore(_dbPath);
-        _store.InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        _store.InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
     }
 
     public void Dispose()

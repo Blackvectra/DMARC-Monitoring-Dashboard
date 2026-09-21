@@ -32,13 +32,13 @@ public sealed class ReportUiService(DatabaseInfo database, IConfiguration config
     public bool IsProviderNameSet =>
         _configuration["Reporting:ProviderName"] is { Length: > 0 };
 
-    /// <param name="tenantId">One organisation's clients, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's clients, or null for every organization's.</param>
     public Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(string? tenantId, CancellationToken ct = default) =>
         _builder.GetClientsAsync(tenantId, ct);
 
     /// <param name="tenantId">
-    /// The organisation the caller may see. A client outside it is not found,
-    /// so a report URL guessed for another organisation's customer is a 404.
+    /// The organization the caller may see. A client outside it is not found,
+    /// so a report URL guessed for another organization's customer is a 404.
     /// </param>
     public Task<ClientReport?> BuildAsync(string slug, ReportPeriod period, string? tenantId, CancellationToken ct = default) =>
         _builder.BuildAsync(slug, period, ProviderName, tenantId, ct);

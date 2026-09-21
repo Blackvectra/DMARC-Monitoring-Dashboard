@@ -53,9 +53,9 @@ builder.Services.AddScoped(_ => new DmarcMonitor.Core.Domains.DomainDetailServic
 // exception to the read-only rule rather than a loosening of it.
 builder.Services.AddScoped<OnboardingService>();
 
-// Organisations: the layer above clients, and who may see which. Every page
+// Organizations: the layer above clients, and who may see which. Every page
 // asks OrgContext for its scope before it asks the database for anything.
-builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tenancy.OrganisationStore(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tenancy.OrganizationStore(dbPath));
 builder.Services.AddScoped<OrgContext>();
 
 // Who did what. Written by the pages that change setup, read on Settings.
@@ -94,6 +94,10 @@ var app = builder.Build();
 // First, so everything after it sees the caller's real address and scheme.
 app.UseProxyHeaders();
 
+// Before anything that can write a response, including the error handler and
+// the static files below, so every byte this app sends carries them.
+app.UseSecurityHeaders();
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/error", createScopeForErrors: true);
@@ -128,7 +132,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapLocalSignIn();
-app.MapOrganisationSwitch();
+app.MapOrganizationSwitch();
 if (AuthSetup.IsEntraConfigured(app.Configuration))
 {
     app.MapControllers();   // Microsoft.Identity.Web.UI provides sign-in/out
@@ -172,20 +176,20 @@ app.MapGet("/.well-known/mta-sts.txt", async (
 // policy covers this endpoint like any other.
 app.MapGet("/reports/download/{slug}/{month}", async (
     HttpContext context, string slug, string month, ReportUiService reports,
-    DmarcMonitor.Core.Tenancy.OrganisationStore organisations, CancellationToken ct) =>
+    DmarcMonitor.Core.Tenancy.OrganizationStore organizations, CancellationToken ct) =>
 {
     if (!ReportUiService.TryParseMonth(month, out var period))
     {
         return Results.BadRequest("Month must look like 2026-08.");
     }
 
-    // Scoped like every page: a slug guessed for another organisation's
+    // Scoped like every page: a slug guessed for another organization's
     // customer is not found, not served. Resolved from the request's own
     // principal, because there is no component here to hold an
     // authentication state.
     var access = OrgContext.Resolve(
-        context.User, await organisations.ListAsync(ct).ConfigureAwait(false), app.Configuration,
-        await organisations.ClientGroupsAsync(ct).ConfigureAwait(false));
+        context.User, await organizations.ListAsync(ct).ConfigureAwait(false), app.Configuration,
+        await organizations.ClientGroupsAsync(ct).ConfigureAwait(false));
     if (access.RestrictedClient is { } only && !only.Equals(slug, StringComparison.OrdinalIgnoreCase))
     {
         // A customer's login gets their own report and nobody else's.

@@ -6,7 +6,7 @@
 
 @*
     The shell. Three jobs beyond holding the page: say which navigation is
-    daily work and which is setup, say which organisation is being looked at
+    daily work and which is setup, say which organization is being looked at
     and let a person who may see more than one switch, and get out of the way
     on a narrow screen.
 
@@ -14,15 +14,15 @@
     morning starts - look like the same kind of thing as "Updates", which is
     touched twice a year.
 
-    The menu, theme and organisation controls call plain JavaScript rather
+    The menu, theme and organization controls call plain JavaScript rather
     than carrying @@onclick. This layout has no render mode: pages are
     interactive islands inside a statically rendered shell, so a Blazor handler
     here is never wired up and does nothing when clicked. That is how the first
     version shipped, and only driving it in a real browser caught it - both
     buttons rendered perfectly and neither worked.
 
-    White-label: the organisation being looked at lends the shell its colour
-    and its logo. The colour only ever comes from the store, which refuses
+    White-label: the organization being looked at lends the shell its color
+    and its logo. The color only ever comes from the store, which refuses
     anything but a six-digit hex, and it is checked again here because it is
     written into a style attribute.
 *@
@@ -50,7 +50,7 @@
             }
         </div>
 
-        @* Which organisation this is. A switcher for anybody who may see more
+        @* Which organization this is. A switcher for anybody who may see more
            than one; a plain name for everybody else, because a select with one
            option is a control that does nothing. *@
         @if (_access is { HasAccess: true })
@@ -58,11 +58,11 @@
             <div class="org">
                 @if (_access.CanSwitch)
                 {
-                    <label class="org-label" for="org-switch">Organisation</label>
-                    <select id="org-switch" class="org-switch" onchange="dmarcShell.switchOrg(this.value)" aria-label="Organisation">
+                    <label class="org-label" for="org-switch">Organization</label>
+                    <select id="org-switch" class="org-switch" onchange="dmarcShell.switchOrg(this.value)" aria-label="Organization">
                         @if (_access.IsMaster)
                         {
-                            <option value="" selected="@(_access.Current is null)">All organisations</option>
+                            <option value="" selected="@(_access.Current is null)">All organizations</option>
                         }
                         @foreach (var o in _access.Visible)
                         {
@@ -72,7 +72,7 @@
                 }
                 else if (_access.Current is not null && Logo is not null)
                 {
-                    <p class="org-label">Organisation</p>
+                    <p class="org-label">Organization</p>
                     <p class="org-name">@_access.Current.Name</p>
                 }
                 @* What this person may do here, said plainly: a viewer who
@@ -132,15 +132,15 @@
 
         @if (_access is { HasAccess: false })
         {
-            @* Signed in, and in no organisation's group. The page is withheld
+            @* Signed in, and in no organization's group. The page is withheld
                rather than rendered empty, and it says what would change that,
                because "no domains" would read as a product with nothing in it
                rather than a person with nothing granted. *@
             <div class="empty">
-                <h2>No organisation</h2>
-                <p>You are signed in, but you are not in the security group of any organisation here, so there
+                <h2>No organization</h2>
+                <p>You are signed in, but you are not in the security group of any organization here, so there
                    is nothing you can see.</p>
-                <p class="muted">Ask whoever runs this to add you to an organisation's group in Microsoft Entra,
+                <p class="muted">Ask whoever runs this to add you to an organization's group in Microsoft Entra,
                    or to the master group named in <code>Auth:MasterGroupId</code>. Sign out and back in once
                    they have.</p>
             </div>
@@ -153,23 +153,23 @@
 </div>
 
 @code {
-    private OrganisationAccess? _access;
+    private OrganizationAccess? _access;
 
     private bool EntraConfigured => DmarcMonitor.Web.Auth.AuthSetup.IsEntraConfigured(Configuration);
 
     private string? Logo =>
-        _access?.Current?.Brand.Logo is { } logo && OrganisationBrand.IsValidLogo(logo) ? logo : null;
+        _access?.Current?.Brand.Logo is { } logo && OrganizationBrand.IsValidLogo(logo) ? logo : null;
 
     private string Accent =>
-        _access?.Current?.Brand.PrimaryColor is { } c && OrganisationBrand.IsValidColor(c) ? $"--accent: {c};" : "";
+        _access?.Current?.Brand.PrimaryColor is { } c && OrganizationBrand.IsValidColor(c) ? $"--accent: {c};" : "";
 
     private string RoleLabel => _access?.CurrentRole switch
     {
-        OrganisationRole.Master => "master: every organisation",
-        OrganisationRole.Admin => "admin",
-        OrganisationRole.Operator => "operator",
-        OrganisationRole.Viewer when _access.RestrictedClient is not null => "your organisation's view, read only",
-        OrganisationRole.Viewer => "viewer, read only",
+        OrganizationRole.Master => "master: every organization",
+        OrganizationRole.Admin => "admin",
+        OrganizationRole.Operator => "operator",
+        OrganizationRole.Viewer when _access.RestrictedClient is not null => "your organization's view, read only",
+        OrganizationRole.Viewer => "viewer, read only",
         _ => "",
     };
 

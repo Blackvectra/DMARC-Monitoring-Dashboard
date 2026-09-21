@@ -8,7 +8,7 @@
 @inject OnboardingService Onboarding
 @inject DmarcMonitor.Core.Updates.ReleaseChannel Releases
 @inject OrgContext Org
-@inject DmarcMonitor.Core.Tenancy.OrganisationStore Organisations
+@inject DmarcMonitor.Core.Tenancy.OrganizationStore Organizations
 @inject DmarcMonitor.Core.Tenancy.AuditLog Audit
 @rendermode InteractiveServer
 
@@ -83,12 +83,12 @@
                     @if (Configuration[OrgContext.MasterGroupKey] is { Length: > 0 } master)
                     {
                         <code>@master</code>
-                        <span class="muted"> — members see every organisation</span>
+                        <span class="muted"> — members see every organization</span>
                     }
                     else
                     {
                         <span class="muted">not set. Set <code>@OrgContext.MasterGroupKey</code> to the object id of the
-                            Entra group whose members may see every organisation.</span>
+                            Entra group whose members may see every organization.</span>
                     }
                 </td>
             </tr>
@@ -99,7 +99,7 @@
                     <td>
                         @if (_access.IsMaster)
                         {
-                            <span>every organisation (@(EntraConfigured ? "master group" : "no sign-in, so the machine is the boundary"))</span>
+                            <span>every organization (@(EntraConfigured ? "master group" : "no sign-in, so the machine is the boundary"))</span>
                         }
                         else if (_access.Visible.Count > 0)
                         {
@@ -107,7 +107,7 @@
                         }
                         else
                         {
-                            <span class="bad">none — you are in no organisation's group</span>
+                            <span class="bad">none — you are in no organization's group</span>
                         }
                     </td>
                 </tr>
@@ -117,13 +117,13 @@
 </section>
 
 <section>
-    <h2>Organisations</h2>
-    <p class="sub">The layer above clients. Each organisation has its own clients and domains, and the people
+    <h2>Organizations</h2>
+    <p class="sub">The layer above clients. Each organization has its own clients and domains, and the people
        in its Entra security groups see those and nothing else: admins run its settings, operators assign
        domains and apply fixes, viewers read. Setting a group here does nothing until the app
        registration's token configuration includes the <code>groups</code> claim.</p>
 
-    @if (_organisations is null)
+    @if (_organizations is null)
     {
         <p class="muted">Loading…</p>
     }
@@ -131,19 +131,19 @@
     {
         <table class="triage">
             <thead>
-                <tr><th>Organisation</th><th>Slug</th><th>Groups</th><th class="num">Clients</th><th class="num">Domains</th><th></th></tr>
+                <tr><th>Organization</th><th>Slug</th><th>Groups</th><th class="num">Clients</th><th class="num">Domains</th><th></th></tr>
             </thead>
             <tbody>
-                @foreach (var o in _organisations)
+                @foreach (var o in _organizations)
                 {
                     <tr>
                         <td>
-                            @if (o.Brand.Logo is { } logo && DmarcMonitor.Core.Tenancy.OrganisationBrand.IsValidLogo(logo))
+                            @if (o.Brand.Logo is { } logo && DmarcMonitor.Core.Tenancy.OrganizationBrand.IsValidLogo(logo))
                             {
                                 <img src="@logo" alt="" style="max-height:20px;max-width:80px;vertical-align:middle;margin-right:6px" />
                             }
                             @o.Name
-                            @if (o.Brand.PrimaryColor is { } c && DmarcMonitor.Core.Tenancy.OrganisationBrand.IsValidColor(c))
+                            @if (o.Brand.PrimaryColor is { } c && DmarcMonitor.Core.Tenancy.OrganizationBrand.IsValidColor(c))
                             {
                                 <span class="pip" style="background:@c;margin-left:6px" title="@c"></span>
                             }
@@ -169,9 +169,9 @@
             </tbody>
         </table>
 
-        @if (_organisationMessage is not null)
+        @if (_organizationMessage is not null)
         {
-            <p class="@(_organisationMessageIsError ? "bad" : "good")">@_organisationMessage</p>
+            <p class="@(_organizationMessageIsError ? "bad" : "good")">@_organizationMessage</p>
         }
 
         @if (_editSlug.Length > 0)
@@ -186,10 +186,10 @@
                 <input placeholder="Operator group object id" @bind="_editOperator" @bind:event="oninput" aria-label="Operator group" />
                 <input placeholder="Viewer group object id" @bind="_editViewer" @bind:event="oninput" aria-label="Viewer group" />
             </div>
-            <p class="sub">White-label: the sidebar takes the colour and logo, and this organisation's reports say
+            <p class="sub">White-label: the sidebar takes the color and logo, and this organization's reports say
                "prepared by" the provider name and end with the contact block.</p>
             <div class="form-row">
-                <input placeholder="Accent colour, e.g. #4f46e5" @bind="_editColor" @bind:event="oninput" aria-label="Accent colour" />
+                <input placeholder="Accent color, e.g. #4f46e5" @bind="_editColor" @bind:event="oninput" aria-label="Accent color" />
                 <input placeholder="Provider name on reports" @bind="_editProvider" @bind:event="oninput" aria-label="Provider name" />
             </div>
             <div class="form-row">
@@ -198,7 +198,7 @@
             </div>
             <div class="form-row">
                 <label class="toggle">
-                    Logo (PNG, JPEG, SVG, up to @(DmarcMonitor.Core.Tenancy.OrganisationBrand.MaxLogoLength / 1000) KB)
+                    Logo (PNG, JPEG, SVG, up to @(DmarcMonitor.Core.Tenancy.OrganizationBrand.MaxLogoLength / 1000) KB)
                     <InputFile OnChange="OnLogoAsync" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" />
                 </label>
                 @if (_editLogo is not null)
@@ -212,18 +212,18 @@
                 }
             </div>
             <div class="form-row">
-                <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_editName))" @onclick="SaveOrganisationAsync">Save</button>
+                <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_editName))" @onclick="SaveOrganizationAsync">Save</button>
                 <button disabled="@_busy" @onclick="() => _editSlug = string.Empty">Cancel</button>
             </div>
         }
 
         @if (_access is { IsMaster: true })
         {
-            <h3>Add an organisation</h3>
+            <h3>Add an organization</h3>
             <div class="form-row">
-                <input placeholder="Name, e.g. NextLayerSec" @bind="_newOrganisation" @bind:event="oninput" />
-                <input placeholder="Operator group object id (optional)" @bind="_newOrganisationGroup" @bind:event="oninput" />
-                <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_newOrganisation))" @onclick="AddOrganisationAsync">Add</button>
+                <input placeholder="Name, e.g. NextLayerSec" @bind="_newOrganization" @bind:event="oninput" />
+                <input placeholder="Operator group object id (optional)" @bind="_newOrganizationGroup" @bind:event="oninput" />
+                <button class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_newOrganization))" @onclick="AddOrganizationAsync">Add</button>
             </div>
         }
     }
@@ -233,7 +233,7 @@
 {
     <section>
         <h2>Recent activity</h2>
-        <p class="sub">Who changed what: organisations, groups, clients, providers, imports. DNS changes have their
+        <p class="sub">Who changed what: organizations, groups, clients, providers, imports. DNS changes have their
            own trail on the Fix page.</p>
         @if (_activity is null)
         {
@@ -537,12 +537,12 @@
             }
         }
 
-        if (!Db.Exists) { _providers = []; _organisations = []; return; }
+        if (!Db.Exists) { _providers = []; _organizations = []; return; }
 
         try
         {
             _access = await Org.GetAsync();
-            _organisations = await Organisations.ListAsync();
+            _organizations = await Organizations.ListAsync();
             _activity = _access.CanAdminister ? await Audit.ListAsync(_access.TenantId, 30) : [];
             _providers = await Fixes.ProvidersAsync(_access.TenantId);
             _clients = [.. (await Onboarding.GetClientsAsync(_access.TenantId))
@@ -623,15 +623,15 @@
     private bool EntraConfigured => AuthSetup.IsEntraConfigured(Configuration);
     private bool LocalModeRemote => AuthSetup.LocalModeAllowedRemotely(Configuration);
 
-    // ---- organisations --------------------------------------------------------
+    // ---- organizations --------------------------------------------------------
 
-    private DmarcMonitor.Core.Tenancy.OrganisationAccess? _access;
-    private IReadOnlyList<DmarcMonitor.Core.Tenancy.Organisation>? _organisations;
+    private DmarcMonitor.Core.Tenancy.OrganizationAccess? _access;
+    private IReadOnlyList<DmarcMonitor.Core.Tenancy.Organization>? _organizations;
     private IReadOnlyList<DmarcMonitor.Core.Tenancy.AuditEntry>? _activity;
-    private string? _organisationMessage;
-    private bool _organisationMessageIsError;
-    private string _newOrganisation = "";
-    private string _newOrganisationGroup = "";
+    private string? _organizationMessage;
+    private bool _organizationMessageIsError;
+    private string _newOrganization = "";
+    private string _newOrganizationGroup = "";
 
     private string _editSlug = "";
     private string _editName = "";
@@ -644,12 +644,12 @@
     private string? _editLogo;
     private string? _editLogoProblem;
 
-    /// <summary>A master edits any organisation; an admin edits their own.</summary>
-    private bool CanEdit(DmarcMonitor.Core.Tenancy.Organisation o) =>
+    /// <summary>A master edits any organization; an admin edits their own.</summary>
+    private bool CanEdit(DmarcMonitor.Core.Tenancy.Organization o) =>
         _access is { IsMaster: true }
-        || (_access is not null && _access.Roles.GetValueOrDefault(o.Slug) >= DmarcMonitor.Core.Tenancy.OrganisationRole.Admin);
+        || (_access is not null && _access.Roles.GetValueOrDefault(o.Slug) >= DmarcMonitor.Core.Tenancy.OrganizationRole.Admin);
 
-    private void BeginEdit(DmarcMonitor.Core.Tenancy.Organisation o)
+    private void BeginEdit(DmarcMonitor.Core.Tenancy.Organization o)
     {
         if (!CanEdit(o)) { return; }
         _editSlug = o.Slug;
@@ -668,19 +668,19 @@
     {
         _editLogoProblem = null;
         var file = e.File;
-        if (file.Size > DmarcMonitor.Core.Tenancy.OrganisationBrand.MaxLogoLength * 3 / 4)
+        if (file.Size > DmarcMonitor.Core.Tenancy.OrganizationBrand.MaxLogoLength * 3 / 4)
         {
-            _editLogoProblem = $"That file is too big; a logo has to fit in {DmarcMonitor.Core.Tenancy.OrganisationBrand.MaxLogoLength / 1000} KB.";
+            _editLogoProblem = $"That file is too big; a logo has to fit in {DmarcMonitor.Core.Tenancy.OrganizationBrand.MaxLogoLength / 1000} KB.";
             return;
         }
 
         try
         {
             using var buffer = new MemoryStream();
-            await using var stream = file.OpenReadStream(DmarcMonitor.Core.Tenancy.OrganisationBrand.MaxLogoLength);
+            await using var stream = file.OpenReadStream(DmarcMonitor.Core.Tenancy.OrganizationBrand.MaxLogoLength);
             await stream.CopyToAsync(buffer);
             var candidate = $"data:{file.ContentType};base64,{Convert.ToBase64String(buffer.ToArray())}";
-            if (!DmarcMonitor.Core.Tenancy.OrganisationBrand.IsValidLogo(candidate))
+            if (!DmarcMonitor.Core.Tenancy.OrganizationBrand.IsValidLogo(candidate))
             {
                 _editLogoProblem = "That is not an image type a browser draws (PNG, JPEG, GIF, WebP or SVG).";
                 return;
@@ -693,11 +693,11 @@
         }
     }
 
-    private async Task SaveOrganisationAsync()
+    private async Task SaveOrganizationAsync()
     {
         // Checked here as well as in the markup: the handler runs on the
         // server, and a hidden form is not a permission.
-        var org = _organisations?.FirstOrDefault(o => o.Slug == _editSlug);
+        var org = _organizations?.FirstOrDefault(o => o.Slug == _editSlug);
         if (org is null || !CanEdit(org) || _access is null) { return; }
 
         _busy = true;
@@ -706,85 +706,85 @@
             var changed = new List<string>();
             if (!string.Equals(org.Name, _editName.Trim(), StringComparison.Ordinal))
             {
-                await Organisations.RenameAsync(org.Slug, _editName);
+                await Organizations.RenameAsync(org.Slug, _editName);
                 changed.Add($"renamed to {_editName.Trim()}");
             }
 
             foreach (var (role, value, was) in new[]
                      {
-                         (DmarcMonitor.Core.Tenancy.OrganisationRole.Admin, _editAdmin, org.AdminGroupId),
-                         (DmarcMonitor.Core.Tenancy.OrganisationRole.Operator, _editOperator, org.EntraGroupId),
-                         (DmarcMonitor.Core.Tenancy.OrganisationRole.Viewer, _editViewer, org.ViewerGroupId),
+                         (DmarcMonitor.Core.Tenancy.OrganizationRole.Admin, _editAdmin, org.AdminGroupId),
+                         (DmarcMonitor.Core.Tenancy.OrganizationRole.Operator, _editOperator, org.EntraGroupId),
+                         (DmarcMonitor.Core.Tenancy.OrganizationRole.Viewer, _editViewer, org.ViewerGroupId),
                      })
             {
                 var wanted = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
                 if (!string.Equals(wanted, was, StringComparison.OrdinalIgnoreCase))
                 {
-                    await Organisations.SetGroupAsync(org.Slug, role, wanted);
+                    await Organizations.SetGroupAsync(org.Slug, role, wanted);
                     changed.Add($"{role.ToString().ToLowerInvariant()} group {(wanted ?? "cleared")}");
                 }
             }
 
-            var brand = new DmarcMonitor.Core.Tenancy.OrganisationBrand(
+            var brand = new DmarcMonitor.Core.Tenancy.OrganizationBrand(
                 string.IsNullOrWhiteSpace(_editColor) ? null : _editColor.Trim(),
                 _editLogo,
                 string.IsNullOrWhiteSpace(_editProvider) ? null : _editProvider.Trim(),
                 string.IsNullOrWhiteSpace(_editContact) ? null : _editContact.Trim());
             if (brand != org.Brand)
             {
-                await Organisations.SetBrandAsync(org.Slug, brand);
+                await Organizations.SetBrandAsync(org.Slug, brand);
                 changed.Add("branding");
             }
 
-            _organisationMessage = changed.Count == 0
+            _organizationMessage = changed.Count == 0
                 ? "Nothing changed."
                 : $"{org.Name}: {string.Join(", ", changed)}. Group changes apply after the people concerned sign out and back in.";
-            _organisationMessageIsError = false;
+            _organizationMessageIsError = false;
 
             if (changed.Count > 0)
             {
-                await Audit.RecordAsync(org.Id, _access.User, "organisation.updated", $"{org.Slug}: {string.Join(", ", changed)}");
+                await Audit.RecordAsync(org.Id, _access.User, "organization.updated", $"{org.Slug}: {string.Join(", ", changed)}");
             }
 
             _editSlug = "";
-            _organisations = await Organisations.ListAsync();
+            _organizations = await Organizations.ListAsync();
             _activity = await Audit.ListAsync(_access.TenantId, 30);
         }
         catch (Exception ex)
         {
-            _organisationMessage = ex.Message;
-            _organisationMessageIsError = true;
+            _organizationMessage = ex.Message;
+            _organizationMessageIsError = true;
         }
         finally { _busy = false; }
     }
 
-    private async Task AddOrganisationAsync()
+    private async Task AddOrganizationAsync()
     {
         if (_access is not { IsMaster: true }) { return; }
         _busy = true;
         try
         {
-            var created = await Organisations.CreateAsync(_newOrganisation, null, _newOrganisationGroup);
+            var created = await Organizations.CreateAsync(_newOrganization, null, _newOrganizationGroup);
             if (created is null)
             {
-                _organisationMessage = $"An organisation filed as '{DmarcMonitor.Core.Storage.ReportStore.Slugify(_newOrganisation)}' already exists.";
-                _organisationMessageIsError = true;
+                _organizationMessage = $"An organization filed as '{DmarcMonitor.Core.Storage.ReportStore.Slugify(_newOrganization)}' already exists.";
+                _organizationMessageIsError = true;
             }
             else
             {
-                _organisationMessage = $"Added {created.Name}, filed as '{created.Slug}'. It appears in the sidebar switcher on the next page load.";
-                _organisationMessageIsError = false;
-                await Audit.RecordAsync(null, _access.User, "organisation.added", $"{created.Name} ({created.Slug})");
-                _newOrganisation = "";
-                _newOrganisationGroup = "";
-                _organisations = await Organisations.ListAsync();
+                _organizationMessage = $"Added {created.Name}, filed as '{created.Slug}'. It appears in the sidebar switcher on the next page load.";
+                _organizationMessageIsError = false;
+                await Audit.RecordAsync(null, _access.User, "organization.added", $"{created.Name} ({created.Slug})");
+                _newOrganization = "";
+                _newOrganizationGroup = "";
+                _organizations = await Organizations.ListAsync();
                 _activity = await Audit.ListAsync(_access.TenantId, 30);
             }
         }
         catch (Exception ex)
         {
-            _organisationMessage = ex.Message;
-            _organisationMessageIsError = true;
+            _organizationMessage = ex.Message;
+            _organizationMessageIsError = true;
         }
         finally { _busy = false; }
     }

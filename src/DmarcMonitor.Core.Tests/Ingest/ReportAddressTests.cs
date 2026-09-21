@@ -80,7 +80,7 @@ public sealed class ReportAddressTests
     }
 
     [Fact]
-    public void NormalisesTheReportingDomainWhenBuilding()
+    public void NormalizesTheReportingDomainWhenBuilding()
     {
         var token = ReportAddress.GenerateToken();
         Assert.Equal($"{token}@rua.nrgsecure.com", ReportAddress.Build(token, "RUA.NRGSecure.com."));
@@ -279,7 +279,7 @@ public sealed class ReportAddressTests
     }
 
     [Fact]
-    public void DoesNotIngestUnrecognisedMailWhenAFallbackIsConfigured()
+    public void DoesNotIngestUnrecognizedMailWhenAFallbackIsConfigured()
     {
         // A configured fallback must not become a catch-all that accepts
         // anything addressed anywhere.

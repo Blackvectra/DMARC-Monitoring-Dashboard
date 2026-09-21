@@ -124,13 +124,13 @@ public static class Program
                 assign           File a domain, and its stored history, under a client.
                   --domain <d>   Domain as it appears in the reports.
                   --client <s>   Client slug, from 'dmarc client list'.
-                --org <slug>     Organisation a new client belongs to. Default: local
+                --org <slug>     Organization a new client belongs to. Default: local
                 --db <path>      Database file. Default: dmarc.db
 
-              org                Organisations: the layer above clients. Each has its own
+              org                Organizations: the layer above clients. Each has its own
                                  clients and domains, and its people - an Entra security
                                  group - see those and nothing else.
-                list             Every organisation, with its group.
+                list             Every organization, with its group.
                 add              Create one.  --name <name> [--slug <slug>] [--group <id>]
                 set-group        Say which Entra group belongs to it.  --org <slug> --group <id>
                 rename           --org <slug> --name <name>
@@ -149,7 +149,7 @@ public static class Program
 
               check              Read what a domain publishes in DNS and say what is wrong
                                  with it: SPF lookup limit, dead includes, a record that
-                                 authorises everybody, a policy applied to only part of the
+                                 authorizes everybody, a policy applied to only part of the
                                  mail, MTA-STS announced but not enforced. Needs no database,
                                  so it works on a prospect's domain.
                 --domain <d>     One domain.

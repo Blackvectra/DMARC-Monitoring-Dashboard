@@ -97,7 +97,7 @@ public static class RolloutAssessment
         }
 
         // Reported once and then stopped. Checked before everything else
-        // because stale data makes every other judgement below it wrong.
+        // because stale data makes every other judgment below it wrong.
         var silentFor = state.Now - state.LastReport.Value;
         if (silentFor.TotalDays > SilentDays)
         {
@@ -159,10 +159,26 @@ public static class RolloutAssessment
 
         if (!state.IsEnforcing)
         {
+            // The next step from p=none is p=quarantine, whatever the target
+            // is, because that is the only move the planner will make: it
+            // refuses none straight to reject, since quarantine sends failing
+            // mail to junk and is recoverable where reject discards it.
+            //
+            // This said "Ready to move to p=reject" for a real domain sitting
+            // at p=none and 100% authenticating. An operator who followed it
+            // got "[REFUSED] Refusing to move mortonnd.gov from p=none
+            // straight to p=reject" from the very next command. Advice the
+            // product will not then carry out is worse than no advice: it
+            // spends the operator's trust on the one screen whose whole job is
+            // saying what to do next.
+            var next = string.Equals(state.PolicyTarget, "quarantine", StringComparison.OrdinalIgnoreCase)
+                ? "p=quarantine."
+                : $"p=quarantine, the step before p={state.PolicyTarget}.";
+
             return new RolloutVerdict
             {
                 Level = TriageLevel.Act,
-                Headline = $"p=none with everything authenticating. Ready to move to p={state.PolicyTarget}.",
+                Headline = $"p=none with everything authenticating. Ready to move to {next}",
             };
         }
 

@@ -15,7 +15,7 @@ namespace DmarcMonitor.Core.Reporting;
 /// broken page at exactly the moment the report is being judged.
 ///
 /// Everything drawn from the database is escaped. That is not cosmetic: the
-/// text in a report - organisation names, domains, DNS record values - arrives
+/// text in a report - organization names, domains, DNS record values - arrives
 /// from whoever sent the report, so it is attacker-influenceable, and pasting
 /// it into a page unescaped would be a scripting hole in a document that gets
 /// forwarded to the client's own staff.
@@ -26,7 +26,7 @@ public static class ClientReportRenderer
     {
         ArgumentNullException.ThrowIfNull(report);
 
-        var summary = ReportNarrative.Summarise(report);
+        var summary = ReportNarrative.Summarize(report);
         var html = new StringBuilder(16 * 1024);
 
         html.Append(CultureInfo.InvariantCulture, $"""
@@ -70,7 +70,7 @@ public static class ClientReportRenderer
             """);
 
     /// <summary>
-    /// The organisation's colour on the header rule, when it has one. Only a
+    /// The organization's color on the header rule, when it has one. Only a
     /// value the store validated as a plain hex ever gets here, and it is
     /// checked again because this is interpolated into a style attribute.
     /// </summary>
@@ -81,7 +81,7 @@ public static class ClientReportRenderer
 
     /// <summary>The logo, when there is one. A data: URL of an image type, checked again before it lands in a src.</summary>
     private static string Logo(ClientReport report) =>
-        report.BrandLogo is { } logo && DmarcMonitor.Core.Tenancy.OrganisationBrand.IsValidLogo(logo)
+        report.BrandLogo is { } logo && DmarcMonitor.Core.Tenancy.OrganizationBrand.IsValidLogo(logo)
             ? $"<img class=\"logo\" src=\"{logo}\" alt=\"{E(report.ProviderName)}\" />\n              "
             : "";
 
@@ -300,7 +300,7 @@ public static class ClientReportRenderer
         foreach (var s in sources)
         {
             var elsewhere = s.OtherClientsAffected > 0
-                ? $"Yes - {s.OtherClientsAffected} other organisation(s)"
+                ? $"Yes - {s.OtherClientsAffected} other customer(s)"
                 : "No";
 
             // Both figures again. An address that sent twelve messages and
@@ -367,28 +367,39 @@ public static class ClientReportRenderer
 
     private static void Legitimate(StringBuilder html, ClientReport report)
     {
-        var sources = report.LegitimateSources;
-        if (sources.Count == 0) { return; }
+        // Gathered by service rather than listed by address. A mailbox on
+        // Microsoft 365 sends from hundreds of Microsoft's addresses, and a
+        // customer shown six hundred of them learns nothing and loses the
+        // dozen rows that were worth reading.
+        var senders = report.LegitimateSenders;
+        if (senders.Count == 0) { return; }
 
         html.Append("""
             <section>
               <h2>What sends mail as you</h2>
-              <p class="note">Everything below is sending legitimately. If you do not recognise one of these,
+              <p class="note">Everything below is sending legitimately. If you do not recognize one of these,
               tell us: a service nobody remembers signing up for is worth knowing about.</p>
               <table>
-                <thead><tr><th>Source</th><th class="n">Messages</th><th>Domains</th></tr></thead>
+                <thead><tr><th>Sender</th><th class="n">Messages</th><th>Domains</th></tr></thead>
                 <tbody>
 
             """);
 
         // Long tails are common and nobody reads past the first handful; the
-        // rest is summarised rather than dropped, so the totals still add up.
+        // rest is summarized rather than dropped, so the totals still add up.
         const int Shown = 15;
-        foreach (var s in sources.Take(Shown))
+        foreach (var s in senders.Take(Shown))
         {
+            // A service says how many addresses it came from, because that is
+            // the number that used to fill the table. An unrecognized address
+            // says nothing extra: "1 address" beside an address is noise.
+            var detail = s.IsService
+                ? $"""<br><span class="note">{N(s.Addresses)} address(es)</span>"""
+                : "";
+
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="ok">
-                      <td class="mono">{E(s.SourceIp)}</td>
+                      <td class="{(s.IsService ? "" : "mono")}">{E(s.Name)}{detail}</td>
                       <td class="n">{N(s.Messages)}</td>
                       <td class="mono">{E(string.Join(", ", s.Domains))}</td>
                     </tr>
@@ -396,12 +407,12 @@ public static class ClientReportRenderer
                 """);
         }
 
-        if (sources.Count > Shown)
+        if (senders.Count > Shown)
         {
-            var rest = sources.Skip(Shown).ToList();
+            var rest = senders.Skip(Shown).ToList();
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="rest">
-                      <td colspan="2">and {N(rest.Count)} more source(s)</td>
+                      <td colspan="2">and {N(rest.Count)} more sender(s)</td>
                       <td class="n">{N(rest.Sum(s => s.Messages))} message(s)</td>
                     </tr>
 
@@ -486,7 +497,7 @@ public static class ClientReportRenderer
             <section class="explainer">
               <h2>What this report is</h2>
               <p>Every mail provider that received mail claiming to come from your domains reports back on
-              what it saw. This summarises every one of those reports for {E(report.Period.Label)}. It covers
+              what it saw. This summarizes every one of those reports for {E(report.Period.Label)}. It covers
               mail sent <em>using your domain name</em>, by you and by anybody else, which is why the totals
               can be larger than the mail your staff sent.</p>
             </section>
@@ -499,7 +510,7 @@ public static class ClientReportRenderer
 
             """);
 
-    /// <summary>Who to call, one paragraph per line, when the organisation said.</summary>
+    /// <summary>Who to call, one paragraph per line, when the organization said.</summary>
     private static string Contact(ClientReport report) =>
         string.IsNullOrWhiteSpace(report.ContactBlock)
             ? ""

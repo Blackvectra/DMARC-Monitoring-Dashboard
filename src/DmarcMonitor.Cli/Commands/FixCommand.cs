@@ -18,10 +18,14 @@ public static class FixCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--domain", "--policy", "--pct", "--sp", "--reason", "--by", "--rollback", "--verify", "--tls-rpt-to", "--transport", "!--all", "!--apply", "!--history", "!--dead-includes", "!--no-verify") is var bad and not 0) { return bad; }
+
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
 
         var store = new ReportStore(dbPath);
-        if (!await store.IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await store.IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;

@@ -21,6 +21,10 @@ public static class ImportCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--from", "--org") is var bad and not 0) { return bad; }
+
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var from = Args.Value(args, "--from");
 
@@ -37,10 +41,10 @@ public static class ImportCommand
             return 66;
         }
 
-        // Domains nobody has seen before go to this organisation; known ones
+        // Domains nobody has seen before go to this organization; known ones
         // keep their own.
         var store = new ReportStore(dbPath, Args.Value(args, "--org") ?? ReportStore.DefaultTenantSlug);
-        if (!await store.IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await store.IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;

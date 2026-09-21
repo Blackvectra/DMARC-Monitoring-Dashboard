@@ -6,7 +6,7 @@ namespace DmarcMonitor.Web.Tests;
 /// <summary>
 /// The half of MTA-STS this app serves rather than publishes.
 ///
-/// The caller is another organisation's mail server. It is anonymous, it is
+/// The caller is another organization's mail server. It is anonymous, it is
 /// not a browser, and RFC 8461 §3.3 says it must not follow a redirect when
 /// fetching a policy - so every answer here has to be the real one. A 302 to a
 /// sign-in page is not a worse 404; it is an answer a machine cannot read.
@@ -69,7 +69,7 @@ public sealed class MtaStsEndpointTests : IClassFixture<UnauthenticatedApp>
     [Fact]
     public async Task ASenderDoesNotHaveToSignIn()
     {
-        // No cookie, no header, nothing. The caller is another organisation's
+        // No cookie, no header, nothing. The caller is another organization's
         // mail server and has no way to authenticate to this instance.
         var response = await Client().SendAsync(Ask("mta-sts.nobody-configured-this.example"));
 

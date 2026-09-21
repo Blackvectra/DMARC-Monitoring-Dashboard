@@ -34,7 +34,7 @@ else. Without it, this app registration can read the CEO's mail.
 
 ### 1. Register the application
 
-Entra admin centre → App registrations → New registration.
+Entra admin center → App registrations → New registration.
 
 - Name: something that says what it is, e.g. `DMARC Monitor ingest`
 - Supported account types: single tenant
@@ -153,15 +153,15 @@ gave `--mailbox` the account's UPN - pass the address in the `rua` tag as
 rua.example.com` (or set `DMARC_REPORTING_DOMAIN`).
 
 Getting this wrong is safe. A genuine report sent to an address the collector
-does not recognise is counted as **not attributed**, listed with the address
+does not recognize is counted as **not attributed**, listed with the address
 it was sent to, and left in the mailbox rather than filed away; when none at
 all could be attributed the run exits 64 and says which address to set. Fix
 the address and the next run ingests them.
 
-With more than one organisation on the install, each organisation's mailbox
-gets its own collector run with `--org <slug>` (or `DMARC_ORGANISATION` in the
+With more than one organization on the install, each organization's mailbox
+gets its own collector run with `--org <slug>` (or `DMARC_ORGANIZATION` in the
 environment file). That decides where a domain nobody has seen before is
-filed; a domain already known keeps its organisation whichever mailbox its
+filed; a domain already known keeps its organization whichever mailbox its
 reports arrive in.
 
 `--dry-run` parses everything and reports what it found, writing nothing and

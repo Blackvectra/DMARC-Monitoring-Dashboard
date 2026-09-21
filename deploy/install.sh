@@ -190,9 +190,9 @@ DMARC_CERT_PASSWORD=
 # addresses under a reporting domain such as rua.example.com.
 DMARC_FALLBACK_ADDRESS=
 DMARC_REPORTING_DOMAIN=
-# Optional. The organisation a domain nobody has seen before is filed under
+# Optional. The organization a domain nobody has seen before is filed under
 # (dmarc org list). Default: local. A known domain keeps its own.
-DMARC_ORGANISATION=
+DMARC_ORGANIZATION=
 ENV
     chmod 0600 "$INGEST_ENV"
     echo "  wrote ${INGEST_ENV} (fill it in, then enable dmarc-ingest.timer)"

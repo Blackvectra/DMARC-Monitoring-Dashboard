@@ -62,7 +62,7 @@ param(
     [string]$FallbackAddress,
     [string]$ReportingDomain,
     [string]$MasterGroupId,
-    [string]$Organisation,
+    [string]$Organization,
     [switch]$MakeIngestCert,
     [switch]$NoProxy,
     [switch]$NoIngestTask
@@ -91,6 +91,46 @@ $Caddyfile = Join-Path $Root 'Caddyfile'
 
 function Say([string]$Text) { Write-Host $Text }
 function Fail([string]$Text, [int]$Code = 1) { Write-Error $Text -ErrorAction Continue; exit $Code }
+
+<#
+.SYNOPSIS
+Downloads a file, retrying the failures that are worth retrying.
+
+.DESCRIPTION
+Every download here is from somebody else's CDN - Microsoft's, Caddy's,
+GitHub's - and any of them can return a 5xx for a few seconds. A single
+Invoke-WebRequest turns that into a dead install: this script gets most of
+the way through, fails at the proxy step, and leaves a half-built machine
+for somebody to work out by hand.
+
+It happened in CI on the WinSW download, which answered "504 Gateway
+Time-out The server didn't respond in time", and that is exactly what it
+would do on a real server on a bad afternoon.
+
+Four attempts, backing off 2, 4 and 8 seconds. Only transport failures and
+5xx are retried; a 404 means the file is not there and trying again three
+more times just wastes a minute before saying so.
+#>
+function Get-File([string]$Uri, [string]$OutFile, [hashtable]$Headers = @{}) {
+    $delay = 2
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -Headers $Headers -UseBasicParsing
+            return
+        } catch {
+            $status = $null
+            try { $status = [int]$_.Exception.Response.StatusCode } catch { }
+
+            # 4xx is an answer, not a hiccup. Say it once and stop.
+            if ($null -ne $status -and $status -lt 500) { throw }
+            if ($attempt -eq 4) { throw }
+
+            Say "   $Uri did not answer ($(if ($status) { $status } else { $_.Exception.Message })); retrying in ${delay}s"
+            Start-Sleep -Seconds $delay
+            $delay *= 2
+        }
+    }
+}
 
 # icacls takes accounts by SID on every language of Windows; the English display
 # names ('Administrators', 'NT AUTHORITY\LocalService') only resolve on an
@@ -127,7 +167,7 @@ Say '== runtime'
 $haveRuntime = (Test-Path $Dotnet) -and ((& $Dotnet --list-runtimes 2>$null) -match '^Microsoft\.AspNetCore\.App 8\.')
 if (-not $haveRuntime) {
     $installer = Join-Path $env:TEMP 'dotnet-install.ps1'
-    Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer -UseBasicParsing
+    Get-File 'https://dot.net/v1/dotnet-install.ps1' $installer
     & $installer -Runtime aspnetcore -Channel 8.0 -InstallDir $DotnetDir -NoPath | Out-Null
 }
 $runtimeLine = (& $Dotnet --list-runtimes) -match '^Microsoft\.AspNetCore\.App 8\.' | Select-Object -First 1
@@ -150,14 +190,21 @@ try {
         Say "== release $Release"
         $tag = $Release
         if ($tag -eq 'latest') {
-            $tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{ Accept = 'application/vnd.github+json' } -UseBasicParsing).tag_name
+            # Through Get-File for the same reason as every other download:
+            # api.github.com rate-limits and occasionally 5xxs, and "could not
+            # find the latest release" is a badly wrong thing to tell somebody
+            # when the release is there and the API had a bad second.
+            $tagFile = Join-Path $env:TEMP 'dmarc-latest.json'
+            Get-File "https://api.github.com/repos/$Repo/releases/latest" $tagFile @{ Accept = 'application/vnd.github+json' }
+            $tag = (Get-Content $tagFile -Raw | ConvertFrom-Json).tag_name
+            Remove-Item $tagFile -ErrorAction SilentlyContinue
             if (-not $tag) { Fail "could not find the latest release of $Repo. Pass -Release <tag>, or -FromDir with the files." 69 }
             Say "   latest is $tag"
         }
         $base = "https://github.com/$Repo/releases/download/$tag"
         foreach ($name in @('dmarc.exe', 'dmarc-web.zip', 'dmarc-deploy.tar.gz')) {
             Say "   fetching $name"
-            Invoke-WebRequest -Uri "$base/$name" -OutFile (Join-Path $work $name) -UseBasicParsing
+            Get-File "$base/$name" (Join-Path $work $name)
         }
         & tar.exe -xzf (Join-Path $work 'dmarc-deploy.tar.gz') -C $work
         if ($LASTEXITCODE -ne 0) { Fail 'could not unpack dmarc-deploy.tar.gz' 65 }
@@ -224,7 +271,7 @@ try {
     if ($TlsReportAddress) { Set-Setting $cfg 'Reporting' 'TlsReportAddress' $TlsReportAddress }
     if ($MasterGroupId) {
         Set-Setting $cfg 'Auth' 'MasterGroupId' $MasterGroupId
-        Say "   master group: $MasterGroupId sees every organisation"
+        Say "   master group: $MasterGroupId sees every organization"
     }
     if ($TenantId) {
         Set-Setting $cfg 'AzureAd' 'TenantId' $TenantId
@@ -303,7 +350,7 @@ try {
         # The task runs this file; its values persist across runs of this script.
         # The last two are optional: reports are attributed by the mailbox
         # itself being the one shared address unless one of them is set.
-        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = ''; DMARC_ORGANISATION = '' }
+        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = ''; DMARC_ORGANIZATION = '' }
         if (Test-Path $IngestCmd) {
             foreach ($line in Get-Content $IngestCmd) {
                 if ($line -match '^set "([A-Z_]+)=(.*)"$' -and $values.Contains($Matches[1])) { $values[$Matches[1]] = $Matches[2] }
@@ -316,7 +363,7 @@ try {
         if ($CertPassword)    { $values['DMARC_CERT_PASSWORD'] = $CertPassword }
         if ($FallbackAddress) { $values['DMARC_FALLBACK_ADDRESS'] = $FallbackAddress }
         if ($ReportingDomain) { $values['DMARC_REPORTING_DOMAIN'] = $ReportingDomain }
-        if ($Organisation)    { $values['DMARC_ORGANISATION'] = $Organisation }
+        if ($Organization)    { $values['DMARC_ORGANIZATION'] = $Organization }
 
         $lines = @('@echo off', ':: Written by bootstrap.ps1. Runs as LocalService from the "DMARC ingest" task; pass --dry-run to test.')
         foreach ($k in $values.Keys) { $lines += "set `"$k=$($values[$k])`"" }
@@ -324,7 +371,7 @@ try {
         [IO.File]::WriteAllLines($IngestCmd, $lines, (New-Object Text.UTF8Encoding $false))
         Set-RestrictedAcl $IngestCmd "${ServiceSid}:RX"
 
-        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN', 'DMARC_ORGANISATION')
+        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN', 'DMARC_ORGANIZATION')
         $missing = @($values.Keys | Where-Object { $optional -notcontains $_ -and -not $values[$_] })
         if ($missing.Count -eq 0 -and -not $NoIngestTask) {
             $action = New-ScheduledTaskAction -Execute $IngestCmd
@@ -358,12 +405,12 @@ try {
         $caddy = Join-Path $BinDir 'caddy.exe'
         if (-not (Test-Path $caddy)) {
             Say '   fetching Caddy'
-            Invoke-WebRequest -Uri 'https://caddyserver.com/api/download?os=windows&arch=amd64' -OutFile $caddy -UseBasicParsing
+            Get-File 'https://caddyserver.com/api/download?os=windows&arch=amd64' $caddy
         }
         $winsw = Join-Path $BinDir 'caddy-service.exe'
         if (-not (Test-Path $winsw)) {
             Say '   fetching WinSW (runs Caddy as a service)'
-            Invoke-WebRequest -Uri 'https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe' -OutFile $winsw -UseBasicParsing
+            Get-File 'https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe' $winsw
         }
         $caddyHome = Join-Path $Root 'caddy'
         if (-not (Test-Path $caddyHome)) { New-Item -ItemType Directory -Path $caddyHome | Out-Null }

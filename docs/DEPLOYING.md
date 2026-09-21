@@ -63,7 +63,7 @@ these move:
 | AWS Lightsail, 2 GB plan | $10–12 | flat rate, transfer and snapshots included, simplest |
 | AWS EC2 `t3.small` + 20 GB gp3 | $15–17 | stoppable: pay ~$2 for the disk while it is off |
 | Azure `B2ats_v2` or `B1ms` | $12–18 | stoppable, same as EC2 |
-| Any of the above on Windows | add $15–30 | the licence. Not needed - see above |
+| Any of the above on Windows | add $15–30 | the license. Not needed - see above |
 
 **For testing**, take an EC2 or Azure VM rather than Lightsail, and stop it
 when you are not using it: a week of intermittent testing is a couple of
@@ -322,7 +322,7 @@ without being asked.
 
 ## 5. Sign-in
 
-In the Entra admin centre, **App registrations → New registration**:
+In the Entra admin center, **App registrations → New registration**:
 
 - Name: `DMARC Monitor`
 - Supported account types: **this organizational directory only**
@@ -360,14 +360,14 @@ users can no longer consent for themselves, and the first sign-in otherwise
 ends in "Need admin approval"), then **Properties → Assignment required =
 Yes**, then **Users and groups** → add the people or the group that should
 have it. Otherwise everyone in the tenant can. Assigning a group needs an
-Entra ID P1 licence; on a free tenant assign people individually.
+Entra ID P1 license; on a free tenant assign people individually.
 
-### Organisations: who sees which clients
+### Organizations: who sees which clients
 
-Clients belong to an organisation, and an organisation's people see its
+Clients belong to an organization, and an organization's people see its
 clients and domains and nothing else. NRG Tech Services and NextLayerSec are
-two organisations in one install; an NRG employee never sees a NextLayerSec
-client, and a domain of the other organisation answers "nothing stored"
+two organizations in one install; an NRG employee never sees a NextLayerSec
+client, and a domain of the other organization answers "nothing stored"
 exactly as a domain that does not exist would.
 
 Who belongs where is decided by Entra security groups, which the token has
@@ -377,21 +377,21 @@ to carry:
   Security groups**, with the group ID as the claim value. Without this the
   token names no groups, everybody signed in belongs to nothing, and the
   page says so.
-- Create one security group per organisation, and one master group for the
+- Create one security group per organization, and one master group for the
   people who run the whole thing. Copy each group's **Object ID**.
 - Tell the app the master group: `Auth:MasterGroupId` in
   `appsettings.Production.json` (or `bootstrap.sh --master-group-id <id>`).
-  Members see every organisation and get a switcher in the sidebar; with
-  "All organisations" chosen, every page shows which organisation each row
+  Members see every organization and get a switcher in the sidebar; with
+  "All organizations" chosen, every page shows which organization each row
   belongs to.
-- Tell each organisation its group, on the Settings page as a master, or
+- Tell each organization its group, on the Settings page as a master, or
   with `dmarc org set-group --org <slug> --group <id>`. The built-in
-  organisation is filed as `local`; rename it there too, or with
+  organization is filed as `local`; rename it there too, or with
   `dmarc org rename --org local --name "NRG Tech Services"`.
 
-#### Roles within an organisation
+#### Roles within an organization
 
-Each organisation has up to three groups, one per role. The strongest group
+Each organization has up to three groups, one per role. The strongest group
 somebody is in wins, so adding a person to a stronger group never means
 removing them from the weaker one first.
 
@@ -399,8 +399,8 @@ removing them from the weaker one first.
 | --- | --- | --- |
 | Viewer | `--role viewer` | Read every page in scope. Nothing else. |
 | Operator | `--role operator` (the default) | Also assign and move domains, add clients, import reports, apply and roll back DNS changes. |
-| Admin | `--role admin` | Also set this organisation's groups, branding and DNS providers, and read its activity log. |
-| Master | `Auth:MasterGroupId` | Every organisation, and creating new ones. |
+| Admin | `--role admin` | Also set this organization's groups, branding and DNS providers, and read its activity log. |
+| Master | `Auth:MasterGroupId` | Every organization, and creating new ones. |
 
 ```bash
 dmarc org set-group --org nrg-tech-services --role admin    --group <id>
@@ -408,15 +408,15 @@ dmarc org set-group --org nrg-tech-services --role operator --group <id>
 dmarc org set-group --org nrg-tech-services --role viewer   --group <id>
 ```
 
-An admin can do the same from **Settings → Organisations → Edit** for their
-own organisation. The sidebar says which role the person has, so a viewer
+An admin can do the same from **Settings → Organizations → Edit** for their
+own organization. The sidebar says which role the person has, so a viewer
 who cannot find the Apply button knows it is not missing.
 
 #### A customer's own login
 
 A client can have a group of its own. Its members see that one client, read
 only, with no Clients, Import, Settings or Updates in the sidebar, and every
-other client of the organisation answers "nothing stored" the way a domain
+other client of the organization answers "nothing stored" the way a domain
 that does not exist would. Guests invited into your directory work, so a
 customer signs in with their own email address.
 
@@ -429,34 +429,34 @@ staff group keeps the staff role: being a customer never takes access away.
 
 #### White-label
 
-Per organisation: an accent colour, a logo in the sidebar, the name the
+Per organization: an accent color, a logo in the sidebar, the name the
 reports are prepared by, and a contact block for their footer. Set it under
-**Settings → Organisations → Edit**, or:
+**Settings → Organizations → Edit**, or:
 
 ```bash
-dmarc org brand --org nextlayersec --colour '#0f766e' \
+dmarc org brand --org nextlayersec --color '#0f766e' \
     --provider-name "NextLayerSec" --contact 'dmarc@nextlayersec.io\n+1 555 0100' \
     --logo ./nextlayersec.png
 ```
 
-The colour has to be a six-digit hex and the logo a PNG, JPEG, GIF, WebP or
+The color has to be a six-digit hex and the logo a PNG, JPEG, GIF, WebP or
 SVG of at most 200 KB: both end up in markup, so anything else is refused.
-`--clear` puts an organisation back to the default look.
+`--clear` puts an organization back to the default look.
 
 #### Who changed what
 
-Changes made through the web app - organisations, groups, branding, clients,
+Changes made through the web app - organizations, groups, branding, clients,
 customer logins, DNS providers and imports - are recorded with who made them.
 Admins and masters read it under **Settings → Recent activity**. DNS changes
 keep their own, fuller trail on the Fix page.
 
-A second organisation is `dmarc org add --name "NextLayerSec" --group <id>`
-(or Settings → Organisations as a master). Its clients are created with
+A second organization is `dmarc org add --name "NextLayerSec" --group <id>`
+(or Settings → Organizations as a master). Its clients are created with
 `--org nextlayersec`, or from the Clients page while looking at it. A
 collector for its own mailbox files new domains there with `--org
-nextlayersec` (`DMARC_ORGANISATION` in the environment file); a domain
-already known keeps its organisation whichever mailbox sees it. Assigning a
-domain to a client in another organisation moves it there, history and all,
+nextlayersec` (`DMARC_ORGANIZATION` in the environment file); a domain
+already known keeps its organization whichever mailbox sees it. Assigning a
+domain to a client in another organization moves it there, history and all,
 and only somebody who can see both can do that.
 
 Without sign-in configured there are no groups to read, and whoever is at
@@ -494,7 +494,7 @@ itself is the address. Set `DMARC_FALLBACK_ADDRESS` if the `rua` address is an
 alias or group rather than the mailbox's own address, and
 `DMARC_REPORTING_DOMAIN` only if per-domain addresses like
 `client.com@rua.example.com` are in use. Getting it wrong loses nothing: reports
-to an address the collector does not recognise are left in the mailbox and the
+to an address the collector does not recognize are left in the mailbox and the
 run says which address to set.
 
 `dmarc-ingest.service` reads the file and runs `dmarc ingest` as the `dmarc`
@@ -574,7 +574,7 @@ again, nothing worse.
 The secrets directory is encrypted to **this machine and this account**. A
 restore onto a new machine cannot read it: the database rows keep working,
 but every DNS provider credential has to be entered again. That is the
-intended behaviour - it is why a stolen backup is not a stolen Cloudflare
+intended behavior - it is why a stolen backup is not a stolen Cloudflare
 token - and it is worth knowing before the day you need the restore.
 
 ## 9. Releases, and keeping this machine stable

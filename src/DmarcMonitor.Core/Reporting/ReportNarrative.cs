@@ -32,7 +32,7 @@ public static class ReportNarrative
     /// <summary>Below this, enough mail is failing to be worth a client's attention.</summary>
     public const double HealthyPassRate = 95;
 
-    public static ReportSummary Summarise(ClientReport report)
+    public static ReportSummary Summarize(ClientReport report)
     {
         ArgumentNullException.ThrowIfNull(report);
 
@@ -89,8 +89,13 @@ public static class ReportNarrative
             var shared = impersonating.Where(s => s.OtherClientsAffected > 0).ToList();
             if (shared.Count > 0)
             {
+                // "Customers", not "organizations". An organization is now the
+                // company running this install - NRG Tech Services and
+                // NextLayerSec are two - and a customer reading that their
+                // attacker also hit "other organizations we protect" would
+                // reasonably read it as the wrong noun entirely.
                 points.Add(
-                    $"{shared.Count} of those source(s) {Was(shared.Count)} also seen sending as other organisations "
+                    $"{shared.Count} of those source(s) {Was(shared.Count)} also seen sending as other customers "
                     + $"{report.ProviderName} protects, which means this is broad activity rather than "
                     + "someone targeting you specifically.");
             }

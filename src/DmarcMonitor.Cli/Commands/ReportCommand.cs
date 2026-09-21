@@ -16,6 +16,10 @@ public static class ReportCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--out", "--provider", "--client", "--month", "!--all") is var bad and not 0) { return bad; }
+
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var outPath = Args.Value(args, "--out") ?? "reports";
         var provider = Args.Value(args, "--provider") ?? "your IT provider";

@@ -253,8 +253,8 @@ public sealed class DomainDetailService(string databasePath)
     }.ToString();
 
     /// <param name="tenantId">
-    /// The organisation the caller may see, or null for any. A domain that
-    /// belongs to another organisation comes back as null, exactly as a domain
+    /// The organization the caller may see, or null for any. A domain that
+    /// belongs to another organization comes back as null, exactly as a domain
     /// that does not exist would: the page must not even confirm it is there.
     /// </param>
     /// <param name="clientSlug">
@@ -331,7 +331,7 @@ public sealed class DomainDetailService(string databasePath)
             Reporters = reporters,
         };
 
-        // The same judgement the triage list made, so the two pages cannot
+        // The same judgment the triage list made, so the two pages cannot
         // disagree about the same domain.
         var verdict = RolloutAssessment.Assess(new DomainState
         {

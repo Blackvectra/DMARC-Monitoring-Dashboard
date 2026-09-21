@@ -97,11 +97,11 @@ else
            grows: an MSP is asked "how is Morton doing", not "how is
            mortonnd.gov doing", and a flat alphabetical list of eighty domains
            cannot answer that without the reader doing the grouping by eye.
-           Across organisations the grouping is by organisation first, so two
-           customers with the same name in different organisations do not
+           Across organizations the grouping is by organization first, so two
+           customers with the same name in different organizations do not
            collapse into one heading. *@
         @foreach (var group in Filtered
-            .GroupBy(r => (AcrossOrganisations ? r.Organisation + " / " : "") + r.ClientName)
+            .GroupBy(r => (AcrossOrganizations ? r.Organization + " / " : "") + r.ClientName)
             .OrderBy(g => g.Key, StringComparer.Ordinal))
         {
             <section>
@@ -130,7 +130,7 @@ else
                 <tr>
                     <th></th>
                     <th>Domain</th>
-                    @if (!_byClient && AcrossOrganisations) { <th>Organisation</th> }
+                    @if (!_byClient && AcrossOrganizations) { <th>Organization</th> }
                     @if (!_byClient) { <th>Client</th> }
                     <th>Policy</th>
                     <th class="num">Messages</th>
@@ -145,7 +145,7 @@ else
                     <tr>
                         <td><span class="pip @Css(row.Level)" title="@row.Headline"></span></td>
                         <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
-                        @if (!_byClient && AcrossOrganisations) { <td class="muted">@row.Organisation</td> }
+                        @if (!_byClient && AcrossOrganizations) { <td class="muted">@row.Organization</td> }
                         @if (!_byClient) { <td class="muted">@row.ClientName</td> }
                         <td><code>p=@row.Policy</code></td>
                         <td class="num">@row.Messages.ToString("N0")</td>
@@ -169,7 +169,7 @@ else
 }
 
 @code {
-    private OrganisationAccess? _access;
+    private OrganizationAccess? _access;
     private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
     private IReadOnlyList<DomainTriage>? _rows;
     private string? _error;
@@ -178,7 +178,7 @@ else
     private int _days = 30;
     private bool _byClient;
 
-    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+    private bool AcrossOrganizations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
 
     // Alphabetical, not by urgency. Triage already ranks; this exists to find
     // a named domain, and a list that reorders itself as data changes is the

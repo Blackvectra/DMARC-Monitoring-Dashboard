@@ -24,7 +24,7 @@ public sealed class CorrelationServiceTests : IDisposable
     public CorrelationServiceTests()
     {
         _store = new ReportStore(_dbPath);
-        _store.InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        _store.InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
     }
 
     public void Dispose()
@@ -248,7 +248,7 @@ public sealed class CorrelationServiceTests : IDisposable
     [Fact]
     public async Task IgnoresAForwarderThatDeclaredItselfAnOverride()
     {
-        // A mailing list breaking authentication is expected behaviour, and
+        // A mailing list breaking authentication is expected behavior, and
         // including it buries the findings that matter under traffic nobody
         // should act on.
         var xml = $"""

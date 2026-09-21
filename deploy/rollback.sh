@@ -60,7 +60,7 @@ DONE=false
 
 # The recovery tool needs its own recovery. Between the two moves below there
 # is no ${ROOT}/app at all, and if the second one fails - a full disk, a
-# permission, anything - the previous behaviour was to exit with the service
+# permission, anything - the previous behavior was to exit with the service
 # stopped and no application present. That leaves the operator worse off than
 # before they ran it, which is the one thing a rollback must never do.
 restore() {

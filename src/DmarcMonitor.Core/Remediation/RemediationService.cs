@@ -315,7 +315,7 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
                     ? published.DmarcRecord
                     : published.SpfRecords.Count > 0 ? published.SpfRecords[0] : null;
 
-                if (change.NewValue is not null && string.Equals(Normalise(seen), Normalise(change.NewValue), StringComparison.Ordinal))
+                if (change.NewValue is not null && string.Equals(Normalize(seen), Normalize(change.NewValue), StringComparison.Ordinal))
                 {
                     await ExecAsync(db, "UPDATE dns_changes SET is_propagated = 1, propagated_at = $now, propagation_error = NULL WHERE id = $id",
                         ct, ("$now", Iso(DateTimeOffset.UtcNow)), ("$id", changeId)).ConfigureAwait(false);
@@ -435,7 +435,7 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     }
 
     /// <summary>The audit trail, newest first. For one domain, or all of them.</summary>
-    /// <param name="tenantId">One organisation's changes, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's changes, or null for every organization's.</param>
     public async Task<IReadOnlyList<AppliedChange>> HistoryAsync(
         string? domain = null, int limit = 100, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
@@ -621,7 +621,7 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         return marker.Length > 2 ? marker : null;
     }
 
-    private static string Normalise(string? record) =>
+    private static string Normalize(string? record) =>
         string.Join(' ', (record ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries)).Trim();
 
     private static string Lower(string sentence) =>

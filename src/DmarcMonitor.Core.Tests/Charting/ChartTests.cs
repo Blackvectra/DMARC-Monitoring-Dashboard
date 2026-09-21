@@ -206,7 +206,7 @@ public sealed class ChartTests
     public void ASegmentStartsAtTheLeftAndSweepsOverTheTop()
     {
         // The dial runs nine o'clock to three o'clock. A segment from 0 begins
-        // at the left edge, level with the centre.
+        // at the left edge, level with the center.
         var path = Chart.Arc(cx: 50, cy: 50, outer: 40, inner: 25, from: 0, to: 0.5);
 
         Assert.StartsWith("M10 50", path, StringComparison.Ordinal);

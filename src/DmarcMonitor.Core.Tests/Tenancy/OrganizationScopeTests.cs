@@ -10,14 +10,14 @@ using Microsoft.Data.Sqlite;
 namespace DmarcMonitor.Core.Tests.Tenancy;
 
 /// <summary>
-/// Two organisations in one database, and every read that must not cross
+/// Two organizations in one database, and every read that must not cross
 /// between them.
 ///
 /// The property: whatever an NRG person asks, the answer contains nothing of
 /// NextLayerSec's. Asked without a scope - which only the master and the
 /// command line do - the answer contains both.
 /// </summary>
-public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
+public sealed class OrganizationScopeTests : IAsyncLifetime, IDisposable
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"dmarc-scope-{Guid.NewGuid():N}.db");
 
@@ -26,13 +26,13 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
 
     public async Task InitializeAsync()
     {
-        await new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql);
+        await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
 
-        var orgs = new OrganisationStore(_dbPath);
+        var orgs = new OrganizationStore(_dbPath);
         var nls = await orgs.CreateAsync("NextLayerSec");
 
         // NRG's domain arrives through NRG's collector, NextLayerSec's through
-        // its own. Each store files new domains under its organisation.
+        // its own. Each store files new domains under its organization.
         var nrgStore = new ReportStore(_dbPath);
         var nlsStore = new ReportStore(_dbPath, "nextlayersec");
 
@@ -61,7 +61,7 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task TriageShowsOneOrganisationsDomainsOrAll()
+    public async Task TriageShowsOneOrganizationsDomainsOrAll()
     {
         var triage = new TriageService(_dbPath);
 
@@ -71,17 +71,17 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
 
         var nls = await triage.GetAsync(30, _nls);
         Assert.Equal(["cornerpost.example"], nls.Select(r => r.Domain));
-        Assert.Equal("NextLayerSec", nls[0].Organisation);
+        Assert.Equal("NextLayerSec", nls[0].Organization);
 
         var all = await triage.GetAsync(30);
         Assert.Equal(2, all.Count);
 
         // The scope that matches nothing, for somebody with no access.
-        Assert.Empty(await triage.GetAsync(30, OrganisationAccess.NoAccessTenantId));
+        Assert.Empty(await triage.GetAsync(30, OrganizationAccess.NoAccessTenantId));
     }
 
     [Fact]
-    public async Task ADomainOfAnotherOrganisationDoesNotExist()
+    public async Task ADomainOfAnotherOrganizationDoesNotExist()
     {
         var detail = new DomainDetailService(_dbPath);
 
@@ -92,7 +92,7 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task TheChartsCountOneOrganisationsMail()
+    public async Task TheChartsCountOneOrganizationsMail()
     {
         var series = new TimeSeriesService(_dbPath);
 
@@ -112,10 +112,10 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task FailingSourcesNeverCrossOrganisations()
+    public async Task FailingSourcesNeverCrossOrganizations()
     {
-        // Across an organisation's clients is the page's purpose; across
-        // organisations would be one company reading another's threat data.
+        // Across an organization's clients is the page's purpose; across
+        // organizations would be one company reading another's threat data.
         var correlation = new CorrelationService(_dbPath);
 
         var nrg = await correlation.GetFailingSourcesAsync(30, tenantId: _nrg);
@@ -126,7 +126,7 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task ClientsAndUnassignedAreListedPerOrganisation()
+    public async Task ClientsAndUnassignedAreListedPerOrganization()
     {
         var store = new ReportStore(_dbPath);
 
@@ -135,11 +135,11 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
         Assert.Contains((await store.GetClientsAsync()).Select(c => c.Slug), s => s == "corner-post");
 
         Assert.Equal(["cornerpost.example"], (await store.GetDomainsAsync(_nls)).Select(d => d.Domain));
-        Assert.Equal("NextLayerSec", (await store.GetDomainsAsync(_nls))[0].OrganisationName);
+        Assert.Equal("NextLayerSec", (await store.GetDomainsAsync(_nls))[0].OrganizationName);
     }
 
     [Fact]
-    public async Task AClientReportBelongsToItsOrganisation()
+    public async Task AClientReportBelongsToItsOrganization()
     {
         var builder = new ClientReportBuilder(_dbPath);
         var period = ReportPeriod.MonthEnding(DateTimeOffset.UtcNow);
@@ -150,9 +150,9 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task AssigningToAnotherOrganisationsClientMovesTheDomainAndItsHistory()
+    public async Task AssigningToAnotherOrganizationsClientMovesTheDomainAndItsHistory()
     {
-        // The one way a domain changes organisation: somebody who can see
+        // The one way a domain changes organization: somebody who can see
         // both files it under the other's client.
         var store = new ReportStore(_dbPath);
 
@@ -180,7 +180,7 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task AScopedAssignCannotReachAnotherOrganisationsDomain()
+    public async Task AScopedAssignCannotReachAnotherOrganizationsDomain()
     {
         // A NextLayerSec person naming an NRG domain gets "no such domain",
         // exactly as they would for a domain that does not exist.
@@ -191,7 +191,7 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task UnassignedIsPerOrganisation()
+    public async Task UnassignedIsPerOrganization()
     {
         var nrgStore = new ReportStore(_dbPath);
         var nlsStore = new ReportStore(_dbPath, "nextlayersec");
@@ -204,7 +204,7 @@ public sealed class OrganisationScopeTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task AKnownDomainKeepsItsOrganisationWhicheverCollectorSeesIt()
+    public async Task AKnownDomainKeepsItsOrganizationWhicheverCollectorSeesIt()
     {
         // NextLayerSec's collector receiving a report for an NRG domain must
         // not pull it across.

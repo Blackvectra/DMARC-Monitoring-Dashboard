@@ -72,7 +72,7 @@ public sealed class ReportNarrativeTests
         // A perfect pass rate at p=none still means anybody can send as this
         // client and it will be delivered. Calling that protected is the one
         // thing this report must not do.
-        var summary = ReportNarrative.Summarise(
+        var summary = ReportNarrative.Summarize(
             Report(domains: [Domain(policy: "none")], messages: 1000, passing: 1000));
 
         Assert.Contains("not yet protected", summary.Headline, StringComparison.Ordinal);
@@ -82,7 +82,7 @@ public sealed class ReportNarrativeTests
     [Fact]
     public void PartialEnforcementSaysHowManyRatherThanRoundingUp()
     {
-        var summary = ReportNarrative.Summarise(Report(domains:
+        var summary = ReportNarrative.Summarize(Report(domains:
         [
             Domain("a.com", "reject"),
             Domain("b.com", "quarantine"),
@@ -96,7 +96,7 @@ public sealed class ReportNarrativeTests
     [Fact]
     public void AFullyProtectedCleanMonthSaysThereIsNothingToDo()
     {
-        var summary = ReportNarrative.Summarise(Report());
+        var summary = ReportNarrative.Summarize(Report());
 
         Assert.Contains("protected", summary.Headline, StringComparison.Ordinal);
         Assert.False(summary.NeedsAttention);
@@ -105,7 +105,7 @@ public sealed class ReportNarrativeTests
     [Fact]
     public void ProtectedButLosingOwnMailIsNotAQuietMonth()
     {
-        var summary = ReportNarrative.Summarise(Report(messages: 1000, passing: 800));
+        var summary = ReportNarrative.Summarize(Report(messages: 1000, passing: 800));
 
         Assert.Contains("failing", summary.Headline, StringComparison.Ordinal);
         Assert.True(summary.NeedsAttention);
@@ -118,7 +118,7 @@ public sealed class ReportNarrativeTests
     {
         // Zeroes everywhere look like a calm month. They almost always mean
         // the record was changed or monitoring broke.
-        var summary = ReportNarrative.Summarise(Report(messages: 0, passing: 0));
+        var summary = ReportNarrative.Summarize(Report(messages: 0, passing: 0));
 
         Assert.Contains("No DMARC reports arrived", summary.Headline, StringComparison.Ordinal);
         Assert.Contains("changed or removed", AllText(summary), StringComparison.Ordinal);
@@ -128,7 +128,7 @@ public sealed class ReportNarrativeTests
     [Fact]
     public void ANoDataMonthDoesNotClaimAnythingWasBlocked()
     {
-        var summary = ReportNarrative.Summarise(Report(messages: 0, passing: 0));
+        var summary = ReportNarrative.Summarize(Report(messages: 0, passing: 0));
 
         Assert.DoesNotContain("refused", AllText(summary), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("%", AllText(summary), StringComparison.Ordinal);
@@ -139,7 +139,7 @@ public sealed class ReportNarrativeTests
     [Fact]
     public void SaysWhatEnforcementActuallyDidWhenSomeoneSentAsTheClient()
     {
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             domains: [Domain(policy: "reject", messages: 1000, passing: 940)],
             sources: [Source(messages: 60)],
             messages: 1000, passing: 940));
@@ -154,7 +154,7 @@ public sealed class ReportNarrativeTests
     {
         // The same impersonation at p=none was delivered. Saying it was
         // blocked would be the report's most damaging possible lie.
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             domains: [Domain(policy: "none", messages: 1000, passing: 940)],
             sources: [Source(messages: 60)],
             messages: 1000, passing: 940));
@@ -169,7 +169,7 @@ public sealed class ReportNarrativeTests
     {
         // The difference between "somebody is after you" and "this is a
         // spray", which is the question a client asks first.
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             sources: [Source(messages: 60, otherClients: 3)],
             messages: 1000, passing: 940));
 
@@ -181,7 +181,7 @@ public sealed class ReportNarrativeTests
     {
         // Not an attack. A client who reads this as an attack panics about the
         // wrong thing and ignores the mail they are actually losing.
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             sources: [Source(ip: "198.51.100.7", messages: 40, authenticatedFor: "mailchimpapp.net")],
             messages: 1000, passing: 960));
 
@@ -200,7 +200,7 @@ public sealed class ReportNarrativeTests
     [Fact]
     public void OmitsTheComparisonWhenThereIsNoPreviousMonth()
     {
-        var summary = ReportNarrative.Summarise(Report(previousMessages: 0));
+        var summary = ReportNarrative.Summarize(Report(previousMessages: 0));
 
         Assert.DoesNotContain("July 2026", AllText(summary), StringComparison.Ordinal);
     }
@@ -211,7 +211,7 @@ public sealed class ReportNarrativeTests
     public void ComparesAgainstThePreviousMonthWhenThereIsOne(
         long previousMessages, long previousPassing, string expected)
     {
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             messages: 1000, passing: 1000,
             previousMessages: previousMessages, previousPassing: previousPassing));
 
@@ -221,7 +221,7 @@ public sealed class ReportNarrativeTests
     [Fact]
     public void NamesThePreviousMonthWhenItReportsAChange()
     {
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             messages: 1000, passing: 1000, previousMessages: 1000, previousPassing: 900));
 
         Assert.Contains("July 2026", AllText(summary), StringComparison.Ordinal);
@@ -234,7 +234,7 @@ public sealed class ReportNarrativeTests
     {
         // Half a sentence in a client-facing document reads as a bug in the
         // product, whatever the numbers say.
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             domains: [Domain(policy: "none")],
             sources: [Source(messages: 60), Source(ip: "198.51.100.7", authenticatedFor: "x.net")],
             changes: [new ReportChange { RecordName = "_dmarc.acme.com", RecordType = "TXT" }],
@@ -254,7 +254,7 @@ public sealed class ReportNarrativeTests
     {
         // The report is forwarded. "We" in a document with no letterhead is
         // ambiguous the moment it leaves the client's inbox.
-        var summary = ReportNarrative.Summarise(Report(
+        var summary = ReportNarrative.Summarize(Report(
             sources: [Source(ip: "198.51.100.7", authenticatedFor: "x.net")],
             messages: 1000, passing: 960));
 
@@ -278,7 +278,7 @@ public sealed class ReportNarrativeTests
             ],
             messages: 4393, passing: 4183);
 
-        var summary = ReportNarrative.Summarise(report);
+        var summary = ReportNarrative.Summarize(report);
         var impersonation = Assert.Single(summary.Points, p => p.Contains("could not prove otherwise", StringComparison.Ordinal));
 
         // Every number in that sentence must be one the sentence is entitled
@@ -308,7 +308,7 @@ public sealed class ReportNarrativeTests
 
         foreach (var report in reports)
         {
-            var summary = ReportNarrative.Summarise(report);
+            var summary = ReportNarrative.Summarize(report);
             if (summary.NeedsAttention)
             {
                 Assert.DoesNotContain("nothing needed attention", summary.Headline, StringComparison.Ordinal);
@@ -318,12 +318,12 @@ public sealed class ReportNarrativeTests
 
     [Fact]
     public void RejectsANullReport() =>
-        Assert.Throws<ArgumentNullException>(() => ReportNarrative.Summarise(null!));
+        Assert.Throws<ArgumentNullException>(() => ReportNarrative.Summarize(null!));
 
     [Fact]
     public void NeverDividesByZeroForAClientWithNoDomains()
     {
-        var summary = ReportNarrative.Summarise(Report(domains: [], messages: 0, passing: 0));
+        var summary = ReportNarrative.Summarize(Report(domains: [], messages: 0, passing: 0));
 
         Assert.False(string.IsNullOrWhiteSpace(summary.Headline));
     }

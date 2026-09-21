@@ -14,14 +14,18 @@ public static class ClientCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--name", "--slug", "--org", "--domain", "--client", "--group", "!--apply") is var bad and not 0) { return bad; }
+
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
         var dbPath = Args.Value(rest, "--db") ?? "dmarc.db";
 
-        // The organisation new clients belong to. Everything else here names
-        // a client or a domain by slug, which is unique across organisations.
+        // The organization new clients belong to. Everything else here names
+        // a client or a domain by slug, which is unique across organizations.
         var store = new ReportStore(dbPath, Args.Value(rest, "--org") ?? ReportStore.DefaultTenantSlug);
-        if (!await store.IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await store.IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;
@@ -72,14 +76,14 @@ public static class ClientCommand
             return 0;
         }
 
-        // The organisation column only earns its width once there are two.
-        var organisations = clients.Select(c => c.OrganisationSlug).Distinct(StringComparer.Ordinal).Count() > 1;
+        // The organization column only earns its width once there are two.
+        var organizations = clients.Select(c => c.OrganizationSlug).Distinct(StringComparer.Ordinal).Count() > 1;
 
         Console.WriteLine();
-        Console.WriteLine($"  {"slug",-28} {"name",-32} {"domains",7} {"messages",9}{(organisations ? "  organisation" : "")}");
+        Console.WriteLine($"  {"slug",-28} {"name",-32} {"domains",7} {"messages",9}{(organizations ? "  organization" : "")}");
         foreach (var c in clients)
         {
-            Console.WriteLine($"  {c.Slug,-28} {c.Name,-32} {c.Domains,7} {c.Messages,9:N0}{(organisations ? "  " + c.OrganisationSlug : "")}");
+            Console.WriteLine($"  {c.Slug,-28} {c.Name,-32} {c.Domains,7} {c.Messages,9:N0}{(organizations ? "  " + c.OrganizationSlug : "")}");
         }
 
         var unassigned = await store.GetUnassignedDomainsAsync(ct: ct).ConfigureAwait(false);
@@ -101,10 +105,10 @@ public static class ClientCommand
         var name = Args.Value(args, "--name");
         if (string.IsNullOrWhiteSpace(name))
         {
-            return Usage("dmarc client add --name \"<name>\" [--slug <slug>] [--org <organisation slug>] [--db <path>]");
+            return Usage("dmarc client add --name \"<name>\" [--slug <slug>] [--org <organization slug>] [--db <path>]");
         }
 
-        var slug = await store.CreateClientAsync(name, Args.Value(args, "--slug"), store.Organisation, ct).ConfigureAwait(false);
+        var slug = await store.CreateClientAsync(name, Args.Value(args, "--slug"), store.Organization, ct).ConfigureAwait(false);
         if (slug is null)
         {
             // Either the name reduced to nothing usable, or it is taken. Both
@@ -153,8 +157,25 @@ public static class ClientCommand
         Console.WriteLine();
         Console.WriteLine($"  {"domain",-26} {"client",-26} {"slug",-24}");
 
-        var taken = (await store.GetClientsAsync(ct: ct).ConfigureAwait(false))
-            .ToDictionary(c => c.Slug, c => c.Name, StringComparer.OrdinalIgnoreCase);
+        // Built a name at a time rather than with ToDictionary, because a slug
+        // is unique within an organization and not across them: every
+        // organization carries its own Unassigned, filed under that same slug.
+        //
+        // ToDictionary threw on the second one - "An item with the same key
+        // has already been added. Key: unassigned" - as an unhandled
+        // exception with a stack trace, so auto-assign stopped working
+        // entirely the moment a second organization existed. That is the
+        // shape this product is for, and the crash was in the one command
+        // meant to save an operator from typing eighteen pairs of commands.
+        //
+        // This is only a collision check for the slugs about to be created,
+        // and those all go into one organization, so one name per slug is
+        // enough.
+        var taken = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var client in await store.GetClientsAsync(ct: ct).ConfigureAwait(false))
+        {
+            taken[client.Slug] = client.Name;
+        }
 
         var planned = new List<(string Domain, string Name, string Slug)>();
         foreach (var domain in domains)
@@ -264,7 +285,7 @@ public static class ClientCommand
         Console.Error.WriteLine(message);
         Console.Error.WriteLine();
         Console.Error.WriteLine("  dmarc client list");
-        Console.Error.WriteLine("  dmarc client add    --name \"<name>\" [--slug <slug>] [--org <organisation slug>]");
+        Console.Error.WriteLine("  dmarc client add    --name \"<name>\" [--slug <slug>] [--org <organization slug>]");
         Console.Error.WriteLine("  dmarc client assign --domain <domain> --client <slug>");
         Console.Error.WriteLine("  dmarc client set-group --client <slug> --group <entra group object id>   (the customer's own login)");
         return 64;

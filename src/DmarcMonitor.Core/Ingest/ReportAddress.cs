@@ -374,7 +374,7 @@ public static class ReportAttribution
         return new AttributionResult
         {
             Outcome = AttributionOutcome.UnknownAddress,
-            Reason = "The report was not delivered to a recognised reporting address.",
+            Reason = "The report was not delivered to a recognized reporting address.",
         };
     }
 
