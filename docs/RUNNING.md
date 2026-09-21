@@ -214,6 +214,45 @@ Exit code is 1 when anything breaking was found, so it can gate a pipeline.
 
 ---
 
+## Retention: what is kept, and for how long
+
+The schema has assumed a retention window since it was written and nothing
+enforced one, so both report tables grew without bound.
+
+    dmarc prune                      # what would go
+    dmarc prune --apply
+    dmarc prune --aggregate-days 400 --forensic-days 30 --apply
+
+`deploy/install.sh` enables `dmarc-prune.timer` from the first day, weekly. The
+window is written into `dmarc-prune.service` where you can read and change it,
+rather than left to a default that could move in a later release.
+
+| class | default | why |
+|---|---|---|
+| aggregate + TLS | **400 days** | thirteen months, so a monthly report always has last year's same month to sit beside; twelve exactly loses it the day it is wanted |
+| forensic | **30 days** | these hold **real message headers** — subject lines, message ids, somebody's mail. Deliberately the shortest window here, and the command refuses a policy where it is the longest |
+
+The floor is 7 days for either: receivers report a day or two late, so anything
+shorter deletes reports about mail that is still arriving and the domain reads
+as quiet.
+
+It is the only thing in this product that deletes a customer's history, so it
+counts before it deletes, deletes inside one transaction, and writes what it
+removed and under which policy to the audit log. **Domains, clients and
+organizations are never touched** — a customer who sent no mail for a year still
+exists, only the reports age out.
+
+SQLite does not hand space back to the filesystem on delete; it reuses the
+pages, so you reach a steady state rather than unbounded growth. To actually
+shrink the file, when there is room for a second copy of it and nothing else is
+using it: `sqlite3 dmarc.db VACUUM`.
+
+Turn it on **before** the collector, not after. A window switched on later
+deletes a year of history in one run, which is a much bigger thing to approve
+than a weekly job that has been quietly ageing reports out all along.
+
+---
+
 ## Can each domain's reports actually reach you?
 
     dmarc reachability

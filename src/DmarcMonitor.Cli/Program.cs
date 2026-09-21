@@ -52,6 +52,7 @@ public static class Program
                 "audit" => await AuditCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "simulate" => await SimulateCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "reachability" => await ReachabilityCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -207,6 +208,22 @@ public static class Program
                 --quiet          Only the domains with something wrong.
                 --db <path>      Database file. Default: dmarc.db
 
+              prune              Remove report data past its retention window. A dry run
+                                 unless --apply. Nothing else in this product deletes a
+                                 customer's history, so it counts first, deletes in one
+                                 transaction, and records what it removed in the audit log.
+                                 Domains and clients are never touched - only the reports
+                                 age out.
+                --aggregate-days <n>  Aggregate and TLS reports to keep. Default: 400
+                                      (thirteen months, so this month still has last
+                                      year's same month to sit beside).
+                --forensic-days <n>   Forensic reports to keep. Default: 30. These hold
+                                      real message headers, so this is deliberately the
+                                      shortest window and may not exceed the one above.
+                --apply               Do it.
+                --by <name>           Who is doing this. Default: the signed-in user.
+                --db <path>           Database file. Default: dmarc.db
+
               fix                Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
@@ -292,6 +309,8 @@ public static class Program
               dmarc audit --zone example.com.txt
               dmarc simulate --domain example.com --policy quarantine
               dmarc reachability --quiet
+              dmarc prune                                    # what would go
+              dmarc prune --apply
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"
               dmarc ingest --mailbox dmarc@example.com --dry-run

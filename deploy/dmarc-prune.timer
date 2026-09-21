@@ -1,0 +1,28 @@
+# Applies the retention window once a week.
+#
+# Weekly rather than nightly because nothing here is urgent: a report that is
+# four hundred and three days old is no more of a problem than one that is four
+# hundred, and a deletion job that runs every night is a deletion job nobody
+# reads the log of. Once a week it is a line somebody notices.
+#
+# Sunday early, after the nightly DNS scan has had its slot, and well away from
+# the collector's.
+#
+# Persistent=true catches up after downtime, which matters more here than for
+# the DNS scan: an install that was off for a month should apply the window on
+# the way back up rather than waiting another week. The randomized delay keeps
+# a room full of installs off the same minute.
+#
+# Enabled by deploy/install.sh; by hand it is:
+#   sudo systemctl enable --now dmarc-prune.timer
+
+[Unit]
+Description=Apply the DMARC report retention window weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:40:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

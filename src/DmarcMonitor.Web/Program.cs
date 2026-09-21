@@ -80,6 +80,12 @@ builder.Services.AddScoped<DnsStatusService>();
 // this that it cannot fetch for itself.
 builder.Services.AddScoped<ZoneAuditUiService>();
 
+// What is kept and for how long. The app never prunes anything - that is
+// dmarc-prune's job, and a web request must not be able to start deleting a
+// customer's history - but Settings has to be able to say what the window is
+// without an operator reading a unit file.
+builder.Services.AddSingleton(new DmarcMonitor.Core.Storage.RetentionPolicy());
+
 // Shared, because it caches: a page opened twice in a minute should not ask
 // the resolver twice. Reading DNS is also the only thing here that reaches
 // outside the machine, so it is the one service whose slowness can be seen.
