@@ -85,6 +85,22 @@ usage() {
     else echo "options: see https://github.com/${REPO}/blob/main/deploy/bootstrap.sh"; fi
 }
 
+# Downloads a file, retrying the failures worth retrying.
+#
+# Every download here is from somebody else's CDN - Microsoft's, Caddy's,
+# GitHub's - and any of them can answer 5xx for a few seconds. A single curl
+# turns that into a dead install: most of the way through, then a failure at
+# the proxy step and a half-built machine to work out by hand. CI hit exactly
+# that, a 504 from GitHub on the WinSW download, which is what a real server
+# would get on a bad afternoon.
+#
+# --retry covers connection failures and 5xx; --retry-all-errors would also
+# retry a 404, which is an answer rather than a hiccup and should be reported
+# at once.
+fetch() {
+    curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 20 "$@"
+}
+
 need_value() { [[ -n "${2:-}" && "${2:0:2}" != "--" ]] || { echo "$1 needs a value" >&2; exit 64; }; }
 
 # Everything below is one function, called on the last line. Piped through
@@ -196,14 +212,14 @@ install_caddy_static() {
     [[ "$ARCH" == linux-arm64 ]] && arch=arm64
     echo "   Caddy: static binary (no package in this distribution)"
     local tmp; tmp="$(mktemp)"
-    curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${arch}" -o "$tmp"
+    fetch "https://caddyserver.com/api/download?os=linux&arch=${arch}" -o "$tmp"
     install -m 0755 "$tmp" /usr/bin/caddy
     rm -f "$tmp"
     getent group caddy >/dev/null || groupadd --system caddy
     id caddy >/dev/null 2>&1 || useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
         --shell /usr/sbin/nologin --comment "Caddy web server" caddy
     mkdir -p /etc/caddy
-    curl -fsSL https://raw.githubusercontent.com/caddyserver/dist/master/init/caddy.service \
+    fetch https://raw.githubusercontent.com/caddyserver/dist/master/init/caddy.service \
         -o /etc/systemd/system/caddy.service
     systemctl daemon-reload
 }
@@ -234,7 +250,7 @@ elif [[ ! -e "${ROOT}/app" ]]; then
     echo "== release ${RELEASE}"
     TAG="$RELEASE"
     if [[ "$TAG" == latest ]]; then
-        TAG="$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/latest" \
+        TAG="$(fetch -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/latest" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))')" || TAG=""
         [[ -n "$TAG" ]] || { echo "could not find the latest release of ${REPO}. Is there one? Pass --release <tag>, or --from-dir with the files." >&2; exit 69; }
         echo "   latest is ${TAG}"
@@ -242,7 +258,7 @@ elif [[ ! -e "${ROOT}/app" ]]; then
     BASE="https://github.com/${REPO}/releases/download/${TAG}"
     for name in dmarc-web.zip "dmarc-${ARCH}" dmarc-deploy.tar.gz; do
         echo "   fetching ${name}"
-        curl -fsSL "${BASE}/${name}" -o "${WORK}/${name}" || {
+        fetch "${BASE}/${name}" -o "${WORK}/${name}" || {
             echo "could not download ${BASE}/${name}. If the repository is private, download the files in a browser and use --from-dir." >&2
             exit 69
         }
