@@ -48,6 +48,19 @@ public sealed record PublishedRecords
     /// <summary>Every TXT record at the apex that begins v=spf1. More than one is itself a fault.</summary>
     public IReadOnlyList<string> SpfRecords { get; init; } = [];
 
+    /// <summary>
+    /// Every TXT record at the apex, SPF or not.
+    /// </summary>
+    /// <remarks>
+    /// Kept because the records that are not SPF are sometimes the finding.
+    /// A TXT record that lists includes and ends in -all, with no v=spf1 in
+    /// front of it, is invisible to <see cref="SpfRecords"/> by design and is
+    /// the reason a domain with an SPF record in its zone has no SPF at all.
+    /// <see cref="ZoneAudit"/> needs to see it here to confirm that what a
+    /// zone file shows is still what DNS serves.
+    /// </remarks>
+    public IReadOnlyList<string> ApexTxt { get; init; } = [];
+
     /// <summary>The TXT record at _dmarc, if there is one.</summary>
     public string? DmarcRecord { get; init; }
 

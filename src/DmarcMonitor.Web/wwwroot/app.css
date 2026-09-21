@@ -764,6 +764,31 @@ section[id] { scroll-margin-top: 16px; }
 }
 .vol-bar > span { display: block; height: 100%; background: var(--dim); border-radius: 2px; }
 
+/* ---- zone file box ----------------------------------------------------- */
+
+/*
+    Where an operator pastes an exported zone. Monospaced and pre-wrapped,
+    because a zone file is columns: a DKIM key wrapped at the reader's word
+    boundaries is unreadable, and somebody checking that they pasted the whole
+    thing is looking at its shape rather than reading it.
+*/
+.zone-paste textarea {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 120px;
+    background: var(--field); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; box-shadow: var(--shadow);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.5; white-space: pre; overflow-wrap: normal;
+}
+.zone-paste textarea::placeholder { color: var(--dim); }
+.zone-paste { margin-bottom: 10px; }
+
+/* Record names here are long by nature - a selector under _domainkey under
+   the domain - and at the width a table gives them by default they wrap one
+   character at a time and stop being readable as names. */
+.triage td.zone-name { min-width: 210px; }
+.triage td.zone-name code { word-break: normal; overflow-wrap: anywhere; }
+
 /* ---- callout ----------------------------------------------------------- */
 
 /*

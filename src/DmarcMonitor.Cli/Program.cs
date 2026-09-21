@@ -49,6 +49,7 @@ public static class Program
                 "org" => await OrgCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "report" => await ReportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "check" => await CheckCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "audit" => await AuditCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -163,6 +164,19 @@ public static class Program
                                  dmarc check --all --save --db <path>
                 --db <path>      Database file. Default: dmarc.db
 
+              audit              Read a zone file and say what is wrong with it. Takes the
+                                 BIND-format export every registrar and DNS host offers,
+                                 and checks it against live DNS and against the reports.
+                                 It sees what 'check' cannot: DNS will not list a domain's
+                                 DKIM selectors, so only a zone file can show the ones that
+                                 have stopped resolving, the key published with the wrong
+                                 version tag, or the record that reads as SPF and has no
+                                 v=spf1 in front of it.
+                --zone <file>    The exported zone file.
+                --domain <d>     The domain it is a zone for, if the file does not say.
+                --offline        Judge the file alone; ask neither DNS nor the reports.
+                --db <path>      Database file. Default: dmarc.db
+
               fix                Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
@@ -232,6 +246,7 @@ public static class Program
               dmarc client add --name "Morton, ND"
               dmarc client assign --domain mortonnd.gov --client morton-nd
               dmarc check --domain example.com
+              dmarc audit --zone example.com.txt
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"
               dmarc ingest --mailbox dmarc@example.com --dry-run

@@ -134,7 +134,7 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
         // asks about keys in a zone nobody owns.
         if (!published.LookupFailed && !published.DomainDoesNotExist)
         {
-            foreach (var (selector, lastSeen) in await SelectorsAsync(name, ct).ConfigureAwait(false))
+            foreach (var (selector, lastSeen) in await SelectorsSeenSigningAsync(name, ct).ConfigureAwait(false))
             {
                 ct.ThrowIfCancellationRequested();
                 var key = await _lookup.DkimAsync(name, selector, ct).ConfigureAwait(false);
@@ -203,9 +203,11 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
     /// and drawn as a broken key forever.
     /// </para>
     /// </remarks>
-    private async Task<List<(string Selector, DateTimeOffset LastSeen)>> SelectorsAsync(
-        string domain, CancellationToken ct)
+    public async Task<IReadOnlyList<(string Selector, DateTimeOffset LastSeen)>> SelectorsSeenSigningAsync(
+        string domain, CancellationToken ct = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+
         var found = new List<(string, DateTimeOffset)>();
 
         await using var db = new SqliteConnection(ReadOnly());
