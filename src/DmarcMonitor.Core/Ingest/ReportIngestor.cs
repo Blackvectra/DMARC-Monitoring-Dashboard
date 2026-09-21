@@ -26,6 +26,16 @@ public sealed record IngestOptions
     /// </summary>
     public string QuarantineFolder { get; init; } = "DMARC-Quarantine";
 
+    /// <summary>
+    /// What to do with a message once its reports are safely stored.
+    /// </summary>
+    /// <remarks>
+    /// Filing is the default and deleting is not, because the mailbox is the
+    /// only copy of a customer's evidence until the database has it. Deleting
+    /// applies to nothing else: see <see cref="DeleteProcessed"/>.
+    /// </remarks>
+    public DeleteProcessed DeleteProcessed { get; init; } = DeleteProcessed.Keep;
+
     /// <summary>The subdomain per-domain report addresses are issued under.</summary>
     public string ReportingDomain { get; init; } = "";
 
@@ -49,6 +59,52 @@ public sealed record IngestOptions
     /// continues from where this one stopped.
     /// </summary>
     public int MaxMessages { get; init; } = 500;
+}
+
+/// <summary>
+/// What becomes of a message whose reports are now in the database.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A reporting mailbox grows without limit. Every receiver sends for every
+/// domain every day, so filing the processed mail into another folder of the
+/// same mailbox moves the problem rather than solving it - it is the same
+/// quota.
+/// </para>
+/// <para>
+/// This applies to processed mail and to nothing else. Mail the parser did
+/// not understand, mail whose delivery address and contents disagreed, and
+/// mail delivered somewhere this deployment does not recognize are all kept
+/// wherever they are now, whatever this is set to. Each of the three is
+/// evidence of something to fix, and a report this version cannot read looks
+/// exactly like junk right up until somebody reads it and improves the parser.
+/// </para>
+/// </remarks>
+public enum DeleteProcessed
+{
+    /// <summary>File it in the processed folder. The default, and the only one that keeps the mail.</summary>
+    Keep,
+
+    /// <summary>
+    /// Put it in Deleted Items, where a person can get it back.
+    /// </summary>
+    /// <remarks>
+    /// Deleted Items counts against the mailbox quota, so this empties the
+    /// inbox without giving any space back until a retention policy clears
+    /// the folder. It is the right first setting for somebody who has not
+    /// watched this run against their mailbox yet.
+    /// </remarks>
+    Soft,
+
+    /// <summary>
+    /// Remove it from the mailbox proper.
+    /// </summary>
+    /// <remarks>
+    /// In Exchange Online this lands in Recoverable Items, which has a quota
+    /// of its own, so this is the setting that actually returns the space.
+    /// Still recoverable for the tenant's deleted-item retention period.
+    /// </remarks>
+    Permanent,
 }
 
 public enum IngestOutcome
@@ -107,6 +163,16 @@ public sealed record IngestRunResult
 {
     public int MessagesRead { get; init; }
     public int MessagesMoved { get; init; }
+
+    /// <summary>
+    /// Messages removed from the mailbox after their reports were stored.
+    /// </summary>
+    /// <remarks>
+    /// Reported separately from the moved count rather than added to it. They
+    /// are not the same event: one can be undone by dragging a folder, and the
+    /// other is the run having thrown mail away on the operator's instruction.
+    /// </remarks>
+    public int MessagesDeleted { get; init; }
     public IReadOnlyList<IngestedReport> Reports { get; init; } = [];
 
     /// <summary>
@@ -200,6 +266,7 @@ public sealed class ReportIngestor
         var errors = new List<string>();
         var read = 0;
         var moved = 0;
+        var deleted = 0;
         var stoppedEarly = false;
 
         var processedId = await _mailbox.EnsureFolderAsync(_options.ProcessedFolder, cancellationToken).ConfigureAwait(false);
@@ -311,10 +378,29 @@ public sealed class ReportIngestor
 
             var destination = ChooseDestination(fromThisMessage, processedId, unrecognizedId, quarantineId);
             if (destination is null) { continue; }
+
+            // Deleting is only ever an alternative to filing in the processed
+            // folder. Everything that lands anywhere else is something an
+            // operator has to be able to look at afterwards, and the whole
+            // point of those folders is that they survive.
+            var delete = _options.DeleteProcessed != DeleteProcessed.Keep
+                && string.Equals(destination, processedId, StringComparison.Ordinal);
+
             try
             {
-                await _mailbox.MoveMessageAsync(message.Id, destination, cancellationToken).ConfigureAwait(false);
-                moved++;
+                if (delete)
+                {
+                    await _mailbox
+                        .DeleteMessageAsync(
+                            message.Id, _options.DeleteProcessed == DeleteProcessed.Permanent, cancellationToken)
+                        .ConfigureAwait(false);
+                    deleted++;
+                }
+                else
+                {
+                    await _mailbox.MoveMessageAsync(message.Id, destination, cancellationToken).ConfigureAwait(false);
+                    moved++;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -323,10 +409,12 @@ public sealed class ReportIngestor
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
-                // A failed move is survivable: the report was already handed
-                // over, and the duplicate check stops it being counted twice
-                // when this message is read again next run.
-                errors.Add($"{message.Id}: could not be filed: {ex.Message}");
+                // Survivable either way: the reports were already stored, and
+                // the duplicate check stops them being counted twice when this
+                // message is read again next run. A delete that failed leaves
+                // the message in the source folder, which is the same place a
+                // failed move leaves it.
+                errors.Add($"{message.Id}: could not be {(delete ? "deleted" : "filed")}: {ex.Message}");
             }
         }
         }
@@ -340,6 +428,7 @@ public sealed class ReportIngestor
         {
             MessagesRead = read,
             MessagesMoved = moved,
+            MessagesDeleted = deleted,
             Reports = reports,
             Errors = errors,
             StoppedEarly = stoppedEarly,

@@ -232,7 +232,20 @@ public static class Program
                 --reporting-domain <d> Subdomain per-domain report addresses use.
                 --fallback <address>   Shared address, for domains not yet migrated.
                 --max <n>              Messages per run. Default: 500
-                --dry-run              Parse and report, write nothing, move nothing.
+                --delete <mode>        Delete a message once its reports are stored, rather
+                                     than filing it. A reporting mailbox grows without
+                                     limit, and the processed folder is the same quota.
+                                       soft       to Deleted Items: a person can get it
+                                                  back, and it still uses the quota until
+                                                  a retention policy clears that folder.
+                                       permanent  out of the mailbox, which is what gives
+                                                  the space back. Recoverable Items keeps
+                                                  it for the tenant's retention period.
+                                     Only stored mail is ever deleted. Reports that could
+                                     not be read, that were quarantined, or that were not
+                                     attributed are always kept. Try --dry-run first.
+                --dry-run              Parse and report, write nothing, move nothing,
+                                     delete nothing.
                                      Safe against a live mailbox. See
                                      docs/INGEST-SETUP.md for the app registration,
                                      and read the part about restricting it to one

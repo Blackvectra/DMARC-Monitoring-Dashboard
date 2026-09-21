@@ -156,6 +156,46 @@ public sealed class GraphMailboxClient : IMailboxClient
         }
     }
 
+    /// <summary>
+    /// Deletes a message, either to Deleted Items or out of the mailbox.
+    /// </summary>
+    /// <remarks>
+    /// Two different Graph operations rather than one with a flag. DELETE on a
+    /// message is a soft delete: Outlook shows it in Deleted Items and it
+    /// still occupies the mailbox quota, which is usually the thing the
+    /// operator was trying to reclaim. permanentDelete moves it to Recoverable
+    /// Items, whose quota is separate, so that is the one that gives the space
+    /// back - and it is still recoverable for the tenant's retention period,
+    /// which is why it is offered at all rather than being considered too
+    /// sharp to ship.
+    /// </remarks>
+    public async Task DeleteMessageAsync(
+        string messageId, bool permanent, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+
+        var id = Uri.EscapeDataString(messageId);
+
+        using var response = permanent
+            ? await _http.PostAsync(
+                new Uri($"{UserBase}/messages/{id}/permanentDelete"), content: null, cancellationToken)
+                .ConfigureAwait(false)
+            : await _http.DeleteAsync(new Uri($"{UserBase}/messages/{id}"), cancellationToken)
+                .ConfigureAwait(false);
+
+        // A message that is already gone is the outcome that was wanted. It
+        // happens when a run is cut off between the delete and recording it,
+        // and treating it as a failure would fill the log with errors about
+        // work that succeeded.
+        if (response.StatusCode == HttpStatusCode.NotFound) { return; }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await SafeReadAsync(response, cancellationToken).ConfigureAwait(false);
+            throw GraphError.Translate(response.StatusCode, body, _mailbox);
+        }
+    }
+
     public async Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(folderName);

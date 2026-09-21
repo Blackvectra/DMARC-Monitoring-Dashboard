@@ -84,6 +84,23 @@ public interface IMailboxClient
     /// </remarks>
     Task MoveMessageAsync(string messageId, string destinationFolderId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Deletes a message.
+    /// </summary>
+    /// <param name="permanent">
+    /// False puts it in Deleted Items, where a person can get it back and
+    /// where it still counts against the mailbox quota. True removes it from
+    /// the mailbox proper; in Exchange Online it is recoverable for the
+    /// tenant's retention period from Recoverable Items, which has a quota of
+    /// its own, so this is the one that actually gives the space back.
+    /// </param>
+    /// <remarks>
+    /// Only ever called for a message whose reports are already in the
+    /// database. See <see cref="DeleteProcessed"/> for why nothing else is
+    /// eligible, and why this is off unless an operator asks for it.
+    /// </remarks>
+    Task DeleteMessageAsync(string messageId, bool permanent, CancellationToken cancellationToken = default);
+
     /// <summary>Returns the id of a folder, creating it if it does not exist.</summary>
     Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default);
 

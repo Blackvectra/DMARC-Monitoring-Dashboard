@@ -84,6 +84,23 @@ public sealed class FakeMailboxClient : IMailboxClient
         return Task.CompletedTask;
     }
 
+    /// <summary>Message id to whether it was deleted permanently.</summary>
+    public Dictionary<string, bool> Deleted { get; } = [];
+
+    /// <summary>Ids whose delete should throw, for the survivable-failure case.</summary>
+    public HashSet<string> FailDeleteFor { get; } = [];
+
+    public Task DeleteMessageAsync(string messageId, bool permanent, CancellationToken cancellationToken = default)
+    {
+        if (FailDeleteFor.Contains(messageId))
+        {
+            throw new InvalidOperationException("delete failed");
+        }
+
+        Deleted[messageId] = permanent;
+        return Task.CompletedTask;
+    }
+
     /// <summary>Folders inside a parent, keyed by parent name.</summary>
     public Dictionary<string, List<MailFolder>> ChildFolders { get; } = new(StringComparer.OrdinalIgnoreCase);
 
