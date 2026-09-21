@@ -14,6 +14,10 @@ public static class ClientCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--name", "--slug", "--org", "--domain", "--client", "--group", "!--apply") is var bad and not 0) { return bad; }
+
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
         var dbPath = Args.Value(rest, "--db") ?? "dmarc.db";
@@ -153,8 +157,25 @@ public static class ClientCommand
         Console.WriteLine();
         Console.WriteLine($"  {"domain",-26} {"client",-26} {"slug",-24}");
 
-        var taken = (await store.GetClientsAsync(ct: ct).ConfigureAwait(false))
-            .ToDictionary(c => c.Slug, c => c.Name, StringComparer.OrdinalIgnoreCase);
+        // Built a name at a time rather than with ToDictionary, because a slug
+        // is unique within an organisation and not across them: every
+        // organisation carries its own Unassigned, filed under that same slug.
+        //
+        // ToDictionary threw on the second one - "An item with the same key
+        // has already been added. Key: unassigned" - as an unhandled
+        // exception with a stack trace, so auto-assign stopped working
+        // entirely the moment a second organisation existed. That is the
+        // shape this product is for, and the crash was in the one command
+        // meant to save an operator from typing eighteen pairs of commands.
+        //
+        // This is only a collision check for the slugs about to be created,
+        // and those all go into one organisation, so one name per slug is
+        // enough.
+        var taken = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var client in await store.GetClientsAsync(ct: ct).ConfigureAwait(false))
+        {
+            taken[client.Slug] = client.Name;
+        }
 
         var planned = new List<(string Domain, string Name, string Slug)>();
         foreach (var domain in domains)

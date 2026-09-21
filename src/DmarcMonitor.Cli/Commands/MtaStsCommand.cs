@@ -20,6 +20,10 @@ public static class MtaStsCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--domain", "--mode", "--mx", "--policy-host", "!--i-have-checked") is var bad and not 0) { return bad; }
+
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
         var dbPath = Args.Value(rest, "--db") ?? "dmarc.db";

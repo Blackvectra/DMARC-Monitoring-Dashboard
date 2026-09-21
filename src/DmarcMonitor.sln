@@ -13,6 +13,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DmarcMonitor.Web", "DmarcMo
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DmarcMonitor.Web.Tests", "DmarcMonitor.Web.Tests\DmarcMonitor.Web.Tests.csproj", "{A036441A-AA78-43F4-A472-13C920FB7A37}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DmarcMonitor.Cli.Tests", "DmarcMonitor.Cli.Tests\DmarcMonitor.Cli.Tests.csproj", "{0046A877-3564-4913-A408-90538F7DCE58}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -42,5 +44,9 @@ Global
 		{A036441A-AA78-43F4-A472-13C920FB7A37}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A036441A-AA78-43F4-A472-13C920FB7A37}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A036441A-AA78-43F4-A472-13C920FB7A37}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0046A877-3564-4913-A408-90538F7DCE58}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0046A877-3564-4913-A408-90538F7DCE58}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0046A877-3564-4913-A408-90538F7DCE58}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0046A877-3564-4913-A408-90538F7DCE58}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

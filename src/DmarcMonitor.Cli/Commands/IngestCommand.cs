@@ -18,6 +18,10 @@ public static class IngestCommand
 {
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
+        // A mistyped flag used to be ignored, which changed what the
+        // command did without saying so. See Args.Reject.
+        if (Args.Reject(args, "--db", "--mailbox", "--tenant", "--client-id", "--cert", "--cert-password", "--max", "--fallback", "--reporting-domain", "--org", "!--dry-run") is var bad and not 0) { return bad; }
+
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var mailbox = Args.Value(args, "--mailbox");
         var tenantId = Args.Value(args, "--tenant") ?? Environment.GetEnvironmentVariable("DMARC_TENANT_ID");
