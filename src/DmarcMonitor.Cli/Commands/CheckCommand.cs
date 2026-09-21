@@ -76,6 +76,10 @@ public static class CheckCommand
 
         var lookup = new DnsLookup();
         var scanner = save ? new DnsScanner(dbPath, lookup) : null;
+
+        // One fetcher for the run, so its connections are reused across a book
+        // of domains rather than opened and torn down eighty times.
+        var fetcher = new MtaStsFetcher();
         var worst = 0;
         var saved = 0;
         var skipped = 0;
@@ -87,6 +91,19 @@ public static class CheckCommand
 
             var published = await lookup.ReadAsync(domain, ct).ConfigureAwait(false);
             var seen = observed.TryGetValue(domain, out var o) ? o : new ObservedSending();
+
+            // The policy a sender would get, rather than the mode the last
+            // stored TLS report remembers. Only for a domain that announces
+            // one: fetching for the rest would be an HTTPS request per domain
+            // to a host nobody claimed exists.
+            if (!string.IsNullOrWhiteSpace(published.MtaStsRecord))
+            {
+                published = published with
+                {
+                    ServedMtaSts = await fetcher.FetchAsync(domain, ct: ct).ConfigureAwait(false),
+                    MxHosts = await lookup.MxAsync(domain, ct).ConfigureAwait(false),
+                };
+            }
 
             // Stored from the same reading that is about to be judged, rather
             // than from a second lookup: a record being edited while this runs

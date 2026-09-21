@@ -21,9 +21,13 @@ public sealed class DnsHygieneTests
         string[]? dead = null,
         int lookups = 0,
         bool failed = false,
-        bool missing = false) => new()
+        bool missing = false,
+        DmarcMonitor.Core.Remediation.ServedPolicy? served = null,
+        string[]? mx = null) => new()
         {
             Domain = "acme.com",
+            ServedMtaSts = served,
+            MxHosts = mx ?? [],
             SpfRecords = spf ?? ["v=spf1 include:spf.protection.outlook.com -all"],
             DmarcRecord = dmarc,
             MtaStsRecord = mtaSts,
@@ -356,7 +360,13 @@ public sealed class DnsHygieneTests
     {
         // The record exists, so "no policy published" would be wrong. What is
         // wrong is that it enforces nothing.
-        var findings = Assess(o: Observed(mode: "Testing"));
+        //
+        // Judged on the file being served rather than on the mode a report
+        // remembers; see the MTA-STS section below for why the two are not
+        // interchangeable.
+        var findings = Assess(
+            Published(served: Serving(MtaStsMode.Testing)),
+            Observed(mode: "Testing"));
 
         var f = Assert.Single(findings, x => x.Record == "MTA-STS");
         Assert.Equal(HygieneSeverity.Weakness, f.Severity);
@@ -429,4 +439,181 @@ public sealed class DnsHygieneTests
         Assert.Throws<ArgumentNullException>(() => DnsHygiene.Assess(null!, Observed()));
         Assert.Throws<ArgumentNullException>(() => DnsHygiene.Assess(Published(), null!));
     }
+
+    // ---- MTA-STS, judged on the file that is served --------------------------
+    //
+    // This used to read the mode off the newest stored TLS report, which is
+    // what senders observed when they last wrote. Two real domains were moved
+    // to enforce, their files verified by fetch, and the check went on telling
+    // the operator to move them to enforce. The reverse is the dangerous one: a
+    // policy reverted, a Pages site down, a custom domain unbound, and it would
+    // have gone on reporting enforce off a two-day-old memory.
+
+    private static DmarcMonitor.Core.Remediation.ServedPolicy Serving(string mode, params string[] mx) =>
+        new(true, new MtaStsPolicy
+        {
+            Mode = mode,
+            Mx = mx.Length > 0 ? mx : ["acme-com.mail.protection.outlook.com"],
+            Id = "20260921",
+        }, null);
+
+    [Fact]
+    public void APolicyServingEnforceIsNotToldToMoveToEnforce()
+    {
+        // The exact false instruction this replaced.
+        var findings = Assess(
+            Published(served: Serving(MtaStsMode.Enforce)),
+            Observed(mode: "Testing"));
+
+        Assert.DoesNotContain(findings, f => f.Fix.Contains("Move the policy to enforce", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ServingEnforceWhileReportsStillSayTestingIsSaidPlainlyAndCostsNothing()
+    {
+        var findings = Assess(
+            Published(served: Serving(MtaStsMode.Enforce)),
+            Observed(mode: "Testing"));
+
+        var note = Assert.Single(findings, f => f.Record == "MTA-STS");
+
+        Assert.Equal(HygieneSeverity.Tidy, note.Severity);
+        Assert.Contains("senders act on the file they cached", note.Problem, StringComparison.Ordinal);
+        Assert.StartsWith("Nothing", note.Fix, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void APolicyServingTestingIsAWeaknessWhateverTheReportsRemember()
+    {
+        var findings = Assess(
+            Published(served: Serving(MtaStsMode.Testing)),
+            Observed(mode: "Enforce"));
+
+        var note = Assert.Single(findings, f => f.Record == "MTA-STS");
+
+        Assert.Equal(HygieneSeverity.Weakness, note.Severity);
+        Assert.Contains("being served is in testing mode", note.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void APolicyServingModeNoneIsAnnouncedAndSwitchedOff()
+    {
+        var findings = Assess(Published(served: Serving(MtaStsMode.None)), Observed(mode: "Enforce"));
+
+        var note = Assert.Single(findings, f => f.Record == "MTA-STS");
+
+        Assert.Equal(HygieneSeverity.Weakness, note.Severity);
+        Assert.Contains("mode: none", note.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARecordAnnouncingAPolicyNobodyServesIsBreaking()
+    {
+        // Worse than never announcing it: a sender that cached the last good
+        // file keeps honouring it until max_age expires, and nothing published
+        // afterwards reaches it.
+        var served = DmarcMonitor.Core.Remediation.ServedPolicy.Missing("there is no host at mta-sts.acme.com");
+        var findings = Assess(Published(served: served), Observed(mode: "Enforce"));
+
+        var note = Assert.Single(findings, f => f.Record == "MTA-STS");
+
+        Assert.Equal(HygieneSeverity.Breaking, note.Severity);
+        Assert.Contains("there is no host at mta-sts.acme.com", note.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFileThatIsServedAndDoesNotParseIsBreakingToo()
+    {
+        var served = new DmarcMonitor.Core.Remediation.ServedPolicy(
+            true, null, "the file does not parse as an MTA-STS policy");
+
+        var note = Assert.Single(
+            Assess(Published(served: served), Observed(mode: "Enforce")), f => f.Record == "MTA-STS");
+
+        Assert.Equal(HygieneSeverity.Breaking, note.Severity);
+    }
+
+    [Fact]
+    public void WhenTheFileWasNotFetchedTheFindingSaysItCameFromTheReports()
+    {
+        // Never a silent fall back. An offline run judging on a memory has to
+        // say that is what it did.
+        var findings = Assess(Published(served: null), Observed(mode: "Testing"));
+
+        var note = Assert.Single(findings, f => f.Record == "MTA-STS");
+
+        Assert.Contains("The last reports from senders saw", note.Problem, StringComparison.Ordinal);
+        Assert.Contains("was not fetched on this run", note.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnUnfetchedPolicyTheReportsCallEnforceSaysNothing()
+    {
+        Assert.DoesNotContain(
+            Assess(Published(served: null), Observed(mode: "Enforce")), f => f.Record == "MTA-STS");
+    }
+
+    // ---- does the policy list the mail servers the domain really uses? --------
+
+    [Fact]
+    public void APolicyInEnforceThatOmitsTheDomainsMxIsRefusingItsOwnMail()
+    {
+        // A sender that reaches a host the policy does not name does not
+        // deliver and does not fall back. Nothing in the product noticed this
+        // before, and the only signal is a TLS report most domains never
+        // collect.
+        var findings = Assess(
+            Published(
+                served: Serving(MtaStsEnforce, "old-host.mail.protection.outlook.com"),
+                mx: ["acme-com.mail.protection.outlook.com"]),
+            Observed(mode: "Enforce"));
+
+        var note = Assert.Single(findings, f => f.Problem.Contains("MX records point", StringComparison.Ordinal));
+
+        Assert.Equal(HygieneSeverity.Breaking, note.Severity);
+        Assert.Contains("acme-com.mail.protection.outlook.com", note.Problem, StringComparison.Ordinal);
+        Assert.Contains("bounced", note.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheSameGapInTestingModeIsAWarningRatherThanALoss()
+    {
+        var findings = Assess(
+            Published(
+                served: Serving(MtaStsMode.Testing, "old-host.mail.protection.outlook.com"),
+                mx: ["acme-com.mail.protection.outlook.com"]),
+            Observed(mode: "Testing"));
+
+        var note = Assert.Single(findings, f => f.Problem.Contains("MX records point", StringComparison.Ordinal));
+
+        Assert.Equal(HygieneSeverity.Weakness, note.Severity);
+        Assert.Contains("before advancing the mode", note.Fix, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AWildcardCoveringTheMxProducesNoFinding()
+    {
+        var findings = Assess(
+            Published(
+                served: Serving(MtaStsEnforce, "*.mail.protection.outlook.com"),
+                mx: ["acme-com.mail.protection.outlook.com"]),
+            Observed(mode: "Enforce"));
+
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("MX records point", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void NothingIsSaidAboutTheMxWhenTheLookupDidNotAnswer()
+    {
+        // An empty MX list means the resolver did not reply, never that the
+        // domain has no mail servers, and an instruction built on it would
+        // have somebody editing a policy on no evidence.
+        var findings = Assess(
+            Published(served: Serving(MtaStsEnforce, "anything.example"), mx: []),
+            Observed(mode: "Enforce"));
+
+        Assert.DoesNotContain(findings, f => f.Problem.Contains("MX records point", StringComparison.Ordinal));
+    }
+
+    private const string MtaStsEnforce = MtaStsMode.Enforce;
 }

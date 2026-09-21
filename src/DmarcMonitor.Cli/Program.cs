@@ -151,8 +151,13 @@ public static class Program
               check              Read what a domain publishes in DNS and say what is wrong
                                  with it: SPF lookup limit, dead includes, a record that
                                  authorizes everybody, a policy applied to only part of the
-                                 mail, MTA-STS announced but not enforced. Needs no database,
-                                 so it works on a prospect's domain.
+                                 mail. Needs no database, so it works on a prospect's domain.
+                                 Where a domain announces MTA-STS the policy file is fetched
+                                 as a sender would, so the mode is the one being served
+                                 rather than the one the last reports remember, and the
+                                 policy's mx: lines are checked against the real MX - an
+                                 enforce policy naming the wrong host bounces the domain's
+                                 own mail.
                 --domain <d>     One domain.
                 --all            Every domain in the database.
                 --save           Store what was read, so the dashboard can show each domain's
