@@ -408,6 +408,20 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task TheDomainPageOffersSomewhereToPasteAZoneFile()
+    {
+        // The one input this application cannot fetch for itself: DNS will not
+        // list a domain's DKIM selectors and will not transfer a zone, so the
+        // records that have stopped working are only visible in an export the
+        // operator already has.
+        var html = await Client().GetStringAsync("/domains/acme.com");
+
+        Assert.Contains("id=\"zone\"", html, StringComparison.Ordinal);
+        Assert.Contains("Audit this zone", html, StringComparison.Ordinal);
+        Assert.Contains("<textarea", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ADomainNamedAfterItsClientDoesNotPrintTheNameTwice()
     {
         // Onboarding by domain name makes the client name equal the domain for

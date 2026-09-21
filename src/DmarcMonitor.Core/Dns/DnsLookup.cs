@@ -79,6 +79,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
             {
                 Domain = name,
                 SpfRecords = spf,
+                ApexTxt = apex,
                 DmarcRecord = dmarc.FirstOrDefault(t => t.TrimStart().StartsWith("v=DMARC1", StringComparison.OrdinalIgnoreCase)),
                 MtaStsRecord = mtaSts.FirstOrDefault(t => t.TrimStart().StartsWith("v=STSv1", StringComparison.OrdinalIgnoreCase)),
                 TlsRptRecord = tlsRpt.FirstOrDefault(t => t.TrimStart().StartsWith("v=TLSRPTv1", StringComparison.OrdinalIgnoreCase)),
@@ -279,26 +280,80 @@ public sealed class DnsLookup(ILookupClient? client = null)
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
         ArgumentException.ThrowIfNullOrWhiteSpace(selector);
 
+        var records = await DkimRecordsAsync(domain, selector, ct).ConfigureAwait(false);
+
+        return records is null ? null : DkimKey.Choose(selector, records);
+    }
+
+    /// <summary>
+    /// Everything published at one selector, before any of it is judged.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="DkimAsync"/> answers "what key would a verifier use", which
+    /// is the right question nearly everywhere and hides one thing: how many
+    /// records are at that name. RFC 6376 §3.6.2.1 does not say which of
+    /// several a verifier picks, so a selector carrying two is a key that
+    /// works for some receivers and not others - a fault that cannot be seen
+    /// from the chosen key alone.
+    /// </para>
+    /// <para>
+    /// Null when the lookup could not answer, as everywhere else here. An
+    /// empty list is a real answer: the name resolves to nothing.
+    /// </para>
+    /// </remarks>
+    public async Task<IReadOnlyList<string>?> DkimRecordsAsync(
+        string domain, string selector, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+        ArgumentException.ThrowIfNullOrWhiteSpace(selector);
+
         var name = $"{selector.Trim().Trim('.')}._domainkey.{domain.Trim().TrimEnd('.')}".ToLowerInvariant();
 
         try
         {
-            var txt = await TxtAsync(name, ct).ConfigureAwait(false);
-
-            // A selector's name holds one key and, in practice, other TXT
-            // records almost never. Where there is more than one, the DKIM
-            // record is the one that parses as a key: picking the first
-            // blindly would report a verification token as a broken key.
-            var keys = txt.Select(t => DkimKey.Parse(selector, t)).ToList();
-
-            return keys.FirstOrDefault(k => k.Usable)
-                ?? keys.FirstOrDefault(k => k.Strength == DkimKeyStrength.Revoked)
-                ?? keys.FirstOrDefault()
-                ?? DkimKey.Parse(selector, null);
+            return await TxtAsync(name, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The name servers a domain is actually delegated to.
+    /// </summary>
+    /// <remarks>
+    /// Needed to judge the NS records inside a zone file, and useless without
+    /// it. A zone export carries whatever NS records the operator has typed
+    /// into that provider's panel, which is not the same thing as where the
+    /// registrar points the domain - a zone moved from one provider to another
+    /// routinely keeps the old provider's NS records inside it, doing nothing,
+    /// until somebody moves the domain back and they quietly take effect.
+    ///
+    /// Empty means "could not tell", never "no name servers". A delegated
+    /// domain always has some, so an empty answer is a failed lookup and
+    /// nothing may be concluded from it.
+    /// </remarks>
+    public async Task<IReadOnlyList<string>> NsAsync(string domain, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+
+        try
+        {
+            var response = await _client
+                .QueryAsync(domain.Trim().TrimEnd('.'), QueryType.NS, cancellationToken: ct)
+                .ConfigureAwait(false);
+
+            return [.. response.Answers.NsRecords()
+                .Select(r => r.NSDName.Value.TrimEnd('.').ToLowerInvariant())
+                .Where(host => host.Length > 0)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)];
+        }
+        catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
+        {
+            return [];
         }
     }
 

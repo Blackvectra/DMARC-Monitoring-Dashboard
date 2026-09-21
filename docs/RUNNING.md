@@ -172,6 +172,48 @@ import is resumed by running it again.
 
 ---
 
+## Auditing a zone file
+
+`dmarc check` asks DNS questions. A zone file is the list of what is *in* the
+zone, which is a different thing, and it shows what no query can:
+
+    dmarc audit --zone example.com.txt
+    dmarc audit --zone example.com.txt --domain example.com   # if the file's header was trimmed off
+    dmarc audit --zone example.com.txt --offline              # judge the file alone, ask nothing
+
+Export the file from wherever the domain's DNS is hosted — GoDaddy calls it
+**Export zone file**, Cloudflare and Route 53 **Export DNS records** — or use
+the paste box at the bottom of the domain page, which runs the same code.
+
+DNS has no query that lists a domain's DKIM selectors, and no authoritative
+server hands a stranger the whole zone, so these are only visible in an
+export:
+
+- a TXT record that lists includes and ends in `-all` with **no `v=spf1` in
+  front of it**: a record somebody wrote, believes is protecting the domain,
+  and which every receiver skips over. The tool used to call this "no SPF
+  record", which sends an operator to publish a *second* one;
+- selectors whose CNAME points at a key the provider stopped serving;
+- a key published as `v=DKIM` rather than `v=DKIM1`, or two TXT records at one
+  selector — the standard does not say which of several a verifier picks;
+- key sizes, across every selector at once rather than one at a time;
+- name servers for a provider the domain is no longer delegated to;
+- `_report._dmarc` records that authorize nothing, because the version is
+  spelled `v=dmarc1` or the domain in the name lost its suffix.
+
+Each finding says whether it came from the file, from live DNS, or from the
+reports. A zone export is a snapshot and can disagree with DNS in either
+direction — the fault may have been fixed since, or the fix may never have
+been published — so a finding the file alone produced says so, and one DNS
+confirms says that instead. Where the reports are involved the finding states
+the evidence and the window and stops there: a selector that has not signed in
+thirty days is a staged key as often as it is a dead one, and this never turns
+silence into an instruction to delete anything.
+
+Exit code is 1 when anything breaking was found, so it can gate a pipeline.
+
+---
+
 ## Fixing what it finds
 
 `dmarc check` says what is wrong with a domain's DNS. `dmarc fix` changes it,

@@ -16,7 +16,15 @@ var builder = WebApplication.CreateBuilder(args);
 // this is a no-op.
 builder.Host.UseWindowsService();
 
-builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+// The receive limit is raised from its 32 KB default for one reason: the
+// zone-file box on the domain page. A paste arrives as a single hub message,
+// and a zone for a domain with a few hundred records is comfortably past the
+// default - where what an operator sees is not an error but the page going
+// quiet, because the circuit is torn down under them. The cap that says no is
+// ZoneAuditUiService.MaxCharacters, which says so in a sentence.
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents()
+    .AddHubOptions(options => options.MaximumReceiveMessageSize = 512 * 1024);
 builder.AddAppAuthentication();
 
 // Whatever holds the TLS certificate - Caddy, nginx, IIS, a load balancer -
@@ -67,6 +75,10 @@ builder.Services.AddScoped<ReportUiService>();
 // storage rather than DNS, because the domains table would otherwise resolve
 // every row on every render.
 builder.Services.AddScoped<DnsStatusService>();
+
+// The zone-file box on the domain page: the one input an operator can give
+// this that it cannot fetch for itself.
+builder.Services.AddScoped<ZoneAuditUiService>();
 
 // Shared, because it caches: a page opened twice in a minute should not ask
 // the resolver twice. Reading DNS is also the only thing here that reaches

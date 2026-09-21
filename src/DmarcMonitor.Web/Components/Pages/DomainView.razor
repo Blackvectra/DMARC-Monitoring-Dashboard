@@ -16,6 +16,7 @@
 @inject OrgContext Org
 @inject OnboardingService Onboarding
 @inject AuditLog Audit
+@inject ZoneAuditUiService ZoneAudits
 @rendermode InteractiveServer
 
 <PageTitle>@Domain — DMARC Monitor</PageTitle>
@@ -209,6 +210,10 @@ else
             <a href="#clean">@_detail.Clean.Count clean</a>
         }
         <a href="#published">Published DNS</a>
+        @if (_access is { CanOperate: true })
+        {
+            <a href="#zone">Zone file</a>
+        }
         <a href="#reporting">
             Reporting
             @if (_detail.Reporters.Any(r => r.HasGoneQuiet))
@@ -609,6 +614,125 @@ else
         }
     </section>
 
+    @if (_access is { CanOperate: true })
+    {
+        @*
+            The one input this application cannot fetch for itself.
+
+            Everything in the section above is what DNS answers when it is
+            asked a question. A zone file is the list of what is in the zone,
+            which is a different thing: there is no query that names a domain's
+            DKIM selectors and no authoritative server will hand a stranger the
+            zone, so a key that has stopped resolving, a record published with
+            the wrong version tag, and a TXT record that reads as SPF and is
+            not one are all invisible from out here. The operator has the file.
+        *@
+        <section id="zone">
+            <h2>Audit a zone file</h2>
+            <p class="sub">
+                Export it from wherever this domain's DNS is hosted — GoDaddy calls it
+                <em>Export zone file</em>, Cloudflare and Route 53 <em>Export DNS records</em> — and paste
+                it here. Each finding says whether it came from the file, from DNS, or from the reports,
+                because an export is a snapshot and can disagree with all three.
+            </p>
+
+            <div class="zone-paste">
+                <textarea rows="6" spellcheck="false" @bind="_zoneText"
+                          aria-label="@($"Zone file for {Domain}")"
+                          placeholder="@($"$ORIGIN {Domain}.")"></textarea>
+            </div>
+
+            <div class="form-row">
+                <button class="primary" @onclick="AuditZoneAsync" disabled="@_zoneBusy">
+                    @(_zoneBusy ? "Reading…" : "Audit this zone")
+                </button>
+                @if (_zone is not null || _zoneRefused is not null)
+                {
+                    <button class="linkish" @onclick="ClearZoneAsync">Clear</button>
+                }
+            </div>
+
+            @if (_zoneRefused is not null)
+            {
+                <p class="muted">@_zoneRefused</p>
+            }
+            else if (_zone is not null)
+            {
+                @* Above the findings, never below. A list read without knowing
+                   that nine lines were unreadable, or that DNS never answered,
+                   is a list somebody trusts as complete. *@
+                <p class="sub">@_zone.ReadSummary. @_zone.EvidenceSummary.</p>
+
+                @if (_zone.SelectorsNotChecked > 0)
+                {
+                    <p class="sub">
+                        @_zone.SelectorsNotChecked selector(s) past the limit of
+                        @ZoneAuditor.SelectorLimit were not resolved, so nothing is said about them.
+                    </p>
+                }
+
+                @if (_zone.Zone.Problems.Count > 0)
+                {
+                    <div class="callout watch">
+                        <h3>@_zone.Zone.Problems.Count line(s) could not be read</h3>
+                        <p>
+                            @foreach (var p in _zone.Zone.Problems.Take(10))
+                            {
+                                <span>Line @p.Line — @p.Reason: <code class="wrap">@p.Text</code></span><br />
+                            }
+                        </p>
+                    </div>
+                }
+
+                @if (_zone.Findings.Count == 0)
+                {
+                    <p class="muted">Nothing to change in what was read.</p>
+                }
+                else
+                {
+                    <div class="table-scroll"><table class="triage">
+                        <thead>
+                            <tr>
+                                <th>Severity</th>
+                                <th>Record</th>
+                                <th>What is wrong</th>
+                                <th>Evidence</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var f in _zone.Findings)
+                            {
+                                <tr class="@Level(f.Severity)">
+                                    <td><span class="badge @Level(f.Severity)">@Label(f.Severity)</span></td>
+                                    <td class="zone-name">
+                                        <strong>@f.Record</strong>
+                                        @if (f.Name.Length > 0)
+                                        {
+                                            <br /><code class="wrap">@f.Name</code>
+                                        }
+                                        @if (f.Line > 0)
+                                        {
+                                            <br /><span class="muted">line @f.Line</span>
+                                        }
+                                    </td>
+                                    <td>
+                                        <span>@f.Problem</span>
+                                        <p class="sub"><strong>Fix:</strong> @f.Fix</p>
+                                        @if (f.Reference.Length > 0)
+                                        {
+                                            <p class="sub">@f.Reference</p>
+                                        }
+                                    </td>
+                                    <td class="muted">@f.Evidence</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table></div>
+                }
+            }
+        </section>
+    }
+
     <section id="reporting">
         <h2>Who is reporting</h2>
         <p class="sub">A clean pass rate heard from one receiver is a partial picture, not a verdict.</p>
@@ -795,6 +919,67 @@ else
         await LoadAsync();
     }
 
+    // ---- zone file ---------------------------------------------------------
+
+    private string _zoneText = "";
+    private ZoneAuditReport? _zone;
+    private string? _zoneRefused;
+    private bool _zoneBusy;
+
+    private async Task AuditZoneAsync()
+    {
+        // Checked on the server as well as in the markup. A section that is
+        // not rendered is not a permission, and this one makes up to fifty DNS
+        // queries and writes a line to the audit log.
+        if (_detail is null || _access is not { CanOperate: true }) { return; }
+
+        _zoneBusy = true;
+        _zone = null;
+        _zoneRefused = null;
+
+        try
+        {
+            var outcome = await ZoneAudits.RunAsync(
+                _detail.Domain, _zoneText, _access.Current?.Id, _access.User);
+
+            _zone = outcome.Report;
+            _zoneRefused = outcome.Refused;
+        }
+        catch (Exception ex)
+        {
+            // Shown rather than swallowed. A button that does nothing at all
+            // reads as a broken page, and the reason is usually something an
+            // operator can act on - no resolver, no database.
+            _zoneRefused = ex.Message;
+        }
+        finally
+        {
+            _zoneBusy = false;
+        }
+    }
+
+    private Task ClearZoneAsync()
+    {
+        _zoneText = "";
+        _zone = null;
+        _zoneRefused = null;
+        return Task.CompletedTask;
+    }
+
+    private static string Level(HygieneSeverity severity) => severity switch
+    {
+        HygieneSeverity.Breaking => "urgent",
+        HygieneSeverity.Weakness => "act",
+        _ => "",
+    };
+
+    private static string Label(HygieneSeverity severity) => severity switch
+    {
+        HygieneSeverity.Breaking => "breaking",
+        HygieneSeverity.Weakness => "weakness",
+        _ => "tidy",
+    };
+
     /// <summary>True when a subdomain policy is more lenient than the domain's own.</summary>
     private static bool Weaker(string sp, string p) => Strength(sp) < Strength(p);
 
@@ -817,6 +1002,13 @@ else
         _dnsPending = true;
         _series = null;
         _breakdown = null;
+
+        // A zone audit belongs to the domain it was run for. Left behind, it
+        // would sit under the next domain's heading reading as that domain's
+        // findings, which is the worst thing this page could show.
+        _zone = null;
+        _zoneRefused = null;
+        _zoneText = "";
 
         if (!Db.Exists) { _loading = false; return; }
 
