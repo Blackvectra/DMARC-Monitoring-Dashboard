@@ -214,6 +214,52 @@ Exit code is 1 when anything breaking was found, so it can gate a pipeline.
 
 ---
 
+## Before changing a policy
+
+`dmarc simulate` replays the reports already held against a record you have not
+published, and says what it would cost.
+
+    dmarc simulate --domain example.com --policy quarantine
+    dmarc simulate --domain example.com --adkim r --aspf r      # what relaxing alignment recovers
+    dmarc simulate --domain example.com --days 90
+
+Anything not named keeps what the domain publishes today, so the answer is the
+cost of *the change* rather than of the whole record. It exits non-zero when
+the change would cost mail, so it can gate a script.
+
+```
+  ndaco.org
+    929 message(s) across 24 day(s) of reports, asked for the last 30;
+    9 of them carried a signature the store did not keep, so they are left out
+    now      p=quarantine; adkim=r; aspf=r
+    proposed p=reject; adkim=r; aspf=r
+
+    costs nothing: no message in the reports held would stop passing
+    at p=reject 101 of the 101 failing message(s) would be refused outright
+    of the 819 that pass: 124 on DKIM alone, 2 on SPF alone, 693 on both.
+```
+
+That last line is what answers "can this domain move to `-all`": mail resting
+on DKIM does not care what the SPF all-mechanism says.
+
+Three things it is careful about, because each is a way to produce a confident
+wrong answer:
+
+- **Alignment only counts when the mechanism authenticated.** A signature that
+  names the domain exactly and did not verify is not rescued by relaxing
+  `adkim`. Matching domains by shape instead produced a claim that relaxing
+  alignment on one real domain would recover 17 messages; the true answer was
+  zero.
+- **The baseline is the record in force, not the receivers' verdicts.** `p=`
+  decides what happens to failing mail, never whether it fails, so changing it
+  alone must cost nothing — and measured the other way it appeared to cost 9.
+- **A message the stored row cannot account for is set aside, not counted.** A
+  message can carry several DKIM signatures and the store keeps one. Where
+  replaying the row disagrees with what the receiver did, the receiver is
+  right, the row is excluded from every figure, and the count is stated.
+
+---
+
 ## Fixing what it finds
 
 `dmarc check` says what is wrong with a domain's DNS. `dmarc fix` changes it,

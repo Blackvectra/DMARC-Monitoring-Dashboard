@@ -50,6 +50,7 @@ public static class Program
                 "report" => await ReportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "check" => await CheckCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "audit" => await AuditCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "simulate" => await SimulateCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -182,6 +183,19 @@ public static class Program
                 --offline        Judge the file alone; ask neither DNS nor the reports.
                 --db <path>      Database file. Default: dmarc.db
 
+              simulate           Replay the reports already held against a record you have
+                                 not published, and say what it would cost. Anything not
+                                 named keeps what the domain publishes today, so the answer
+                                 is the cost of the change rather than of the whole record.
+                --domain <d>     Domain to replay.
+                --policy <p>     none, quarantine or reject.
+                --adkim r|s      DKIM alignment to try.
+                --aspf r|s       SPF alignment to try.
+                --pct <n>        Percent of failing mail the policy would apply to.
+                --days <n>       Window to replay. Default: 30
+                --db <path>      Database file. Default: dmarc.db
+                                 Exits non-zero when the change would cost mail.
+
               fix                Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
@@ -265,6 +279,7 @@ public static class Program
               dmarc client assign --domain mortonnd.gov --client morton-nd
               dmarc check --domain example.com
               dmarc audit --zone example.com.txt
+              dmarc simulate --domain example.com --policy quarantine
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"
               dmarc ingest --mailbox dmarc@example.com --dry-run
