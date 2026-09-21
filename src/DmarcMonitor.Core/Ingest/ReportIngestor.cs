@@ -17,11 +17,11 @@ public sealed record IngestOptions
     /// a report the parser does not yet understand looks exactly like junk,
     /// and deleting it destroys the evidence needed to fix that.
     /// </summary>
-    public string UnrecognisedFolder { get; init; } = "DMARC-Unrecognised";
+    public string UnrecognizedFolder { get; init; } = "DMARC-Unrecognized";
 
     /// <summary>
     /// Where a report is filed when the delivery address and its contents
-    /// disagree. Separate from unrecognised because this is the shape of an
+    /// disagree. Separate from unrecognized because this is the shape of an
     /// injected report and somebody should look at it.
     /// </summary>
     public string QuarantineFolder { get; init; } = "DMARC-Quarantine";
@@ -60,11 +60,11 @@ public enum IngestOutcome
     Duplicate,
 
     /// <summary>Not a report, or a report this version cannot read.</summary>
-    Unrecognised,
+    Unrecognized,
 
     /// <summary>
     /// A genuine report delivered to an address this deployment does not
-    /// recognise at all: not a per-domain address, not the shared one. That is
+    /// recognize at all: not a per-domain address, not the shared one. That is
     /// almost always the shared address being configured wrong (an alias, a
     /// group, a UPN), so the message is left where it is for the run after the
     /// configuration is corrected rather than filed away as junk.
@@ -121,7 +121,7 @@ public sealed record IngestRunResult
     public int IngestedCount => Reports.Count(r => r.Outcome == IngestOutcome.Ingested);
     public int QuarantinedCount => Reports.Count(r => r.Outcome == IngestOutcome.Quarantined);
     public int DuplicateCount => Reports.Count(r => r.Outcome == IngestOutcome.Duplicate);
-    public int UnrecognisedCount => Reports.Count(r => r.Outcome == IngestOutcome.Unrecognised);
+    public int UnrecognizedCount => Reports.Count(r => r.Outcome == IngestOutcome.Unrecognized);
     public int UnattributedCount => Reports.Count(r => r.Outcome == IngestOutcome.Unattributed);
 
     /// <summary>The distinct addresses unattributed reports were delivered to, most common first.</summary>
@@ -203,11 +203,11 @@ public sealed class ReportIngestor
         var stoppedEarly = false;
 
         var processedId = await _mailbox.EnsureFolderAsync(_options.ProcessedFolder, cancellationToken).ConfigureAwait(false);
-        var unrecognisedId = await _mailbox.EnsureFolderAsync(_options.UnrecognisedFolder, cancellationToken).ConfigureAwait(false);
+        var unrecognizedId = await _mailbox.EnsureFolderAsync(_options.UnrecognizedFolder, cancellationToken).ConfigureAwait(false);
         var quarantineId = await _mailbox.EnsureFolderAsync(_options.QuarantineFolder, cancellationToken).ConfigureAwait(false);
 
         // The enumeration itself can throw on cancellation, so the whole loop
-        // is wrapped. A cancelled run has to RETURN what it already did: the
+        // is wrapped. A canceled run has to RETURN what it already did: the
         // scheduled task is time-limited, so being cut off mid-backlog is the
         // normal case, not an exceptional one. Throwing here would discard
         // every report processed before the deadline and leave their messages
@@ -309,7 +309,7 @@ public sealed class ReportIngestor
                 if (!saved) { continue; }
             }
 
-            var destination = ChooseDestination(fromThisMessage, processedId, unrecognisedId, quarantineId);
+            var destination = ChooseDestination(fromThisMessage, processedId, unrecognizedId, quarantineId);
             if (destination is null) { continue; }
             try
             {
@@ -351,16 +351,16 @@ public sealed class ReportIngestor
     /// Worst outcome wins: a message carrying one good report and one
     /// quarantined report is quarantined, so the thing worth looking at is not
     /// buried in the processed folder. An unattributed report stays put: moving
-    /// it to the unrecognised folder would make a configuration mistake
+    /// it to the unrecognized folder would make a configuration mistake
     /// permanent, because nothing reads that folder again.
     /// </summary>
     private static string? ChooseDestination(
-        List<IngestedReport> reports, string processed, string unrecognised, string quarantine)
+        List<IngestedReport> reports, string processed, string unrecognized, string quarantine)
     {
         if (reports.Exists(r => r.Outcome == IngestOutcome.Quarantined)) { return quarantine; }
         if (reports.Exists(r => r.Outcome == IngestOutcome.Unattributed)) { return null; }
-        if (reports.Count == 0) { return unrecognised; }
-        if (reports.TrueForAll(r => r.Outcome == IngestOutcome.Unrecognised)) { return unrecognised; }
+        if (reports.Count == 0) { return unrecognized; }
+        if (reports.TrueForAll(r => r.Outcome == IngestOutcome.Unrecognized)) { return unrecognized; }
         return processed;
     }
 
@@ -379,7 +379,7 @@ public sealed class ReportIngestor
                 {
                     ReportKind.DmarcAggregate => HandleAggregate(message, extracted),
                     ReportKind.TlsRpt => HandleTls(message, extracted),
-                    _ => Unrecognised(message, extracted.FileName, "The attachment is not a report this version can read."),
+                    _ => Unrecognized(message, extracted.FileName, "The attachment is not a report this version can read."),
                 });
             }
         }
@@ -392,7 +392,7 @@ public sealed class ReportIngestor
         var parsed = AggregateReportParser.Parse(extracted.Content);
         if (!parsed.Success)
         {
-            return Unrecognised(message, extracted.FileName, parsed.Error);
+            return Unrecognized(message, extracted.FileName, parsed.Error);
         }
 
         var report = parsed.Report!;
@@ -419,7 +419,7 @@ public sealed class ReportIngestor
 
         if (!attribution.ShouldIngest)
         {
-            return Unrecognised(message, extracted.FileName, attribution.Reason);
+            return Unrecognized(message, extracted.FileName, attribution.Reason);
         }
 
         // Scope the duplicate key by domain. Report ids are only unique per
@@ -458,7 +458,7 @@ public sealed class ReportIngestor
         var parsed = TlsReportParser.Parse(extracted.Content);
         if (!parsed.Success)
         {
-            return Unrecognised(message, extracted.FileName, parsed.Error);
+            return Unrecognized(message, extracted.FileName, parsed.Error);
         }
 
         var report = parsed.Report!;
@@ -486,7 +486,7 @@ public sealed class ReportIngestor
 
         if (!attribution.ShouldIngest)
         {
-            return Unrecognised(message, extracted.FileName, attribution.Reason);
+            return Unrecognized(message, extracted.FileName, attribution.Reason);
         }
 
         var key = $"tls|{attribution.Domain}|{report.OrganizationName}|{report.ReportId}";
@@ -561,16 +561,16 @@ public sealed class ReportIngestor
             null, reportDomain, _options.ReportingDomain, _resolveToken, _options.FallbackAddress);
     }
 
-    private static IngestedReport Unrecognised(MailMessage message, string fileName, string reason) => new()
+    private static IngestedReport Unrecognized(MailMessage message, string fileName, string reason) => new()
     {
         MessageId = message.Id,
         FileName = fileName,
-        Outcome = IngestOutcome.Unrecognised,
+        Outcome = IngestOutcome.Unrecognized,
         Reason = reason,
     };
 
     /// <summary>
-    /// An address of no recognised shape. A per-domain address whose token
+    /// An address of no recognized shape. A per-domain address whose token
     /// resolves to nothing is different: that is the expected tail after a
     /// domain is removed, and filing it away is right.
     /// </summary>

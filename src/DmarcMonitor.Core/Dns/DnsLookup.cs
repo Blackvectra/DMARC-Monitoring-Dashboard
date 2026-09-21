@@ -100,7 +100,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
     /// <remarks>
     /// One level only. Following the whole tree would need the full
     /// evaluation, and a wrong answer here tells somebody to delete an include
-    /// that authorises their mail. One level catches the common case - a
+    /// that authorizes their mail. One level catches the common case - a
     /// provider retired, the include left behind - without guessing.
     /// </remarks>
     private async Task<List<string>> DeadIncludesAsync(string spfRecord, CancellationToken ct)
@@ -178,22 +178,22 @@ public sealed class DnsLookup(ILookupClient? client = null)
     }
 
     /// <summary>
-    /// The address ranges an include ends up authorising, includes followed.
+    /// The address ranges an include ends up authorizing, includes followed.
     /// </summary>
     /// <remarks>
     /// Only the ip4 and ip6 terms, because those are the ones an observed
-    /// sending address can be tested against. An a or mx term authorises
+    /// sending address can be tested against. An a or mx term authorizes
     /// whatever those names resolve to today, which is a moving target and
     /// deliberately not followed: a range missed here shows as "no mail seen",
     /// and the finding that produces is worded so that absence is never
     /// treated as permission to delete anything.
     /// </remarks>
-    public async Task<IReadOnlyList<AuthorisedRange>> RangesAsync(
+    public async Task<IReadOnlyList<AuthorizedRange>> RangesAsync(
         string includeTarget, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(includeTarget);
 
-        var ranges = new List<AuthorisedRange>();
+        var ranges = new List<AuthorizedRange>();
         await CollectAsync(includeTarget, ranges, new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0, ct)
             .ConfigureAwait(false);
 
@@ -201,7 +201,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
     }
 
     private async Task CollectAsync(
-        string target, List<AuthorisedRange> into, HashSet<string> visited, int depth, CancellationToken ct)
+        string target, List<AuthorizedRange> into, HashSet<string> visited, int depth, CancellationToken ct)
     {
         if (depth > 10 || !visited.Add(target)) { return; }
 
@@ -225,7 +225,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
             switch (term.Name)
             {
                 case "ip4" or "ip6" when TryNetwork(term.Value, out var network):
-                    into.Add(new AuthorisedRange(network));
+                    into.Add(new AuthorizedRange(network));
                     break;
 
                 case "include" or "redirect" when term.Value.Length > 0:

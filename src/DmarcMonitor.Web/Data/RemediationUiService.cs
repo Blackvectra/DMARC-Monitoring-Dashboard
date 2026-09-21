@@ -80,7 +80,7 @@ public sealed class RemediationUiService(
     /// comes back, rather than showing nothing for the half-minute it takes
     /// to ask about ten domains.
     /// </remarks>
-    /// <param name="tenantId">One organisation's domains, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's domains, or null for every organization's.</param>
     public Task<IReadOnlyList<DomainTriage>> DomainsAsync(string? tenantId, string? clientSlug = null, CancellationToken ct = default) =>
         _triage.GetAsync(tenantId: tenantId, clientSlug: clientSlug, ct: ct);
 

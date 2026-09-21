@@ -152,7 +152,7 @@ public sealed class CorpusTests
 
     [Theory]
     [MemberData(nameof(EveryAggregateReport))]
-    public void IsRecognisedAsADmarcReportByContentAlone(string fixture, string domain)
+    public void IsRecognizedAsADmarcReportByContentAlone(string fixture, string domain)
     {
         _ = domain;
         // Ingest classifies by content, never by file name, because receivers

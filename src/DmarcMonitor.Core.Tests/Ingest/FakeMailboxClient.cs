@@ -5,7 +5,7 @@ namespace DmarcMonitor.Core.Tests.Ingest;
 /// <summary>
 /// An in-memory mailbox, so the ingest pipeline can be exercised without a
 /// tenant. Records what was moved where, which is how the durability
-/// behaviour is asserted.
+/// behavior is asserted.
 /// </summary>
 public sealed class FakeMailboxClient : IMailboxClient
 {

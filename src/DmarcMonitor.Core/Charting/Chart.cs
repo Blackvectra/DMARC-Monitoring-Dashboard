@@ -4,9 +4,9 @@ using System.Text;
 namespace DmarcMonitor.Core.Charting;
 
 /// <summary>One slice of a proportion bar or donut.</summary>
-/// <param name="Label">What it is, spelled out. Never only a colour.</param>
+/// <param name="Label">What it is, spelled out. Never only a color.</param>
 /// <param name="Value">The count.</param>
-/// <param name="Css">The class carrying its colour.</param>
+/// <param name="Css">The class carrying its color.</param>
 public sealed record Slice(string Label, long Value, string Css);
 
 /// <summary>A slice with its geometry worked out.</summary>
@@ -133,7 +133,7 @@ public static class Chart
     /// <para>
     /// Zero-valued slices are dropped: a legend entry for something that did
     /// not happen is noise, and a zero-width segment is an invisible one that
-    /// still takes a colour out of the palette.
+    /// still takes a color out of the palette.
     /// </para>
     /// </remarks>
     public static IReadOnlyList<PlacedSlice> Stack(IEnumerable<Slice> slices)
@@ -253,7 +253,7 @@ public static class Chart
 
         if (inner <= 0)
         {
-            // A pie slice closes through the centre.
+            // A pie slice closes through the center.
             path.Append('L').Append(N(cx)).Append(' ').Append(N(cy)).Append(" Z");
             return path.ToString();
         }
@@ -288,7 +288,7 @@ public static class Chart
             .ToString("0", CultureInfo.InvariantCulture) + "%";
     }
 
-    /// <summary>The horizontal centre of bucket <paramref name="index"/>.</summary>
+    /// <summary>The horizontal center of bucket <paramref name="index"/>.</summary>
     /// <remarks>
     /// A single bucket sits in the middle rather than at the left edge: one
     /// reading pinned to x=0 reads as the start of a trend that has not been

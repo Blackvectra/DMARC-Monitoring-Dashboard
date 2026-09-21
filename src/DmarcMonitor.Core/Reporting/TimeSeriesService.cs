@@ -84,7 +84,7 @@ public sealed record VolumeBreakdown
 /// checked, or the signing domain where there is no envelope. That is the
 /// closest thing to "which service is this" available from a report alone:
 /// naming the service properly needs a reverse lookup on the sending address
-/// and a catalogue to match it against, and nothing in this product does that
+/// and a catalog to match it against, and nothing in this product does that
 /// yet. <c>em318306.nrgtechservices.com</c> is SendGrid and
 /// <c>bounce.myngp.com</c> is NGP VAN; the report does not say so, and this
 /// type does not pretend to know.
@@ -140,7 +140,7 @@ public sealed class TimeSeriesService(string databasePath)
     }.ToString();
 
     /// <summary>The whole estate, one point per day.</summary>
-    /// <param name="tenantId">One organisation, or null for all of them.</param>
+    /// <param name="tenantId">One organization, or null for all of them.</param>
     /// <param name="clientSlug">One client of it, or null for all of them.</param>
     public Task<IReadOnlyList<DayPoint>> EstateAsync(
         int days = 30, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default) =>
@@ -166,7 +166,7 @@ public sealed class TimeSeriesService(string databasePath)
     /// The window's mail split three ways, for the dial.
     /// </summary>
     /// <param name="domain">One domain, or null for the whole estate.</param>
-    /// <param name="tenantId">One organisation, or null for all of them.</param>
+    /// <param name="tenantId">One organization, or null for all of them.</param>
     /// <param name="clientSlug">One client, or null for all of them.</param>
     public async Task<VolumeBreakdown> BreakdownAsync(
         string? domain = null, int days = 30,
@@ -583,7 +583,7 @@ public sealed class TimeSeriesService(string databasePath)
               + (clientSlug is not null ? " JOIN clients c ON c.id = d.client_id" : "");
 
     /// <summary>
-    /// The organisation is filtered on the counted table itself, which carries
+    /// The organization is filtered on the counted table itself, which carries
     /// its own tenant_id, so scoping never depends on a join being present.
     /// </summary>
     private static string Filter(string? domain, string? clientSlug, string? tenantId, string alias) =>

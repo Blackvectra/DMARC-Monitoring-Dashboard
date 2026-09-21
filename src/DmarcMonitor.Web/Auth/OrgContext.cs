@@ -7,10 +7,10 @@ using Microsoft.AspNetCore.Components.Authorization;
 namespace DmarcMonitor.Web.Auth;
 
 /// <summary>
-/// Which organisation the signed-in person is looking at, and which they may.
+/// Which organization the signed-in person is looking at, and which they may.
 ///
 /// Read from the person's claims and nothing else: their Entra groups decide
-/// what they may see, and the organisation they switched to is carried as a
+/// what they may see, and the organization they switched to is carried as a
 /// claim of its own, re-signed into the cookie by the switch endpoint. Claims
 /// are the one thing that reaches an interactive page reliably - the request
 /// that opened the circuit is long gone by the time a page renders, and
@@ -18,34 +18,34 @@ namespace DmarcMonitor.Web.Auth;
 /// </summary>
 public sealed class OrgContext(
     AuthenticationStateProvider auth,
-    OrganisationStore organisations,
+    OrganizationStore organizations,
     IConfiguration configuration)
 {
-    /// <summary>The claim carrying the organisation a person switched to.</summary>
+    /// <summary>The claim carrying the organization a person switched to.</summary>
     public const string ChoiceClaim = "dmarc:org";
 
-    /// <summary>The configuration key naming the group that sees every organisation.</summary>
+    /// <summary>The configuration key naming the group that sees every organization.</summary>
     public const string MasterGroupKey = "Auth:MasterGroupId";
 
-    public async Task<OrganisationAccess> GetAsync(CancellationToken ct = default)
+    public async Task<OrganizationAccess> GetAsync(CancellationToken ct = default)
     {
         var state = await auth.GetAuthenticationStateAsync().ConfigureAwait(false);
-        var all = await organisations.ListAsync(ct).ConfigureAwait(false);
-        var clientGroups = await organisations.ClientGroupsAsync(ct).ConfigureAwait(false);
+        var all = await organizations.ListAsync(ct).ConfigureAwait(false);
+        var clientGroups = await organizations.ClientGroupsAsync(ct).ConfigureAwait(false);
         return Resolve(state.User, all, configuration, clientGroups);
     }
 
     /// <summary>
-    /// The organisation new domains are filed under from a page: the one being
+    /// The organization new domains are filed under from a page: the one being
     /// looked at, or the built-in one when a master is looking at everything.
     /// </summary>
-    public static string OrganisationFor(OrganisationAccess access) =>
+    public static string OrganizationFor(OrganizationAccess access) =>
         access.Current?.Slug ?? DmarcMonitor.Core.Storage.ReportStore.DefaultTenantSlug;
 
-    public static OrganisationAccess Resolve(
-        ClaimsPrincipal user, IReadOnlyList<Organisation> all, IConfiguration configuration,
+    public static OrganizationAccess Resolve(
+        ClaimsPrincipal user, IReadOnlyList<Organization> all, IConfiguration configuration,
         IReadOnlyList<ClientGroup>? clientGroups = null) =>
-        OrganisationAccess.Resolve(
+        OrganizationAccess.Resolve(
             all,
             GroupIds(user),
             configuration[MasterGroupKey],
@@ -72,31 +72,31 @@ public sealed class OrgContext(
 
 }
 
-/// <summary>The endpoint that records a switch of organisation.</summary>
-public static class OrganisationSwitch
+/// <summary>The endpoint that records a switch of organization.</summary>
+public static class OrganizationSwitch
 {
     /// <summary>
-    /// Records a switch of organisation by re-signing the cookie with the
+    /// Records a switch of organization by re-signing the cookie with the
     /// choice as a claim, then goes back to where the person was.
     /// </summary>
     /// <remarks>
-    /// Only a visible organisation can be chosen, and only a master can
+    /// Only a visible organization can be chosen, and only a master can
     /// choose all of them; anything else is refused rather than stored, so a
     /// hand-typed slug cannot become a door.
     /// </remarks>
-    public static void MapOrganisationSwitch(this WebApplication app)
+    public static void MapOrganizationSwitch(this WebApplication app)
     {
         ArgumentNullException.ThrowIfNull(app);
 
         app.MapGet("/org/switch", async (
             HttpContext context, string? slug, string? returnUrl,
-            OrganisationStore organisations, IConfiguration configuration, CancellationToken ct) =>
+            OrganizationStore organizations, IConfiguration configuration, CancellationToken ct) =>
         {
             var access = OrgContext.Resolve(
                 context.User,
-                await organisations.ListAsync(ct).ConfigureAwait(false),
+                await organizations.ListAsync(ct).ConfigureAwait(false),
                 configuration,
-                await organisations.ClientGroupsAsync(ct).ConfigureAwait(false));
+                await organizations.ClientGroupsAsync(ct).ConfigureAwait(false));
 
             var wanted = string.IsNullOrWhiteSpace(slug) ? null : slug.Trim().ToLowerInvariant();
             var chosen = wanted is null
@@ -105,7 +105,7 @@ public static class OrganisationSwitch
 
             if (chosen is null && (wanted is not null || !access.IsMaster))
             {
-                return Results.NotFound("That is not an organisation you can open.");
+                return Results.NotFound("That is not an organization you can open.");
             }
 
             var scheme = AuthSetup.IsEntraConfigured(configuration)

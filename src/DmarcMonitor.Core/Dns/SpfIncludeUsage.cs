@@ -2,8 +2,8 @@ using System.Net;
 
 namespace DmarcMonitor.Core.Dns;
 
-/// <summary>One address range an SPF include authorises.</summary>
-public sealed record AuthorisedRange(IPNetwork Network);
+/// <summary>One address range an SPF include authorizes.</summary>
+public sealed record AuthorizedRange(IPNetwork Network);
 
 /// <summary>What an include is for, and whether anything has used it.</summary>
 public sealed record IncludeUsage
@@ -23,8 +23,8 @@ public sealed record IncludeUsage
     /// </remarks>
     public string Service => Registrable(Target);
 
-    /// <summary>Address ranges this include ends up authorising.</summary>
-    public IReadOnlyList<AuthorisedRange> Ranges { get; init; } = [];
+    /// <summary>Address ranges this include ends up authorizing.</summary>
+    public IReadOnlyList<AuthorizedRange> Ranges { get; init; } = [];
 
     /// <summary>Messages seen from those ranges in the window examined.</summary>
     public long Messages { get; init; }
@@ -44,7 +44,7 @@ public sealed record IncludeUsage
     /// <remarks>
     /// Two labels only, which is right for the common case and wrong for a
     /// handful of multi-part suffixes such as co.uk. It is used to give an
-    /// operator something recognisable to look at, never to decide anything,
+    /// operator something recognizable to look at, never to decide anything,
     /// so being occasionally imprecise costs nothing.
     /// </remarks>
     private static string Registrable(string host)

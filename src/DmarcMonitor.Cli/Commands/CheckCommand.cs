@@ -73,7 +73,7 @@ public static class CheckCommand
             var published = await lookup.ReadAsync(domain, ct).ConfigureAwait(false);
             var seen = observed.TryGetValue(domain, out var o) ? o : new ObservedSending();
 
-            // Resolve each include to the addresses it authorises and match
+            // Resolve each include to the addresses it authorizes and match
             // them against what has actually sent. Only attempted with a
             // database: with no reports there is nothing to match against, and
             // calling an include unused on no evidence is the worst answer
@@ -119,7 +119,7 @@ public static class CheckCommand
     }
 
     /// <summary>
-    /// What each include authorises, and how much of it has been used.
+    /// What each include authorizes, and how much of it has been used.
     /// </summary>
     /// <remarks>
     /// Matched by address rather than by name, because that is the only link

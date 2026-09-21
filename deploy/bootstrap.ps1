@@ -62,7 +62,7 @@ param(
     [string]$FallbackAddress,
     [string]$ReportingDomain,
     [string]$MasterGroupId,
-    [string]$Organisation,
+    [string]$Organization,
     [switch]$MakeIngestCert,
     [switch]$NoProxy,
     [switch]$NoIngestTask
@@ -224,7 +224,7 @@ try {
     if ($TlsReportAddress) { Set-Setting $cfg 'Reporting' 'TlsReportAddress' $TlsReportAddress }
     if ($MasterGroupId) {
         Set-Setting $cfg 'Auth' 'MasterGroupId' $MasterGroupId
-        Say "   master group: $MasterGroupId sees every organisation"
+        Say "   master group: $MasterGroupId sees every organization"
     }
     if ($TenantId) {
         Set-Setting $cfg 'AzureAd' 'TenantId' $TenantId
@@ -303,7 +303,7 @@ try {
         # The task runs this file; its values persist across runs of this script.
         # The last two are optional: reports are attributed by the mailbox
         # itself being the one shared address unless one of them is set.
-        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = ''; DMARC_ORGANISATION = '' }
+        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = ''; DMARC_ORGANIZATION = '' }
         if (Test-Path $IngestCmd) {
             foreach ($line in Get-Content $IngestCmd) {
                 if ($line -match '^set "([A-Z_]+)=(.*)"$' -and $values.Contains($Matches[1])) { $values[$Matches[1]] = $Matches[2] }
@@ -316,7 +316,7 @@ try {
         if ($CertPassword)    { $values['DMARC_CERT_PASSWORD'] = $CertPassword }
         if ($FallbackAddress) { $values['DMARC_FALLBACK_ADDRESS'] = $FallbackAddress }
         if ($ReportingDomain) { $values['DMARC_REPORTING_DOMAIN'] = $ReportingDomain }
-        if ($Organisation)    { $values['DMARC_ORGANISATION'] = $Organisation }
+        if ($Organization)    { $values['DMARC_ORGANIZATION'] = $Organization }
 
         $lines = @('@echo off', ':: Written by bootstrap.ps1. Runs as LocalService from the "DMARC ingest" task; pass --dry-run to test.')
         foreach ($k in $values.Keys) { $lines += "set `"$k=$($values[$k])`"" }
@@ -324,7 +324,7 @@ try {
         [IO.File]::WriteAllLines($IngestCmd, $lines, (New-Object Text.UTF8Encoding $false))
         Set-RestrictedAcl $IngestCmd "${ServiceSid}:RX"
 
-        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN', 'DMARC_ORGANISATION')
+        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN', 'DMARC_ORGANIZATION')
         $missing = @($values.Keys | Where-Object { $optional -notcontains $_ -and -not $values[$_] })
         if ($missing.Count -eq 0 -and -not $NoIngestTask) {
             $action = New-ScheduledTaskAction -Execute $IngestCmd

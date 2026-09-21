@@ -20,7 +20,7 @@ public sealed class TimeSeriesServiceTests : IDisposable
     public TimeSeriesServiceTests()
     {
         _store = new ReportStore(_dbPath);
-        _store.InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        _store.InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
     }
 
     public void Dispose()

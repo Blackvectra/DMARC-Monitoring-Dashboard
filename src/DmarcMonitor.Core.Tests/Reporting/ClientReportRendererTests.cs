@@ -8,7 +8,7 @@ namespace DmarcMonitor.Core.Tests.Reporting;
 /// Two things are load-bearing here. The file must stand alone, because it is
 /// opened as an email attachment on a phone with no network and printed to PDF
 /// for an accountant. And everything drawn from the database must be escaped:
-/// organisation names, domains and record values all arrive inside reports
+/// organization names, domains and record values all arrive inside reports
 /// sent by third parties, so they are attacker-influenceable text being pasted
 /// into a document the client forwards to their own staff.
 /// </summary>
@@ -193,7 +193,7 @@ public sealed class ClientReportRendererTests
     }
 
     [Fact]
-    public void SummarisesALongTailRatherThanPrintingAllOfIt()
+    public void SummarizesALongTailRatherThanPrintingAllOfIt()
     {
         // Twenty rows of legitimate senders is a list nobody reads, but the
         // totals still have to add up, so the rest is counted rather than cut.

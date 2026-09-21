@@ -6,12 +6,12 @@ using Xunit;
 namespace DmarcMonitor.Cli.Tests;
 
 /// <summary>
-/// Auto-assign against more than one organisation.
+/// Auto-assign against more than one organization.
 ///
-/// Every organisation carries its own Unassigned client, filed under that
-/// same slug, so slugs repeat across organisations. Auto-assign built a
+/// Every organization carries its own Unassigned client, filed under that
+/// same slug, so slugs repeat across organizations. Auto-assign built a
 /// dictionary keyed on slug alone and threw on the second one, which took the
-/// whole command out the moment a second organisation existed - the exact
+/// whole command out the moment a second organization existed - the exact
 /// arrangement this product is built for.
 /// </summary>
 public sealed class AutoAssignTests : IDisposable
@@ -28,13 +28,13 @@ public sealed class AutoAssignTests : IDisposable
         }
     }
 
-    private async Task TwoOrganisationsEachWithAnUnassignedDomainAsync()
+    private async Task TwoOrganizationsEachWithAnUnassignedDomainAsync()
     {
-        await new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql);
+        await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
 
         // A report for a domain nobody has onboarded is filed under that
-        // organisation's own Unassigned, which is what brings the second one
-        // into being. Two organisations, two clients both slugged
+        // organization's own Unassigned, which is what brings the second one
+        // into being. Two organizations, two clients both slugged
         // 'unassigned'.
         var nrg = new ReportStore(_dbPath, "local");
         var nls = new ReportStore(_dbPath, "nextlayersec");
@@ -72,9 +72,9 @@ public sealed class AutoAssignTests : IDisposable
     }
 
     [Fact]
-    public async Task SurvivesASecondOrganisationsUnassignedClient()
+    public async Task SurvivesASecondOrganizationsUnassignedClient()
     {
-        await TwoOrganisationsEachWithAnUnassignedDomainAsync();
+        await TwoOrganizationsEachWithAnUnassignedDomainAsync();
 
         // A dry run: it reads every client to check for slug collisions,
         // which is where it used to throw, and writes nothing.
@@ -84,9 +84,9 @@ public sealed class AutoAssignTests : IDisposable
     }
 
     [Fact]
-    public async Task AppliesAgainstASecondOrganisationToo()
+    public async Task AppliesAgainstASecondOrganizationToo()
     {
-        await TwoOrganisationsEachWithAnUnassignedDomainAsync();
+        await TwoOrganizationsEachWithAnUnassignedDomainAsync();
 
         var code = await ClientCommand.RunAsync(
             ["auto-assign", "--apply", "--db", _dbPath], CancellationToken.None);
@@ -97,7 +97,7 @@ public sealed class AutoAssignTests : IDisposable
     [Fact]
     public async Task AMistypedFlagIsRefusedRatherThanIgnored()
     {
-        await TwoOrganisationsEachWithAnUnassignedDomainAsync();
+        await TwoOrganizationsEachWithAnUnassignedDomainAsync();
 
         // --aply is not --apply. It used to be ignored, so the operator was
         // shown a dry run and told nothing had been written - which was true,

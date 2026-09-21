@@ -6,8 +6,8 @@ namespace DmarcMonitor.Core.Remediation;
 /// Plans removing an include from a domain's SPF record.
 ///
 /// Only ever for an include that resolves to no SPF record. Such an include
-/// authorises nothing, spends one of the ten lookups, and under RFC 7208 §5.2
-/// makes the whole evaluation a permerror, so removing it cannot un-authorise
+/// authorizes nothing, spends one of the ten lookups, and under RFC 7208 §5.2
+/// makes the whole evaluation a permerror, so removing it cannot un-authorize
 /// anybody. An include that merely has not sent lately is a different thing
 /// and is deliberately not plannable here: the hygiene check words that as
 /// evidence for a human, and this must not turn it into a write.
@@ -65,7 +65,7 @@ public static class SpfIncludePlanner
             ProposedValue = proposed,
             LookupsBefore = record.DirectLookups,
             LookupsAfter = record.DirectLookups - matching.Count,
-            Summary = $"Remove include:{target} from the SPF record for {name}; it resolves to no SPF record and authorises nothing",
+            Summary = $"Remove include:{target} from the SPF record for {name}; it resolves to no SPF record and authorizes nothing",
         };
     }
 }

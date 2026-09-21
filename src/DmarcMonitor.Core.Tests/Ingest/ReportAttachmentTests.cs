@@ -100,8 +100,8 @@ public sealed class ReportAttachmentTests
     [Fact]
     public void DetectsCompressionByMagicNumberNotExtension()
     {
-        // A gzip attachment mislabelled .xml must still be decompressed.
-        var reports = ReportAttachment.Extract("mislabelled.xml", Fixture("outlook-aggregate.xml.gz"));
+        // A gzip attachment mislabeled .xml must still be decompressed.
+        var reports = ReportAttachment.Extract("mislabeled.xml", Fixture("outlook-aggregate.xml.gz"));
         Assert.Equal(ReportKind.DmarcAggregate, Assert.Single(reports).Kind);
     }
 

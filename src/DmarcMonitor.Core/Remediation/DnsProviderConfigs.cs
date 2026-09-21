@@ -159,7 +159,7 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
     }
 
     /// <summary>Every configured provider, for the settings page. Refs only; never a secret.</summary>
-    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<DnsProviderConfig>> ListAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);

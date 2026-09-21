@@ -70,7 +70,7 @@ public sealed record ReportSource
 /// Clean sources gathered under one service, for the report's "what sends
 /// mail as you" list.
 /// </summary>
-/// <param name="Name">The service, or the address itself when it is not one we recognise.</param>
+/// <param name="Name">The service, or the address itself when it is not one we recognize.</param>
 /// <param name="IsService">
 /// True when <paramref name="Name"/> names a service rather than repeating an
 /// address, so the report can say "17 addresses" for the one and nothing for
@@ -138,10 +138,10 @@ public sealed record ClientReport
     public required string ProviderName { get; init; }
     public required ReportPeriod Period { get; init; }
 
-    /// <summary>The organisation's accent colour, #rrggbb, or null for the default.</summary>
+    /// <summary>The organization's accent color, #rrggbb, or null for the default.</summary>
     public string? BrandColor { get; init; }
 
-    /// <summary>The organisation's logo as a data: URL, or null for none.</summary>
+    /// <summary>The organization's logo as a data: URL, or null for none.</summary>
     public string? BrandLogo { get; init; }
 
     /// <summary>Who to contact, printed in the footer. Null for none.</summary>
@@ -171,7 +171,7 @@ public sealed record ClientReport
     /// </summary>
     /// <remarks>
     /// Counted in Messages and deliberately absent from the source tables,
-    /// because a mailing list breaking authentication is expected behaviour
+    /// because a mailing list breaking authentication is expected behavior
     /// rather than a finding. That makes the tables sum to less than the
     /// headline, and a client who adds them up and finds a gap has no way to
     /// know it was deliberate.
@@ -212,7 +212,7 @@ public sealed record ClientReport
     /// sources that were actually worth reading buried underneath. Gathered,
     /// it is "Microsoft 365, 1,756 messages" and then those dozen.
     ///
-    /// Only services <see cref="SenderCatalog"/> recognises are gathered;
+    /// Only services <see cref="SenderCatalog"/> recognizes are gathered;
     /// everything else keeps its own address and its own row, so nothing is
     /// merged on a guess.
     /// </remarks>

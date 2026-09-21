@@ -65,7 +65,7 @@ public sealed class SpfRecordTests
     [InlineData("v=spf1 all", '+')]
     public void ReadsTheQualifierOnAllIncludingWhenItIsImplicit(string record, char expected)
     {
-        // A bare "all" means "+all", which authorises the internet. Defaulting
+        // A bare "all" means "+all", which authorizes the internet. Defaulting
         // it to anything else would hide the worst record there is.
         Assert.Equal(expected, SpfRecord.Parse(record).All!.Qualifier);
     }
@@ -129,7 +129,7 @@ public sealed class SpfRecordTests
     [Fact]
     public void KeepsEachTermAsItWasWrittenForShowingBack()
     {
-        // An operator reading a finding needs to recognise their own record.
+        // An operator reading a finding needs to recognize their own record.
         var r = SpfRecord.Parse("v=spf1 ~include:MixedCase.Example -all");
 
         Assert.Equal("~include:MixedCase.Example", r.Terms[0].Raw);

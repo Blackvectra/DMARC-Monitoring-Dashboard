@@ -86,7 +86,7 @@ public sealed class UnauthenticatedApp : WebApplicationFactory<Program>
         Path.Combine(Path.GetTempPath(), $"dmarc-proxy-{Guid.NewGuid():N}.db");
 
     public UnauthenticatedApp() =>
-        new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {

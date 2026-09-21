@@ -40,7 +40,7 @@ public sealed class DatabaseMigrationTests : IDisposable
     /// <summary>A database as an older build left it: current schema, minus what came after.</summary>
     private async Task<string> AnOlderDatabaseAsync(string upToVersion)
     {
-        await new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql);
+        await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
 
         await using var db = Open();
 
@@ -116,7 +116,7 @@ public sealed class DatabaseMigrationTests : IDisposable
         // schema.sql is complete and records every version, so a fresh
         // install must not have migrations replayed into it - they would fail
         // on tables that are already there.
-        await new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql);
+        await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
 
         var result = await DatabaseMigrations.ApplyAsync(_dbPath);
 
@@ -204,7 +204,7 @@ public sealed class DatabaseMigrationTests : IDisposable
         // A fresh database must report the baseline. If schema.sql stopped
         // recording a version, an upgrade would replay migrations into a
         // database that already had them.
-        await new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql);
+        await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
 
         Assert.Equal(DatabaseMigrations.BaselineVersion, await DatabaseMigrations.VersionAsync(_dbPath));
     }
@@ -238,7 +238,7 @@ public sealed class DatabaseExistenceTests : IDisposable
     [Fact]
     public async Task AskingAboutADatabaseThatIsNotThereLeavesNothingBehind()
     {
-        Assert.False(await new ReportStore(_dbPath).IsInitialisedAsync());
+        Assert.False(await new ReportStore(_dbPath).IsInitializedAsync());
 
         Assert.False(File.Exists(_dbPath));
     }
@@ -247,8 +247,8 @@ public sealed class DatabaseExistenceTests : IDisposable
     public async Task AndTheAnswerIsStillRightOnceItExists()
     {
         var store = new ReportStore(_dbPath);
-        await store.InitialiseAsync(DatabaseSchema.Sql);
+        await store.InitializeAsync(DatabaseSchema.Sql);
 
-        Assert.True(await store.IsInitialisedAsync());
+        Assert.True(await store.IsInitializedAsync());
     }
 }

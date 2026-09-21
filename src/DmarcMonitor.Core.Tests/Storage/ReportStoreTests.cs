@@ -19,7 +19,7 @@ public sealed class ReportStoreTests : IDisposable
     {
         _store = new ReportStore(_dbPath);
         var schema = File.ReadAllText(FindSchema());
-        _store.InitialiseAsync(schema).GetAwaiter().GetResult();
+        _store.InitializeAsync(schema).GetAwaiter().GetResult();
     }
 
     public void Dispose()
@@ -54,7 +54,7 @@ public sealed class ReportStoreTests : IDisposable
     [Fact]
     public async Task CreatesADatabaseWithTheExpectedTables()
     {
-        Assert.True(await _store.IsInitialisedAsync());
+        Assert.True(await _store.IsInitializedAsync());
     }
 
     [Fact]
@@ -90,7 +90,7 @@ public sealed class ReportStoreTests : IDisposable
     [Fact]
     public async Task RefusesToStoreTheSameReportTwice()
     {
-        // The database is the last line of defence behind the ingestor's own
+        // The database is the last line of defense behind the ingestor's own
         // check: a crash between the two must not inflate a customer's volume
         // when the message is read again.
         var report = Aggregate("google-aggregate.xml");

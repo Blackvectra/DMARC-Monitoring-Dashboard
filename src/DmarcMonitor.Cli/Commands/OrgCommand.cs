@@ -4,7 +4,7 @@ using DmarcMonitor.Core.Tenancy;
 namespace DmarcMonitor.Cli.Commands;
 
 /// <summary>
-/// Organisations: the layer above clients, and which Entra group belongs to
+/// Organizations: the layer above clients, and which Entra group belongs to
 /// each.
 ///
 /// A fresh install has one, filed as 'local' and called Local until somebody
@@ -19,19 +19,22 @@ public static class OrgCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--org", "--name", "--slug", "--group", "--role", "--colour", "--color", "--provider-name", "--contact", "--logo", "!--clear") is var bad and not 0) { return bad; }
+        // --colour is still accepted. The product says color everywhere now,
+        // and refusing the other spelling would only punish somebody who
+        // copied a command out of an older page.
+        if (Args.Reject(args, "--db", "--org", "--name", "--slug", "--group", "--role", "--color", "--colour", "--provider-name", "--contact", "--logo", "!--clear") is var bad and not 0) { return bad; }
 
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
         var dbPath = Args.Value(rest, "--db") ?? "dmarc.db";
 
-        if (!await new ReportStore(dbPath).IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await new ReportStore(dbPath).IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;
         }
 
-        var store = new OrganisationStore(dbPath);
+        var store = new OrganizationStore(dbPath);
         return action switch
         {
             "list" => await ListAsync(store, ct).ConfigureAwait(false),
@@ -44,28 +47,28 @@ public static class OrgCommand
     }
 
     /// <summary>
-    /// How the organisation looks: the accent colour and logo in the sidebar,
+    /// How the organization looks: the accent color and logo in the sidebar,
     /// and how it names itself on the reports it sends.
     /// </summary>
-    private static async Task<int> BrandAsync(OrganisationStore store, string[] args, CancellationToken ct)
+    private static async Task<int> BrandAsync(OrganizationStore store, string[] args, CancellationToken ct)
     {
         var slug = Args.Value(args, "--org");
         if (string.IsNullOrWhiteSpace(slug))
         {
-            return Usage("dmarc org brand --org <slug> [--colour #rrggbb] [--provider-name <n>] [--contact <text>] [--logo <image file>] [--clear] [--db <path>]");
+            return Usage("dmarc org brand --org <slug> [--color #rrggbb] [--provider-name <n>] [--contact <text>] [--logo <image file>] [--clear] [--db <path>]");
         }
 
         var existing = await store.GetAsync(slug, ct).ConfigureAwait(false);
         if (existing is null)
         {
-            Console.Error.WriteLine($"No organisation with the slug '{slug}'. See: dmarc org list");
+            Console.Error.WriteLine($"No organization with the slug '{slug}'. See: dmarc org list");
             return 66;
         }
 
-        var brand = Args.Flag(args, "--clear") ? OrganisationBrand.None : existing.Brand;
-        if ((Args.Value(args, "--colour") ?? Args.Value(args, "--color")) is { } colour)
+        var brand = Args.Flag(args, "--clear") ? OrganizationBrand.None : existing.Brand;
+        if ((Args.Value(args, "--color") ?? Args.Value(args, "--colour")) is { } color)
         {
-            brand = brand with { PrimaryColor = colour };
+            brand = brand with { PrimaryColor = color };
         }
         if (Args.Value(args, "--provider-name") is { } provider) { brand = brand with { ProviderName = provider }; }
         if (Args.Value(args, "--contact") is { } contact) { brand = brand with { ContactBlock = contact.Replace("\\n", "\n", StringComparison.Ordinal) }; }
@@ -104,19 +107,19 @@ public static class OrgCommand
         }
 
         Console.WriteLine($"'{slug}' now looks like this:");
-        Console.WriteLine($"  colour        {brand.PrimaryColor ?? "(default)"}");
+        Console.WriteLine($"  color        {brand.PrimaryColor ?? "(default)"}");
         Console.WriteLine($"  logo          {(brand.Logo is null ? "(none)" : $"{brand.Logo.Length / 1000} KB")}");
         Console.WriteLine($"  provider name {brand.ProviderName ?? "(from configuration)"}");
         Console.WriteLine($"  contact       {(brand.ContactBlock is null ? "(none)" : brand.ContactBlock.Replace("\n", " / ", StringComparison.Ordinal))}");
         return 0;
     }
 
-    private static async Task<int> ListAsync(OrganisationStore store, CancellationToken ct)
+    private static async Task<int> ListAsync(OrganizationStore store, CancellationToken ct)
     {
         var all = await store.ListAsync(ct).ConfigureAwait(false);
         if (all.Count == 0)
         {
-            Console.WriteLine("No organisations yet. The first is created by the first report or client; or: dmarc org add --name \"<name>\"");
+            Console.WriteLine("No organizations yet. The first is created by the first report or client; or: dmarc org add --name \"<name>\"");
             return 0;
         }
 
@@ -130,7 +133,7 @@ public static class OrgCommand
         return 0;
     }
 
-    private static async Task<int> AddAsync(OrganisationStore store, string[] args, CancellationToken ct)
+    private static async Task<int> AddAsync(OrganizationStore store, string[] args, CancellationToken ct)
     {
         var name = Args.Value(args, "--name");
         if (string.IsNullOrWhiteSpace(name))
@@ -144,7 +147,7 @@ public static class OrgCommand
             var wanted = ReportStore.Slugify(Args.Value(args, "--slug") ?? name);
             Console.Error.WriteLine(wanted.Length == 0
                 ? $"'{name}' has no letters or digits to make a slug from. Pass --slug <slug>."
-                : $"An organisation with the slug '{wanted}' already exists.");
+                : $"An organization with the slug '{wanted}' already exists.");
             return 65;
         }
 
@@ -158,7 +161,7 @@ public static class OrgCommand
         return 0;
     }
 
-    private static async Task<int> SetGroupAsync(OrganisationStore store, string[] args, CancellationToken ct)
+    private static async Task<int> SetGroupAsync(OrganizationStore store, string[] args, CancellationToken ct)
     {
         var slug = Args.Value(args, "--org");
         if (string.IsNullOrWhiteSpace(slug))
@@ -168,16 +171,16 @@ public static class OrgCommand
 
         var role = (Args.Value(args, "--role") ?? "operator").ToLowerInvariant() switch
         {
-            "operator" => OrganisationRole.Operator,
-            "admin" => OrganisationRole.Admin,
-            "viewer" => OrganisationRole.Viewer,
+            "operator" => OrganizationRole.Operator,
+            "admin" => OrganizationRole.Admin,
+            "viewer" => OrganizationRole.Viewer,
             var other => throw new ArgumentException($"--role {other}: one of operator, admin, viewer."),
         };
 
         var group = Args.Value(args, "--group");
         if (!await store.SetGroupAsync(slug, role, group, ct).ConfigureAwait(false))
         {
-            Console.Error.WriteLine($"No organisation with the slug '{slug}'. See: dmarc org list");
+            Console.Error.WriteLine($"No organization with the slug '{slug}'. See: dmarc org list");
             return 66;
         }
 
@@ -188,7 +191,7 @@ public static class OrgCommand
         return 0;
     }
 
-    private static async Task<int> RenameAsync(OrganisationStore store, string[] args, CancellationToken ct)
+    private static async Task<int> RenameAsync(OrganizationStore store, string[] args, CancellationToken ct)
     {
         var slug = Args.Value(args, "--org");
         var name = Args.Value(args, "--name");
@@ -199,7 +202,7 @@ public static class OrgCommand
 
         if (!await store.RenameAsync(slug, name, ct).ConfigureAwait(false))
         {
-            Console.Error.WriteLine($"No organisation with the slug '{slug}'. See: dmarc org list");
+            Console.Error.WriteLine($"No organization with the slug '{slug}'. See: dmarc org list");
             return 66;
         }
 
@@ -215,7 +218,7 @@ public static class OrgCommand
         Console.Error.WriteLine("  dmarc org add       --name \"<name>\" [--slug <slug>] [--group <id>]");
         Console.Error.WriteLine("  dmarc org set-group --org <slug> --group <entra group object id> [--role operator|admin|viewer]");
         Console.Error.WriteLine("  dmarc org rename    --org <slug> --name \"<name>\"");
-        Console.Error.WriteLine("  dmarc org brand     --org <slug> [--colour #rrggbb] [--provider-name <n>] [--contact <text>] [--logo <file>]");
+        Console.Error.WriteLine("  dmarc org brand     --org <slug> [--color #rrggbb] [--provider-name <n>] [--contact <text>] [--logo <file>]");
         return 64;
     }
 }

@@ -3,12 +3,12 @@
     framework would be more bytes than the app.
 
     The look: a plain, quiet dashboard. White cards on an off-white page, one
-    accent colour for anything interactive, status carried by small tinted
-    chips rather than blocks of solid colour, and tables set tight enough that
+    accent color for anything interactive, status carried by small tinted
+    chips rather than blocks of solid color, and tables set tight enough that
     twenty domains fit on one screen. Nothing on the page is louder than the
     numbers.
 
-    Colour carries meaning here, so it is never the only signal: every
+    Color carries meaning here, so it is never the only signal: every
     severity also has a label and a position in the ordering. Roughly one in
     twelve men cannot reliably separate red from green, and this is a tool for
     finding problems.
@@ -20,15 +20,15 @@
     it flip because their laptop went dark at sunset is not a preference being
     honoured.
 
-    EVERY colour is a token. The first attempt at a light theme left a dozen
+    EVERY color is a token. The first attempt at a light theme left a dozen
     literal dark hexes scattered through the rules below - table borders, row
     hovers, code backgrounds - and they turned into black slots on a white
-    page. If a new rule needs a colour, add a token rather than a hex.
+    page. If a new rule needs a color, add a token rather than a hex.
 */
 
 /*
     Depth runs the opposite way in the two themes, which is why these are
-    three separate tokens rather than one colour lightened twice. On light the
+    three separate tokens rather than one color lightened twice. On light the
     page is off-white and a panel is white; on dark the page is near-black and
     a panel lifts off it. Collapsing them made code blocks inside panels vanish.
 */
@@ -48,16 +48,16 @@
     --hover: #f4f4f5;
 
     /* The one accent. Links, the active nav item, primary buttons, the chart
-       line. Everything interactive is this colour and nothing else is. */
+       line. Everything interactive is this color and nothing else is. */
     --accent: #4f46e5;
     --link: var(--accent);
     --ontrack: var(--accent);   /* a rollout in progress is information, not a warning */
-    /* The tint behind an accent chip is derived, so an organisation's own
-       colour set on .app carries through without a second token. */
+    /* The tint behind an accent chip is derived, so an organization's own
+       color set on .app carries through without a second token. */
     --accent-bg: color-mix(in srgb, var(--accent) 12%, var(--panel));
 
-    /* Status colours, and a tint of each for the chip behind the word. The
-       tint does the work on a page; the full colour is kept for a dot or a
+    /* Status colors, and a tint of each for the chip behind the word. The
+       tint does the work on a page; the full color is kept for a dot or a
        chart segment, where there is no room for a tint. */
     --urgent: #dc2626;  --urgent-bg: #fef2f2;
     --act: #ea580c;     --act-bg: #fff7ed;
@@ -139,7 +139,7 @@ a:hover { text-decoration: underline; }
 /* ---- sidebar ---------------------------------------------------------- */
 
 /*
-    The same colour as the page rather than a white column: the content
+    The same color as the page rather than a white column: the content
     panels are what should read as raised, and a white sidebar beside white
     cards is one more edge than the page needs.
 */
@@ -179,10 +179,10 @@ a:hover { text-decoration: underline; }
     box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
 }
 
-/* ---- organisation ------------------------------------------------------ */
+/* ---- organization ------------------------------------------------------ */
 
 /*
-    Which organisation this is, above the navigation, because everything
+    Which organization this is, above the navigation, because everything
     under it is scoped by it. A select for anybody who may see more than one;
     a plain name for everybody else.
 */
@@ -197,7 +197,7 @@ a:hover { text-decoration: underline; }
 .org-name { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
 .org-role { font-size: 11px; color: var(--dim); margin-top: 6px; }
 
-/* An organisation's own logo takes the brand's place, sized to the column. */
+/* An organization's own logo takes the brand's place, sized to the column. */
 .brand-logo { display: block; max-height: 36px; max-width: 100%; }
 .org-switch {
     width: 100%;
@@ -255,7 +255,7 @@ select {
 
 .counts { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
 
-/* A chip: tinted background, coloured word, no hard edge. */
+/* A chip: tinted background, colored word, no hard edge. */
 .count {
     font-size: 12px; font-weight: 500; padding: 3px 9px; border-radius: 999px;
     border: 1px solid transparent; background: var(--dim-bg); color: var(--muted);
@@ -374,7 +374,7 @@ section[id] { scroll-margin-top: 16px; }
     a script from a CDN is a chart that does not draw - and the client report
     is mailed and printed, where no script runs at all.
 
-    Colour is never the only signal here either: every chart writes out the
+    Color is never the only signal here either: every chart writes out the
     numbers it draws, and each segment carries its name.
 */
 .chart {
@@ -426,7 +426,7 @@ section[id] { scroll-margin-top: 16px; }
 .key { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .key strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 
-/* The legend swatches repeat the chart's colours, and sit beside a word. */
+/* The legend swatches repeat the chart's colors, and sit beside a word. */
 .key-total::before, .key-fail::before, .key-gap::before {
     content: "";
     width: 8px; height: 8px; border-radius: 2px;
@@ -556,7 +556,7 @@ section[id] { scroll-margin-top: 16px; }
 
 /*
     SVG takes `fill`, not `background`. The first version reused the
-    proportion bar's colour rules, which set `background` on a span and do
+    proportion bar's color rules, which set `background` on a span and do
     nothing whatever to a path - so every segment fell back to the default
     fill and the dial rendered solid black. It looked like a deliberate
     design until it was put on a screen.
@@ -611,7 +611,7 @@ section[id] { scroll-margin-top: 16px; }
 }
 .proportion-bar .seg { display: block; height: 100%; }
 
-/* Named for what they mean, not for a colour. */
+/* Named for what they mean, not for a color. */
 .seg.fine    { background: var(--fine); }
 .seg.watch   { background: var(--watch); }
 .seg.act     { background: var(--act); }
@@ -678,7 +678,7 @@ section[id] { scroll-margin-top: 16px; }
     font-size: 11.5px; color: var(--muted);
 }
 
-/* The pip repeats what the ordering and the wording already say. Colour is
+/* The pip repeats what the ordering and the wording already say. Color is
    never the only carrier of meaning. */
 .pip { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
 .pip.urgent { background: var(--urgent); }
@@ -687,7 +687,7 @@ section[id] { scroll-margin-top: 16px; }
 .pip.fine   { background: var(--fine); }
 .pip.ontrack{ background: var(--ontrack); }
 
-/* No coloured stripe down the first column any more: the pip and the
+/* No colored stripe down the first column any more: the pip and the
    ordering say it, and eighteen stripes made the list look like a warning. */
 
 .good { color: var(--fine); }
@@ -696,8 +696,8 @@ section[id] { scroll-margin-top: 16px; }
 /* ---- callout ----------------------------------------------------------- */
 
 /*
-    The headline finding on a domain page. Tinted in the colour of its level
-    rather than striped, so it reads as one calm block: the same colour the
+    The headline finding on a domain page. Tinted in the color of its level
+    rather than striped, so it reads as one calm block: the same color the
     triage chip carried for this domain, in the same place on the page.
 */
 .callout {
@@ -761,7 +761,7 @@ button.primary {
 button.primary:hover { filter: brightness(1.08); }
 button.primary:disabled { opacity: .45; cursor: default; filter: none; }
 
-/* The quiet button: a bordered field-coloured pill for a secondary action,
+/* The quiet button: a bordered field-colored pill for a secondary action,
    such as Save on a row or Remove beside a provider. */
 button.quiet, .triage td > button {
     background: var(--field); color: var(--text);

@@ -47,7 +47,7 @@
                     <option value="">@(_detail.ClientSlug == ReportStore.UnassignedClientSlug ? "Unassigned" : _detail.ClientName)</option>
                     @foreach (var c in _clients.Where(c => c.Slug != _detail.ClientSlug))
                     {
-                        <option value="@c.Slug">@(AcrossOrganisations ? $"{c.OrganisationName} / {c.Name}" : c.Name)</option>
+                        <option value="@c.Slug">@(AcrossOrganizations ? $"{c.OrganizationName} / {c.Name}" : c.Name)</option>
                     }
                 </select>
             </label>
@@ -322,7 +322,7 @@ else
                                     }
                                     else
                                     {
-                                        <span>A different organisation from @Domain. No alignment setting
+                                        <span>A different organization from @Domain. No alignment setting
                                               makes this count.</span>
                                     }
                                 </td>
@@ -754,13 +754,13 @@ else
         }
     }
 
-    private OrganisationAccess? _access;
+    private OrganizationAccess? _access;
     private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
     private string _moveTo = "";
     private string? _moved;
     private bool _movedIsError;
 
-    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+    private bool AcrossOrganizations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
 
     private async Task MoveAsync()
     {
@@ -823,7 +823,7 @@ else
         try
         {
             // The scope decides whether this domain exists at all as far as
-            // this person is concerned: another organisation's domain is
+            // this person is concerned: another organization's domain is
             // "nothing stored", the same page a domain nobody has reported on
             // gets, so the URL confirms nothing.
             _access = await Org.GetAsync();
@@ -890,7 +890,7 @@ else
 
     /// <summary>
     /// pct is the tag operators forget. A domain at p=reject with pct=20 looks
-    /// enforcing everywhere it is summarised, and is not.
+    /// enforcing everywhere it is summarized, and is not.
     /// </summary>
     private static string Sample(DomainDetail d) =>
         d.Pct < 100 ? $", but only for {d.Pct}% of it - the rest is delivered" : "";

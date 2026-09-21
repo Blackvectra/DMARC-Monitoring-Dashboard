@@ -32,7 +32,7 @@ public static class InitDbCommand
         if (File.Exists(dbPath))
         {
             var store = new ReportStore(dbPath);
-            if (await store.IsInitialisedAsync(ct).ConfigureAwait(false))
+            if (await store.IsInitializedAsync(ct).ConfigureAwait(false))
             {
                 // Existing and ours: bring it up to date rather than declining.
                 // This is the upgrade path, and running it is what stops a new
@@ -67,7 +67,7 @@ public static class InitDbCommand
         try
         {
             var store = new ReportStore(dbPath);
-            await store.InitialiseAsync(schema, ct).ConfigureAwait(false);
+            await store.InitializeAsync(schema, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -129,7 +129,7 @@ internal static class Args
 
     /// <summary>
     /// Complains about the first flag that is not one this command takes, and
-    /// returns 64. Returns 0 when every flag is recognised.
+    /// returns 64. Returns 0 when every flag is recognized.
     /// </summary>
     /// <remarks>
     /// Flags used to be looked up by name and anything else ignored, so a

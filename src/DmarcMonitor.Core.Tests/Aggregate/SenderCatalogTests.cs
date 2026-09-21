@@ -54,7 +54,7 @@ public sealed class SenderCatalogTests
     }
 
     [Fact]
-    public void AnUnknownAddressIsLabelledWithItself()
+    public void AnUnknownAddressIsLabeledWithItself()
     {
         // Label never invents a name, because a row saying "unknown service"
         // for eleven different addresses would merge eleven strangers into

@@ -186,7 +186,7 @@ else
             <tr>
                 <th></th>
                 <th>Domain</th>
-                @if (AcrossOrganisations) { <th>Organisation</th> }
+                @if (AcrossOrganizations) { <th>Organization</th> }
                 <th>Client</th>
                 <th>Policy</th>
                 <th class="num">Messages</th>
@@ -201,7 +201,7 @@ else
                 <tr class="@Css(row.Level)">
                     <td><span class="pip @Css(row.Level)" title="@Label(row.Level)"></span></td>
                     <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
-                    @if (AcrossOrganisations) { <td class="muted">@row.Organisation</td> }
+                    @if (AcrossOrganizations) { <td class="muted">@row.Organization</td> }
                     @* Onboarding by domain name makes these identical for most
                        rows, and a column repeating the one beside it eighteen
                        times is noise in the place the eye scans first. The
@@ -254,7 +254,7 @@ else
 }
 
 @code {
-    private OrganisationAccess? _access;
+    private OrganizationAccess? _access;
     private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
     private IReadOnlyList<DomainTriage>? _rows;
     private IReadOnlyList<DayPoint>? _series;
@@ -278,8 +278,8 @@ else
         : string.IsNullOrEmpty(_client) ? _rows
         : [.. _rows.Where(r => r.ClientSlug.Equals(_client, StringComparison.OrdinalIgnoreCase))];
 
-    /// <summary>A master looking at every organisation at once needs to be told which is which.</summary>
-    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+    /// <summary>A master looking at every organization at once needs to be told which is which.</summary>
+    private bool AcrossOrganizations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
 
     private string Subject =>
         !string.IsNullOrEmpty(_client) ? _clients.FirstOrDefault(c => c.Slug == _client)?.Name ?? "This client"

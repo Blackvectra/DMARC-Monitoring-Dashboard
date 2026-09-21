@@ -106,7 +106,7 @@ public sealed class RealReportTests
     [Fact]
     public void IgnoresElementsItDoesNotModel()
     {
-        // <version> and <extra_contact_info> are present and unmodelled.
+        // <version> and <extra_contact_info> are present and unmodeled.
         // Unknown elements must be skipped, never treated as an error.
         Assert.True(AggregateReportParser.Parse(Fixture("google-aggregate.xml")).Success);
     }

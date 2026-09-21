@@ -10,16 +10,16 @@ public sealed record AuditEntry(DateTimeOffset At, string Actor, string Action, 
 /// Who did what, for the settings page and for anybody asking afterwards.
 ///
 /// Not the DNS change trail, which dns_changes keeps in full with before and
-/// after values; this is the rest: organisations, groups, clients, providers,
+/// after values; this is the rest: organizations, groups, clients, providers,
 /// imports. Every hosted DMARC product with more than one login has one of
 /// these, and the question it answers - "who moved that domain?" - comes up
-/// the week after two organisations share an install.
+/// the week after two organizations share an install.
 /// </summary>
 public sealed class AuditLog(string databasePath)
 {
     private readonly string _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
 
-    /// <param name="tenantId">The organisation it concerns, or null for the platform.</param>
+    /// <param name="tenantId">The organization it concerns, or null for the platform.</param>
     public async Task RecordAsync(string? tenantId, string actor, string action, string? detail = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(action);
@@ -37,7 +37,7 @@ public sealed class AuditLog(string databasePath)
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
-    /// <summary>Newest first. One organisation's entries plus the platform's, or everything when unscoped.</summary>
+    /// <summary>Newest first. One organization's entries plus the platform's, or everything when unscoped.</summary>
     public async Task<IReadOnlyList<AuditEntry>> ListAsync(string? tenantId = null, int limit = 50, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);

@@ -97,7 +97,7 @@ public sealed class ArgsTests
     }
 
     [Fact]
-    public void AFlagAtTheEndWithNoValueIsStillRecognised()
+    public void AFlagAtTheEndWithNoValueIsStillRecognized()
     {
         // "dmarc report --client" is wrong, but it is wrong in the way the
         // command's own usage text explains. It must not be reported as an

@@ -30,19 +30,19 @@ public sealed class ReportStore
     /// <summary>SQLITE_NOTADB: the file is not a database at all.</summary>
     private const int NotADatabase = 26;
 
-    /// <param name="organisation">
-    /// The organisation new domains are filed under when a report arrives for
+    /// <param name="organization">
+    /// The organization new domains are filed under when a report arrives for
     /// one nobody has seen. A domain that already exists keeps its own
-    /// organisation whatever this says, so a collector for one organisation's
+    /// organization whatever this says, so a collector for one organization's
     /// mailbox cannot move another's domain.
     /// </param>
-    public ReportStore(string databasePath, string organisation = DefaultTenantSlug)
+    public ReportStore(string databasePath, string organization = DefaultTenantSlug)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(organisation);
+        ArgumentException.ThrowIfNullOrWhiteSpace(organization);
 
         _databasePath = databasePath;
-        _organisation = organisation.Trim().ToLowerInvariant();
+        _organization = organization.Trim().ToLowerInvariant();
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
@@ -51,10 +51,10 @@ public sealed class ReportStore
     }
 
     private readonly string _databasePath;
-    private readonly string _organisation;
+    private readonly string _organization;
 
-    /// <summary>The organisation slug new domains are filed under.</summary>
-    public string Organisation => _organisation;
+    /// <summary>The organization slug new domains are filed under.</summary>
+    public string Organization => _organization;
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken ct)
     {
@@ -71,7 +71,7 @@ public sealed class ReportStore
     /// <summary>
     /// Creates the database from the schema file if it is not already there.
     /// </summary>
-    public async Task InitialiseAsync(string schemaSql, CancellationToken ct = default)
+    public async Task InitializeAsync(string schemaSql, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(schemaSql);
 
@@ -98,7 +98,7 @@ public sealed class ReportStore
     /// look like a DMARC Monitor database". A dead end reached by following
     /// the instructions.
     /// </remarks>
-    public async Task<bool> IsInitialisedAsync(CancellationToken ct = default)
+    public async Task<bool> IsInitializedAsync(CancellationToken ct = default)
     {
         if (_databasePath is not ":memory:" && !File.Exists(_databasePath)) { return false; }
 
@@ -174,7 +174,7 @@ public sealed class ReportStore
         await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
         var tx = (SqliteTransaction)transaction;
 
-        var ids = await EnsureDomainAsync(connection, tx, report.Policy.Domain, _organisation, ct).ConfigureAwait(false);
+        var ids = await EnsureDomainAsync(connection, tx, report.Policy.Domain, _organization, ct).ConfigureAwait(false);
         var reportId = Guid.NewGuid().ToString("N");
         var now = Iso(DateTimeOffset.UtcNow);
 
@@ -218,7 +218,7 @@ public sealed class ReportStore
         catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
         {
             // UNIQUE(org_name, external_report_id, domain_id). The database is
-            // the last line of defence against double-counting, behind the
+            // the last line of defense against double-counting, behind the
             // ingestor's own check: a crash between the two must not inflate a
             // customer's volume when the message is read again.
             await transaction.RollbackAsync(ct).ConfigureAwait(false);
@@ -307,7 +307,7 @@ public sealed class ReportStore
         await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
         var tx = (SqliteTransaction)transaction;
 
-        var ids = await EnsureDomainAsync(connection, tx, domain, _organisation, ct).ConfigureAwait(false);
+        var ids = await EnsureDomainAsync(connection, tx, domain, _organization, ct).ConfigureAwait(false);
         var reportId = Guid.NewGuid().ToString("N");
 
         try
@@ -357,7 +357,7 @@ public sealed class ReportStore
     }
 
     /// <summary>Domains with no client assigned: reports arriving that nobody is billed for.</summary>
-    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<string>> GetUnassignedDomainsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
@@ -380,11 +380,11 @@ public sealed class ReportStore
         return result;
     }
 
-    /// <summary>A domain, who it is filed under, and which organisation that is.</summary>
-    public sealed record DomainSummary(string Domain, string ClientSlug, string ClientName, string OrganisationSlug, string OrganisationName);
+    /// <summary>A domain, who it is filed under, and which organization that is.</summary>
+    public sealed record DomainSummary(string Domain, string ClientSlug, string ClientName, string OrganizationSlug, string OrganizationName);
 
     /// <summary>Every domain, for moving one between clients.</summary>
-    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<DomainSummary>> GetDomainsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
@@ -410,11 +410,11 @@ public sealed class ReportStore
     }
 
     /// <summary>A client and how much is filed under it.</summary>
-    /// <param name="OrganisationSlug">The organisation it belongs to.</param>
+    /// <param name="OrganizationSlug">The organization it belongs to.</param>
     /// <param name="EntraGroupId">The customer's own login group, or null.</param>
     public sealed record ClientSummary(
         string Slug, string Name, int Domains, long Messages,
-        string OrganisationSlug = "", string OrganisationName = "", string? EntraGroupId = null);
+        string OrganizationSlug = "", string OrganizationName = "", string? EntraGroupId = null);
 
     /// <summary>
     /// Records the customer's own login group for a client. Its members see
@@ -448,7 +448,7 @@ public sealed class ReportStore
     }
 
     /// <summary>
-    /// Every table that carries a denormalised client_id alongside a domain_id.
+    /// Every table that carries a denormalized client_id alongside a domain_id.
     ///
     /// Moving a domain to a client has to move its history too. Updating only
     /// the domains row would leave every report still filed under Unassigned,
@@ -480,7 +480,7 @@ public sealed class ReportStore
     ];
 
     /// <summary>Every client, with the Unassigned one included: unbilled work is worth seeing.</summary>
-    /// <param name="tenantId">One organisation's, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<ClientSummary>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
     {
         await using var connection = await OpenAsync(ct).ConfigureAwait(false);
@@ -517,13 +517,13 @@ public sealed class ReportStore
     /// <summary>
     /// Creates a client. Returns its slug, or null when that slug is taken.
     /// </summary>
-    /// <param name="organisation">
-    /// The organisation it belongs to, by slug. The store's own organisation
-    /// when not given. An organisation that does not exist yet is created
+    /// <param name="organization">
+    /// The organization it belongs to, by slug. The store's own organization
+    /// when not given. An organization that does not exist yet is created
     /// under that name, which is how the first one comes to exist at all.
     /// </param>
     public async Task<string?> CreateClientAsync(
-        string name, string? slug = null, string? organisation = null, CancellationToken ct = default)
+        string name, string? slug = null, string? organization = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
 
@@ -539,7 +539,7 @@ public sealed class ReportStore
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
         var tenantId = await EnsureTenantAsync(connection, transaction,
-            string.IsNullOrWhiteSpace(organisation) ? _organisation : organisation.Trim().ToLowerInvariant(), now, ct)
+            string.IsNullOrWhiteSpace(organization) ? _organization : organization.Trim().ToLowerInvariant(), now, ct)
             .ConfigureAwait(false);
 
         await using (var exists = connection.CreateCommand())
@@ -577,14 +577,14 @@ public sealed class ReportStore
     /// Files a domain, and everything already stored for it, under a client.
     /// </summary>
     /// <remarks>
-    /// The client's organisation comes with it: assigning a domain to a
+    /// The client's organization comes with it: assigning a domain to a
     /// NextLayerSec client moves it out of NRG Tech Services, history and all.
-    /// That is the one way a domain changes organisation, and it is a
+    /// That is the one way a domain changes organization, and it is a
     /// deliberate act by somebody who could see both.
     /// </remarks>
     /// <param name="tenantId">
-    /// When given, the domain must belong to this organisation, so a person
-    /// scoped to one organisation cannot pull a domain out of another by
+    /// When given, the domain must belong to this organization, so a person
+    /// scoped to one organization cannot pull a domain out of another by
     /// naming it.
     /// </param>
     public async Task<AssignOutcome> AssignDomainAsync(
@@ -624,8 +624,8 @@ public sealed class ReportStore
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = transaction;
-            // Unassigned exists once per organisation; the domain's own is the
-            // one meant. Any other slug is unique across organisations.
+            // Unassigned exists once per organization; the domain's own is the
+            // one meant. Any other slug is unique across organizations.
             lookup.CommandText = """
                 SELECT id, tenant_id FROM clients
                 WHERE slug = $slug AND (slug <> $unassigned OR tenant_id = $current)
@@ -693,7 +693,7 @@ public sealed class ReportStore
     /// Accented letters, folded to the ASCII letter they are built on.
     /// </summary>
     /// <remarks>
-    /// Spelled out rather than done with Unicode normalisation, because this
+    /// Spelled out rather than done with Unicode normalization, because this
     /// solution builds with InvariantGlobalization (src/Directory.Build.props),
     /// and under that switch string.Normalize is a no-op and ToLowerInvariant
     /// only touches ASCII. A FormD-and-strip-the-marks implementation looks
@@ -780,16 +780,16 @@ public sealed class ReportStore
     private sealed record DomainIds(string TenantId, string ClientId, string DomainId);
 
     /// <summary>
-    /// Resolves a domain to its ids, creating the organisation, its Unassigned
+    /// Resolves a domain to its ids, creating the organization, its Unassigned
     /// client and the domain row as needed.
     /// </summary>
     private static async Task<DomainIds> EnsureDomainAsync(
-        SqliteConnection connection, SqliteTransaction tx, string domain, string organisation, CancellationToken ct)
+        SqliteConnection connection, SqliteTransaction tx, string domain, string organization, CancellationToken ct)
     {
         var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
         var now = Iso(DateTimeOffset.UtcNow);
 
-        // An existing domain keeps whatever client - and organisation - it
+        // An existing domain keeps whatever client - and organization - it
         // was assigned to, so onboarding is never undone by a later report
         // arriving, whichever mailbox it arrived in.
         await using (var lookup = connection.CreateCommand())
@@ -804,9 +804,9 @@ public sealed class ReportStore
             }
         }
 
-        var tenantId = await EnsureTenantAsync(connection, tx, organisation, now, ct).ConfigureAwait(false);
+        var tenantId = await EnsureTenantAsync(connection, tx, organization, now, ct).ConfigureAwait(false);
 
-        // Unassigned is per organisation: NRG's unfiled domains are NRG's
+        // Unassigned is per organization: NRG's unfiled domains are NRG's
         // worklist, not NextLayerSec's.
         var clientId = await EnsureRowAsync(connection, tx,
             $"SELECT id FROM clients WHERE slug = $slug AND tenant_id = '{tenantId}'",
@@ -836,7 +836,7 @@ public sealed class ReportStore
     }
 
     /// <summary>
-    /// The organisation's row, created under its slug as a name when it does
+    /// The organization's row, created under its slug as a name when it does
     /// not exist yet. The built-in one is called Local until somebody renames
     /// it; any other is expected to have been created deliberately, and being
     /// created here is only so a report is never refused for want of a row.

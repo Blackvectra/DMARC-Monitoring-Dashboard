@@ -61,7 +61,7 @@ public sealed class GraphMailboxClientTests
 
         await foreach (var _ in client.GetMessagesAsync("Inbox")) { }
 
-        // Compare unescaped: Uri normalises %20 back to a space and re-encodes
+        // Compare unescaped: Uri normalizes %20 back to a space and re-encodes
         // on the wire, so asserting on the encoding tests the wrong thing.
         var url = Uri.UnescapeDataString(stub.Requests[^1].RequestUri!.ToString());
         Assert.Contains("$orderby=receivedDateTime asc", url, StringComparison.Ordinal);

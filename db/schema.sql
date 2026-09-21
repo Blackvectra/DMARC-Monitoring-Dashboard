@@ -45,7 +45,7 @@
 --
 --     tenant_id is denormalized alongside client_id onto every tenant-scoped
 --     table, hot ones included, for the same reason client_id is (rule 1) —
---     and for a stronger one. Self-hosted, client_id scoping is organisational
+--     and for a stronger one. Self-hosted, client_id scoping is organizational
 --     hygiene. Hosted, tenant_id scoping is the security boundary that stops
 --     MSP A reading MSP B's book of business. A boundary enforced by
 --     remembering to write a JOIN is not a boundary. Every read filters
@@ -79,7 +79,7 @@ CREATE TABLE tenants (
                         CHECK (deployment_mode IN ('self_hosted','hosted')),
 
     status              TEXT NOT NULL DEFAULT 'active'
-                        CHECK (status IN ('trial','active','suspended','cancelled')),
+                        CHECK (status IN ('trial','active','suspended','canceled')),
 
     -- Where this tenant's secrets actually live. Self-hosted uses DPAPI, which
     -- is bound to a Windows user on one machine and cannot work server-side.
@@ -104,8 +104,8 @@ CREATE TABLE tenants (
     -- Who belongs here: the object ids of Entra security groups, matched
     -- against the groups claim of whoever signs in. Operators (entra_group_id)
     -- assign domains, apply fixes and import; admins also run the
-    -- organisation's settings; viewers read. NULL throughout means nobody but
-    -- the master group (named in configuration) can see this organisation.
+    -- organization's settings; viewers read. NULL throughout means nobody but
+    -- the master group (named in configuration) can see this organization.
     entra_group_id      TEXT,
     admin_group_id      TEXT,
     viewer_group_id     TEXT,
@@ -827,7 +827,7 @@ CREATE TABLE dns_change_plans (
     summary             TEXT,
 
     status              TEXT NOT NULL DEFAULT 'proposed'
-                        CHECK (status IN ('proposed','refused','applied','rolled_back','superseded','cancelled')),
+                        CHECK (status IN ('proposed','refused','applied','rolled_back','superseded','canceled')),
 
     created_at          TEXT NOT NULL,
     created_by          TEXT
@@ -925,7 +925,7 @@ CREATE INDEX ix_flatten_due ON spf_flatten_state(refresh_by) WHERE is_stale = 0;
 -- somebody has to remember to update is a list that goes stale and then gets
 -- distrusted. The one thing a human supplies is the classification, because
 -- deciding that a source is a client's own marketing platform rather than an
--- attacker is a judgement, and getting it wrong in either direction is
+-- attacker is a judgment, and getting it wrong in either direction is
 -- expensive.
 CREATE TABLE threat_indicators (
     id                  TEXT PRIMARY KEY,
@@ -1012,10 +1012,10 @@ INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0009', datetime('now'), 'MTA-STS policies: what this product serves at mta-sts.<domain>, so the DNS record and the policy file cannot disagree');
 
 INSERT INTO schema_migrations (version, applied_at, description)
-VALUES ('0010', datetime('now'), 'Organisations: the Entra group that decides who belongs to each tenant');
+VALUES ('0010', datetime('now'), 'Organizations: the Entra group that decides who belongs to each tenant');
 
 INSERT INTO schema_migrations (version, applied_at, description)
-VALUES ('0011', datetime('now'), 'Roles within an organisation, customer login groups, white-label branding, and an audit log');
+VALUES ('0011', datetime('now'), 'Roles within an organization, customer login groups, white-label branding, and an audit log');
 
 
 -- ============================================================================
@@ -1024,7 +1024,7 @@ VALUES ('0011', datetime('now'), 'Roles within an organisation, customer login g
 
 -- Who did what, for the settings page and for anybody asking afterwards.
 -- Not the DNS change trail, which dns_changes keeps in full; this is the
--- rest: organisations, groups, clients, providers, imports.
+-- rest: organizations, groups, clients, providers, imports.
 CREATE TABLE audit_log (
     id                  INTEGER PRIMARY KEY,
     tenant_id           TEXT,                          -- NULL for platform-wide

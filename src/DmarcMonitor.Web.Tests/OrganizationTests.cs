@@ -17,7 +17,7 @@ using Microsoft.Extensions.Options;
 namespace DmarcMonitor.Web.Tests;
 
 /// <summary>
-/// The separation, end to end: two organisations in one database, and people
+/// The separation, end to end: two organizations in one database, and people
 /// from each opening the real pages over real HTTP.
 ///
 /// The Core tests prove the queries are scoped. These prove the pages pass
@@ -25,11 +25,11 @@ namespace DmarcMonitor.Web.Tests;
 /// scopes never, which compiles, renders beautifully, and shows NextLayerSec's
 /// clients to NRG.
 /// </summary>
-public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
+public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
 {
-    private readonly TwoOrganisationApp _app;
+    private readonly TwoOrganizationApp _app;
 
-    public OrganisationTests(TwoOrganisationApp app) => _app = app;
+    public OrganizationTests(TwoOrganizationApp app) => _app = app;
 
     private HttpClient As(string user, string groups = "", string? org = null)
     {
@@ -43,13 +43,13 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     [Fact]
     public async Task AnNrgEmployeeSeesNrgAndNothingOfNextLayerSec()
     {
-        var html = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetStringAsync("/");
+        var html = await As("nrg@example.com", TwoOrganizationApp.NrgGroup).GetStringAsync("/");
 
         Assert.Contains("acme.com", html, StringComparison.Ordinal);
         Assert.DoesNotContain("cornerpost.example", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Corner Post", html, StringComparison.Ordinal);
 
-        // Told which organisation they are in, with nothing to switch to.
+        // Told which organization they are in, with nothing to switch to.
         Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
         Assert.DoesNotContain("org-switch", html, StringComparison.Ordinal);
     }
@@ -57,7 +57,7 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     [Fact]
     public async Task ANextLayerSecEmployeeSeesTheirOwnAndNothingOfNrg()
     {
-        var html = await As("nls@example.com", TwoOrganisationApp.NlsGroup).GetStringAsync("/domains");
+        var html = await As("nls@example.com", TwoOrganizationApp.NlsGroup).GetStringAsync("/domains");
 
         Assert.Contains("cornerpost.example", html, StringComparison.Ordinal);
         Assert.DoesNotContain("acme.com", html, StringComparison.Ordinal);
@@ -66,21 +66,21 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     [Fact]
     public async Task TheMasterGroupSeesBothAndCanSwitch()
     {
-        var html = await As("boss@example.com", TwoOrganisationApp.MasterGroup).GetStringAsync("/");
+        var html = await As("boss@example.com", TwoOrganizationApp.MasterGroup).GetStringAsync("/");
 
         Assert.Contains("acme.com", html, StringComparison.Ordinal);
         Assert.Contains("cornerpost.example", html, StringComparison.Ordinal);
         Assert.Contains("org-switch", html, StringComparison.Ordinal);
-        Assert.Contains("All organisations", html, StringComparison.Ordinal);
+        Assert.Contains("All organizations", html, StringComparison.Ordinal);
 
-        // Across organisations the rows say which is which.
-        Assert.Contains(">Organisation<", html, StringComparison.Ordinal);
+        // Across organizations the rows say which is which.
+        Assert.Contains(">Organization<", html, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task AMasterNarrowedToOneOrganisationSeesOnlyIt()
+    public async Task AMasterNarrowedToOneOrganizationSeesOnlyIt()
     {
-        var html = await As("boss@example.com", TwoOrganisationApp.MasterGroup, org: "nextlayersec").GetStringAsync("/");
+        var html = await As("boss@example.com", TwoOrganizationApp.MasterGroup, org: "nextlayersec").GetStringAsync("/");
 
         Assert.Contains("cornerpost.example", html, StringComparison.Ordinal);
         Assert.DoesNotContain("acme.com", html, StringComparison.Ordinal);
@@ -97,18 +97,18 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     {
         var html = await As("stranger@example.com", "33333333-3333-3333-3333-333333333333").GetStringAsync(route);
 
-        Assert.Contains("No organisation", html, StringComparison.Ordinal);
+        Assert.Contains("No organization", html, StringComparison.Ordinal);
         Assert.DoesNotContain("acme.com", html, StringComparison.Ordinal);
         Assert.DoesNotContain("cornerpost.example", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Acme Corp", html, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task AnotherOrganisationsDomainPageConfirmsNothing()
+    public async Task AnotherOrganizationsDomainPageConfirmsNothing()
     {
         // The same page a domain nobody has reported on gets, so the URL
         // cannot be used to learn whether NextLayerSec manages a domain.
-        var html = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetStringAsync("/domains/cornerpost.example");
+        var html = await As("nrg@example.com", TwoOrganizationApp.NrgGroup).GetStringAsync("/domains/cornerpost.example");
 
         Assert.Contains("Nothing stored for", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Corner Post", html, StringComparison.Ordinal);
@@ -116,47 +116,47 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     }
 
     [Fact]
-    public async Task AnotherOrganisationsReportIsNotFound()
+    public async Task AnotherOrganizationsReportIsNotFound()
     {
-        var client = As("nrg@example.com", TwoOrganisationApp.NrgGroup);
+        var client = As("nrg@example.com", TwoOrganizationApp.NrgGroup);
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/reports/download/acme-corp/2026-08")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/reports/download/corner-post/2026-08")).StatusCode);
     }
 
     [Fact]
-    public async Task SwitchingToAnOrganisationYouCannotSeeIsRefused()
+    public async Task SwitchingToAnOrganizationYouCannotSeeIsRefused()
     {
-        var response = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetAsync("/org/switch?slug=nextlayersec");
+        var response = await As("nrg@example.com", TwoOrganizationApp.NrgGroup).GetAsync("/org/switch?slug=nextlayersec");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
-    public async Task ClientsAreListedPerOrganisation()
+    public async Task ClientsAreListedPerOrganization()
     {
-        var html = await As("nls@example.com", TwoOrganisationApp.NlsGroup).GetStringAsync("/clients");
+        var html = await As("nls@example.com", TwoOrganizationApp.NlsGroup).GetStringAsync("/clients");
 
         Assert.Contains("Corner Post", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Acme Corp", html, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task SettingsShowsOrganisationsAndTheMasterGroupToAMaster()
+    public async Task SettingsShowsOrganizationsAndTheMasterGroupToAMaster()
     {
-        var html = await As("boss@example.com", TwoOrganisationApp.MasterGroup).GetStringAsync("/settings");
+        var html = await As("boss@example.com", TwoOrganizationApp.MasterGroup).GetStringAsync("/settings");
 
         Assert.Contains("NextLayerSec", html, StringComparison.Ordinal);
-        Assert.Contains(TwoOrganisationApp.MasterGroup, html, StringComparison.Ordinal);
-        Assert.Contains("Add an organisation", html, StringComparison.Ordinal);
+        Assert.Contains(TwoOrganizationApp.MasterGroup, html, StringComparison.Ordinal);
+        Assert.Contains("Add an organization", html, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task AnEmployeeCannotAdministerOrganisations()
+    public async Task AnEmployeeCannotAdministerOrganizations()
     {
-        var html = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetStringAsync("/settings");
+        var html = await As("nrg@example.com", TwoOrganizationApp.NrgGroup).GetStringAsync("/settings");
 
-        Assert.DoesNotContain("Add an organisation", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Add an organization", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -172,7 +172,7 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     [Fact]
     public async Task AViewerReadsTheDataAndIsOfferedNothingToChange()
     {
-        var client = As("reader@example.com", TwoOrganisationApp.NrgViewers);
+        var client = As("reader@example.com", TwoOrganizationApp.NrgViewers);
 
         var triage = await client.GetStringAsync("/");
         Assert.Contains("acme.com", triage, StringComparison.Ordinal);
@@ -190,38 +190,38 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     }
 
     [Fact]
-    public async Task AnOperatorGetsTheControlsButNotTheOrganisationsSettings()
+    public async Task AnOperatorGetsTheControlsButNotTheOrganizationsSettings()
     {
-        var client = As("nrg@example.com", TwoOrganisationApp.NrgGroup);
+        var client = As("nrg@example.com", TwoOrganizationApp.NrgGroup);
 
         var clients = await client.GetStringAsync("/clients");
         Assert.Contains("Add a client", clients, StringComparison.Ordinal);
         Assert.DoesNotContain("Customer login group", clients, StringComparison.Ordinal);
 
         var settings = await client.GetStringAsync("/settings");
-        Assert.DoesNotContain("Add an organisation", settings, StringComparison.Ordinal);
+        Assert.DoesNotContain("Add an organization", settings, StringComparison.Ordinal);
         Assert.DoesNotContain("Recent activity", settings, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task AnAdminRunsTheirOwnOrganisationAndNobodyElses()
+    public async Task AnAdminRunsTheirOwnOrganizationAndNobodyElses()
     {
-        var html = await As("admin@example.com", TwoOrganisationApp.NrgAdmins).GetStringAsync("/settings");
+        var html = await As("admin@example.com", TwoOrganizationApp.NrgAdmins).GetStringAsync("/settings");
 
         Assert.Contains("Recent activity", html, StringComparison.Ordinal);
         Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
 
-        // Creating organisations stays with the master group.
-        Assert.DoesNotContain("Add an organisation", html, StringComparison.Ordinal);
+        // Creating organizations stays with the master group.
+        Assert.DoesNotContain("Add an organization", html, StringComparison.Ordinal);
 
         // And the customer-login column, which is an admin's to set.
-        Assert.Contains("Customer login group", await As("admin@example.com", TwoOrganisationApp.NrgAdmins).GetStringAsync("/clients"), StringComparison.Ordinal);
+        Assert.Contains("Customer login group", await As("admin@example.com", TwoOrganizationApp.NrgAdmins).GetStringAsync("/clients"), StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task ACustomerSeesTheirOwnClientAndNoSetupAtAll()
     {
-        var client = As("customer@acme.example", TwoOrganisationApp.AcmeGroup);
+        var client = As("customer@acme.example", TwoOrganizationApp.AcmeGroup);
 
         var triage = await client.GetStringAsync("/");
         Assert.Contains("acme.com", triage, StringComparison.Ordinal);
@@ -237,7 +237,7 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     [Fact]
     public async Task ACustomerCannotReachAnotherClientsReportOrDomain()
     {
-        var client = As("customer@acme.example", TwoOrganisationApp.AcmeGroup);
+        var client = As("customer@acme.example", TwoOrganizationApp.AcmeGroup);
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/reports/download/acme-corp/2026-08")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/reports/download/corner-post/2026-08")).StatusCode);
@@ -249,23 +249,23 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
     // ---- white label ---------------------------------------------------------
 
     [Fact]
-    public async Task AnOrganisationsColourAndLogoDressTheShell()
+    public async Task AnOrganizationsColorAndLogoDressTheShell()
     {
-        var html = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetStringAsync("/");
+        var html = await As("nrg@example.com", TwoOrganizationApp.NrgGroup).GetStringAsync("/");
 
         Assert.Contains("--accent: #0f766e;", html, StringComparison.Ordinal);
         Assert.Contains("class=\"brand-logo\"", html, StringComparison.Ordinal);
 
         // NextLayerSec has no branding, so it keeps the default mark.
-        var plain = await As("nls@example.com", TwoOrganisationApp.NlsGroup).GetStringAsync("/");
+        var plain = await As("nls@example.com", TwoOrganizationApp.NlsGroup).GetStringAsync("/");
         Assert.DoesNotContain("--accent:", plain, StringComparison.Ordinal);
         Assert.Contains("brand-mark", plain, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task AClientReportCarriesTheOrganisationsNameAndContact()
+    public async Task AClientReportCarriesTheOrganizationsNameAndContact()
     {
-        var response = await As("nrg@example.com", TwoOrganisationApp.NrgGroup).GetAsync("/reports/download/acme-corp/2026-08");
+        var response = await As("nrg@example.com", TwoOrganizationApp.NrgGroup).GetAsync("/reports/download/acme-corp/2026-08");
         var html = await response.Content.ReadAsStringAsync();
 
         Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
@@ -278,7 +278,7 @@ public sealed class OrganisationTests : IClassFixture<TwoOrganisationApp>
 /// The application with Entra sign-in configured and a test scheme standing
 /// in for it: whoever the request's headers say, with the groups they say.
 /// </summary>
-public sealed class TwoOrganisationApp : WebApplicationFactory<Program>
+public sealed class TwoOrganizationApp : WebApplicationFactory<Program>
 {
     public const string NrgGroup = "11111111-1111-1111-1111-111111111111";
     public const string NlsGroup = "22222222-2222-2222-2222-222222222222";
@@ -294,7 +294,7 @@ public sealed class TwoOrganisationApp : WebApplicationFactory<Program>
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"dmarc-orgs-web-{Guid.NewGuid():N}.db");
     private readonly string _secretsDir = Path.Combine(Path.GetTempPath(), $"dmarc-orgs-web-secrets-{Guid.NewGuid():N}");
 
-    public TwoOrganisationApp() => Seed().GetAwaiter().GetResult();
+    public TwoOrganizationApp() => Seed().GetAwaiter().GetResult();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -320,9 +320,9 @@ public sealed class TwoOrganisationApp : WebApplicationFactory<Program>
 
     private async Task Seed()
     {
-        await new ReportStore(_dbPath).InitialiseAsync(DatabaseSchema.Sql);
+        await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
 
-        var orgs = new OrganisationStore(_dbPath);
+        var orgs = new OrganizationStore(_dbPath);
         await orgs.CreateAsync("NextLayerSec", entraGroupId: NlsGroup);
 
         var nrg = new ReportStore(_dbPath);
@@ -336,13 +336,13 @@ public sealed class TwoOrganisationApp : WebApplicationFactory<Program>
         await nrg.AssignDomainAsync("acme.com", (await nrg.CreateClientAsync("Acme Corp"))!);
         await nls.AssignDomainAsync("cornerpost.example", (await nls.CreateClientAsync("Corner Post"))!);
 
-        // The built-in organisation, named and given its groups, the way an
+        // The built-in organization, named and given its groups, the way an
         // operator would from the settings page.
         await orgs.RenameAsync(ReportStore.DefaultTenantSlug, "NRG Tech Services");
         await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, NrgGroup);
-        await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, OrganisationRole.Admin, NrgAdmins);
-        await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, OrganisationRole.Viewer, NrgViewers);
-        await orgs.SetBrandAsync(ReportStore.DefaultTenantSlug, new OrganisationBrand(
+        await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, OrganizationRole.Admin, NrgAdmins);
+        await orgs.SetGroupAsync(ReportStore.DefaultTenantSlug, OrganizationRole.Viewer, NrgViewers);
+        await orgs.SetBrandAsync(ReportStore.DefaultTenantSlug, new OrganizationBrand(
             "#0F766E", Logo, "NRG Tech Services", "dmarc@nrgtechservices.com\n+1 555 0100"));
 
         // Acme's own people, who see Acme and nothing else.

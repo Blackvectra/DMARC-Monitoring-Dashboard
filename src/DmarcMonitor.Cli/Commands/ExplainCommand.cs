@@ -145,7 +145,7 @@ public static class ExplainCommand
                     break;
 
                 case SourceOutcome.Forwarded:
-                    Console.WriteLine($"    IGNORE    {s.SourceIp}  {N(s.Failing)} failed, but the receiver recognised a forwarder or mailing list");
+                    Console.WriteLine($"    IGNORE    {s.SourceIp}  {N(s.Failing)} failed, but the receiver recognized a forwarder or mailing list");
                     Console.WriteLine("              Not an attack and not a misconfiguration. Nothing to do.");
                     break;
 

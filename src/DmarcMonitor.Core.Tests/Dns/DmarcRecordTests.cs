@@ -111,7 +111,7 @@ public sealed class DmarcRecordTests
     [Fact]
     public void KeepsTheRecordAsPublishedForShowingBack()
     {
-        // The page prints this verbatim so an operator can recognise their own
+        // The page prints this verbatim so an operator can recognize their own
         // record rather than a reconstruction of it.
         const string raw = "v=DMARC1; p=reject; rua=mailto:x@example.com";
 

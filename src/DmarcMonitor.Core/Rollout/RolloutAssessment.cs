@@ -97,7 +97,7 @@ public static class RolloutAssessment
         }
 
         // Reported once and then stopped. Checked before everything else
-        // because stale data makes every other judgement below it wrong.
+        // because stale data makes every other judgment below it wrong.
         var silentFor = state.Now - state.LastReport.Value;
         if (silentFor.TotalDays > SilentDays)
         {

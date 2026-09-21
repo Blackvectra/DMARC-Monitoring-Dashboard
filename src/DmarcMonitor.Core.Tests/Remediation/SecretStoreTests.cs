@@ -85,7 +85,7 @@ public sealed class SecretStoreTests : IDisposable
     public async Task TheDatabaseRowHoldsTheRefAndNeverTheToken()
     {
         var store = new ReportStore(_dbPath);
-        await store.InitialiseAsync(DatabaseSchema.Sql);
+        await store.InitializeAsync(DatabaseSchema.Sql);
         var xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "dmv-google-aggregate.xml"));
         await store.SaveAggregateAsync(AggregateReportParser.Parse(xml).Report!, xml, null);
         await store.CreateClientAsync("DMV");
@@ -118,7 +118,7 @@ public sealed class SecretStoreTests : IDisposable
     public async Task ADomainConfigWinsOverItsClients()
     {
         var store = new ReportStore(_dbPath);
-        await store.InitialiseAsync(DatabaseSchema.Sql);
+        await store.InitializeAsync(DatabaseSchema.Sql);
         var xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "dmv-google-aggregate.xml"));
         await store.SaveAggregateAsync(AggregateReportParser.Parse(xml).Report!, xml, null);
         await store.CreateClientAsync("DMV");
@@ -137,7 +137,7 @@ public sealed class SecretStoreTests : IDisposable
     public async Task ReplacingAConfigRemovesTheOldSecret()
     {
         var store = new ReportStore(_dbPath);
-        await store.InitialiseAsync(DatabaseSchema.Sql);
+        await store.InitializeAsync(DatabaseSchema.Sql);
         var xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "dmv-google-aggregate.xml"));
         await store.SaveAggregateAsync(AggregateReportParser.Parse(xml).Report!, xml, null);
         await store.CreateClientAsync("DMV");
@@ -155,7 +155,7 @@ public sealed class SecretStoreTests : IDisposable
     public async Task CloudflareWithoutATokenIsRefusedWithTheReason()
     {
         var store = new ReportStore(_dbPath);
-        await store.InitialiseAsync(DatabaseSchema.Sql);
+        await store.InitializeAsync(DatabaseSchema.Sql);
         await store.CreateClientAsync("DMV");
         var configs = new DnsProviderConfigs(_dbPath, new InMemorySecretStore());
 

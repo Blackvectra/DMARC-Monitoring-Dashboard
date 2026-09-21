@@ -108,13 +108,13 @@ foreach ($rule in $rules | Sort-Object Priority) {
     elseif ($rule.CopyToFolder) { $target = "$($rule.CopyToFolder) (copy)" }
 
     $state = if ($rule.Enabled) { 'yes' } else { 'NO' }
-    $colour = 'Gray'
+    $color = 'Gray'
 
-    if (-not $rule.Enabled) { $disabled += $rule; $colour = 'Yellow' }
-    if ($rule.InError)      { $failing  += $rule; $colour = 'Red' }
+    if (-not $rule.Enabled) { $disabled += $rule; $color = 'Yellow' }
+    if ($rule.InError)      { $failing  += $rule; $color = 'Red' }
 
     Write-Host ("  {0,-34} {1,-9} {2,-8} {3}" -f `
-        $rule.Name, $state, $rule.Priority, $target) -ForegroundColor $colour
+        $rule.Name, $state, $rule.Priority, $target) -ForegroundColor $color
 
     # A rule that stops the chain prevents every rule below it from running,
     # which is the commonest reason a rule that looks correct never fires.

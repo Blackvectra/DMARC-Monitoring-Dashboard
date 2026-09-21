@@ -25,7 +25,7 @@ public static class FixCommand
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
 
         var store = new ReportStore(dbPath);
-        if (!await store.IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await store.IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;

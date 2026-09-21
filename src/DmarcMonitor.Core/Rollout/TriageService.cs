@@ -11,8 +11,8 @@ public sealed record DomainTriage
     /// <summary>The client's slug, which is what a filter or an assignment goes by.</summary>
     public string ClientSlug { get; init; } = "";
 
-    /// <summary>The organisation the client belongs to, for a master looking across all of them.</summary>
-    public string Organisation { get; init; } = "";
+    /// <summary>The organization the client belongs to, for a master looking across all of them.</summary>
+    public string Organization { get; init; } = "";
 
     public string Policy { get; init; } = "none";
     public long Messages { get; init; }
@@ -70,7 +70,7 @@ public sealed class TriageService(string databasePath)
     }.ToString();
 
     /// <param name="days">Window to judge on. Long enough to be stable, short enough to be current.</param>
-    /// <param name="tenantId">One organisation's domains, or null for every organisation's.</param>
+    /// <param name="tenantId">One organization's domains, or null for every organization's.</param>
     /// <param name="clientSlug">One client's domains, or null for every client's.</param>
     public async Task<IReadOnlyList<DomainTriage>> GetAsync(
         int days = 14, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
@@ -145,10 +145,10 @@ public sealed class TriageService(string databasePath)
                 BaselineDays = reader.IsDBNull(9) ? 14 : reader.GetInt32(9),
                 PolicyTarget = reader.IsDBNull(10) ? "reject" : reader.GetString(10),
                 ClientSlug = reader.GetString(11),
-                Organisation = reader.GetString(12),
+                Organization = reader.GetString(12),
             };
 
-            // The judgement lives in Core and is unit tested against every
+            // The judgment lives in Core and is unit tested against every
             // combination. Duplicating it here would mean the page could
             // disagree with the tests.
             var verdict = RolloutAssessment.Assess(new DomainState

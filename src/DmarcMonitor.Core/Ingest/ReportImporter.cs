@@ -187,7 +187,7 @@ public sealed class ReportImporter(ReportStore store)
             }
 
             default:
-                // Unreachable: extraction only yields reports it recognised.
+                // Unreachable: extraction only yields reports it recognized.
                 // Kept so a new ReportKind cannot be silently counted as
                 // stored without anybody writing the code to store it.
                 throw new InvalidDataException($"{report.Kind} reports are not stored yet");

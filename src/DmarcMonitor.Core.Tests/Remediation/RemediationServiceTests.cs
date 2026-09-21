@@ -27,7 +27,7 @@ public sealed class RemediationServiceTests : IDisposable
     public RemediationServiceTests()
     {
         var store = new ReportStore(_dbPath);
-        store.InitialiseAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
+        store.InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
 
         // A real report, so the domain exists the way it would in production:
         // filed under a client, with ids the audit rows need.

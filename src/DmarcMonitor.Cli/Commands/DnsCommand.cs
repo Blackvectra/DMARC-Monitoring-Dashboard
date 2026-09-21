@@ -26,7 +26,7 @@ public static class DnsCommand
         var rest = args.Skip(1).ToArray();
         var dbPath = Args.Value(rest, "--db") ?? "dmarc.db";
 
-        if (!await new ReportStore(dbPath).IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await new ReportStore(dbPath).IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;

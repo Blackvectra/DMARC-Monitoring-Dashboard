@@ -15,7 +15,7 @@ public enum AlignmentVerdict
     Organizational,
 
     /// <summary>
-    /// A different organisation altogether. Never aligns, in either mode, so
+    /// A different organization altogether. Never aligns, in either mode, so
     /// the only fix is to change what the sender signs as.
     /// </summary>
     Unrelated,
@@ -58,20 +58,20 @@ public static class Alignment
     /// Classifies a domain that authenticated against the From domain.
     /// </summary>
     /// <remarks>
-    /// The organisational comparison is a suffix test rather than a Public
+    /// The organizational comparison is a suffix test rather than a Public
     /// Suffix List lookup. For the case this exists to catch - a subdomain of
     /// the customer's own domain, against the customer's own domain - the two
     /// agree, and shipping a PSL means shipping a list that goes stale.
     /// Where they can disagree is a name under a public suffix that is itself
     /// two labels, <c>foo.github.io</c> against <c>github.io</c>, which this
-    /// calls organisational and the PSL calls unrelated. Nothing acts on that
+    /// calls organizational and the PSL calls unrelated. Nothing acts on that
     /// verdict by itself: it produces a sentence telling an operator the two
     /// names look related and to confirm the subdomain is theirs.
     /// </remarks>
     public static AlignmentVerdict Classify(string authenticatedDomain, string fromDomain)
     {
-        var auth = Normalise(authenticatedDomain);
-        var from = Normalise(fromDomain);
+        var auth = Normalize(authenticatedDomain);
+        var from = Normalize(fromDomain);
 
         if (auth.Length == 0 || from.Length == 0) { return AlignmentVerdict.Unrelated; }
         if (string.Equals(auth, from, StringComparison.Ordinal)) { return AlignmentVerdict.Exact; }
@@ -100,6 +100,6 @@ public static class Alignment
         // own infrastructure.
         && candidate[candidate.Length - parent.Length - 1] == '.';
 
-    private static string Normalise(string domain) =>
+    private static string Normalize(string domain) =>
         string.IsNullOrWhiteSpace(domain) ? "" : domain.Trim().TrimEnd('.').ToLowerInvariant();
 }

@@ -5,7 +5,7 @@ namespace DmarcMonitor.Core.Aggregate;
 
 /// <summary>
 /// Which service an address belongs to, when it is one anybody would
-/// recognise.
+/// recognize.
 /// </summary>
 /// <remarks>
 /// A client report used to list every sending address on its own. For a

@@ -230,14 +230,14 @@ public sealed class PageTests : IClassFixture<SeededApp>
     public async Task TheDialsSegmentsAreFilledRatherThanGivenABackground()
     {
         // SVG takes `fill`, not `background`. The first version reused the
-        // proportion bar's colour rules, which set `background` on a span and
+        // proportion bar's color rules, which set `background` on a span and
         // do nothing whatever to a path, so every segment fell back to the
         // default fill and the dial rendered solid black. It looked like a
         // deliberate design until it was put on a screen.
         var css = await Client().GetStringAsync("/app.css");
 
         var start = css.IndexOf(".gauge-dial .seg", StringComparison.Ordinal);
-        Assert.True(start >= 0, "the dial's segments have no colour rules of their own");
+        Assert.True(start >= 0, "the dial's segments have no color rules of their own");
 
         var block = css[start..Math.Min(css.Length, start + 600)];
         Assert.Contains("fill:", block, StringComparison.Ordinal);
@@ -338,12 +338,12 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
-    public async Task EveryColourInTheStylesheetIsAToken()
+    public async Task EveryColorInTheStylesheetIsAToken()
     {
         // The first pass at a light theme left a dozen literal dark hexes in
         // the rules - table borders, row hovers, code backgrounds - and they
         // came out as black slots on a white page. Only the two token blocks
-        // at the top may name a colour.
+        // at the top may name a color.
         var css = await Client().GetStringAsync("/app.css");
 
         var rules = css[css.IndexOf("* { box-sizing", StringComparison.Ordinal)..];
@@ -352,7 +352,7 @@ public sealed class PageTests : IClassFixture<SeededApp>
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        Assert.True(literals.Count == 0, $"hard-coded colours outside the token blocks: {string.Join(", ", literals)}");
+        Assert.True(literals.Count == 0, $"hard-coded colors outside the token blocks: {string.Join(", ", literals)}");
     }
 
     [Fact]
@@ -568,7 +568,7 @@ public sealed class SeededApp : WebApplicationFactory<Program>
     private async Task Seed()
     {
         var store = new ReportStore(_dbPath);
-        await store.InitialiseAsync(DatabaseSchema.Sql);
+        await store.InitializeAsync(DatabaseSchema.Sql);
 
         var begin = DateTimeOffset.UtcNow.AddDays(-2);
         var august = new DateTimeOffset(2026, 8, 15, 0, 0, 0, TimeSpan.Zero);

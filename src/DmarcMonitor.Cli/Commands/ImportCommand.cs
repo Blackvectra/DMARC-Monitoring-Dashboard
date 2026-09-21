@@ -41,10 +41,10 @@ public static class ImportCommand
             return 66;
         }
 
-        // Domains nobody has seen before go to this organisation; known ones
+        // Domains nobody has seen before go to this organization; known ones
         // keep their own.
         var store = new ReportStore(dbPath, Args.Value(args, "--org") ?? ReportStore.DefaultTenantSlug);
-        if (!await store.IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await store.IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;

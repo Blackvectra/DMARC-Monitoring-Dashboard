@@ -36,10 +36,16 @@ public static class IngestCommand
         var maxMessages = Args.Int(args, "--max", 500);
         var dryRun = Args.Flag(args, "--dry-run");
 
-        // Which organisation a domain nobody has seen before belongs to. One
-        // collector per organisation's mailbox is the expected shape; a domain
-        // already known keeps its own organisation whatever this says.
-        var organisation = NonBlank(Args.Value(args, "--org")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_ORGANISATION"))
+        // Which organization a domain nobody has seen before belongs to. One
+        // collector per organization's mailbox is the expected shape; a domain
+        // already known keeps its own organization whatever this says.
+        // DMARC_ORGANISATION is still read. An environment file written by an
+        // earlier bootstrap carries that spelling, and a collector that
+        // quietly filed a customer's domains under the wrong organization
+        // because of a renamed variable is not a trade worth making.
+        var organization = NonBlank(Args.Value(args, "--org"))
+            ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_ORGANIZATION"))
+            ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_ORGANISATION"))
             ?? ReportStore.DefaultTenantSlug;
 
         // Everything missing is reported at once. Being told about one missing
@@ -66,7 +72,7 @@ public static class IngestCommand
         }
 
         // Without a reporting domain or a shared address nothing can be
-        // attributed and every report would be filed as unrecognised. The
+        // attributed and every report would be filed as unrecognized. The
         // commonest shape by far is one shared mailbox that every domain
         // reports to - which is the mailbox being read - so that is the
         // default, said out loud below. It used to be an error instead, which
@@ -77,8 +83,8 @@ public static class IngestCommand
             : $"per-domain addresses under {reportingDomain}{(fallback is null ? "" : $", falling back to {fallback}")}";
         fallback ??= string.IsNullOrWhiteSpace(reportingDomain) ? mailbox : null;
 
-        var store = new ReportStore(dbPath, organisation);
-        if (!dryRun && !await store.IsInitialisedAsync(ct).ConfigureAwait(false))
+        var store = new ReportStore(dbPath, organization);
+        if (!dryRun && !await store.IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;   // EX_UNAVAILABLE
@@ -157,9 +163,9 @@ public static class IngestCommand
 
             Console.WriteLine($"Reading {mailbox}{(dryRun ? " (dry run: nothing will be written or moved)" : "")}");
             Console.WriteLine($"Attributing reports by {attributedBy}");
-            if (organisation != ReportStore.DefaultTenantSlug)
+            if (organization != ReportStore.DefaultTenantSlug)
             {
-                Console.WriteLine($"Filing new domains under the organisation '{organisation}'");
+                Console.WriteLine($"Filing new domains under the organization '{organization}'");
             }
             Console.WriteLine();
 
@@ -188,13 +194,13 @@ public static class IngestCommand
             if (!dryRun) { await WarnUnassignedAsync(store, ct).ConfigureAwait(false); }
 
             // Genuine reports and not one of them addressed to anything this
-            // deployment recognises means the shared address is wrong, not
+            // deployment recognizes means the shared address is wrong, not
             // the mail. The messages were left in place, so this is the exit
             // code that says "configure it and run again", not "data lost".
             if (result.UnattributedCount > 0 && result.IngestedCount == 0 && result.DuplicateCount == 0)
             {
                 Console.Error.WriteLine();
-                Console.Error.WriteLine($"No report was addressed to {fallback ?? "a recognised address"}. They were sent to:");
+                Console.Error.WriteLine($"No report was addressed to {fallback ?? "a recognized address"}. They were sent to:");
                 foreach (var a in result.UnattributedAddresses.Take(5)) { Console.Error.WriteLine($"  {a}"); }
                 Console.Error.WriteLine("Set --fallback (or DMARC_FALLBACK_ADDRESS) to the address in the domains' rua= tag,");
                 Console.Error.WriteLine("or --reporting-domain if per-domain addresses are in use. Nothing was moved.");
@@ -276,12 +282,12 @@ public static class IngestCommand
         Console.WriteLine($"  messages read      {result.MessagesRead}");
         Console.WriteLine($"  reports ingested   {result.IngestedCount}{(dryRun ? " (not written)" : $", {stored} stored")}");
         if (result.DuplicateCount > 0) { Console.WriteLine($"  already seen       {result.DuplicateCount}"); }
-        if (result.UnrecognisedCount > 0)
+        if (result.UnrecognizedCount > 0)
         {
-            Console.WriteLine($"  not reports        {result.UnrecognisedCount}");
+            Console.WriteLine($"  not reports        {result.UnrecognizedCount}");
             // Grouped by reason, so a mailbox full of one kind of thing is one
             // line rather than a page, and the reason points at the cause.
-            foreach (var g in result.Reports.Where(r => r.Outcome == IngestOutcome.Unrecognised)
+            foreach (var g in result.Reports.Where(r => r.Outcome == IngestOutcome.Unrecognized)
                          .GroupBy(r => r.Reason).OrderByDescending(g => g.Count()).Take(5))
             {
                 Console.WriteLine($"    {g.Count()}: {g.Key}");

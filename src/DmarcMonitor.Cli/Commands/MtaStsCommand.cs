@@ -33,7 +33,7 @@ public static class MtaStsCommand
         // the commonest reason to run it.
         if (action == "check") { return await CheckAsync(rest, ct).ConfigureAwait(false); }
 
-        if (!await new ReportStore(dbPath).IsInitialisedAsync(ct).ConfigureAwait(false))
+        if (!await new ReportStore(dbPath).IsInitializedAsync(ct).ConfigureAwait(false))
         {
             Console.Error.WriteLine($"{dbPath} is not a DMARC Monitor database. Run: dmarc init-db --db {dbPath}");
             return 69;

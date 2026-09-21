@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace DmarcMonitor.Core.Tenancy;
 
 /// <summary>
-/// An organisation: the layer above clients.
+/// An organization: the layer above clients.
 ///
 /// NRG Tech Services and NextLayerSec each have their own clients and their
 /// own domains, and a person from one must never see the other's. This is the
@@ -15,9 +15,9 @@ namespace DmarcMonitor.Core.Tenancy;
 /// assign domains, apply fixes, import. Null when nobody but the master
 /// group, or an admin or viewer group, can see it.
 /// </param>
-/// <param name="AdminGroupId">The group whose members also run the organisation's settings.</param>
+/// <param name="AdminGroupId">The group whose members also run the organization's settings.</param>
 /// <param name="ViewerGroupId">The group whose members read and change nothing.</param>
-public sealed record Organisation(
+public sealed record Organization(
     string Id,
     string Name,
     string Slug,
@@ -26,22 +26,22 @@ public sealed record Organisation(
     int Domains,
     string? AdminGroupId = null,
     string? ViewerGroupId = null,
-    OrganisationBrand? Brand = null)
+    OrganizationBrand? Brand = null)
 {
-    /// <summary>How the organisation looks, never null.</summary>
-    public OrganisationBrand Brand { get; init; } = Brand ?? OrganisationBrand.None;
+    /// <summary>How the organization looks, never null.</summary>
+    public OrganizationBrand Brand { get; init; } = Brand ?? OrganizationBrand.None;
 }
 
 /// <summary>
-/// White-label: what the sidebar and the reports carry for one organisation.
+/// White-label: what the sidebar and the reports carry for one organization.
 /// </summary>
-/// <param name="PrimaryColor">A hex colour, #rrggbb, for the accent. Null keeps the default.</param>
+/// <param name="PrimaryColor">A hex color, #rrggbb, for the accent. Null keeps the default.</param>
 /// <param name="Logo">A small image as a data: URL, or null for the default mark.</param>
-/// <param name="ProviderName">How the organisation names itself on reports. Null falls back to configuration.</param>
+/// <param name="ProviderName">How the organization names itself on reports. Null falls back to configuration.</param>
 /// <param name="ContactBlock">Text for the report footer: who to call.</param>
-public sealed record OrganisationBrand(string? PrimaryColor, string? Logo, string? ProviderName, string? ContactBlock)
+public sealed record OrganizationBrand(string? PrimaryColor, string? Logo, string? ProviderName, string? ContactBlock)
 {
-    public static readonly OrganisationBrand None = new(null, null, null, null);
+    public static readonly OrganizationBrand None = new(null, null, null, null);
 
     /// <summary>Largest logo accepted, as the data: URL's length. Enough for a crisp PNG, not for a photograph.</summary>
     public const int MaxLogoLength = 200_000;
@@ -49,7 +49,7 @@ public sealed record OrganisationBrand(string? PrimaryColor, string? Logo, strin
     public bool IsEmpty => PrimaryColor is null && Logo is null && ProviderName is null && ContactBlock is null;
 
     /// <summary>
-    /// Whether the colour is a plain six-digit hex. Anything else is refused,
+    /// Whether the color is a plain six-digit hex. Anything else is refused,
     /// because it is interpolated into a stylesheet and an inline style.
     /// </summary>
     public static bool IsValidColor(string? value) =>
@@ -66,12 +66,12 @@ public sealed record OrganisationBrand(string? PrimaryColor, string? Logo, strin
 }
 
 /// <summary>A client's own login group, for resolving customer access.</summary>
-public sealed record ClientGroup(string OrganisationSlug, string ClientSlug, string ClientName, string EntraGroupId);
+public sealed record ClientGroup(string OrganizationSlug, string ClientSlug, string ClientName, string EntraGroupId);
 
 /// <summary>
-/// What a person may do within an organisation, lowest first.
+/// What a person may do within an organization, lowest first.
 /// </summary>
-public enum OrganisationRole
+public enum OrganizationRole
 {
     /// <summary>Not a member.</summary>
     None,
@@ -82,10 +82,10 @@ public enum OrganisationRole
     /// <summary>Assigns domains, applies fixes, imports.</summary>
     Operator,
 
-    /// <summary>Also runs the organisation's settings: groups, branding, providers.</summary>
+    /// <summary>Also runs the organization's settings: groups, branding, providers.</summary>
     Admin,
 
-    /// <summary>The master group: every organisation, and creating new ones.</summary>
+    /// <summary>The master group: every organization, and creating new ones.</summary>
     Master,
 }
 
@@ -97,26 +97,26 @@ public enum OrganisationRole
 /// data from another's is tested on a table rather than by signing in as
 /// twelve different people.
 /// </remarks>
-public sealed record OrganisationAccess
+public sealed record OrganizationAccess
 {
-    /// <summary>The organisations this person may open.</summary>
-    public required IReadOnlyList<Organisation> Visible { get; init; }
+    /// <summary>The organizations this person may open.</summary>
+    public required IReadOnlyList<Organization> Visible { get; init; }
 
-    /// <summary>In the master group, or on an install with no sign-in: sees every organisation.</summary>
+    /// <summary>In the master group, or on an install with no sign-in: sees every organization.</summary>
     public required bool IsMaster { get; init; }
 
     /// <summary>
-    /// The organisation being looked at, or null for all of them at once,
+    /// The organization being looked at, or null for all of them at once,
     /// which only a master can do.
     /// </summary>
-    public Organisation? Current { get; init; }
+    public Organization? Current { get; init; }
 
-    /// <summary>The role in each visible organisation, by slug.</summary>
-    public IReadOnlyDictionary<string, OrganisationRole> Roles { get; init; } =
-        new Dictionary<string, OrganisationRole>(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The role in each visible organization, by slug.</summary>
+    public IReadOnlyDictionary<string, OrganizationRole> Roles { get; init; } =
+        new Dictionary<string, OrganizationRole>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// The one client a person is confined to in each organisation, by slug,
+    /// The one client a person is confined to in each organization, by slug,
     /// for people who came in through a client's own group. Absent for
     /// everybody else.
     /// </summary>
@@ -132,17 +132,17 @@ public sealed record OrganisationAccess
     /// <summary>Whether a switcher is worth drawing.</summary>
     public bool CanSwitch => IsMaster ? Visible.Count > 0 : Visible.Count > 1;
 
-    /// <summary>The role in the organisation being looked at. Master everywhere for a master.</summary>
-    public OrganisationRole CurrentRole =>
-        IsMaster ? OrganisationRole.Master
-        : Current is null ? OrganisationRole.None
-        : Roles.GetValueOrDefault(Current.Slug, OrganisationRole.None);
+    /// <summary>The role in the organization being looked at. Master everywhere for a master.</summary>
+    public OrganizationRole CurrentRole =>
+        IsMaster ? OrganizationRole.Master
+        : Current is null ? OrganizationRole.None
+        : Roles.GetValueOrDefault(Current.Slug, OrganizationRole.None);
 
     /// <summary>May assign domains, apply fixes and import here.</summary>
-    public bool CanOperate => CurrentRole >= OrganisationRole.Operator;
+    public bool CanOperate => CurrentRole >= OrganizationRole.Operator;
 
-    /// <summary>May change this organisation's groups, branding and providers.</summary>
-    public bool CanAdminister => CurrentRole >= OrganisationRole.Admin;
+    /// <summary>May change this organization's groups, branding and providers.</summary>
+    public bool CanAdminister => CurrentRole >= OrganizationRole.Admin;
 
     /// <summary>The one client this person is confined to here, or null for all of them.</summary>
     public string? RestrictedClient =>
@@ -166,15 +166,15 @@ public sealed record OrganisationAccess
     /// <summary>
     /// Works out access from the groups a person carries.
     /// </summary>
-    /// <param name="all">Every organisation.</param>
+    /// <param name="all">Every organization.</param>
     /// <param name="groupIds">The group object ids in the person's token.</param>
     /// <param name="masterGroupId">The group that sees everything, or null when there is none.</param>
-    /// <param name="chosenSlug">The organisation the person switched to, if any.</param>
+    /// <param name="chosenSlug">The organization the person switched to, if any.</param>
     /// <param name="everyoneIsMaster">True on an install with no sign-in, where the machine is the boundary.</param>
     /// <param name="clientGroups">Clients with a login group of their own.</param>
     /// <param name="user">Who this is, for the audit log.</param>
-    public static OrganisationAccess Resolve(
-        IReadOnlyList<Organisation> all,
+    public static OrganizationAccess Resolve(
+        IReadOnlyList<Organization> all,
         IReadOnlyCollection<string> groupIds,
         string? masterGroupId,
         string? chosenSlug,
@@ -190,7 +190,7 @@ public sealed record OrganisationAccess
 
         var isMaster = everyoneIsMaster || In(masterGroupId);
 
-        var roles = new Dictionary<string, OrganisationRole>(StringComparer.OrdinalIgnoreCase);
+        var roles = new Dictionary<string, OrganizationRole>(StringComparer.OrdinalIgnoreCase);
         var restrictions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var o in all)
@@ -199,28 +199,28 @@ public sealed record OrganisationAccess
             // admin group is an admin; being added to a group never takes
             // anything away.
             var role =
-                isMaster ? OrganisationRole.Master
-                : In(o.AdminGroupId) ? OrganisationRole.Admin
-                : In(o.EntraGroupId) ? OrganisationRole.Operator
-                : In(o.ViewerGroupId) ? OrganisationRole.Viewer
-                : OrganisationRole.None;
+                isMaster ? OrganizationRole.Master
+                : In(o.AdminGroupId) ? OrganizationRole.Admin
+                : In(o.EntraGroupId) ? OrganizationRole.Operator
+                : In(o.ViewerGroupId) ? OrganizationRole.Viewer
+                : OrganizationRole.None;
 
-            if (role == OrganisationRole.None && clientGroups is not null)
+            if (role == OrganizationRole.None && clientGroups is not null)
             {
                 // A customer's own group: read only, one client, nothing else
-                // of the organisation. The first matching client wins if a
+                // of the organization. The first matching client wins if a
                 // person somehow belongs to several; one client per customer
                 // is the shape this is for.
                 var mine = clientGroups.FirstOrDefault(c =>
-                    c.OrganisationSlug.Equals(o.Slug, StringComparison.OrdinalIgnoreCase) && In(c.EntraGroupId));
+                    c.OrganizationSlug.Equals(o.Slug, StringComparison.OrdinalIgnoreCase) && In(c.EntraGroupId));
                 if (mine is not null)
                 {
-                    role = OrganisationRole.Viewer;
+                    role = OrganizationRole.Viewer;
                     restrictions[o.Slug] = mine.ClientSlug;
                 }
             }
 
-            if (role != OrganisationRole.None) { roles[o.Slug] = role; }
+            if (role != OrganizationRole.None) { roles[o.Slug] = role; }
         }
 
         var visible = isMaster ? all : [.. all.Where(o => roles.ContainsKey(o.Slug))];
@@ -233,11 +233,11 @@ public sealed record OrganisationAccess
             : visible.FirstOrDefault(o => o.Slug.Equals(chosenSlug.Trim(), StringComparison.OrdinalIgnoreCase));
 
         // A master with no choice sees everything. Anybody else lands in the
-        // first organisation they belong to, because "all" is not a view they
+        // first organization they belong to, because "all" is not a view they
         // have.
         var current = chosen ?? (isMaster || visible.Count == 0 ? null : visible[0]);
 
-        return new OrganisationAccess
+        return new OrganizationAccess
         {
             Visible = visible,
             IsMaster = isMaster,

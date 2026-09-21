@@ -271,7 +271,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
               domains           = excluded.domains,
               updated_at        = excluded.updated_at
             -- classification, classified_by, classified_at and notes are NOT
-            -- touched: a human's judgement must survive a refresh.
+            -- touched: a human's judgment must survive a refresh.
             """;
         command.Parameters.AddWithValue("$since", since);
         command.Parameters.AddWithValue("$now", Iso(DateTimeOffset.UtcNow));

@@ -16,7 +16,7 @@
         <h1>Clients</h1>
         <p class="sub">Reports arrive for domains before anybody gets round to onboarding them, so they
            are kept under Unassigned rather than refused. That makes Unassigned a worklist. Every domain
-           belongs to one client, and every client to one organisation.</p>
+           belongs to one client, and every client to one organization.</p>
     </div>
 </header>
 
@@ -78,7 +78,7 @@ else
                     <option value="">Choose a client…</option>
                     @foreach (var c in Assignable)
                     {
-                        <option value="@c.Slug">@(AcrossOrganisations ? $"{c.OrganisationName} / {c.Name}" : c.Name)</option>
+                        <option value="@c.Slug">@(AcrossOrganizations ? $"{c.OrganizationName} / {c.Name}" : c.Name)</option>
                     }
                 </select>
                 <button class="primary" disabled="@(!CanAssign)" @onclick="AssignAsync">@(_unassigned.Count > 0 ? "Assign" : "Move")</button>
@@ -87,9 +87,9 @@ else
             {
                 <p class="sub">No clients yet. Add one below first.</p>
             }
-            else if (AcrossOrganisations)
+            else if (AcrossOrganizations)
             {
-                <p class="sub">Assigning a domain to a client in another organisation moves it there, history and all.</p>
+                <p class="sub">Assigning a domain to a client in another organization moves it there, history and all.</p>
             }
         </section>
 
@@ -99,9 +99,9 @@ else
                 <input placeholder="Client name, e.g. Morton, ND" @bind="_newName" @bind:event="oninput" />
                 @if (_access is { IsMaster: true, Visible.Count: > 1 })
                 {
-                    @* A master looking across organisations has to say which one
+                    @* A master looking across organizations has to say which one
                        the new client belongs to; anybody else has exactly one. *@
-                    <select @bind="_newOrganisation" aria-label="Organisation">
+                    <select @bind="_newOrganization" aria-label="Organization">
                         @foreach (var o in _access.Visible)
                         {
                             <option value="@o.Slug">@o.Name</option>
@@ -133,7 +133,7 @@ else
         <table class="triage">
             <thead>
                 <tr>
-                    @if (AcrossOrganisations) { <th>Organisation</th> }
+                    @if (AcrossOrganizations) { <th>Organization</th> }
                     <th>Client</th>
                     <th>Slug</th>
                     <th class="num">Domains</th>
@@ -153,7 +153,7 @@ else
                 {
                     var unassigned = c.Slug == ReportStore.UnassignedClientSlug;
                     <tr class="@(unassigned && c.Domains > 0 ? "act" : "")">
-                        @if (AcrossOrganisations) { <td class="muted">@c.OrganisationName</td> }
+                        @if (AcrossOrganizations) { <td class="muted">@c.OrganizationName</td> }
                         <td>@c.Name</td>
                         <td><code>@c.Slug</code></td>
                         <td class="num">@c.Domains</td>
@@ -183,7 +183,7 @@ else
 }
 
 @code {
-    private OrganisationAccess? _access;
+    private OrganizationAccess? _access;
     private IReadOnlyList<ReportStore.ClientSummary>? _clients;
     private IReadOnlyList<ReportStore.DomainSummary> _domains = [];
     private IReadOnlyList<string> _unassigned = [];
@@ -194,11 +194,11 @@ else
     private bool _messageIsError;
 
     private string _newName = "";
-    private string _newOrganisation = "";
+    private string _newOrganization = "";
     private string _assignDomain = "";
     private string _assignClient = "";
 
-    private bool AcrossOrganisations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+    private bool AcrossOrganizations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
     private bool CanOperate => _access is { CanOperate: true };
     private bool CanAdminister => _access is { CanAdminister: true };
 
@@ -224,7 +224,7 @@ else
             _domains = await Onboarding.GetDomainsAsync(tenant);
             _unassigned = await Onboarding.GetUnassignedDomainsAsync(tenant);
 
-            if (string.IsNullOrEmpty(_newOrganisation)) { _newOrganisation = OrgContext.OrganisationFor(_access); }
+            if (string.IsNullOrEmpty(_newOrganization)) { _newOrganization = OrgContext.OrganizationFor(_access); }
         }
         catch (Exception ex)
         {
@@ -244,7 +244,7 @@ else
 
         try
         {
-            var slug = await Onboarding.CreateClientAsync(name, _newOrganisation);
+            var slug = await Onboarding.CreateClientAsync(name, _newOrganization);
             if (slug is null)
             {
                 // Two reasons, two different fixes, so they are not merged
@@ -257,7 +257,7 @@ else
             else
             {
                 Set($"Added {name}, filed as '{slug}'.", isError: false);
-                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "", "client.added", $"{name} ({slug}) in {_newOrganisation}");
+                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "", "client.added", $"{name} ({slug}) in {_newOrganization}");
                 _newName = "";
             }
         }

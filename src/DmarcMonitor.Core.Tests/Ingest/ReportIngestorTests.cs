@@ -5,7 +5,7 @@ namespace DmarcMonitor.Core.Tests.Ingest;
 /// <summary>
 /// The ingest pipeline.
 ///
-/// This is where the behaviour that decides whether the tool is trustworthy
+/// This is where the behavior that decides whether the tool is trustworthy
 /// lives: not losing a report when something dies mid-run, not counting one
 /// twice, not letting a single bad message stop a backlog, and not filing a
 /// fabricated report against a customer.
@@ -87,7 +87,7 @@ public sealed class ReportIngestorTests
         await Ingestor(mailbox).RunAsync();
 
         Assert.Contains("DMARC-Processed", mailbox.FoldersCreated);
-        Assert.Contains("DMARC-Unrecognised", mailbox.FoldersCreated);
+        Assert.Contains("DMARC-Unrecognized", mailbox.FoldersCreated);
         Assert.Contains("DMARC-Quarantine", mailbox.FoldersCreated);
     }
 
@@ -206,14 +206,14 @@ public sealed class ReportIngestorTests
         var result = await Ingestor(mailbox, resolve: _ => null).RunAsync();
 
         Assert.Equal(0, result.IngestedCount);
-        Assert.Equal("DMARC-Unrecognised", mailbox.Moved["m1"]);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
     }
 
     [Fact]
     public async Task LeavesAGenuineReportToAnUnknownAddressInTheMailbox()
     {
         // The shared address is configured as the mailbox, but the rua= tag
-        // points at an alias of it. Filing the report as unrecognised would
+        // points at an alias of it. Filing the report as unrecognized would
         // lose it for good: nothing reads that folder again. It stays put,
         // says where it was sent, and the run after the fix picks it up.
         var mailbox = new FakeMailboxClient();
@@ -231,7 +231,7 @@ public sealed class ReportIngestorTests
         Assert.Equal(["dmarc-reports@nrgtechservices.com"], report.DeliveredTo);
         Assert.Equal(1, result.UnattributedCount);
         Assert.Equal(["dmarc-reports@nrgtechservices.com"], result.UnattributedAddresses);
-        Assert.Equal(0, result.UnrecognisedCount);
+        Assert.Equal(0, result.UnrecognizedCount);
         Assert.False(mailbox.Moved.ContainsKey("m1"));
 
         // Corrected configuration, same mailbox: ingested and filed.
@@ -243,7 +243,7 @@ public sealed class ReportIngestorTests
     }
 
     [Fact]
-    public async Task StillFilesAReportToAStaleIssuedAddressAsUnrecognised()
+    public async Task StillFilesAReportToAStaleIssuedAddressAsUnrecognized()
     {
         // A per-domain address whose token no longer resolves is the expected
         // tail after a domain is removed, not a configuration mistake, so it
@@ -256,8 +256,8 @@ public sealed class ReportIngestorTests
         var result = await Ingestor(mailbox, Options(fallback: "dmarc@nrgtechservices.com"), resolve: _ => null).RunAsync();
 
         Assert.Equal(0, result.UnattributedCount);
-        Assert.Equal(1, result.UnrecognisedCount);
-        Assert.Equal("DMARC-Unrecognised", mailbox.Moved["m1"]);
+        Assert.Equal(1, result.UnrecognizedCount);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
     }
 
     [Fact]
@@ -373,7 +373,7 @@ public sealed class ReportIngestorTests
     }
 
     [Fact]
-    public async Task FilesNonReportMailAsUnrecognisedRatherThanDeletingIt()
+    public async Task FilesNonReportMailAsUnrecognizedRatherThanDeletingIt()
     {
         // A report this version cannot yet read looks exactly like junk.
         var mailbox = new FakeMailboxClient();
@@ -384,11 +384,11 @@ public sealed class ReportIngestorTests
         var result = await Ingestor(mailbox).RunAsync();
 
         Assert.Equal(0, result.IngestedCount);
-        Assert.Equal("DMARC-Unrecognised", mailbox.Moved["m1"]);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
     }
 
     [Fact]
-    public async Task FilesAMessageWithNoAttachmentsAsUnrecognised()
+    public async Task FilesAMessageWithNoAttachmentsAsUnrecognized()
     {
         var mailbox = new FakeMailboxClient();
         mailbox.Add(Message("m1", $"{Token}@{ReportingDomain}"));
@@ -396,7 +396,7 @@ public sealed class ReportIngestorTests
         var result = await Ingestor(mailbox).RunAsync();
 
         Assert.Empty(result.Reports);
-        Assert.Equal("DMARC-Unrecognised", mailbox.Moved["m1"]);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
     }
 
     [Fact]
@@ -410,7 +410,7 @@ public sealed class ReportIngestorTests
         var result = await Ingestor(mailbox).RunAsync();
 
         var report = Assert.Single(result.Reports);
-        Assert.Equal(IngestOutcome.Unrecognised, report.Outcome);
+        Assert.Equal(IngestOutcome.Unrecognized, report.Outcome);
         Assert.NotEmpty(report.Reason);
     }
 
@@ -655,7 +655,7 @@ public sealed class ReportIngestorTests
     public async Task WithNoStoreToCallTheRunBehavesAsItAlwaysDid()
     {
         // The callback is optional, so nothing that constructs an ingestor
-        // without one changes behaviour.
+        // without one changes behavior.
         var mailbox = new FakeMailboxClient();
         mailbox.Add(
             Message("m1", $"{Token}@{ReportingDomain}"),

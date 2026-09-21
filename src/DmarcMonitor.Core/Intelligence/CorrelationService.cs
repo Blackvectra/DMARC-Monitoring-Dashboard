@@ -104,7 +104,7 @@ public sealed class CorrelationService(string databasePath)
 {
     // Opens its own read-only connection, like the other services in Core.
     // Living here rather than beside the page is the point: this classifies a
-    // sending source, which is the same judgement the client report and the
+    // sending source, which is the same judgment the client report and the
     // intelligence make, and the three disagreeing about one address is how
     // the worst bug of the day was found. A rule this load-bearing belongs
     // where it can be tested.
@@ -115,7 +115,7 @@ public sealed class CorrelationService(string databasePath)
     }.ToString();
 
     /// <param name="tenantId">
-    /// One organisation's clients, or null for every organisation's. Scoped
+    /// One organization's clients, or null for every organization's. Scoped
     /// even though the whole point of this page is seeing across clients:
     /// across NRG's clients is the product; across NRG's and NextLayerSec's
     /// is a leak.
@@ -132,7 +132,7 @@ public sealed class CorrelationService(string databasePath)
         await using var command = db.CreateCommand();
 
         // Overrides are excluded. A mailing list or forwarder breaking
-        // authentication is expected behaviour, and including it would bury
+        // authentication is expected behavior, and including it would bury
         // the real findings under traffic nobody should act on.
         command.CommandText = """
             SELECT
