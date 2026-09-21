@@ -222,10 +222,20 @@ render_unit() {
 render_unit dmarc-web.service
 render_unit dmarc-ingest.service
 render_unit dmarc-ingest.timer
+render_unit dmarc-dns.service
+render_unit dmarc-dns.timer
 
 systemctl daemon-reload
 echo "  starting dmarc-web"
 systemctl enable --now dmarc-web >/dev/null
+
+# Enabled here rather than left as a step for later, unlike the collector.
+# The collector waits because it cannot run until somebody fills in a
+# certificate and a mailbox; this needs nothing, reads only public DNS, and
+# is what fills the record columns on the domains page. Left disabled it
+# would be a feature nobody switched on, showing dashes forever.
+echo "  enabling the nightly DNS scan"
+systemctl enable --now dmarc-dns.timer >/dev/null
 
 ok=false
 for _ in $(seq 1 30); do

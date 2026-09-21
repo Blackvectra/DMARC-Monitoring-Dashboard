@@ -256,6 +256,53 @@ public sealed class DnsLookup(ILookupClient? client = null)
     }
 
     /// <summary>
+    /// The DKIM key published at one selector, or null when the lookup itself
+    /// could not answer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Null is the third answer and it matters as much here as it does at the
+    /// apex. A selector that times out looks exactly like a selector that has
+    /// been withdrawn, and the two lead somewhere opposite: one is a network
+    /// hiccup, the other is mail about to start failing DKIM. Callers keep
+    /// what they already knew when this returns null rather than recording an
+    /// absence they did not observe.
+    /// </para>
+    /// <para>
+    /// A name that does not exist is not null, though - it is a real answer,
+    /// and it comes back as a key that could not be parsed with "nothing
+    /// published at this selector". That is the finding worth having.
+    /// </para>
+    /// </remarks>
+    public async Task<DkimKey?> DkimAsync(string domain, string selector, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+        ArgumentException.ThrowIfNullOrWhiteSpace(selector);
+
+        var name = $"{selector.Trim().Trim('.')}._domainkey.{domain.Trim().TrimEnd('.')}".ToLowerInvariant();
+
+        try
+        {
+            var txt = await TxtAsync(name, ct).ConfigureAwait(false);
+
+            // A selector's name holds one key and, in practice, other TXT
+            // records almost never. Where there is more than one, the DKIM
+            // record is the one that parses as a key: picking the first
+            // blindly would report a verification token as a broken key.
+            var keys = txt.Select(t => DkimKey.Parse(selector, t)).ToList();
+
+            return keys.FirstOrDefault(k => k.Usable)
+                ?? keys.FirstOrDefault(k => k.Strength == DkimKeyStrength.Revoked)
+                ?? keys.FirstOrDefault()
+                ?? DkimKey.Parse(selector, null);
+        }
+        catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The mail exchangers a domain publishes, best preference first.
     /// </summary>
     /// <remarks>

@@ -63,6 +63,11 @@ builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Tenancy.AuditLog(dbPath
 builder.Services.AddScoped<ImportUiService>();
 builder.Services.AddScoped<ReportUiService>();
 
+// What each domain publishes, as last read by the scheduled scan. Reads
+// storage rather than DNS, because the domains table would otherwise resolve
+// every row on every render.
+builder.Services.AddScoped<DnsStatusService>();
+
 // Shared, because it caches: a page opened twice in a minute should not ask
 // the resolver twice. Reading DNS is also the only thing here that reaches
 // outside the machine, so it is the one service whose slowness can be seen.

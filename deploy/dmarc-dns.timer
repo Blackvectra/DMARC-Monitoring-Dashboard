@@ -1,0 +1,25 @@
+# Reads every domain's DNS once a night.
+#
+# Daily rather than hourly, because a DNS record is edited by a person a few
+# times a year and the reading is only worth taking often enough that the
+# dashboard is not stale. The page marks a reading older than a week as such,
+# so a nightly run leaves six days of slack for a machine that was switched
+# off.
+#
+# Persistent=true catches up after downtime. The randomized delay keeps a
+# room full of these installs off the same minute, which is the difference
+# between a resolver serving them and rate-limiting them.
+#
+# Enabled by deploy/install.sh; by hand it is:
+#   sudo systemctl enable --now dmarc-dns.timer
+
+[Unit]
+Description=Read each domain's published DNS records nightly
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

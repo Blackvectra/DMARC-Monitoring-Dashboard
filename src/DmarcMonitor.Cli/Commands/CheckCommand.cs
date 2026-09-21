@@ -19,17 +19,28 @@ public static class CheckCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--domain", "!--all") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--domain", "!--all", "!--save") is var bad and not 0) { return bad; }
 
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var single = Args.Value(args, "--domain");
         var all = Args.Flag(args, "--all");
+        var save = Args.Flag(args, "--save");
 
         if (string.IsNullOrWhiteSpace(single) && !all)
         {
             Console.Error.WriteLine("dmarc check --domain <domain>");
             Console.Error.WriteLine("dmarc check --all [--db <path>]    every domain reports have arrived for");
             return 64;
+        }
+
+        // Storing a reading needs somewhere to store it, and a domain row to
+        // hang it off. Saying so here beats running the whole check and
+        // mentioning at the end that none of it was kept.
+        if (save && !File.Exists(dbPath))
+        {
+            Console.Error.WriteLine($"--save needs a database. No file at {Path.GetFullPath(dbPath)}.");
+            Console.Error.WriteLine($"Create one with: dmarc init-db --db {dbPath}");
+            return 66;
         }
 
         List<string> domains;
@@ -64,7 +75,11 @@ public static class CheckCommand
         }
 
         var lookup = new DnsLookup();
+        var scanner = save ? new DnsScanner(dbPath, lookup) : null;
         var worst = 0;
+        var saved = 0;
+        var skipped = 0;
+        var changed = 0;
 
         foreach (var domain in domains)
         {
@@ -72,6 +87,17 @@ public static class CheckCommand
 
             var published = await lookup.ReadAsync(domain, ct).ConfigureAwait(false);
             var seen = observed.TryGetValue(domain, out var o) ? o : new ObservedSending();
+
+            // Stored from the same reading that is about to be judged, rather
+            // than from a second lookup: a record being edited while this runs
+            // would otherwise be judged as one thing and recorded as another.
+            ScanResult? stored = null;
+            if (scanner is not null)
+            {
+                stored = await scanner.SaveAsync(domain, published, ct).ConfigureAwait(false);
+                if (stored.Stored) { saved++; } else { skipped++; }
+                if (stored.Changed) { changed++; }
+            }
 
             // Resolve each include to the addresses it authorizes and match
             // them against what has actually sent. Only attempted with a
@@ -88,6 +114,12 @@ public static class CheckCommand
 
             Console.WriteLine();
             Console.WriteLine($"  {domain}");
+
+            // DKIM is the one thing 'check' has never been able to say
+            // anything about, because there is no record to ask for - only
+            // selectors, and only the reports know which. Saving is what
+            // looks them up, so this is where it gets reported.
+            if (stored is not null) { Console.WriteLine("    " + SaveNote(stored)); }
 
             if (findings.Count == 0)
             {
@@ -114,8 +146,62 @@ public static class CheckCommand
 
         Console.WriteLine();
 
+        if (save)
+        {
+            if (saved > 0)
+            {
+                Console.WriteLine(changed == 0
+                    ? $"  Stored {saved} reading(s). Nothing had changed since the last one."
+                    : $"  Stored {saved} reading(s); {changed} domain(s) publish something different than before.");
+            }
+
+            if (skipped > 0)
+            {
+                Console.WriteLine($"  {skipped} not stored: not in the book. A domain appears once a report arrives for it.");
+            }
+
+            Console.WriteLine();
+        }
+
         // Breaking findings exit non-zero so this can gate a pipeline.
         return worst >= (int)HygieneSeverity.Breaking ? 1 : 0;
+    }
+
+    /// <summary>
+    /// The one line <c>--save</c> adds under a domain, saying what was stored
+    /// and, when nothing was, why.
+    /// </summary>
+    /// <remarks>
+    /// Separate and testable because the reason is the part that is easy to
+    /// get wrong, and wrong in a way nobody would notice. "No DKIM selector
+    /// seen signing" is a statement about what the reports contain. Printed
+    /// because the apex lookup timed out, it is a fact nobody established -
+    /// the same mistake as drawing a cross for a record that was never read,
+    /// which is what the rest of this feature exists to avoid.
+    /// </remarks>
+    internal static string SaveNote(ScanResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (!result.Stored)
+        {
+            // Checking a prospect's domain is the commonest use of this
+            // command, and there is nothing to attach a reading to until
+            // reports for it arrive. Silence would look like it was saved.
+            return "not stored: no reports have arrived for this domain, so it is not in the book yet";
+        }
+
+        return result.Status switch
+        {
+            DnsCheckStatus.Failed =>
+                "DNS could not be read, so nothing was recorded about its records or its DKIM selectors",
+            DnsCheckStatus.NoSuchDomain =>
+                "the resolver says this name does not exist, so there was nothing to read",
+            _ when result.Selectors == 0 =>
+                "no DKIM selector seen signing in the last 30 days, so none was checked",
+            _ => $"{result.Selectors} DKIM selector(s) checked"
+                 + (result.Changed ? ", records changed since the last reading" : ""),
+        };
     }
 
     /// <summary>

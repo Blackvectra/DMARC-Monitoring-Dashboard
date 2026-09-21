@@ -60,8 +60,13 @@ else
     /// this is worth spelling out: it would look like a styling quirk rather
     /// than a wrong chart.
     /// </remarks>
-    private static string Percent(double value) =>
-        value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+    /// <remarks>
+    /// The same formatter the volume bars use, in Core where a test can run
+    /// it under a locale that writes decimals with a comma. Two copies of
+    /// this rule is one copy too many: the second one was written without it
+    /// and shipped the bug this comment describes.
+    /// </remarks>
+    private static string Percent(double value) => Chart.Percent(value);
 
     private string Describe() =>
         string.Join(", ", Placed.Select(p => $"{p.Slice.Label} {p.Percent}%"));

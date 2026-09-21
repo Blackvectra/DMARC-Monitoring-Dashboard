@@ -243,21 +243,35 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("fill:", block, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// HTML comments, which carry Blazor's persisted state and nothing a
+    /// chart draws.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex Comments =
+        new("<!--.*?-->", System.Text.RegularExpressions.RegexOptions.Singleline);
+
     [Fact]
     public async Task NoChartEmitsANumberTheBrowserCannotParse()
     {
         // NaN or Infinity in a path attribute renders as an empty chart with
         // nothing logged anywhere, which is the hardest kind of wrong to spot.
         //
-        // The assertion says where it found one. It failed once on CI and
-        // could not be reproduced in ten local runs, and "Assert.DoesNotContain
-        // NaN" on a whole page names neither the route nor the attribute, so
-        // there was nothing to work from. Every division behind these charts
-        // is guarded, so if it happens again the surrounding markup is the
-        // evidence that says which one is not.
+        // This failed intermittently on CI and never once locally, and the
+        // improved assertion is what finally caught it out: the match was
+        // inside the <!--Blazor-Server-Component-State--> comment, which is
+        // several kilobytes of base64. N, a and n are all base64 characters,
+        // so "NaN" turns up in that blob by chance on roughly one page load in
+        // sixty - which is exactly the frequency that had been mistaken for a
+        // flaky chart. Every division behind these charts really was guarded;
+        // there was never a NaN to find.
+        //
+        // So the state comment is removed before scanning. Nothing a chart
+        // renders lives in an HTML comment, and the test is otherwise
+        // unchanged: it still reads every attribute of every element on every
+        // route, and still says where it found one.
         foreach (var route in new[] { "/", "/domains/acme.com", "/domains/signed.example" })
         {
-            var html = await Client().GetStringAsync(route);
+            var html = Comments.Replace(await Client().GetStringAsync(route), "");
 
             foreach (var bad in new[] { "NaN", "Infinity" })
             {
@@ -549,6 +563,18 @@ public sealed class SeededApp : WebApplicationFactory<Program>
 
     /// <summary>The token stored for the seeded provider. Must never appear in any page.</summary>
     public const string ProviderToken = "cf-token-KEEP-OUT-OF-PAGES-9f8e7d";
+
+    /// <summary>
+    /// This instance's database, for a test that needs to put something in it
+    /// that no report can carry.
+    /// </summary>
+    /// <remarks>
+    /// Safe to write to: xUnit builds one fixture per test class, so each
+    /// class gets its own file. Writing to it from a test would be a trap
+    /// only if the fixture were shared across classes, which a collection
+    /// fixture is and this is not.
+    /// </remarks>
+    public string DatabasePath => _dbPath;
 
     public SeededApp() => Seed().GetAwaiter().GetResult();
 

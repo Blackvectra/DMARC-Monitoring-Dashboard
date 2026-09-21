@@ -208,8 +208,15 @@ loopback. What it did, so that it is not magic:
   `/opt/dmarc/data/dmarc.db` as that account.
 - Wrote `/opt/dmarc/app/appsettings.Production.json` (step 3) and
   `/etc/dmarc-ingest.env` (step 6) as templates.
-- Installed `dmarc-web.service`, `dmarc-ingest.service` and
-  `dmarc-ingest.timer` from `deploy/`, and started the first.
+- Installed `dmarc-web.service`, `dmarc-ingest.service`,
+  `dmarc-ingest.timer`, `dmarc-dns.service` and `dmarc-dns.timer` from
+  `deploy/`, and started the web app.
+- Enabled `dmarc-dns.timer`, which reads every domain's published SPF, DKIM
+  and DMARC records nightly and is what fills the Records column on the
+  domains page. It is on from the start, unlike the collector, because it
+  needs no mailbox, no app registration and no certificate - only public DNS.
+  Run it whenever you like with `sudo systemctl start dmarc-dns`, or by hand
+  as `dmarc check --all --save --db /opt/dmarc/data/dmarc.db`.
 
 Somewhere other than `/opt/dmarc`, or under a different account name:
 `DMARC_ROOT=/srv/dmarc DMARC_USER=svc-dmarc sudo -E ./deploy/install.sh`.
@@ -704,6 +711,7 @@ What it sets up, and where:
 | The proxy | Caddy as a systemd service | Caddy as a Windows service through WinSW, ports 80 and 443 opened in Windows Firewall |
 | Configuration | `/opt/dmarc/app/appsettings.Production.json` | `C:\dmarc\app\appsettings.Production.json` |
 | The collector | `dmarc-ingest.timer`, settings in `/etc/dmarc-ingest.env` | Task Scheduler task `DMARC ingest`, settings in `C:\dmarc\ingest.cmd` (readable by administrators and the service only) |
+| The DNS scan | `dmarc-dns.timer`, nightly, enabled from the start | Task Scheduler task `DMARC DNS scan`, nightly, runs `C:\dmarc\dns-scan.cmd`, log in `C:\dmarc\data\dns-scan.log` |
 | The certificate | `--make-ingest-cert` via OpenSSL | `-MakeIngestCert` via `New-SelfSignedCertificate` |
 
 Same arguments, PowerShell spelling: `-TenantId`, `-ClientId`, `-Mailbox`,

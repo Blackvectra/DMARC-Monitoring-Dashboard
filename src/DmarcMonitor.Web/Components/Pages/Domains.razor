@@ -1,4 +1,6 @@
 @page "/domains"
+@using DmarcMonitor.Core.Charting
+@using DmarcMonitor.Core.Dns
 @using DmarcMonitor.Core.Rollout
 @using DmarcMonitor.Core.Storage
 @using DmarcMonitor.Core.Tenancy
@@ -8,6 +10,7 @@
 @inject ReportStoreConnection Db
 @inject OrgContext Org
 @inject OnboardingService Onboarding
+@inject DnsStatusService DnsStatus
 @rendermode InteractiveServer
 
 <PageTitle>Domains — DMARC Monitor</PageTitle>
@@ -42,6 +45,47 @@
         </label>
     </div>
 </header>
+
+@* What the record chips are drawn from, and whether it is current. A tick
+   with nothing behind it is the thing this feature has to avoid producing,
+   so the age of the reading is on the page rather than only in a tooltip. *@
+@if (_rows is { Count: > 0 })
+{
+    <div class="dns-state">
+        @if (_scanning)
+        {
+            <span class="muted">Reading DNS…</span>
+        }
+        else if (_scanMessage is not null)
+        {
+            <span class="muted">@_scanMessage</span>
+        }
+        else if (_lastRead is null)
+        {
+            <span class="muted">
+                DNS has not been read yet, so the SPF, DKIM and DMARC columns say only that.
+                The scheduled scan fills them: <code>dmarc check --all --save</code>
+            </span>
+        }
+        else if (_stale > 0)
+        {
+            <span class="muted">
+                DNS last read @Ago(_lastRead).
+                @_stale of @_rows.Count domain@(_rows.Count == 1 ? "" : "s") not read in the last
+                @RecordStatus.StaleAfterDays days — the nightly scan may not be running.
+            </span>
+        }
+        else
+        {
+            <span class="muted">DNS last read @Ago(_lastRead).</span>
+        }
+
+        @if (_access is { CanOperate: true } && Db.Exists)
+        {
+            <button class="linkish" disabled="@_scanning" @onclick="RefreshDnsAsync">Read DNS now</button>
+        }
+    </div>
+}
 
 @if (!Db.Exists)
 {
@@ -132,8 +176,9 @@ else
                     <th>Domain</th>
                     @if (!_byClient && AcrossOrganizations) { <th>Organization</th> }
                     @if (!_byClient) { <th>Client</th> }
+                    <th>Records</th>
                     <th>Policy</th>
-                    <th class="num">Messages</th>
+                    <th class="num">Volume</th>
                     <th class="num">Passing</th>
                     <th class="num">Sources</th>
                     <th>Last report</th>
@@ -147,8 +192,39 @@ else
                         <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
                         @if (!_byClient && AcrossOrganizations) { <td class="muted">@row.Organization</td> }
                         @if (!_byClient) { <td class="muted">@row.ClientName</td> }
+                        <td class="records">
+                            @* Each chip carries its own name and its own shape,
+                               not only a color: about one man in twelve cannot
+                               tell the red from the green, and a column of
+                               eighty rows distinguished by hue alone is a
+                               column that person cannot read at all. *@
+                            @foreach (var chip in RecordStatus.For(Dns(row.Domain)))
+                            {
+                                @* role="img" so the label is what gets read.
+                                   Without it a screen reader announces "SPF"
+                                   and stops - the state is carried by a glyph
+                                   and a color, and both are hidden from it.
+                                   title is the same sentence for a pointer. *@
+                                <span class="chip @chip.Css @(chip.Stale ? "stale" : "")"
+                                      role="img" aria-label="@($"{chip.Label} for {row.Domain}: {chip.Title}")"
+                                      title="@chip.Title">
+                                    <span class="chip-name">@chip.Label</span><span class="chip-mark">@chip.Glyph</span>
+                                </span>
+                            }
+                        </td>
                         <td><code>p=@row.Policy</code></td>
-                        <td class="num">@row.Messages.ToString("N0")</td>
+                        <td class="num vol">
+                            <span class="vol-count">@row.Messages.ToString("N0")</span>
+                            @* Ranks the column by eye; the number above it is
+                               what anybody reads for the quantity. Scaled
+                               against the largest row on screen, so filtering
+                               to one client rescales to that client rather
+                               than leaving every bar a sliver of the busiest
+                               domain in the book. *@
+                            <span class="vol-bar" aria-hidden="true">
+                                <span style="width:@Width(row.Messages)%"></span>
+                            </span>
+                        </td>
                         <td class="num">
                             @if (row.Messages > 0)
                             {
@@ -172,6 +248,12 @@ else
     private OrganizationAccess? _access;
     private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
     private IReadOnlyList<DomainTriage>? _rows;
+    private IReadOnlyDictionary<string, DomainDns> _dns =
+        new Dictionary<string, DomainDns>(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset? _lastRead;
+    private int _stale;
+    private bool _scanning;
+    private string? _scanMessage;
     private string? _error;
     private string _filter = "";
     private string _client = "";
@@ -180,23 +262,91 @@ else
 
     private bool AcrossOrganizations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
 
+    /// <summary>
+    /// What is stored about a domain's DNS, or an unread one.
+    /// </summary>
+    /// <remarks>
+    /// The fallback is not an empty record standing for "nothing published".
+    /// It is a domain nobody has looked at, which RecordStatus draws as three
+    /// dashes rather than three crosses - the whole distinction this feature
+    /// rests on.
+    /// </remarks>
+    private DomainDns Dns(string domain) =>
+        _dns.TryGetValue(domain, out var found) ? found : new DomainDns { Domain = domain };
+
+    /// <summary>
+    /// The busiest row currently on screen, which every volume bar is drawn
+    /// against.
+    /// </summary>
+    /// <remarks>
+    /// Taken from the filtered set rather than from the whole book on
+    /// purpose. Narrowing to one client should rescale that client's bars to
+    /// each other; against a fixed maximum, a customer whose busiest domain
+    /// sends a thousandth of the largest domain in the book would see ten
+    /// identical slivers and learn nothing.
+    /// </remarks>
+    private long _busiest;
+
+    /// <summary>
+    /// The bar's width, written invariantly.
+    /// </summary>
+    /// <remarks>
+    /// Through Chart.Percent rather than interpolated as a double, because a
+    /// server whose locale uses a comma for the decimal point would emit
+    /// "width:90,69%" - which a browser drops as an invalid declaration,
+    /// leaving every bar at its default width. The page still renders, so it
+    /// would read as a styling quirk rather than as a broken chart, and
+    /// nobody developing on an en-US machine would ever see it.
+    /// </remarks>
+    private string Width(long messages)
+    {
+        _ = Filtered;   // whose computation is also what sets the scale
+        return Chart.Percent(Chart.BarWidth(messages, _busiest));
+    }
+
     // Alphabetical, not by urgency. Triage already ranks; this exists to find
     // a named domain, and a list that reorders itself as data changes is the
     // wrong tool for that.
-    private IReadOnlyList<DomainTriage> Filtered =>
-        _rows is null ? []
-        : [.. _rows
-            .Where(r => string.IsNullOrEmpty(_client) || r.ClientSlug.Equals(_client, StringComparison.OrdinalIgnoreCase))
-            .Where(r => string.IsNullOrWhiteSpace(_filter)
-                     || r.Domain.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-                     || r.ClientName.Contains(_filter, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(r => r.Domain, StringComparer.Ordinal)];
+    //
+    // Memoized because one render reads it several times - the count, the
+    // grouping, the rows, and the scale every volume bar is drawn against -
+    // and recomputing the filter inside the loop that the filter produced
+    // makes the page quadratic in the size of the book.
+    private (string Filter, string Client, object? Source) _filteredFrom = ("", "", null);
+    private IReadOnlyList<DomainTriage> _filtered = [];
+
+    private IReadOnlyList<DomainTriage> Filtered
+    {
+        get
+        {
+            var from = (_filter, _client, (object?)_rows);
+            if (_filteredFrom != from)
+            {
+                _filtered = _rows is null ? []
+                    : [.. _rows
+                        .Where(r => string.IsNullOrEmpty(_client) || r.ClientSlug.Equals(_client, StringComparison.OrdinalIgnoreCase))
+                        .Where(r => string.IsNullOrWhiteSpace(_filter)
+                                 || r.Domain.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+                                 || r.ClientName.Contains(_filter, StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(r => r.Domain, StringComparer.Ordinal)];
+                _busiest = _filtered.Count == 0 ? 0 : _filtered.Max(r => r.Messages);
+                _filteredFrom = from;
+            }
+
+            return _filtered;
+        }
+    }
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
     private async Task LoadAsync()
     {
         _error = null;
+
+        // Whatever the last refresh reported describes a reading that has now
+        // been replaced, so it goes when the data does. RefreshDnsAsync sets
+        // it again after calling this.
+        _scanMessage = null;
         if (!Db.Exists) { _rows = Array.Empty<DomainTriage>(); return; }
 
         try
@@ -216,12 +366,83 @@ else
             if (_access.RestrictedClient is { } only) { _client = only; }
 
             _rows = await Triage.GetAsync(_days, tenant, _access.RestrictedClient);
+
+            // Read from storage, never resolved here: a table of eighty rows
+            // would otherwise be eighty DNS lookups per render, each able to
+            // hang for five seconds, on a page somebody reloads.
+            _dns = await DnsStatus.GetAsync(tenant, _access.RestrictedClient);
+            Summarize();
         }
         catch (Exception ex)
         {
             _rows = Array.Empty<DomainTriage>();
             _error = ex.Message;
         }
+    }
+
+    /// <summary>
+    /// How current the readings behind the chips are.
+    /// </summary>
+    /// <remarks>
+    /// The newest reading rather than the oldest, with the count of stale ones
+    /// beside it. The oldest alone would report the whole page as out of date
+    /// because of one domain that has been failing to resolve for a month,
+    /// and that reads as "this feature is broken" rather than as "one domain
+    /// needs looking at".
+    /// </remarks>
+    private void Summarize()
+    {
+        var read = _dns.Values.Select(d => d.CheckedAt).Where(at => at is not null).ToList();
+
+        _lastRead = read.Count == 0 ? null : read.Max();
+        _stale = _rows is null ? 0 : _rows.Count(r => RecordStatus.Spf(Dns(r.Domain)) is { Stale: true } or { State: RecordState.Unknown });
+    }
+
+    /// <summary>
+    /// Reads the DNS of everything in scope again, now.
+    /// </summary>
+    /// <remarks>
+    /// The scheduled scan is what normally fills this in. The button exists
+    /// because a fresh install has no readings until that first fires, and a
+    /// page of dashes with no way to do anything about them is a feature that
+    /// looks broken on the day somebody sets it up.
+    /// </remarks>
+    private async Task RefreshDnsAsync()
+    {
+        if (_access is not { CanOperate: true } || _scanning || !Db.Exists) { return; }
+
+        _scanning = true;
+        _scanMessage = null;
+        string? outcome;
+
+        try
+        {
+            var summary = await DnsStatus.RefreshAsync(_access.TenantId, _access.RestrictedClient, _access.User);
+
+            outcome = summary is null
+                ? "There is no database to store a reading in."
+                : $"Read {summary.Read} domain(s)"
+                  + (summary.Failed > 0 ? $", {summary.Failed} could not be resolved" : "")
+                  + (summary.Missing > 0 ? $", {summary.Missing} do not exist" : "")
+                  + (summary.Changed > 0 ? $", {summary.Changed} changed since last time" : "")
+                  + (summary.Skipped > 0
+                      ? $". {summary.Skipped} not read: a page can only do {DnsStatusService.RefreshLimit} at a time, "
+                        + "and the rest are the scheduled scan's work."
+                      : ".");
+        }
+        catch (Exception ex)
+        {
+            outcome = $"Could not read DNS: {ex.Message}";
+        }
+        finally
+        {
+            _scanning = false;
+        }
+
+        // Reloaded first, because LoadAsync clears the message: what is shown
+        // has to describe the readings now on screen.
+        await LoadAsync();
+        _scanMessage = outcome;
     }
 
     private static string Ago(DateTimeOffset? when)

@@ -154,6 +154,13 @@ public static class Program
                                  so it works on a prospect's domain.
                 --domain <d>     One domain.
                 --all            Every domain in the database.
+                --save           Store what was read, so the dashboard can show each domain's
+                                 SPF, DKIM and DMARC status without resolving eighty domains
+                                 every time somebody opens the page. Also looks up the DKIM
+                                 selectors the reports have seen signing, which is the only
+                                 way to check DKIM at all - DNS cannot be asked which
+                                 selectors a domain has. Run it daily:
+                                 dmarc check --all --save --db <path>
                 --db <path>      Database file. Default: dmarc.db
 
               fix                Fix what 'check' found, in the customer's DNS. A dry run
