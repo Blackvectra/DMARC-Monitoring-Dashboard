@@ -236,10 +236,15 @@ app.MapGet("/.well-known/mta-sts.txt", async (
     return Results.Text(policy.ToFile(), "text/plain; charset=utf-8");
 }).AllowAnonymous();
 
-// The report as a file, rendered by the same code the CLI uses. A download
-// rather than a page: this is a document that gets attached to an email and
-// printed, not something to read in the app. The fallback authorization
-// policy covers this endpoint like any other.
+// The report as a document, rendered by the same code the CLI uses, so a copy
+// opened from the browser is the copy `dmarc report` writes.
+//
+// PDF, because this is what a client receives. It used to be HTML with a note
+// on the page telling the operator to turn the browser's headers and footers
+// off before printing - which is a product asking somebody to remember
+// something every month, and the month they forget, "localhost:5000" goes out
+// across the foot of a document a customer is paying for. ?format=html still
+// serves the long on-screen version, which is for reading here, not sending.
 app.MapGet("/reports/download/{slug}/{month}", async (
     HttpContext context, string slug, string month, ReportUiService reports,
     DmarcMonitor.Core.Tenancy.OrganizationStore organizations, CancellationToken ct) =>
@@ -282,12 +287,23 @@ app.MapGet("/reports/download/{slug}/{month}", async (
             statusCode: StatusCodes.Status409Conflict);
     }
 
-    var html = ClientReportRenderer.ToHtml(report);
+    if (string.Equals(context.Request.Query["format"], "html", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Content(ClientReportRenderer.ToHtml(report), "text/html; charset=utf-8");
+    }
 
     // Inline rather than an attachment: the operator opening this is checking
     // it before sending it, and a download that lands in a folder unread is
-    // how an unchecked report reaches a customer.
-    return Results.Content(html, "text/html; charset=utf-8");
+    // how an unchecked report reaches a customer. The filename is what they
+    // get if they then save it, and is built from the slug rather than from
+    // the client's name, which can contain anything a person typed.
+    var stem = new string([.. slug.Where(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_')]);
+    if (stem.Length == 0) { stem = "report"; }
+
+    context.Response.Headers.ContentDisposition =
+        $"inline; filename=\"{stem}-{period.Start:yyyy-MM}.pdf\"";
+
+    return Results.File(ClientReportPdf.Render(report), "application/pdf");
 });
 
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();

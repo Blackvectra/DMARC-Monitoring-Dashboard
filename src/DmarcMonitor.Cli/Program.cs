@@ -225,8 +225,8 @@ public static class Program
                 --all            Every client except Unassigned.
                 --month <yyyy-MM> Month to cover. Default: last complete month.
                 --out <folder>   Where to write. Default: reports
-                --pdf            Write a PDF, which is what a client receives.
-                                 Add --html for both. HTML alone is the default.
+                --html           Also write the long on-screen version, with the
+                                 full evidence tables. A PDF is written either way.
                 --provider <n>   How to name yourself in the report.
                 --db <path>      Database file. Default: dmarc.db
 

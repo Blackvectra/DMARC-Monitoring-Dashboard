@@ -599,21 +599,23 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     /// <summary>
-    /// The print dialog owns the one part of the page the document cannot
-    /// style, so the page has to say so.
+    /// The page offers the document, not a print dialog.
     /// </summary>
     /// <remarks>
-    /// Chrome and Edge stamp the date, the tab title and the URL over every
-    /// printed page. On a report opened from this app that URL reads
-    /// localhost:5000, and it went to a paying customer that way. No
-    /// stylesheet can suppress it; only the person at the dialog can.
+    /// It used to offer HTML under a note saying to turn Chrome's headers and
+    /// footers off before printing, because that browser stamps the date, the
+    /// tab title and the URL over every page - which on this app reads
+    /// localhost:5000, and went to a paying customer that way. A product that
+    /// asks somebody to remember something every month has not fixed it; the
+    /// PDF is drawn here and the note is gone.
     /// </remarks>
     [Fact]
-    public async Task ReportsSaysToTurnOffTheBrowsersHeadersAndFooters()
+    public async Task ReportsOffersThePdfAndNoLongerAPrintDialog()
     {
         var html = await Client().GetStringAsync("/reports");
 
-        Assert.Contains("Headers and footers", html, StringComparison.Ordinal);
+        Assert.Contains("Open PDF", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Headers and footers", html, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -807,9 +809,30 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
-    public async Task AReportDownloadsAsAWholeDocument()
+    public async Task AReportOpensAsAPdf()
     {
+        // What a client receives. It was HTML, under a note on the page
+        // telling whoever sent it to turn the browser's headers and footers
+        // off before printing - and the month somebody forgets,
+        // "localhost:5000" goes out across the foot of a paid-for document.
         var response = await Client().GetAsync("/reports/download/acme-corp/2026-08");
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/pdf", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("%PDF", System.Text.Encoding.ASCII.GetString(bytes, 0, 4));
+
+        // Named for the client and the month, because it is about to be saved
+        // and attached to an email.
+        var disposition = response.Content.Headers.ContentDisposition;
+        Assert.Equal("inline", disposition?.DispositionType);
+        Assert.Contains("acme-corp-2026-08.pdf", disposition?.FileName, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheLongVersionIsStillThereForReadingOnScreen()
+    {
+        var response = await Client().GetAsync("/reports/download/acme-corp/2026-08?format=html");
         var html = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);

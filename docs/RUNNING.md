@@ -491,6 +491,10 @@ Monthly, after the month has ended:
 dmarc report --all --out C:\dmarc\reports --provider "Your Company"
 ```
 
+That writes one PDF per client — the document you attach to an email. Add
+`--html` for the long on-screen version as well, which carries the full
+evidence tables and is for reading rather than sending.
+
 `--max` caps messages per ingest run (default 500), so a backlog is worked
 through over several runs rather than one long one. Interrupting a run is
 safe: it returns what it has already done, and the next run resumes.

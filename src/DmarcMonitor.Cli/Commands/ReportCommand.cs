@@ -78,13 +78,16 @@ public static class ReportCommand
 
         Directory.CreateDirectory(outPath);
 
-        // PDF is what a client receives: an .html attachment is the one thing a
-        // mail gateway is most likely to strip or warn about, and a customer
-        // warned about the document their security provider just sent them has
-        // learned the wrong lesson. HTML stays the default because it is what
-        // an operator reads on screen, and --pdf --html writes both.
-        var wantsPdf = Args.Flag(args, "--pdf");
-        var wantsHtml = !wantsPdf || Args.Flag(args, "--html");
+        // PDF is what a client receives, so PDF is what this writes. An .html
+        // attachment is the one thing a mail gateway is most likely to strip
+        // or warn about, and a customer warned about the document their
+        // security provider just sent them has learned the wrong lesson.
+        //
+        // --html still writes the long on-screen version, which carries the
+        // full evidence tables; --pdf is accepted and does nothing, so a
+        // script written against the flag keeps working.
+        var wantsHtml = Args.Flag(args, "--html");
+        var wantsPdf = !wantsHtml || Args.Flag(args, "--pdf");
 
         var written = 0;
         var empty = 0;

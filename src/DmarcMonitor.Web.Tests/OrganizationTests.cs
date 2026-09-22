@@ -265,12 +265,37 @@ public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
     [Fact]
     public async Task AClientReportCarriesTheOrganizationsNameAndContact()
     {
-        var response = await As("nrg@example.com", TwoOrganizationApp.NrgGroup).GetAsync("/reports/download/acme-corp/2026-08");
+        var response = await As("nrg@example.com", TwoOrganizationApp.NrgGroup)
+            .GetAsync("/reports/download/acme-corp/2026-08?format=html");
         var html = await response.Content.ReadAsStringAsync();
 
         Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
         Assert.Contains("dmarc@nrgtechservices.com", html, StringComparison.Ordinal);
         Assert.Contains("#0f766e", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And so does the PDF, which is the copy that leaves the building.
+    /// </summary>
+    /// <remarks>
+    /// White-labelling that stops at the screen is not white-labelling. The
+    /// PDF carried the provider's name from the start and dropped its colour,
+    /// its logo and its contact block, which are the three things an MSP is
+    /// buying. What is asserted here is that the branded organization's
+    /// document renders and differs from the unbranded one's; the content is
+    /// pinned field by field in ClientReportPdfTests.
+    /// </remarks>
+    [Fact]
+    public async Task ThePdfIsBrandedByTheOrganizationThatSendsIt()
+    {
+        var response = await As("nrg@example.com", TwoOrganizationApp.NrgGroup)
+            .GetAsync("/reports/download/acme-corp/2026-08");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/pdf", response.Content.Headers.ContentType?.MediaType);
+
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal("%PDF", System.Text.Encoding.ASCII.GetString(bytes, 0, 4));
     }
 }
 

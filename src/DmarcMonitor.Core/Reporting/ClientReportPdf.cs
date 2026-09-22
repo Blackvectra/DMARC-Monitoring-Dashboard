@@ -109,6 +109,7 @@ public static class ClientReportPdf
         footer.Format.Borders.Top.Color = Rule;
         footer.Format.SpaceBefore = 6;
         footer.AddText($"{report.ClientName} · {report.Period.Label} · prepared by {report.ProviderName}");
+
         footer.AddTab();
         footer.AddText("Page ");
         footer.AddPageField();
@@ -121,10 +122,33 @@ public static class ClientReportPdf
         // instead of on the right margin.
         var printable = Unit.FromCentimeter(21.0) - section.PageSetup.LeftMargin - section.PageSetup.RightMargin;
         footer.Format.TabStops.AddTabStop(printable, TabAlignment.Right);
+
+        // Who to call, when the organization has said. It is the line a client
+        // needs most, and a document that says a problem is urgent without
+        // saying who to tell is a document that gets filed.
+        if (report.ContactBlock is { Length: > 0 } contact)
+        {
+            var reach = section.Footers.Primary.AddParagraph(OneLine(contact));
+            reach.Format.Font.Size = 7;
+            reach.Format.Font.Color = Muted;
+            reach.Format.SpaceBefore = 1;
+        }
     }
+
+    /// <summary>
+    /// A block of text as one line. The contact block is a textarea, and a
+    /// newline inside a MigraDoc paragraph is a literal control character
+    /// rather than a break.
+    /// </summary>
+    private static string OneLine(string text) =>
+        string.Join(" · ", text.Split(Breaks, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+    private static readonly char[] Breaks = ['\r', '\n'];
 
     private static void Header(Section section, ClientReport report)
     {
+        Logo(section, report);
+
         var eyebrow = section.AddParagraph("EMAIL AUTHENTICATION REPORT");
         eyebrow.Format.Font.Size = 7.5;
         eyebrow.Format.Font.Bold = true;
@@ -139,8 +163,69 @@ public static class ClientReportPdf
         var period = section.AddParagraph($"{report.Period.Label} · prepared by {report.ProviderName}");
         period.Format.Font.Color = Muted;
         period.Format.Borders.Bottom.Width = 1;
-        period.Format.Borders.Bottom.Color = Ink;
+        period.Format.Borders.Bottom.Color = Accent(report) ?? Ink;
         period.Format.SpaceAfter = 14;
+    }
+
+    /// <summary>
+    /// The organization's colour, when it has set one and it is a plain hex.
+    /// </summary>
+    /// <remarks>
+    /// Checked here as well as where it is stored. This one is drawn rather
+    /// than interpolated into a stylesheet, so a bad value is a crash at
+    /// render time rather than an injection - which is still a report that
+    /// did not go out.
+    /// </remarks>
+    private static Color? Accent(ClientReport report)
+    {
+        if (report.BrandColor is not { Length: 7 } hex || hex[0] != '#') { return null; }
+
+        return byte.TryParse(hex.AsSpan(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var r)
+            && byte.TryParse(hex.AsSpan(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var g)
+            && byte.TryParse(hex.AsSpan(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b)
+                ? new Color(r, g, b)
+                : null;
+    }
+
+    /// <summary>
+    /// The organization's logo, when it has one this can draw.
+    /// </summary>
+    /// <remarks>
+    /// White-labelling is the point of it: the report is the part of this
+    /// product a customer sees, and it should carry the MSP's mark, not this
+    /// product's.
+    ///
+    /// PNG and JPEG only. The store also accepts GIF, WebP and SVG because a
+    /// browser draws them in the sidebar, and PDFsharp does not - so an
+    /// organization with an SVG logo gets a report with its name on it rather
+    /// than an exception where the month's report should be.
+    /// </remarks>
+    private static void Logo(Section section, ClientReport report)
+    {
+        if (report.BrandLogo is not { Length: > 0 } url) { return; }
+        if (!DmarcMonitor.Core.Tenancy.OrganizationBrand.IsValidLogo(url)) { return; }
+
+        var comma = url.IndexOf(',', StringComparison.Ordinal);
+        if (comma < 0) { return; }
+
+        var type = url.AsSpan(0, comma);
+        if (!type.StartsWith("data:image/png", StringComparison.Ordinal)
+            && !type.StartsWith("data:image/jpeg", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        try
+        {
+            var image = section.AddImage("base64:" + url[(comma + 1)..]);
+            image.Height = Unit.FromCentimeter(1.1);
+            image.LockAspectRatio = true;
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or NotSupportedException or FormatException)
+        {
+            // A logo that will not decode is not a reason to withhold the
+            // month's report from a client.
+        }
     }
 
     private static void Verdict(Section section, ClientReport report)

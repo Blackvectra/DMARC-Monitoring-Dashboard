@@ -60,6 +60,23 @@ public static class SecurityHeaders
         "form-action 'none'; " +
         "frame-ancestors 'none'";
 
+    /// <summary>
+    /// What a report served as a PDF may do.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="ReportPolicy"/> only over <c>object-src</c>.
+    /// A browser's built-in PDF viewer is the thing that policy names, and a
+    /// document a client is paying for is not worth losing to a header whose
+    /// benefit here is nil: the bytes are ours, drawn by this product from its
+    /// own database, not markup assembled from what a stranger sent.
+    /// </remarks>
+    private const string PdfPolicy =
+        "default-src 'none'; " +
+        "object-src 'self'; " +
+        "base-uri 'none'; " +
+        "form-action 'none'; " +
+        "frame-ancestors 'none'";
+
     public static IApplicationBuilder UseSecurityHeaders(this IApplicationBuilder app)
     {
         ArgumentNullException.ThrowIfNull(app);
@@ -73,14 +90,18 @@ public static class SecurityHeaders
                 var headers = context.Response.Headers;
 
                 // A report is data from strangers rendered as a document, and
-                // needs none of what the app needs.
+                // needs none of what the app needs. The PDF is the same
+                // document drawn by us rather than marked up, and answers to
+                // the one policy that lets a browser display it.
                 var isReport = context.Request.Path.StartsWithSegments("/reports/download");
+                var isPdf = isReport && headers.ContentType.ToString()
+                    .StartsWith("application/pdf", StringComparison.OrdinalIgnoreCase);
 
                 // Only set what is not already there: a proxy in front, or a
                 // later change here, should win rather than be duplicated.
                 if (!headers.ContainsKey("Content-Security-Policy"))
                 {
-                    headers["Content-Security-Policy"] = isReport ? ReportPolicy : AppPolicy;
+                    headers["Content-Security-Policy"] = isPdf ? PdfPolicy : isReport ? ReportPolicy : AppPolicy;
                 }
 
                 // Stops a browser deciding for itself that something is script.

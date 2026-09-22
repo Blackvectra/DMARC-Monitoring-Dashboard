@@ -214,6 +214,98 @@ public sealed class ClientReportPdfTests
         Assert.Contains("SIL OPEN FONT LICENSE", ReportFonts.License, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The MSP's mark, not this product's.
+    /// </summary>
+    /// <remarks>
+    /// The report is the part of the platform a customer ever sees, so
+    /// white-labelling that stops at the screen is not white-labelling. The
+    /// HTML carried the colour, the logo and the contact block from the start;
+    /// the PDF carried only the provider's name.
+    /// </remarks>
+    [Fact]
+    public void TheOrganizationsBrandingReachesThePdf()
+    {
+        var branded = Report() with
+        {
+            BrandColor = "#0f766e",
+            ContactBlock = "dmarc@nrgtechservices.com\n(701) 555-0134",
+        };
+
+        var document = ClientReportPdf.Build(branded);
+
+        // The rule under the client's name is the organization's colour.
+        var section = document.Sections[0]!;
+        var rule = Find(section, p => p.Format.Borders.Bottom.Width.Point > 0 && !p.Format.Borders.Bottom.Color.IsEmpty);
+        Assert.Equal(new Color(0x0F, 0x76, 0x6E), rule.Format.Borders.Bottom.Color);
+
+        // The contact block is in the footer, on one line: a newline inside a
+        // MigraDoc paragraph is a control character, not a break.
+        var text = Text(document);
+        Assert.Contains("dmarc@nrgtechservices.com · (701) 555-0134", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnUnbrandedReportStillRenders()
+    {
+        var text = Text(ClientReportPdf.Build(Report()));
+
+        Assert.DoesNotContain("·  ·", text, StringComparison.Ordinal);
+        Assert.True(ClientReportPdf.Render(Report()).Length > 5000);
+    }
+
+    /// <summary>
+    /// A logo this renderer cannot draw does not cost the client their month.
+    /// </summary>
+    /// <remarks>
+    /// The store accepts GIF, WebP and SVG because a browser draws them in
+    /// the sidebar. PDFsharp does not, and an exception where the report
+    /// should be is a worse answer than a report with the name on it.
+    /// </remarks>
+    [Theory]
+    [InlineData("data:image/svg+xml;base64,PHN2Zy8+")]
+    [InlineData("data:image/gif;base64,R0lGODlhAQABAAAAACw=")]
+    [InlineData("not a data url at all")]
+    public void ALogoThatCannotBeDrawnIsSkippedRatherThanThrown(string logo)
+    {
+        var bytes = ClientReportPdf.Render(Report() with { BrandLogo = logo });
+
+        Assert.True(bytes.Length > 5000);
+    }
+
+    [Fact]
+    public void APngLogoIsDrawn()
+    {
+        // An 8x8 PNG, which is enough to prove the decode path: the logo an
+        // organization uploads is a data: URL, and PDFsharp takes base64
+        // rather than a URL.
+        const string Png =
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPg"
+            + "L8vDihiGlgQApWE8wfekj3cAAAAASUVORK5CYII=";
+
+        var document = ClientReportPdf.Build(Report() with { BrandLogo = Png });
+        var section = document.Sections[0]!;
+
+        var images = 0;
+        foreach (var element in section.Elements)
+        {
+            if (element is MigraDoc.DocumentObjectModel.Shapes.Image) { images++; }
+        }
+
+        Assert.Equal(1, images);
+        Assert.True(ClientReportPdf.Render(Report() with { BrandLogo = Png }).Length > 5000);
+    }
+
+    private static Paragraph Find(Section section, Func<Paragraph, bool> predicate)
+    {
+        foreach (var element in section.Elements)
+        {
+            if (element is Paragraph p && predicate(p)) { return p; }
+        }
+
+        throw new InvalidOperationException("no paragraph matched");
+    }
+
     [Fact]
     public void ANullReportIsRefused()
     {

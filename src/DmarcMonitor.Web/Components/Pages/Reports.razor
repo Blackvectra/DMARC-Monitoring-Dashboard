@@ -14,8 +14,8 @@
 <header class="page-head">
     <div>
         <h1>Reports</h1>
-        <p class="sub">The monthly report a client receives. One self-contained file: it opens with no
-           network and prints to PDF, because that is what happens to it after you send it.</p>
+        <p class="sub">The monthly report a client receives, as a PDF — the document you attach to an
+           email, with this company's name on it and nothing of this server's.</p>
     </div>
 </header>
 
@@ -67,28 +67,29 @@ else
                button to open it has told somebody what to ignore. *@
             @if (Named)
             {
-                <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open</a>
+                <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open PDF</a>
             }
             else
             {
                 <span class="primary-link disabled" aria-disabled="true"
-                      title="Set Reporting:ProviderName before a report can be opened.">Open</span>
+                      title="Set Reporting:ProviderName before a report can be opened.">Open PDF</span>
             }
         </div>
         @if (Named)
         {
             <p class="sub">Reported as “@(_preview?.ProviderName ?? ReportUi.ProviderName)”.</p>
 
-            @* The one thing a browser will not let the document control.
-               Chrome and Edge print their own header and footer over every
-               page - the date, the tab title, and the URL, which on this
-               machine reads localhost:5000 and goes to a paying customer like
-               that. No stylesheet can suppress them; only the person at the
-               print dialog can. *@
+            @* The long version stays, and is named for what it is for. It used
+               to be the only version, under a note telling whoever sent it to
+               turn the browser's headers and footers off in the print dialog
+               first - a product asking somebody to remember something every
+               month, and the month they forget, this server's address goes out
+               across the foot of a document a customer is paying for. *@
             <p class="sub">
-                Printing to PDF: turn <strong>Headers and footers</strong> off in the print dialog,
-                under More settings. Left on, the browser stamps the page with the date and this
-                server's address, and both end up in the customer's copy.
+                The PDF is the document to send. For the full evidence tables on screen —
+                every sender, every reporter, the remediation register —
+                <a href="@($"reports/download/{_slug}/{_month}?format=html")" target="_blank">open the long
+                version</a>.
             </p>
         }
         else
