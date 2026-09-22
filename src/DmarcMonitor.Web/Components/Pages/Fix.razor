@@ -113,6 +113,22 @@ else
                 @if (d is not null)
                 {
                     <span class="muted provider">via @d.ProviderName</span>
+
+                    @* Every finding in this section is a live reading of DNS
+                       and of what the policy host serves, and both of those
+                       change minutes after somebody publishes a record - which
+                       is exactly when this page gets looked at. Without this
+                       the only way to ask again was to reload the whole page
+                       and wait for every domain to be re-read.
+
+                       Reported as a bug, and it was one: a domain that had
+                       just had MTA-STS published correctly was still being
+                       told "there is no host at mta-sts.<domain>", with
+                       nothing on screen offering to look again. *@
+                    <button class="link-button" disabled="@(_rechecking is not null)"
+                            @onclick="() => RecheckAsync(row.Domain)">
+                        @(_rechecking == row.Domain ? "Checking…" : "Check again")
+                    </button>
                 }
             </h2>
 
@@ -499,6 +515,40 @@ else
         {
             _pending = 0;
             _loaded = true;
+        }
+    }
+
+    /// <summary>The domain being re-read, so its button can say so.</summary>
+    private string? _rechecking;
+
+    /// <summary>
+    /// Reads DNS and the policy host for one domain again.
+    /// </summary>
+    /// <remarks>
+    /// One domain rather than the page, because the reason to press it is
+    /// always "I just changed this one" - and re-reading eighteen domains to
+    /// answer a question about one is how a refresh becomes something nobody
+    /// presses.
+    /// </remarks>
+    private async Task RecheckAsync(string domain)
+    {
+        if (_rechecking is not null) { return; }
+        if (!_domains.TryGetValue(domain, out var current)) { return; }
+
+        _rechecking = domain;
+        try
+        {
+            _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, null, _tenant);
+        }
+        catch (Exception ex)
+        {
+            // A failed re-read must not take the section away. The finding on
+            // screen is still the last thing that was true.
+            _error = ex.Message;
+        }
+        finally
+        {
+            _rechecking = null;
         }
     }
 

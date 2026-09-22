@@ -648,6 +648,26 @@ section[id] { scroll-margin-top: 16px; }
    row did before, so a table part-way through its first nightly pass is a
    mixture rather than a column of gaps.
 */
+/*
+   "Check again", beside a domain on the Fix page. A quiet control on
+   purpose: it sits in a heading next to the domain name and the policy, and
+   anything with a border there competes with the findings underneath, which
+   are the point of the page.
+*/
+.link-button {
+    background: none;
+    border: 0;
+    padding: 0 0 0 10px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--accent);
+    cursor: pointer;
+}
+
+.link-button:hover:not(:disabled) { text-decoration: underline; }
+.link-button:disabled { color: var(--dim); cursor: default; }
+
 .source-name { display: block; font-weight: 500; }
 
 .source-ip {
