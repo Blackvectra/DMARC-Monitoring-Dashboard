@@ -31,6 +31,12 @@ Re-running it is safe: on an installed machine it only applies configuration.
   Adds Entra sign-in to an existing install and restarts the service.
 
 .EXAMPLE
+  .\bootstrap.ps1 -CollectorOnly -MakeIngestCert -Mailbox dmarc@example.com `
+      -IngestTenantId <id> -IngestClientId <id>
+  Collects hourly and scans DNS nightly, with nothing left running. No web
+  service, no proxy. Open the dashboard yourself when you want it.
+
+.EXAMPLE
   .\bootstrap.ps1 -HostName dmarc.example.com -MakeIngestCert -Mailbox dmarc@example.com `
       -IngestTenantId <id> -IngestClientId <id>
   Creates the collector's certificate, prints the .cer to upload, registers the task.
@@ -65,7 +71,17 @@ param(
     [string]$Organization,
     [switch]$MakeIngestCert,
     [switch]$NoProxy,
-    [switch]$NoIngestTask
+    [switch]$NoIngestTask,
+    # Collect on a schedule, and do not leave anything running.
+    #
+    # The dashboard is not installed as a service and no reverse proxy is set
+    # up; the collector and the nightly DNS scan are scheduled tasks, which
+    # wake, do their work and exit. Open the dashboard when you want to look
+    # at it - the command is printed at the end.
+    #
+    # This is the shape for a machine that is not a server: a workstation, or
+    # a box in the corner whose job is to keep the reports coming in.
+    [switch]$CollectorOnly
 )
 
 Set-StrictMode -Version Latest
@@ -148,7 +164,8 @@ function Set-RestrictedAcl([string]$Path, [string]$ServiceGrant) {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not restrict $Path" 70 }
 }
 
-if (-not $NoProxy -and -not $HostName) { Fail '-HostName is required (it is what the certificate is for). Use -NoProxy to skip Caddy.' 64 }
+if ($CollectorOnly) { $NoProxy = $true }
+if (-not $NoProxy -and -not $HostName) { Fail '-HostName is required (it is what the certificate is for). Use -NoProxy to skip Caddy, or -CollectorOnly for a machine that only collects.' 64 }
 if ($HostName -and $HostName -notmatch '^[A-Za-z0-9.-]+$') { Fail '-HostName must be a bare hostname, e.g. dmarc.example.com' 64 }
 if ([bool]$TenantId -ne [bool]$ClientId) { Fail '-TenantId and -ClientId go together; the app treats sign-in as configured only when both are set' 64 }
 if ([Environment]::Is64BitOperatingSystem -eq $false) { Fail 'a 64-bit Windows is required' 69 }
@@ -287,6 +304,15 @@ try {
     Set-RestrictedAcl $Settings "${ServiceSid}:R"
 
     # ---- 5. the service --------------------------------------------------------
+    #
+    # Skipped entirely for a collector-only install. The point of that shape is
+    # that nothing is listening between the hourly runs, so creating the
+    # service and then telling somebody to stop it would be theatre.
+    if ($CollectorOnly) {
+        Say '== service'
+        Say '   skipped: -CollectorOnly. The dashboard runs when you start it.'
+    }
+    else {
     Say '== service'
     $svc = Get-Service -Name 'dmarc-web' -ErrorAction SilentlyContinue
     if (-not $svc) {
@@ -313,6 +339,7 @@ try {
         exit 1
     }
     Say "   answers on 127.0.0.1:5000 (HTTP $code)"
+    }
 
     # ---- 6. the collector ------------------------------------------------------
     if ($MakeIngestCert) {
@@ -509,8 +536,32 @@ try {
 # ---- done -------------------------------------------------------------------
 Say ''
 Say 'Done.'
+
+# A collector-only install has nothing listening, so the last thing printed is
+# how to look at what it collected. Without this the install finishes with no
+# URL and no service, which reads as a failure.
+if ($CollectorOnly) {
+    $dbPath = Join-Path $DataDir 'dmarc.db'
+    Say @"
+Collecting on a schedule. Nothing is left running.
+
+  DMARC ingest     hourly, catches up if the machine was asleep
+  DMARC DNS scan   nightly at 03:20
+  database         $dbPath
+
+To look at it, from an elevated PowerShell:
+  & "$Dotnet" "$(Join-Path $AppDir 'DmarcMonitor.Web.dll')" --contentRoot "$AppDir"
+then open http://127.0.0.1:5000 . Close the window when you are done; the
+collector keeps running without it.
+
+To see the tasks, or run one now:
+  Get-ScheduledTask -TaskName 'DMARC*'
+  Start-ScheduledTask -TaskName 'DMARC ingest'
+"@
+}
+
 $signInConfigured = $TenantId -or ((Test-Path $Settings) -and ((Get-Content -Raw $Settings | ConvertFrom-Json).AzureAd.TenantId))
-if (-not $signInConfigured) {
+if (-not $CollectorOnly -and -not $signInConfigured) {
     $h = if ($HostName) { $HostName } else { '<host>' }
     Say @"
 Next: sign-in. In Entra, App registrations -> New registration:
@@ -525,9 +576,10 @@ Then, here:
 "@
 }
 if (-not (Test-Path $IngestCmd)) {
+    $where = if ($CollectorOnly) { '-CollectorOnly' } else { "-HostName $(if ($HostName) { $HostName } else { '<host>' })" }
     Say @"
 Mailbox collection: docs/INGEST-SETUP.md. When the ingest app registration exists:
-  .\bootstrap.ps1 -HostName $(if ($HostName) { $HostName } else { '<host>' }) -MakeIngestCert -Mailbox dmarc@example.com ``
+  .\bootstrap.ps1 $where -MakeIngestCert -Mailbox dmarc@example.com ``
       -IngestTenantId <directory id> -IngestClientId <ingest application id>
 "@
 }

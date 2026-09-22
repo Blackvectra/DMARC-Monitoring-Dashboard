@@ -640,6 +640,46 @@ jobs:
           Compress-Archive -Path publish/dmarc-web -DestinationPath dmarc-web.zip
           Copy-Item publish/cli/dmarc.exe dmarc.exe
 
+      # The shape a workstation gets: collect on a schedule, leave nothing
+      # running. Run first, into its own root, while no dmarc-web service
+      # exists yet - so "no service was created" is a claim this can actually
+      # make. A collector-only path nobody has run is how the trial download
+      # shipped broken, and this is the same shape of gap.
+      - name: Collector only, with nothing left running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\deploy\bootstrap.ps1 -FromDir . -Root C:\dmarc-collector -CollectorOnly -ProviderName CI
+
+          if (Get-Service dmarc-web -ErrorAction SilentlyContinue) { throw 'a web service was installed anyway' }
+          if (Get-Service caddy -ErrorAction SilentlyContinue) { throw 'a proxy was installed anyway' }
+          if (-not (Test-Path C:\dmarc-collector\data\dmarc.db)) { throw 'no database' }
+
+          # Registered unconditionally, because it needs no mailbox and no
+          # certificate: without it the domains page shows dashes forever.
+          if (-not (Get-ScheduledTask -TaskName 'DMARC DNS scan' -ErrorAction SilentlyContinue)) {
+            throw 'no DMARC DNS scan task'
+          }
+
+          # And the dashboard still runs when a person starts it.
+          $app = 'C:\dmarc-collector\app\DmarcMonitor.Web.dll'
+          $dotnet = 'C:\dmarc-collector\dotnet\dotnet.exe'
+          $proc = Start-Process -FilePath $dotnet `
+            -ArgumentList @($app, '--contentRoot', 'C:\dmarc-collector\app') -PassThru
+          try {
+            $code = '000'
+            foreach ($i in 1..30) {
+              Start-Sleep -Seconds 2
+              $code = & curl.exe -s -o NUL -w '%{http_code}' http://127.0.0.1:5000/
+              if ($code -match '^(2|3|4)') { break }
+            }
+            "on demand: $code"
+            if ($code -notmatch '^(2|3|4)') { throw "the dashboard did not answer when started by hand ($code)" }
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            $proc.WaitForExit(15000) | Out-Null
+          }
+
       - name: One command, from nothing
         shell: pwsh
         run: |

@@ -791,6 +791,44 @@ What it sets up, and where:
 Same arguments, PowerShell spelling: `-TenantId`, `-ClientId`, `-Mailbox`,
 `-IngestTenantId`, `-IngestClientId`, `-MakeIngestCert`, `-FromDir`, `-NoProxy`.
 
+### A machine that only collects
+
+`-CollectorOnly` installs the two scheduled tasks and nothing else: no web
+service, no proxy, no certificate, no host name.
+
+```powershell
+.\bootstrap.ps1 -CollectorOnly -MakeIngestCert -Mailbox DMARC@nrgtechservices.com `
+    -IngestTenantId <directory id> -IngestClientId <ingest application id>
+```
+
+The collector wakes hourly, reads the mailbox, stores what it finds and exits.
+`-StartWhenAvailable` is set, so a machine that was asleep or switched off
+catches up on the next opportunity rather than skipping the runs it missed.
+The DNS scan runs nightly. Between them nothing of this is running.
+
+Open the dashboard when you want to look at it — the script prints the exact
+command when it finishes, and it needs an elevated PowerShell because the
+configuration file is readable by administrators and the service account only:
+
+```powershell
+& C:\dmarc\dotnet\dotnet.exe C:\dmarc\app\DmarcMonitor.Web.dll --contentRoot C:\dmarc\app
+```
+
+Then <http://127.0.0.1:5000>. Close the window when you are done; the collector
+is a scheduled task and does not care whether the dashboard ever runs.
+
+This is the shape for a workstation, or for a machine in the corner whose job
+is to keep the reports coming in. It is **not** the shape for something other
+people need to reach: there is no sign-in and no TLS, and the app serves
+loopback only, which is what makes it safe to run this way.
+
+Two things a server would have and this does not: nothing restarts the
+collector if the machine is off at the scheduled minute beyond the catch-up
+above, and there is still no Windows backup task (see `docs/OPEN-ISSUES.md`
+10b). `dmarc backup --to <path>` run from the same elevated prompt is the
+manual equivalent, and worth a calendar reminder if the database is the only
+copy of a year of reports.
+
 Caddy needs ports 80 and 443. On a machine with IIS installed they belong to
 `http.sys`, and the script stops before installing Caddy and says so; either
 `Stop-Service W3SVC` and disable it, or run with `-NoProxy` and put IIS in
