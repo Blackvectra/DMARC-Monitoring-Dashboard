@@ -434,6 +434,53 @@ actually going into is Ubuntu on EC2, and adding Windows scheduling without a
 Windows server to watch it on would be three untested tasks that *look* like
 protection.
 
+---
+
+## 10c. Upgrading the Windows download looks like it lost your data
+
+**Area** `src/DmarcMonitor.Web/FirstRun.cs`, `deploy/windows-trial/README.txt`
+**Severity** High for the trial, which is the copy people form an opinion from.
+None on a server, where `update.sh` already runs `dmarc init-db`.
+
+Reported by somebody upgrading their own copy: *"it didn't keep data I already
+imported."* Nothing was lost - but everything about the experience says it was,
+and that is the version somebody repeats to a colleague.
+
+Two separate behaviours combine into it.
+
+**The database lives in the folder.** `dmarc.db` and `keys\` are written beside
+the executable, which is what makes the promise in the README true - delete the
+folder and every trace is gone. A new download is extracted to a *new* folder,
+which contains no database, so the app makes an empty one and the dashboard
+opens with nothing in it. The previous folder still holds everything.
+
+**Copying the database across is not enough, and nothing says so.** `FirstRun`
+creates a database only where there is effectively none, and leaves any
+existing file strictly alone - no adoption, no migration - because guessing at
+somebody's file is how data really does go missing. So an old `dmarc.db`
+carried into a new folder is opened at whatever schema it had. Against v1.1.1
+that is a database with no `mta_sts_mode` and no `raw_hash`, and the pages that
+touch them report a database they cannot read. `dmarc init-db` is the upgrade
+path and applies the migrations correctly; it is simply not mentioned anywhere
+a person upgrading would look.
+
+The whole procedure today, none of which is written down:
+
+1. close the app,
+2. copy `dmarc.db` (and `keys\`, to stay signed in) into the new folder,
+3. run `dmarc.exe init-db` there once,
+4. start it.
+
+**How to fix.** Have the application recognise on startup a database that is
+ours but behind the schema this build expects, and in local trial mode bring it
+up to date itself, logging each migration the way `init-db` prints them. Not on
+a server: migrating somebody's production database because a service restarted
+is a decision an operator makes, and `update.sh` already makes it explicitly.
+Where it will not migrate, it should say what to run rather than leave the
+pages to fail one by one. The README should also tell somebody upgrading to
+bring the database with them, since a folder per version is otherwise a
+reasonable thing to assume is disposable.
+
 ## 11. The apply path has never written to a real zone
 
 **Area** `src/DmarcMonitor.Core/Remediation/`, `dmarc fix`, the Fix page
