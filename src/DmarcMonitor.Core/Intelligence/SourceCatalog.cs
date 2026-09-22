@@ -168,6 +168,13 @@ public static class SourceCatalog
         ["sonicwall.com"]      = new("SonicWall", SourceKind.SecurityGateway),
         ["trendmicro.com"]     = new("Trend Micro", SourceKind.SecurityGateway),
         ["mailcontrol.com"]    = new("Forcepoint", SourceKind.SecurityGateway),
+        ["messagelabs.com"]    = new("Symantec Email Security", SourceKind.SecurityGateway),
+        ["antispamcloud.com"]  = new("SpamExperts", SourceKind.SecurityGateway),
+        ["mailspamprotection.com"] = new("SiteGround Spam Protection", SourceKind.SecurityGateway),
+
+        // Named for what it is rather than for who runs it: the envelope
+        // domain is all there is to go on and several products use it.
+        ["shield.security"]    = new("a hosted mail security gateway", SourceKind.SecurityGateway),
 
         // Services a customer sends through. Fixable at the vendor.
         ["sendgrid.net"]       = new("SendGrid", SourceKind.Marketing),

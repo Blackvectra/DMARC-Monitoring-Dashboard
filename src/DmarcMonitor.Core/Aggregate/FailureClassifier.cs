@@ -1,3 +1,5 @@
+using DmarcMonitor.Core.Intelligence;
+
 namespace DmarcMonitor.Core.Aggregate;
 
 /// <summary>What a failing source most likely is.</summary>
@@ -101,41 +103,6 @@ public sealed record FailingSourceFacts
 /// </summary>
 public static class FailureClassifier
 {
-    /// <summary>
-    /// The envelope domains security gateways send from.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Matched on the envelope domain rather than on an address, because the
-    /// address list of a cloud gateway changes without notice and the domain it
-    /// puts in MAIL FROM does not. Both of the gateways that account for the
-    /// bulk of the failures on the real book are identifiable this way -
-    /// <c>ipw.inkyphishfence.com</c> and <c>us.cloud-sec-av.com</c> - and an
-    /// address table would have been stale within a month.
-    /// </para>
-    /// <para>
-    /// Deliberately excludes <c>protection.outlook.com</c>. It is the envelope
-    /// of Microsoft's own inbound relay and also part of the normal path for
-    /// every Microsoft 365 tenant in the book, so matching it would file a
-    /// great deal of ordinary mail as forwarded and quietly remove it from the
-    /// compliance figure. Anything ambiguous is left to
-    /// <see cref="FailureKind.Unknown"/>.
-    /// </para>
-    /// </remarks>
-    private static readonly (string Suffix, string Name)[] Gateways =
-    [
-        ("inkyphishfence.com", "INKY Phish Fence"),
-        ("cloud-sec-av.com", "a hosted mail security gateway"),
-        ("shield.security", "a hosted mail security gateway"),
-        ("mimecast.com", "Mimecast"),
-        ("pphosted.com", "Proofpoint"),
-        ("barracudanetworks.com", "Barracuda"),
-        ("mailcontrol.com", "Forcepoint"),
-        ("messagelabs.com", "Symantec Email Security"),
-        ("antispamcloud.com", "SpamExperts"),
-        ("mailspamprotection.com", "SiteGround Spam Protection"),
-    ];
-
     public static FailureKind Classify(FailingSourceFacts facts)
     {
         ArgumentNullException.ThrowIfNull(facts);
@@ -206,8 +173,33 @@ public static class FailureClassifier
     /// this knows.
     /// </summary>
     /// <remarks>
-    /// Null means "no name", never "unknown gateway". Everything not in the
-    /// table keeps its address and is judged on the pattern alone.
+    /// <para>
+    /// Null means "no name", never "unknown gateway". Everything the catalog
+    /// does not know keeps its address and is judged on the pattern alone.
+    /// </para>
+    /// <para>
+    /// This used to carry its own table of gateway suffixes, and the two
+    /// disagreed: <c>inkyphishfence.com</c> was "INKY Phish Fence" here and
+    /// "INKY" in the catalog, and <c>cloud-sec-av.com</c> was "a hosted mail
+    /// security gateway" here while the catalog had identified it as Avanan.
+    /// So the same address had two names depending on which page asked, and
+    /// only one of them was the better answer. One table now, and this one
+    /// gained Cisco IronPort, SonicWall, Trend Micro and Proofpoint Essentials
+    /// by asking it.
+    /// </para>
+    /// <para>
+    /// Matched on the envelope domain rather than on an address, because the
+    /// address list of a cloud gateway changes without notice and the domain
+    /// it puts in MAIL FROM does not.
+    /// </para>
+    /// <para>
+    /// <c>protection.outlook.com</c> is still excluded, now by being a
+    /// MailProvider in the catalog rather than by being left out of a list. It
+    /// is Microsoft's own inbound relay and part of the normal path for every
+    /// Microsoft 365 tenant in the book; matching it would file a great deal
+    /// of ordinary mail as forwarded and quietly remove it from the compliance
+    /// figure.
+    /// </para>
     /// </remarks>
     public static string? GatewayName(IReadOnlyList<string>? envelopeDomains)
     {
@@ -215,18 +207,9 @@ public static class FailureClassifier
 
         foreach (var envelope in envelopeDomains)
         {
-            var domain = (envelope ?? "").Trim().TrimEnd('.').ToLowerInvariant();
-            if (domain.Length == 0) { continue; }
-
-            foreach (var (suffix, name) in Gateways)
+            if (SourceCatalog.Identify(envelope) is { Kind: SourceKind.SecurityGateway } gateway)
             {
-                // Suffix on a label boundary, so a domain that merely ends in
-                // the same letters is not matched.
-                if (domain.Equals(suffix, StringComparison.Ordinal)
-                    || domain.EndsWith('.' + suffix, StringComparison.Ordinal))
-                {
-                    return name;
-                }
+                return gateway.Name;
             }
         }
 

@@ -60,10 +60,58 @@ public sealed class FailureClassifierTests
         Assert.Equal(FailureKind.Forwarded, FailureClassifier.Classify(facts));
     }
 
+    /// <summary>
+    /// The name comes from the one catalog, so a gateway is called the same
+    /// thing wherever it appears.
+    /// </summary>
+    /// <remarks>
+    /// This asserted "INKY Phish Fence" while the Sources page, reading the
+    /// catalog, said "INKY" - the same address under two names depending on
+    /// which page asked. The catalog is the survivor.
+    /// </remarks>
     [Fact]
     public void AGatewayCanBeNamedSoThePageDoesNotJustSayForwarded()
     {
-        Assert.Equal("INKY Phish Fence", FailureClassifier.GatewayName(["ipw.inkyphishfence.com"]));
+        Assert.Equal("INKY", FailureClassifier.GatewayName(["ipw.inkyphishfence.com"]));
+    }
+
+    /// <summary>
+    /// And the classifier inherits everything the catalog knows, rather than
+    /// keeping a shorter list of its own.
+    /// </summary>
+    /// <remarks>
+    /// These four were in the catalog and not in the table this used to carry,
+    /// so their mail was classified as Unknown rather than as a gateway
+    /// breaking a signature in transit - which is the difference between a
+    /// customer's security product and an impersonator.
+    /// </remarks>
+    [Theory]
+    [InlineData("mx1.iphmx.com", "Cisco IronPort")]
+    [InlineData("a.ppe-hosted.com", "Proofpoint Essentials")]
+    [InlineData("gw.sonicwall.com", "SonicWall")]
+    [InlineData("relay.trendmicro.com", "Trend Micro")]
+    public void TheCatalogsGatewaysAreAllKnownHereToo(string envelope, string expected)
+    {
+        Assert.Equal(expected, FailureClassifier.GatewayName([envelope]));
+    }
+
+    /// <summary>
+    /// A mail provider is not a gateway, however much of the estate's mail it
+    /// carries.
+    /// </summary>
+    /// <remarks>
+    /// The exclusion that used to be a deliberate omission from this class's
+    /// own table and is now a consequence of the catalog's SourceKind.
+    /// protection.outlook.com is Microsoft's inbound relay and part of the
+    /// normal path for every Microsoft 365 tenant in the book; filing it as a
+    /// gateway would lift a great deal of ordinary mail out of the compliance
+    /// figure.
+    /// </remarks>
+    [Fact]
+    public void AMailProviderIsNotAGateway()
+    {
+        Assert.Null(FailureClassifier.GatewayName(["acme-com.mail.protection.outlook.com"]));
+        Assert.Null(FailureClassifier.GatewayName(["mail-eastus.outbound.protection.outlook.com"]));
     }
 
     [Fact]

@@ -445,7 +445,8 @@ public sealed class PageTests : IClassFixture<SeededApp>
 
         Assert.Contains("id=\"forwarded\"", html, StringComparison.Ordinal);
         Assert.Contains("Broken in transit by a gateway", html, StringComparison.Ordinal);
-        Assert.Contains("INKY Phish Fence", html, StringComparison.Ordinal);
+        // The catalog's name, which is what every other page calls it.
+        Assert.Contains("INKY", html, StringComparison.Ordinal);
 
         // And the sentence that stops the wrong fix being attempted.
         Assert.Contains("No DNS record fixes this", html, StringComparison.Ordinal);
