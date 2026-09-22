@@ -285,4 +285,82 @@ public sealed class CorrelationServiceTests : IDisposable
 
         Assert.Null(await SourceAsync("192.0.2.50"));
     }
+
+    /// <summary>
+    /// The row an operator actually reads.
+    /// </summary>
+    /// <remarks>
+    /// "192.3.180.38 against two clients" is homework. "ColoCrossing against
+    /// two clients" is a finding, and it is the same row.
+    /// </remarks>
+    [Fact]
+    public async Task ASourceWithAKnownReverseNameIsReportedByVendorName()
+    {
+        await StoreUnassignedAsync("a.example", Row("35.174.145.124", 5, "fail", "a.example", "fail"));
+        await new SourceNameStore(_dbPath).SaveAsync("35.174.145.124", "us.cloud-sec-av.com", answered: true);
+
+        var row = await SourceAsync("35.174.145.124");
+
+        Assert.NotNull(row);
+        Assert.True(row!.IsNamed);
+        Assert.Equal("us.cloud-sec-av.com", row.ReverseName);
+
+        // The address is still the identity; only the label changed.
+        Assert.Equal("35.174.145.124", row.SourceIp);
+        Assert.NotEqual(row.SourceIp, row.Display);
+    }
+
+    /// <summary>
+    /// The state every install is in for its first night, and the one that
+    /// must not look broken: nothing has been looked up yet.
+    /// </summary>
+    [Fact]
+    public async Task ASourceNobodyHasLookedUpStillReportsItsAddress()
+    {
+        await StoreUnassignedAsync("a.example", Row("203.0.113.77", 5, "fail", "a.example", "fail"));
+
+        var row = await SourceAsync("203.0.113.77");
+
+        Assert.NotNull(row);
+        Assert.Null(row!.ReverseName);
+        Assert.False(row.IsNamed);
+        Assert.Equal("203.0.113.77", row.Display);
+    }
+
+    /// <summary>
+    /// A reverse name the catalogue has never seen is still worth showing: it
+    /// is a domain somebody can search for, where an address is not.
+    /// </summary>
+    [Fact]
+    public async Task AnUnrecognisedReverseNameIsShownRatherThanDiscarded()
+    {
+        await StoreUnassignedAsync("a.example", Row("198.51.100.4", 5, "fail", "a.example", "fail"));
+        await new SourceNameStore(_dbPath).SaveAsync("198.51.100.4", "smtp3.some-isp.example", answered: true);
+
+        var row = await SourceAsync("198.51.100.4");
+
+        Assert.Equal("smtp3.some-isp.example", row!.Display);
+    }
+
+    /// <summary>
+    /// Naming is for reading, never for judging. A PTR is written by whoever
+    /// holds the address, so a friendly name is not evidence of anything -
+    /// and a source that authenticated nothing against several unrelated
+    /// parties stays exactly as damning with a name on it.
+    /// </summary>
+    [Fact]
+    public async Task ANameDoesNotSoftenTheVerdict()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.200", 5, "fail", "a.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("192.0.2.200", 5, "fail", "b.example", "fail"));
+
+        var before = await SourceAsync("192.0.2.200");
+        await new SourceNameStore(_dbPath).SaveAsync("192.0.2.200", "mail.colocrossing.com", answered: true);
+        var after = await SourceAsync("192.0.2.200");
+
+        Assert.True(after!.IsNamed);
+        Assert.Equal(before!.Verdict, after.Verdict);
+        Assert.Equal(before.IsCrossClient, after.IsCrossClient);
+        Assert.Equal(before.IndependentParties, after.IndependentParties);
+    }
 }

@@ -59,6 +59,34 @@ public sealed record FailingSource
     /// <summary>Seen against more than one unrelated party. Only a multi-client platform can see this.</summary>
     public bool IsCrossClient => IndependentParties > 1;
 
+    /// <summary>
+    /// What the address reverses to, or null when nothing has looked yet.
+    /// </summary>
+    public string? ReverseName { get; init; }
+
+    /// <summary>
+    /// The source as it should be written down: the vendor if the catalogue
+    /// recognises one, else the reverse name, else the address.
+    /// </summary>
+    /// <remarks>
+    /// Never empty and never a guess. An address nobody can name prints as an
+    /// address, which is what every row was before any of this existed - so
+    /// the worst case here is the old best case.
+    ///
+    /// The name is for reading, never for judging. A PTR is written by
+    /// whoever holds the address, so recognising "ColoCrossing" says who owns
+    /// the wire and nothing about whether the mail is legitimate. Every
+    /// verdict on this record still comes from what was signed and from how
+    /// many unrelated parties the address was seen against.
+    /// </remarks>
+    public string Display =>
+        SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
+        : SourceIp;
+
+    /// <summary>Whether anything better than the address is known.</summary>
+    public bool IsNamed => Display != SourceIp;
+
     public bool AuthenticatedNothing => AuthenticatedFor.Count == 0;
 
     /// <summary>
@@ -169,10 +197,18 @@ public sealed class CorrelationService(string databasePath)
                   AND EXISTS (SELECT 1 FROM aggregate_records p
                                WHERE p.source_ip = f.source_ip
                                  AND p.domain_id = f.domain_id
-                                 AND p.dmarc_result = 'pass')) AS domains_also_passed
+                                 AND p.dmarc_result = 'pass')) AS domains_also_passed,
+              -- What the address reverses to, if anything has looked. Joined
+              -- rather than resolved per row: a page cannot make a DNS query
+              -- while it renders, least of all one per row against addresses
+              -- chosen by whoever mailed the reports. Absent is ordinary and
+              -- means the nightly pass has not reached it yet, in which case
+              -- the address is printed exactly as it always was.
+              n.reverse_name                                        AS reverse_name
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             JOIN clients c ON c.id = r.client_id
+            LEFT JOIN source_names n ON n.ip = r.source_ip
             WHERE r.dmarc_result = 'fail'
               AND r.date_begin >= $since
               AND (r.override_reason IS NULL OR r.override_reason = '')
@@ -213,6 +249,7 @@ public sealed class CorrelationService(string databasePath)
                 LastSeen = lastSeen,
                 AuthenticatedFor = ParseAuthDomains(reader.IsDBNull(6) ? "" : reader.GetString(6)),
                 DomainsAlsoPassed = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                ReverseName = reader.IsDBNull(8) ? null : reader.GetString(8),
             });
         }
 

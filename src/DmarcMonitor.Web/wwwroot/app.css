@@ -637,6 +637,27 @@ section[id] { scroll-margin-top: 16px; }
    from once". */
 .spark-dot, .chart-svg .lone-point { fill: var(--accent); }
 
+/* ---- a named sending source ------------------------------------------- */
+
+/*
+   "Avanan (Check Point Harmony)" over "35.174.145.124", rather than the
+   address alone. The name is what the row is about; the address is how to
+   look it up, so it is still there and still selectable, just quieter.
+
+   A source nobody has a name for renders as a bare <code> exactly as every
+   row did before, so a table part-way through its first nightly pass is a
+   mixture rather than a column of gaps.
+*/
+.source-name { display: block; font-weight: 500; }
+
+.source-ip {
+    display: block;
+    font-size: 11px;
+    /* Addresses are compared down a column - two /24s from the same range
+       should line up - which proportional digits make impossible. */
+    font-variant-numeric: tabular-nums;
+}
+
 /* The sparkline column is fixed-width so the shapes line up down the page:
    comparison is the entire point, and shapes at differing widths cannot be
    compared. */

@@ -83,7 +83,23 @@ else
             {
                 <tr class="@Css(row.Verdict)">
                     <td><span class="pip @Css(row.Verdict)"></span></td>
-                    <td><code>@row.SourceIp</code></td>
+                    @* The name first and the address under it, because the
+                       name is what the row is about and the address is how to
+                       look it up. An unnamed source prints exactly as it
+                       always did - one line, the address - so the worst case
+                       here is the old case rather than a gap where a name
+                       should be. *@
+                    <td>
+                        @if (row.IsNamed)
+                        {
+                            <span class="source-name">@row.Display</span>
+                            <code class="source-ip muted">@row.SourceIp</code>
+                        }
+                        else
+                        {
+                            <code>@row.SourceIp</code>
+                        }
+                    </td>
                     <td class="num">
                         @if (row.IsCrossClient)
                         {
