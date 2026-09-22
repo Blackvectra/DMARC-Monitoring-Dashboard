@@ -125,7 +125,7 @@ else
                             @if (a.EverPassed) { <span class="chip fine">yes</span> }
                             else { <span class="chip urgent">never</span> }
                         </td>
-                        <td class="muted">@(a.LastSeen is { } s ? Ago(s) : "—")</td>
+                        <td class="when">@(a.LastSeen is { } s ? Ago(s) : "—")</td>
                     </tr>
                 }
             </tbody>

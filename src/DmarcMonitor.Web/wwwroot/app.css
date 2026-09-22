@@ -675,7 +675,12 @@ section[id] { scroll-margin-top: 16px; }
 .source-name { display: block; font-weight: 500; }
 
 .source-ip {
+    /* Block so it sits under the name, but only as wide as the address.
+       A plain block takes the whole cell, and .triage td code has a tinted
+       background - so a short address rendered as an eight-hundred-pixel
+       grey bar that reads as a progress meter. */
     display: block;
+    width: fit-content;
     font-size: 11px;
     /* Addresses are compared down a column - two /24s from the same range
        should line up - which proportional digits make impossible. */
@@ -714,7 +719,28 @@ section[id] { scroll-margin-top: 16px; }
 .triage td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
 .triage tbody tr:last-child td { border-bottom: 0; }
 .triage tbody tr:hover { background: var(--hover); }
+/*
+    Numbers and dates shrink to their content; the descriptive columns take
+    the slack.
+
+    Every table here is width:100%, and with five short columns a browser
+    shares the leftover width across all of them - which is why a row read
+    "Source | Sent | Failed | Signs as .......... Last seen" with six hundred
+    pixels of nothing in the middle. width:1% with nowrap is the old trick
+    for "as narrow as the content allows": the percentage cannot be honoured,
+    so the column collapses to its minimum and the remaining columns divide
+    what is left.
+
+    Reported as "overall bad layout", and this was most of it.
+*/
+.triage .num,
+.triage .when {
+    width: 1%;
+    white-space: nowrap;
+}
+
 .triage .num { text-align: right; font-variant-numeric: tabular-nums; }
+.triage .when { color: var(--muted); }
 .triage th.num { text-align: right; }
 .triage td a { font-weight: 500; color: var(--text); }
 .triage td a:hover { color: var(--link); }
@@ -1214,3 +1240,23 @@ tr.act    .needs-doing { color: var(--act); }
 .nav-fold:not([open]) > summary::after { transform: rotate(0deg); }
 
 .nav-fold > summary:hover { color: var(--text); }
+
+/* ---- two small figures, side by side ----------------------------------- */
+
+/*
+    A ring with a two-line legend, and a bar with one line under it. Each was
+    a full-width card about four fifths empty, and stacked they pushed the
+    tables that answer "what do I do" a screen further down.
+
+    minmax(0, 1fr) rather than 1fr: a grid track defaults to min-content
+    width, and an SVG or a long caption inside one will otherwise refuse to
+    shrink and overflow the row.
+*/
+.figure-pair {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
+    gap: 14px;
+    align-items: start;
+}
+
+.figure-pair > * { min-width: 0; }
