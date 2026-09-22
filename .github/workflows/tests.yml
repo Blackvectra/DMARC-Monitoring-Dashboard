@@ -110,6 +110,38 @@ jobs:
       - name: Test
         run: dotnet test src/DmarcMonitor.sln --no-build --configuration Release --verbosity normal
 
+      # A dependency with a published advisory is a finding whether or not the
+      # code here calls into it, and "it is only in the test projects" stops
+      # being an answer the moment somebody fills in a security questionnaire.
+      # This found two High advisories reaching the test projects through an
+      # old Microsoft.NET.Test.Sdk, which is exactly the kind of thing nobody
+      # goes looking for on purpose.
+      #
+      # --include-transitive because the direct references were never the
+      # problem: what ships is resolved, not what is written down.
+      #
+      # dotnet exits 0 whatever it finds, so the output is what decides - and
+      # set -o pipefail so `dotnet` itself failing is not swallowed by tee.
+      # Without it a restore error leaves audit.txt empty, the grep finds
+      # nothing, and the gate reports "No known advisories" having in fact
+      # checked nothing at all.
+      - name: Vulnerable dependencies
+        run: |
+          set -o pipefail
+          dotnet list src/DmarcMonitor.sln package --vulnerable --include-transitive 2>&1 | tee audit.txt
+          if grep -qiE '^\s*>' audit.txt; then
+            echo "::error::A dependency has a published advisory. See the table above."
+            exit 1
+          fi
+          echo "No known advisories."
+
+      # Separate step, and deliberately not failing the build. A package that
+      # is deprecated is a thing to plan for, not a thing to stop a release at
+      # four in the morning.
+      - name: Deprecated dependencies
+        continue-on-error: true
+        run: dotnet list src/DmarcMonitor.sln package --deprecated --include-transitive
+
   install:
     name: Install on a fresh Ubuntu
     runs-on: ubuntu-latest
@@ -184,6 +216,190 @@ jobs:
             echo "install.sh ran over an existing install"; exit 1
           fi
 
+      # Everything from here to the update agent is about the four scheduled
+      # jobs install.sh switches on. Until now CI checked that the unit FILES
+      # parsed and that the web app answered; nothing checked that the timers
+      # were actually enabled, and dmarc-backup and dmarc-health had never run
+      # on a machine at all - only their logic, against temporary directories,
+      # in unit tests.
+      #
+      # That is the gap worth closing. These two run unattended, as the
+      # service account, inside ProtectSystem=strict with a literal
+      # ReadWritePaths= list. A path that is right in the unit file and wrong
+      # on disk passes every test in the solution and fails at 03:20 into a
+      # journal nobody reads until the day they need a restore.
+      - name: Every scheduled job the install promised is switched on
+        run: |
+          for t in dmarc-dns.timer dmarc-prune.timer dmarc-backup.timer dmarc-health.timer; do
+            printf '%-20s %s %s\n' "$t" "$(systemctl is-enabled "$t")" "$(systemctl is-active "$t")"
+            test "$(systemctl is-enabled "$t")" = enabled
+            test "$(systemctl is-active "$t")"  = active
+          done
+
+          # And the collector deliberately is not: it cannot run until somebody
+          # supplies a certificate and a mailbox, and an hourly unit failing on
+          # an empty environment file teaches an operator to ignore it.
+          # is-enabled exits non-zero for a disabled unit, hence the guard.
+          state=$(systemctl is-enabled dmarc-ingest.timer || true)
+          echo "dmarc-ingest.timer $state"; test "$state" = disabled
+
+          systemctl list-timers --all 'dmarc-*' --no-pager
+
+      - name: The backup runs, under the sandbox it will run under every night
+        run: |
+          # install.sh takes the first one, so there is a copy before the
+          # health check below is ever asked. Its permissions matter as much
+          # as its existence: the live database is 0600, and a backup readable
+          # by every account on the machine is a copy of every customer's mail
+          # data sitting at 0644.
+          sudo ls -la /opt/dmarc/backups
+          first=$(sudo sh -c 'ls -1 /opt/dmarc/backups/dmarc-*.bak' | head -1)
+          test -n "$first"
+          echo "first backup: $first"
+          test "$(sudo stat -c '%a %U' "$first")"       = "600 dmarc"
+          test "$(sudo stat -c '%a %U' /opt/dmarc/backups)" = "700 dmarc"
+
+          # A second, started the way the timer starts it. The name carries a
+          # timestamp to the second, so this cannot collide with the one the
+          # install took minutes ago.
+          sudo systemctl start dmarc-backup
+          sudo journalctl -u dmarc-backup -n 30 --no-pager
+          test "$(systemctl show dmarc-backup -p Result --value)" = success
+          count=$(sudo sh -c 'ls -1 /opt/dmarc/backups/dmarc-*.bak' | wc -l)
+          echo "$count backup(s) held"; test "$count" -ge 2
+
+          # The copy is a real database, not a truncated file that happens to
+          # exist - which is the failure a backup has when nobody checks.
+          # Copied out under this account, because a root-owned 0600 file is
+          # one sqlite3 here cannot open and the point is to open it.
+          sudo install -m 0644 -o "$(id -un)" -g "$(id -gn)" "$first" /tmp/restore-check.db
+          test "$(sqlite3 /tmp/restore-check.db 'PRAGMA integrity_check;')" = ok
+          sqlite3 /tmp/restore-check.db "SELECT count(*) FROM aggregate_reports;"
+          rm -f /tmp/restore-check.db
+
+      - name: The health check runs, and is green on a fresh install
+        run: |
+          sudo systemctl start dmarc-health
+          sudo journalctl -u dmarc-health -n 30 --no-pager
+          test "$(systemctl show dmarc-health -p Result --value)" = success
+
+          # And silent, which is the contract of the --quiet in its ExecStart:
+          # a twice-daily check that writes something on a good day is one
+          # that gets muted, and then the broken day arrives into a muted
+          # channel. Findings are printed as "  [BROKEN] ..." / "  [check ]
+          # ...", so the absence of that shape is the absence of findings.
+          test -z "$(sudo journalctl -u dmarc-health -n 20 --no-pager -o cat | grep -E '^ *\[')"
+
+          # Green because there is nothing wrong, and it says so when asked
+          # without --quiet. Run separately rather than through a pipe, so a
+          # non-zero exit is not swallowed by tee.
+          sudo -u dmarc dmarc health --db /opt/dmarc/data/dmarc.db --backups /opt/dmarc/backups > health.out
+          cat health.out
+          grep -q 'Nothing wrong' health.out
+
+      - name: It is green because it looked, and a failure raises an alert
+        run: |
+          # A check that is always green is indistinguishable from a check
+          # that is not running. So: point it at a directory with no backups
+          # in it - the one fault a fresh install can be made to have - and it
+          # must fail, say why, and start the alert unit.
+          sudo install -d -o dmarc -g dmarc -m 0700 /opt/dmarc/data/no-backups-here
+          sudo mkdir -p /etc/systemd/system/dmarc-health.service.d
+          printf '[Service]\nEnvironment=DMARC_BACKUP_DIR=/opt/dmarc/data/no-backups-here\n' \
+            | sudo tee /etc/systemd/system/dmarc-health.service.d/ci-no-backups.conf >/dev/null
+          sudo systemctl daemon-reload
+
+          if sudo systemctl start dmarc-health; then
+            echo "::error::dmarc-health passed with no backups at all"; exit 1
+          fi
+          test "$(systemctl is-failed dmarc-health)" = failed
+          sudo journalctl -u dmarc-health -n 30 --no-pager
+          sudo journalctl -u dmarc-health --no-pager \
+            | grep -q 'There are no backups in /opt/dmarc/data/no-backups-here'
+
+          # OnFailure= starts the alert asynchronously, so wait for it rather
+          # than race it. The unit is dmarc-alert@dmarc-health.service: %N in
+          # the OnFailure= line, so the instance is the failing unit's name
+          # without its suffix.
+          for _ in $(seq 1 30); do
+            sudo journalctl -u 'dmarc-alert@dmarc-health.service' --no-pager 2>/dev/null \
+              | grep -q 'ALERT: dmarc-health failed' && break
+            sleep 1
+          done
+          sudo journalctl -u 'dmarc-alert@dmarc-health.service' -n 20 --no-pager
+          sudo journalctl -u 'dmarc-alert@dmarc-health.service' --no-pager \
+            | grep -q 'ALERT: dmarc-health failed'
+
+          # Put it back, and prove the failure was the missing backups and not
+          # something this step broke on the way past.
+          sudo rm -rf /etc/systemd/system/dmarc-health.service.d
+          sudo systemctl daemon-reload
+          sudo systemctl reset-failed dmarc-health 'dmarc-alert@dmarc-health.service'
+          sudo systemctl start dmarc-health
+          test "$(systemctl is-failed dmarc-health || true)" != failed
+
+      - name: A second mailbox collects under its own organization
+        run: |
+          # The templated unit is how an install collecting for more than one
+          # organization runs, which is the shape this is actually deployed
+          # in. It is installed but never enabled, so nothing here had ever
+          # instantiated it - and a template that lost its %i installs
+          # perfectly and only fails the day somebody adds a second mailbox.
+          mkdir -p /tmp/ci-cert
+          password=$(openssl rand -base64 24)
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
+            -subj "/CN=CI ingest" -keyout /tmp/ci-cert/k.pem -out /tmp/ci-cert/c.pem 2>/dev/null
+          ( umask 077 && CERT_PASSWORD="$password" openssl pkcs12 -export \
+              -inkey /tmp/ci-cert/k.pem -in /tmp/ci-cert/c.pem \
+              -out /tmp/ci-cert/ingest.pfx -passout env:CERT_PASSWORD )
+          sudo install -o dmarc -g dmarc -m 0600 /tmp/ci-cert/ingest.pfx /opt/dmarc/data/ingest-nrg.pfx
+
+          { printf 'DMARC_MAILBOX=dmarc@example.com\n'
+            printf 'DMARC_TENANT_ID=11111111-2222-3333-4444-555555555555\n'
+            printf 'DMARC_CLIENT_ID=22222222-3333-4444-5555-666666666666\n'
+            printf 'DMARC_CERT_PATH=/opt/dmarc/data/ingest-nrg.pfx\n'
+            printf 'DMARC_CERT_PASSWORD="%s"\n' "$password"
+            printf 'DMARC_ORGANIZATION=nrg\n'
+          } | sudo tee /etc/dmarc-ingest-nrg.env >/dev/null
+          sudo chmod 0600 /etc/dmarc-ingest-nrg.env
+
+          # It reads its own environment file, loads its own certificate and
+          # gets as far as authenticating against a tenant that does not
+          # exist - which is everything this side of the network. Exit 77, so
+          # the unit ends failed, and that is the expected outcome here.
+          set +e
+          sudo systemctl start dmarc-ingest@nrg
+          set -e
+          sudo journalctl -u 'dmarc-ingest@nrg.service' -n 40 --no-pager | tee ingest-nrg.out
+
+          # The instance name reached the description, the environment file and
+          # --org. The last is the one that matters: a mailbox collected under
+          # the wrong organization files a customer's domains into somebody
+          # else's book and says nothing.
+          grep -q 'Collect DMARC reports for nrg' ingest-nrg.out
+          grep -q "Filing new domains under the organization 'nrg'" ingest-nrg.out
+          grep -q 'Could not authenticate to Microsoft Entra' ingest-nrg.out
+
+          sudo systemctl reset-failed 'dmarc-ingest@nrg.service'
+          sudo rm -f /etc/dmarc-ingest-nrg.env /opt/dmarc/data/ingest-nrg.pfx
+          rm -rf /tmp/ci-cert
+
+      - name: An export is written readable by nobody else
+        run: |
+          # A complete dump of every customer's mail data. Written with the
+          # ordinary umask it lands 0644 - weaker than the database it was
+          # read from - so the command sets the mode as it creates the file.
+          sudo -u dmarc dmarc export --db /opt/dmarc/data/dmarc.db --out /tmp/ci-export.ndjson
+          test "$(stat -c '%a %U' /tmp/ci-export.ndjson)" = "600 dmarc"
+
+          # And again over the file that now exists, because UnixCreateMode
+          # applies only when a file is created: a second export over a
+          # world-readable file used to leave it world-readable.
+          sudo chmod 0644 /tmp/ci-export.ndjson
+          sudo -u dmarc dmarc export --db /opt/dmarc/data/dmarc.db --out /tmp/ci-export.ndjson
+          test "$(stat -c '%a %U' /tmp/ci-export.ndjson)" = "600 dmarc"
+          sudo rm -f /tmp/ci-export.ndjson
+
       - name: The update agent's path unit wakes and refuses a bogus request
         run: |
           # OPEN-ISSUES.md said no systemd path unit had ever woken. This is
@@ -212,6 +428,97 @@ jobs:
           set -e
           echo "exit $code"; test "$code" = 66
           systemctl is-active dmarc-web
+
+      - name: What the service logged
+        if: always()
+        run: sudo journalctl -u dmarc-web -n 40 --no-pager || true
+
+  # ARM was the one architecture that shipped without ever being executed.
+  # The release cross-compiled linux-arm64 from an x64 runner and checked the
+  # binary's ELF header and its size, which is not the same as knowing it
+  # starts - and docs/AWS.md recommended an ARM instance, so the recommended
+  # instance was the untested one.
+  #
+  # GitHub's arm64 runners are free for public repositories, so there is no
+  # longer a reason for that to be true. This is the whole install, on the
+  # architecture, on every pull request.
+  install-arm64:
+    name: Install on a fresh Ubuntu (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: The tools install.sh asks for
+        run: |
+          # Named rather than assumed. The arm64 image is a smaller build than
+          # ubuntu-latest and a tool that happens to be on one is not a thing
+          # to rely on being on the other.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip zip sqlite3 curl python3 file
+
+          # The units name /usr/bin/dotnet, which is where the distro packages
+          # put it; setup-dotnet puts it elsewhere. Same layout as the
+          # packages, so the units are exercised as shipped.
+          sudo ln -sf "$(command -v dotnet)" /usr/bin/dotnet
+          dotnet --list-runtimes | grep '^Microsoft.AspNetCore.App 8\.'
+
+      - name: Build the release artifacts for this machine
+        run: |
+          dotnet publish src/DmarcMonitor.Cli/DmarcMonitor.Cli.csproj \
+            --configuration Release --runtime linux-arm64 --self-contained true \
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true -p:DebugType=none \
+            --output publish/cli
+          dotnet publish src/DmarcMonitor.Web/DmarcMonitor.Web.csproj \
+            --configuration Release --output publish/dmarc-web
+          (cd publish && zip -qr ../dmarc-web.zip dmarc-web)
+          cp publish/cli/dmarc dmarc-linux-arm64
+
+          # Built here, natively - so this also proves the runner is the
+          # machine it claims to be and the RID was not quietly ignored.
+          file dmarc-linux-arm64
+          file dmarc-linux-arm64 | grep -q 'ARM aarch64'
+          test "$(uname -m)" = aarch64
+
+      - name: The binary runs with nothing beside it
+        run: |
+          # The release's own smoke test, finally executed for this
+          # architecture: an empty directory, no checkout, no schema file, no
+          # native SQLite library - and it must still create a database.
+          mkdir -p smoke && cp dmarc-linux-arm64 smoke/
+          (cd smoke && ./dmarc-linux-arm64 init-db --db proof.db && test -f proof.db)
+          ./smoke/dmarc-linux-arm64 explain src/DmarcMonitor.Core.Tests/Fixtures/google-aggregate.xml
+
+      - name: Install from nothing
+        run: sudo ./deploy/install.sh --web dmarc-web.zip --cli dmarc-linux-arm64
+
+      - name: The service answers and every scheduled job runs
+        run: |
+          systemctl is-active dmarc-web
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/)
+          echo "loopback: $code"; [[ "$code" =~ ^(200|302)$ ]]
+
+          for t in dmarc-dns.timer dmarc-prune.timer dmarc-backup.timer dmarc-health.timer; do
+            printf '%-20s %s %s\n' "$t" "$(systemctl is-enabled "$t")" "$(systemctl is-active "$t")"
+            test "$(systemctl is-enabled "$t")" = enabled
+            test "$(systemctl is-active "$t")"  = active
+          done
+
+          # The install took a backup; the health check is green because of
+          # it. Both run as the service account inside ProtectSystem=strict,
+          # and both unpack the single-file binary's native libraries first -
+          # which is the step that fails on an architecture nobody ran.
+          sudo sh -c 'ls -la /opt/dmarc/backups'
+          sudo systemctl start dmarc-backup
+          sudo systemctl start dmarc-health
+          sudo journalctl -u dmarc-backup -u dmarc-health -n 40 --no-pager
+          test "$(systemctl is-failed dmarc-backup || true)" != failed
+          test "$(systemctl is-failed dmarc-health || true)" != failed
+          sudo -u dmarc dmarc version
 
       - name: What the service logged
         if: always()
@@ -259,6 +566,13 @@ jobs:
         run: |
           systemctl is-active dmarc-web caddy dmarc-ingest.timer dmarc-update.path
           sudo journalctl -u dmarc-web -n 30 --no-pager | grep -q 'Sign-in: Microsoft Entra'
+
+          # The scheduled jobs install.sh switches on reach this path too -
+          # bootstrap.sh is a wrapper around it, and a timer that only ever
+          # gets enabled on the install.sh path is one half the installs do
+          # not have.
+          systemctl is-active dmarc-dns.timer dmarc-prune.timer dmarc-backup.timer dmarc-health.timer
+          sudo sh -c 'ls -1 /opt/dmarc/backups/dmarc-*.bak'
 
           # Through Caddy, as a visitor would arrive: TLS terminated, proxied,
           # and the app - now with sign-in configured - sends them to Entra.

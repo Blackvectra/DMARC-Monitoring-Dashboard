@@ -1,0 +1,66 @@
+# One collection run against ONE mailbox. Templated, so an install that
+# collects for more than one organization runs one instance per mailbox:
+#
+#   sudo systemctl start dmarc-ingest@nrg
+#   sudo systemctl enable --now dmarc-ingest@nrg.timer
+#   sudo systemctl enable --now dmarc-ingest@nextlayersec.timer
+#
+# The part after the @ is the instance name. It selects the environment file
+# - /etc/dmarc-ingest-<instance>.env - and nothing else, so it can be called
+# whatever makes the systemctl line readable. Naming it after the organization
+# is the obvious choice and is what install.sh writes templates for.
+#
+# WHY THIS IS SEPARATE FROM dmarc-ingest.service
+#
+# The non-templated unit still exists and still reads /etc/dmarc-ingest.env.
+# An install that has it enabled goes on working untouched across an upgrade.
+# Silently retiring it would stop a running collector and say nothing, and a
+# collector that has stopped is the failure this product is worst at noticing.
+# Use one or the other, not both against the same mailbox.
+#
+# EACH INSTANCE NEEDS ITS OWN DMARC_ORGANIZATION
+#
+# This is the whole point of running more than one. A domain nobody has seen
+# before is filed under the collecting organization, and since domains are now
+# per-organization, a mailbox collected under the wrong one creates a second
+# copy of somebody's domain rather than filing into theirs. That is silent:
+# the real domain simply stops growing. `dmarc reachability` reports a name
+# held by more than one organization for exactly this reason.
+#
+# CONCURRENCY
+#
+# Two instances may overlap - their timers are independent - and both write to
+# the same SQLite file. That is safe: the database is in WAL mode and the
+# client retries a busy database for up to thirty seconds, so concurrent
+# collectors serialize rather than failing. Verified with two writers against
+# one file: 400 of 400 rows committed, none lost.
+
+[Unit]
+Description=Collect DMARC reports for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dmarc
+EnvironmentFile=/etc/dmarc-ingest-%i.env
+ExecStart=/usr/local/bin/dmarc ingest --db /opt/dmarc/data/dmarc.db --mailbox ${DMARC_MAILBOX} --org ${DMARC_ORGANIZATION}
+
+# --org is passed explicitly rather than left to the environment. The command
+# would read DMARC_ORGANIZATION either way, but an instance whose env file is
+# missing that line should fail loudly here rather than quietly collect a
+# customer's mailbox into 'local'.
+
+# The dmarc binary is one self-contained file that unpacks its native SQLite
+# library the first time it runs, and it needs somewhere writable to do that.
+# Left unset it uses the home directory - which the sandbox below hides - and
+# the command dies with exit 159 before printing anything useful.
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net
+
+# This process holds the certificate that reads the mailbox. It needs the
+# database, the extraction directory above, and nothing else.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/dmarc/data

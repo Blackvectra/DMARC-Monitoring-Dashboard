@@ -54,6 +54,8 @@ public static class Program
                 "reachability" => await ReachabilityCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "export" => await ExportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "backup" => await BackupCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "health" => await HealthCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -129,6 +131,19 @@ public static class Program
                 assign           File a domain, and its stored history, under a client.
                   --domain <d>   Domain as it appears in the reports.
                   --client <s>   Client slug, from 'dmarc client list'.
+                erase            Remove a client and everything belonging to them,
+                                 permanently. The answer to "can we have our data
+                                 deleted". A dry run unless --apply, and --apply alone
+                                 is not enough: the slug must be typed again into
+                                 --confirm, because --apply is muscle memory by the
+                                 time anybody reaches this. Verified afterwards - every
+                                 table carrying a client_id is checked, and anything
+                                 left behind takes the whole thing back. The audit log
+                                 survives it, because proving a request was honoured is
+                                 the other half of honouring it. Says what your backups
+                                 still hold, and until when.
+                  --client <s>   Client slug.
+                  --apply --confirm <s> --by <name>
                 --org <slug>     Organization a new client belongs to. Default: local
                 --db <path>      Database file. Default: dmarc.db
 
@@ -246,6 +261,44 @@ public static class Program
                                  Every run prints the number to use next time.
                 --db <path>      Database file. Default: dmarc.db
 
+              backup             Take a verified copy of the database. The only thing here
+                                 that protects the reports - update and rollback roll the
+                                 BINARY back, and years of a customer's history had nothing.
+                                 Safe while the collector is running: the copy comes from
+                                 SQLite, not the filesystem, so it is a consistent snapshot
+                                 rather than whatever the bytes were mid-write.
+                                 The LIVE database is integrity-checked first, before
+                                 anything is written or removed: a database that has begun
+                                 to corrupt still copies, and the copy verifies, so checking
+                                 only the copy would quietly replace every good backup you
+                                 hold with a copy of the damage. A source that fails stops
+                                 the run - nothing written, nothing pruned, exit 74.
+                --to <dir>       Where to write. Put it on a different disk from --db.
+                --keep <n>       Backups to keep, newest first. Default: 14. Older ones go
+                                 only after a new copy has verified, so a failed run never
+                                 costs you yesterday's.
+                --quick          Use PRAGMA quick_check on the live database instead of
+                                 integrity_check: ~9x faster, and skips the one part worth
+                                 having - whether each index still agrees with its table.
+                                 The full check is 100ms on 17 MB and 3.8s on 313 MB, so
+                                 this is for much later than you think.
+                --db <path>      Database file. Default: dmarc.db
+
+              health             Whether this install is still doing its job. Everything it
+                                 looks at fails silently: a collector whose certificate
+                                 expired stops storing reports and says nothing, while every
+                                 screen goes on showing the figures from before it stopped.
+                                 Judged on what was STORED, not on whether a process ran - a
+                                 run against the wrong mailbox succeeds every time.
+                                 Exits 1 when something is broken, so systemd OnFailure= or
+                                 cron's mail-on-output turns it into an alert with no SMTP
+                                 configuration of its own.
+                --backups <dir>  Also check a backup was taken recently. Left out, nothing
+                                 is concluded about backups rather than assumed missing.
+                --quiet          Print nothing when there is nothing wrong. What a
+                                 scheduled run wants.
+                --db <path>      Database file. Default: dmarc.db
+
               fix              Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
@@ -335,6 +388,8 @@ public static class Program
               dmarc prune --apply
               dmarc export --days 7 --failures-only | jq -r .source_ip | sort | uniq -c
               dmarc export --format csv --out book.csv
+              dmarc backup --to /var/backups/dmarc
+              dmarc health --quiet          # silent unless something is wrong
               dmarc export --after-id 41232 | jq -c '{index:{_index:"dmarc",_id:.id}},.'
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"

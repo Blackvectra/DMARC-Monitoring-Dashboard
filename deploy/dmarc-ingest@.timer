@@ -1,0 +1,26 @@
+# Runs one mailbox's collector on the hour, give or take ten minutes.
+#
+# One timer per instance, enabled separately:
+#   sudo systemctl enable --now dmarc-ingest@nrg.timer
+#   sudo systemctl enable --now dmarc-ingest@nextlayersec.timer
+#
+# The randomised delay does double duty here. It keeps this install off the
+# exact hour, which is when everybody else's jobs run, and it staggers the
+# instances against each other - two collectors writing to one SQLite file
+# serialize safely, but there is no reason to make them queue when spreading
+# them costs nothing.
+#
+# Persistent=true catches up after the machine has been off, which matters:
+# reports left uncollected sit in the mailbox indefinitely, so a missed window
+# is a delay rather than a loss, but only if something eventually runs.
+
+[Unit]
+Description=Collect DMARC reports for %i hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

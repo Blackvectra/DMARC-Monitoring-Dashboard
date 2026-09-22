@@ -468,6 +468,190 @@ safe: it returns what it has already done, and the next run resumes.
 
 ---
 
+## Backups
+
+    dmarc backup --to /var/backups/dmarc
+    dmarc backup --to /mnt/backup --keep 30
+
+**This is the only thing here that protects the reports.** `dmarc update` and
+`rollback.sh` roll the *binary* back; years of a customer's history had
+nothing at all, on a product designed to run on one machine.
+
+On a Linux install you do not have to start it: `install.sh` enables
+`dmarc-backup.timer` (nightly, 03:20, 14 kept in `/opt/dmarc/backups`) and
+takes the first copy during the install, so a machine has a backup before
+anybody has put anything in it. That first run is also the one that proves the
+thing works *on that machine* — the service account can read the database, the
+sandbox lets it write where the unit says, the disk has room. Left to the
+timer, all of that is first attempted unattended at 03:20.
+
+Safe to run while the collector is working. The copy comes from SQLite rather
+than from the filesystem, so it is a transactionally consistent snapshot — not
+whatever the bytes happened to be mid-write. `cp dmarc.db` is not equivalent:
+in WAL mode it can catch a torn page and a `-wal` file that does not match it.
+
+### What it checks, and when
+
+**The live database is checked first — before anything is written or removed.**
+
+That ordering is the point. A database that has begun to corrupt still copies,
+and the copy verifies, because it is a faithful copy of damaged pages. Fourteen
+nights later every backup you hold is a copy of the damage and the last good one
+has been pruned away, on schedule, by this very command.
+
+So a source that fails stops the run dead: no copy is written, **nothing is
+pruned**, and it exits 74 so the alert fires the same night. Every backup you
+already had is still there — which is exactly what you restore from.
+
+Three checks, all on the source:
+
+| | Catches | 17 MB | 313 MB |
+|---|---|---|---|
+| `integrity_check` | damaged pages, indexes that disagree with their table | 100 ms | 3.8 s |
+| `foreign_key_check` | records pointing at reports that are gone — not corruption, data that lost its meaning | 14 ms | 6 ms |
+| the copy, re-opened | a copy that did not land correctly | included | included |
+
+`--quick` swaps `integrity_check` for `quick_check` — about nine times faster
+(424 ms vs 3.8 s at 313 MB), and it skips precisely the part worth having:
+whether each index still agrees with its table. On the numbers above you will
+not need it for a very long time.
+
+The counts are printed, because "0 reports" in a log has taught you something
+that a silent success would have hidden until a restore.
+
+### How fast
+
+Measured, not estimated. 313 MB is roughly **thirty years** of a
+seventeen-domain book at its current rate of 177 records a day:
+
+| | 17 MB (today) | 313 MB |
+|---|---|---|
+| whole `dmarc backup` run | **56 ms** | **~5 s** |
+
+The nightly job is not something you will notice. It takes a read lock, so a
+collector writing at the same moment waits rather than fails — the same retry
+that makes two collectors safe.
+
+Retention keeps the newest `--keep` (default 14) and runs **only after a new
+copy has verified**, so a failed run never costs you yesterday's. It matches
+only files this wrote — a directory you also keep other things in is safe.
+
+On Linux `deploy/install.sh` enables `dmarc-backup.timer` from the first day,
+nightly at 03:20, into `/opt/dmarc/backups`.
+
+### Who can read a backup
+
+A backup is a **complete copy of every client's data**. It is written `0600`
+into a directory forced to `0700`, so it is readable by the service account and
+nobody else — matching the live database rather than whatever the umask
+happened to give it.
+
+`dmarc export --out` is the same: `0600`, created that way rather than
+chmod'ed afterwards, so the file never exists with rows in it at the wrong
+permissions.
+
+Neither is **encrypted at rest**. On AWS that is EBS encryption's job (turn it
+on at launch — it cannot be added to a running volume without a snapshot
+round-trip), and S3's bucket default encryption for the offsite copy. If you
+want the file itself encrypted regardless of where it lands, pipe it through
+`age` or `gpg` in `ExecStartPost` before the sync.
+
+### Offsite
+
+A backup on the same machine as the database protects against a bad change.
+It does nothing about the failure that actually takes a single-machine install
+down, which is the machine. Set `DMARC_BACKUP_S3` in `/etc/dmarc-backup.env`
+and the unit syncs the directory after each run:
+
+    DMARC_BACKUP_S3=s3://your-bucket/dmarc
+
+On EC2 the instance role supplies the credentials, so **nothing has to be
+stored, rotated or kept out of a config file**. The sync is `aws s3 sync` in
+the unit rather than an S3 client inside the product, so swapping it for
+rclone, restic or scp is one line you edit rather than a feature you wait for.
+
+A failed upload does not fail the run — the local copy *is* the backup, and a
+network problem must not make it look as though nothing was taken.
+
+### Is it still working?
+
+    dmarc health
+    dmarc health --backups /opt/dmarc/backups
+    dmarc health --quiet            # prints nothing when nothing is wrong
+
+**Everything this looks at fails silently.** A collector whose certificate
+expired stops storing reports and says nothing — the pages go on showing the
+figures from before it stopped, and those figures look fine. A customer whose
+DMARC record somebody else edited stops being reported on, and an empty chart
+reads as "no problems" rather than "no data".
+
+Judged on what was **stored**, not on whether a process ran. A collector that
+runs perfectly every hour against a mailbox nothing is delivered to succeeds
+every time, and a run-history table would call it healthy.
+
+What it checks:
+
+| | |
+|---|---|
+| Collection, **per organization** | Nothing stored in 36 hours. Per organization because two collectors break independently, and one still working keeps the install-wide figure looking healthy while a whole customer book goes dark. |
+| Domains gone quiet | Reports stopped more than 7 days ago while others kept arriving. Not raised when collection itself is broken — then everything is quiet, and saying so 17 times buries the finding that matters. |
+| Backups | Only when you name a directory. Left out, nothing is concluded rather than assumed missing. |
+| A name in two organizations | Usually a mistyped `--org` on a collector. Reported, not judged. |
+
+**Exit 1 only when something is actually broken.** A weakness prints and exits
+0, because a check that pages every night over a stale backup is a check
+somebody mutes — and then the collector stops into a muted channel.
+
+That exit code is the whole alerting story: it needs no SMTP client, no
+webhook signer and no credentials of its own. `deploy/install.sh` enables
+`dmarc-health.timer` twice daily, and its `OnFailure=` starts
+`dmarc-alert@.service` — which ships doing nothing but writing to the journal,
+deliberately, because a unit that pretends to alert is worse than one you had
+to write. It carries commented examples for mail, Slack, SNS and
+Healthchecks.io; uncomment one, put any secret in `/etc/dmarc-alert.env`, done.
+
+If you already run monitoring, a failed systemd unit is a state Zabbix,
+Datadog, the CloudWatch agent and node_exporter all report without being told
+how.
+
+### Restoring
+
+A backup is an ordinary SQLite database. Stop the services, put it in place,
+and start them — **and delete the `-wal` and `-shm` files first:**
+
+    sudo systemctl stop dmarc-web 'dmarc-ingest*.timer' dmarc-backup.timer
+
+    # THIS LINE IS NOT OPTIONAL
+    sudo -u dmarc rm -f /opt/dmarc/data/dmarc.db-wal /opt/dmarc/data/dmarc.db-shm
+
+    sudo -u dmarc cp /opt/dmarc/backups/dmarc-20260922-032000.bak /opt/dmarc/data/dmarc.db
+    sudo -u dmarc dmarc init-db --db /opt/dmarc/data/dmarc.db    # applies any newer migrations
+    sudo -u dmarc dmarc backup --db /opt/dmarc/data/dmarc.db --to /tmp/verify --keep 1   # integrity-checks it
+    sudo systemctl start dmarc-web 'dmarc-ingest*.timer' dmarc-backup.timer
+
+**Why the `rm` matters.** The database runs in WAL mode, so recent writes live
+in `dmarc.db-wal` rather than in `dmarc.db`. Copy a backup over `dmarc.db` and
+leave the old `-wal` beside it, and SQLite replays that write-ahead log onto
+the file you just restored.
+
+Reproduced: a backup taken at 200 rows, restored with the old `-wal` left in
+place, opened showing **500 rows — 300 of them written after the backup was
+taken.** A clean shutdown checkpoints the WAL away and hides this, which is
+exactly why it bites: restores happen after crashes, where it survives.
+
+In the case this section exists for — a database that failed its integrity
+check — the damage is as likely to be in the WAL as anywhere, and this lands
+it on top of the clean copy.
+
+The `dmarc backup` line before starting the services is not ceremony: it
+integrity-checks the restored file and tells you the row counts, so you find
+out now rather than when the collector writes to it.
+
+Nothing is lost in the gap: reports stay in the mailbox until a run stores
+them, so the next collection picks up whatever arrived meanwhile.
+
+---
+
 ## Where things live
 
 | | |

@@ -80,7 +80,15 @@ once it is real and the wrong one while you are poking at it.
 **ARM is fine** (`t4g.small` on AWS, `Dpsv5` on Azure) and is the cheapest
 way to run this - about $12 a month, or a couple of dollars for a week of
 testing if you stop it in between. The release publishes `linux-arm64`
-alongside `linux-x64`; take whichever matches `uname -m`.
+alongside `linux-x64`; take whichever matches `uname -m`, which is what
+`bootstrap.sh` does for you.
+
+Both architectures are built on the machine they target and installed end to
+end by CI on every change - the whole `install.sh` run, the web app answering,
+the timers enabled, a backup taken and a health check passed. That was not
+true until recently: `linux-arm64` was cross-compiled from an x64 runner and
+published having never been executed, which is worth knowing if you are
+reading an older release's notes.
 
 ---
 

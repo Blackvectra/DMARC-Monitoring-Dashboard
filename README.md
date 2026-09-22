@@ -32,6 +32,7 @@ a client report without a mailbox or an app registration.
 | [docs/AWS.md](docs/AWS.md) | One EC2 instance, start to finish, reachable from work, home and a phone — with Entra sign-in, MFA and passkeys. |
 | [docs/FEATURE-MATRIX.md](docs/FEATURE-MATRIX.md) | What this has against what DMARC platforms generally have, and what it deliberately does not. |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Why not just run parsedmarc and OpenSearch. Where each wins, and how to run both. |
+| [docs/DATA-HANDLING.md](docs/DATA-HANDLING.md) | What it holds, where it lives, how long, and who can see it. Written to hand to a client who asks. |
 | [docs/OPEN-ISSUES.md](docs/OPEN-ISSUES.md) | What is known to be unfinished. |
 
 ## What it monitors

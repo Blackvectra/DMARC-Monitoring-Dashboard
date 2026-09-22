@@ -1,0 +1,26 @@
+# Asks twice a day whether collection is still working.
+#
+# Twice rather than hourly, and not at the top of the hour. The thing it
+# watches moves on a daily rhythm - receivers send at most once a day per
+# domain - so checking hourly would ask a question whose answer cannot have
+# changed, twelve times for nothing. What it would change is how often an
+# operator sees the unit in a log, and a check that is always there is a check
+# nobody reads.
+#
+# 09:10 and 21:10 local: mid-morning, so a collector that died overnight is
+# found at the start of a working day rather than at 03:00; and mid-evening,
+# so a failure during the day does not sit until tomorrow.
+#
+# Persistent=true so a machine that was off is asked on the way back up. That
+# matters here more than anywhere: downtime is exactly when collection stops.
+
+[Unit]
+Description=Check the DMARC collector twice a day
+
+[Timer]
+OnCalendar=*-*-* 09,21:10:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

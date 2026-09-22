@@ -1,0 +1,44 @@
+# What to do when a unit fails. Started by OnFailure= on dmarc-health,
+# and usable from any other unit the same way:
+#
+#   [Unit]
+#   OnFailure=dmarc-alert@%N.service
+#
+# %i is the name of the unit that failed, so one instance serves all of them.
+#
+# %N and not %n. Both name the failing unit; %n keeps its ".service" suffix,
+# so the alert arrives as dmarc-alert@dmarc-health.service.service - a name an
+# operator reasonably reads as a bug in the thing that is supposed to be
+# telling them about a bug. %N drops the suffix: dmarc-alert@dmarc-health.
+#
+# NOT INSTALLED WITH A DEFAULT ACTION ON PURPOSE
+#
+# As shipped this writes the failure to the journal and stops. That is
+# deliberate: a unit that pretends to alert and quietly does nothing is worse
+# than no unit at all, because it is the one you believe in. Uncomment one of
+# the lines below, or write your own, and you have an alert.
+#
+# The command has already done the hard part - it exits non-zero only when
+# something is genuinely broken, and prints what and why on stderr - so
+# anything that can run a command can carry it.
+#
+#   mail:     ExecStart=/bin/sh -c 'systemctl status %i --no-pager | mail -s "DMARC: %i failed" you@example.com'
+#   Slack:    ExecStart=/bin/sh -c 'curl -sS -X POST -H "Content-type: application/json" --data "{\"text\":\"DMARC: %i failed on $(hostname)\"}" "$SLACK_WEBHOOK"'
+#   SNS:      ExecStart=/bin/sh -c 'aws sns publish --topic-arn "$SNS_TOPIC" --subject "DMARC: %i failed" --message "$(systemctl status %i --no-pager)"'
+#   Healthchecks.io etc: ExecStart=/usr/bin/curl -fsS --retry 3 "$PING_URL/fail"
+#
+# Secrets (a webhook URL, a topic ARN) go in /etc/dmarc-alert.env, root-owned
+# and mode 0600 - not on this command line, where `ps` would show them.
+
+[Unit]
+Description=Report that %i failed
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/dmarc-alert.env
+ExecStart=/bin/sh -c 'echo "ALERT: %i failed. Nothing is configured to send this anywhere - see /etc/systemd/system/dmarc-alert@.service." >&2; exit 0'
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true

@@ -46,6 +46,7 @@ public sealed class DocumentationTests
     [InlineData("docs/INGEST-SETUP.md")]
     [InlineData("docs/AWS.md")]
     [InlineData("docs/COMPARISON.md")]
+    [InlineData("docs/DATA-HANDLING.md")]
     public void TheReadmePointsAtTheDocumentationForWhatShips(string doc)
     {
         Assert.Contains(doc, Readme(), StringComparison.Ordinal);
@@ -58,7 +59,7 @@ public sealed class DocumentationTests
         // linking nowhere.
         var root = RepoRoot().FullName;
 
-        foreach (var doc in new[] { "docs/RUNNING.md", "docs/DEPLOYING.md", "docs/INGEST-SETUP.md", "docs/OPEN-ISSUES.md", "docs/AWS.md", "docs/COMPARISON.md" })
+        foreach (var doc in new[] { "docs/RUNNING.md", "docs/DEPLOYING.md", "docs/INGEST-SETUP.md", "docs/OPEN-ISSUES.md", "docs/AWS.md", "docs/COMPARISON.md", "docs/DATA-HANDLING.md" })
         {
             Assert.True(File.Exists(Path.Combine(root, doc.Replace('/', Path.DirectorySeparatorChar))),
                 $"README links to {doc}, which does not exist");

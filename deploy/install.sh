@@ -112,6 +112,10 @@ fi
 
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$ROOT"
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "${ROOT}/data"
+# Backups default here. On this disk it protects against a bad change rather
+# than a dead machine, which is why dmarc-backup.service can sync it off the
+# box and the docs say to.
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "${ROOT}/backups"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -180,6 +184,26 @@ if [[ ! -f "$INGEST_ENV" ]]; then
 # and takes the rest from this environment. Fill these in, then:
 #   sudo systemctl enable --now dmarc-ingest.timer
 # See docs/INGEST-SETUP.md for the app registration and the certificate.
+#
+# COLLECTING MORE THAN ONE MAILBOX
+#
+# This file drives the single-mailbox unit. For several - one per organization
+# is the usual shape - copy it once per mailbox and use the templated unit
+# instead, which reads /etc/dmarc-ingest-<instance>.env:
+#
+#   sudo cp /etc/dmarc-ingest.env /etc/dmarc-ingest-acme.env
+#   sudo chmod 0600 /etc/dmarc-ingest-acme.env
+#   # edit DMARC_MAILBOX and DMARC_ORGANIZATION in the copy
+#   sudo systemctl enable --now dmarc-ingest@acme.timer
+#
+# Then disable this one, so the same mailbox is not collected twice:
+#   sudo systemctl disable --now dmarc-ingest.timer
+#
+# Give every instance its own DMARC_ORGANIZATION. Domains belong to an
+# organization, so a mailbox collected under the wrong one makes a second copy
+# of a customer's domain instead of filing into theirs - and says nothing,
+# while the real domain stops growing. `dmarc reachability` flags a name held
+# by more than one organization.
 DMARC_MAILBOX=dmarc@example.com
 DMARC_TENANT_ID=
 DMARC_CLIENT_ID=
@@ -222,10 +246,23 @@ render_unit() {
 render_unit dmarc-web.service
 render_unit dmarc-ingest.service
 render_unit dmarc-ingest.timer
+
+# The templated pair, for an install collecting more than one mailbox - one
+# instance per organization. Installed always, enabled never: which instances
+# exist is the operator's decision and depends on env files only they can
+# write. The non-templated unit above is left in place so an existing install
+# that has it enabled keeps collecting across this upgrade.
+render_unit 'dmarc-ingest@.service'
+render_unit 'dmarc-ingest@.timer'
 render_unit dmarc-dns.service
 render_unit dmarc-dns.timer
 render_unit dmarc-prune.service
 render_unit dmarc-prune.timer
+render_unit dmarc-backup.service
+render_unit dmarc-backup.timer
+render_unit dmarc-health.service
+render_unit dmarc-health.timer
+render_unit 'dmarc-alert@.service'
 
 systemctl daemon-reload
 echo "  starting dmarc-web"
@@ -247,6 +284,55 @@ systemctl enable --now dmarc-dns.timer >/dev/null
 # it, rather than left to a default that might move in a later release.
 echo "  enabling the weekly retention prune (aggregate 400 days, forensic 30)"
 systemctl enable --now dmarc-prune.timer >/dev/null
+
+# Enabled from the first day for the same reason as the prune, and one more:
+# a backup nobody turned on is the single most common way a single-machine
+# install loses years of a customer's history. Local copies only until
+# DMARC_BACKUP_S3 is set in /etc/dmarc-backup.env - which is worth doing,
+# because a backup on the same instance does not survive losing the instance.
+echo "  enabling the nightly database backup (${ROOT}/backups, 14 kept)"
+systemctl enable --now dmarc-backup.timer >/dev/null
+
+# And take one now, rather than leaving the first until 03:20 tomorrow.
+#
+# Two reasons, and the second is the one that matters. The first is that the
+# health check below treats "no backups at all" as broken and is right to -
+# so an install at 10:00 with the first copy twelve hours away fails its own
+# check at 21:10 on day one, over a fault that is really just a clock. A
+# product that pages its new owner on the evening they installed it has taught
+# them to ignore it before it has ever been right.
+#
+# The second: this is the run that proves the backup works ON THIS MACHINE -
+# that the service account can read the database, that the sandbox lets it
+# write where the unit says, that the disk has room. Left to the timer, all
+# of that is first attempted unattended at 03:20, and a failure then is a
+# journal line nobody reads until the day they need a restore.
+#
+# Never fatal. Everything above is installed and running by this point, and
+# aborting over a backup would leave a working install looking like a failed
+# one. It says what went wrong and carries on.
+echo "  taking the first backup"
+if backup_output="$(systemctl start dmarc-backup 2>&1)"; then
+    first_backup="$(ls -1t "${ROOT}/backups"/dmarc-*.bak 2>/dev/null | head -1 || true)"
+    if [[ -n "$first_backup" ]]; then
+        echo "    $(basename "$first_backup") ($(du -h "$first_backup" | cut -f1))"
+    else
+        echo "    dmarc-backup reported success but wrote nothing to ${ROOT}/backups" >&2
+    fi
+else
+    echo "    the first backup failed; the install is fine, this is not:" >&2
+    [[ -n "$backup_output" ]] && echo "      ${backup_output}" >&2
+    echo "      see why: journalctl -u dmarc-backup -n 30" >&2
+fi
+
+# The check that notices this install has stopped working. Enabled because
+# the failure it catches - a collector that quietly stopped - is the one this
+# product is worst at noticing on its own: every screen goes on showing the
+# figures from before it stopped, and those look fine. It writes to the
+# journal and fails the unit; wiring that to mail, Slack or SNS is a line in
+# /etc/systemd/system/dmarc-alert@.service.
+echo "  enabling the twice-daily health check (journal only until dmarc-alert@ is filled in)"
+systemctl enable --now dmarc-health.timer >/dev/null
 
 ok=false
 for _ in $(seq 1 30); do
@@ -279,8 +365,23 @@ Next, in this order:
   1. Put Caddy (or nginx) in front of it with a certificate - docs/DEPLOYING.md, step 4.
   2. Fill in AzureAd in ${SETTINGS}, then: sudo systemctl restart dmarc-web
   3. Fill in ${INGEST_ENV}, then: sudo systemctl enable --now dmarc-ingest.timer
+     Collecting several mailboxes? ${INGEST_ENV} says how; it is one instance
+     of dmarc-ingest@.timer per mailbox, each with its own DMARC_ORGANIZATION.
   4. For the Updates page's Install button: sudo ${HERE}/install-update-agent.sh
 
 Until step 2 is done, see it from your own machine through an SSH tunnel:
   ssh -L 5000:127.0.0.1:5000 <this server>   then open http://127.0.0.1:5000
+
+Running on their own from now on:
+  dmarc-backup.timer   nightly 03:20, ${ROOT}/backups, 14 kept. One was taken
+                       just now. A copy on this disk survives a bad change and
+                       not a dead machine - set DMARC_BACKUP_S3 in
+                       /etc/dmarc-backup.env to sync it off the box.
+  dmarc-health.timer   09:10 and 21:10. Notices a collector that has quietly
+                       stopped, which nothing else here will tell you. It
+                       fails its unit; /etc/systemd/system/dmarc-alert@.service
+                       is where that becomes mail, Slack or SNS, and until you
+                       edit it nothing is sent anywhere.
+  dmarc-dns.timer      nightly, reads each domain's published records.
+  dmarc-prune.timer    weekly, aggregate 400 days, forensic 30.
 DONE
