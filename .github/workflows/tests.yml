@@ -775,6 +775,17 @@ jobs:
           if ($out -notmatch 'inside the \.zip') { throw 'it did not name the cause' }
           if ($out -notmatch 'Extract All')      { throw 'it did not say how to fix it' }
 
+          'the launcher refused to run and explained why'
+
+          # This step asserts that a program exited 1, so $LASTEXITCODE is 1
+          # when the assertions finish - and a pwsh step inherits whatever a
+          # native command left there, however well the PowerShell after it
+          # went. Without this the step fails on its own success, which is
+          # exactly what it did the first time it ran. A failed assertion
+          # still fails the step: $ErrorActionPreference is Stop, so `throw`
+          # never reaches this line.
+          exit 0
+
       - name: The launcher and the note agree with the bundle
         shell: pwsh
         run: |
