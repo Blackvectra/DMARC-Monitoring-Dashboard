@@ -535,6 +535,80 @@ public sealed class TimeSeriesService(string databasePath)
         return rows;
     }
 
+    /// <summary>
+    /// The rows every other view is a summary of.
+    /// </summary>
+    /// <remarks>
+    /// Grouped by address, receiver, domain and disposition, which is as far
+    /// as an aggregate report can be taken without inventing precision: a
+    /// record is already a count of messages a receiver chose to group, and
+    /// there is no per-message truth underneath it to recover.
+    /// </remarks>
+    public async Task<IReadOnlyList<DetailRow>> DetailsAsync(
+        string? domain = null, int days = 30, int top = 500,
+        string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+        if (top < 1) { throw new ArgumentOutOfRangeException(nameof(top), top, "Asking for no rows returns an empty panel with nothing to explain it."); }
+
+        var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var client = Slug(clientSlug);
+        var since = Since(days);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        var named = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = $"""
+            SELECT r.source_ip,
+                   {(named ? "COALESCE((SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip), '')" : "''")},
+                   COALESCE(NULLIF(a.org_name, ''), '(not stated)'),
+                   COALESCE(d.name, ''),
+                   COALESCE(NULLIF(r.disposition, ''), 'none'),
+                   COALESCE(SUM(r.message_count), 0),
+                   COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.spf_auth_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count END), 0)
+            FROM aggregate_records r
+            JOIN aggregate_reports a ON a.id = r.report_id
+            JOIN domains d ON d.id = r.domain_id
+            {(client is not null ? "JOIN clients c ON c.id = d.client_id" : "")}
+            WHERE r.date_begin >= $since
+              {(name is not null ? "AND d.name = $domain" : "")}
+              {(client is not null ? "AND c.slug = $slug" : "")}
+              {(tenantId is not null ? "AND r.tenant_id = $tenant" : "")}
+            GROUP BY r.source_ip, 3, 4, 5
+            HAVING SUM(r.message_count) > 0
+            ORDER BY SUM(r.message_count) DESC
+            LIMIT $top
+            """;
+        Bind(command, name, client, since, tenantId);
+        command.Parameters.AddWithValue("$top", top);
+
+        var rows = new List<DetailRow>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            rows.Add(new DetailRow
+            {
+                SourceIp = reader.GetString(0),
+                ReverseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                Org = reader.GetString(2),
+                Domain = reader.GetString(3),
+                Disposition = reader.GetString(4),
+                Messages = reader.GetInt64(5),
+                DmarcPass = reader.GetInt64(6),
+                SpfPass = reader.GetInt64(7),
+                DkimPass = reader.GetInt64(8),
+            });
+        }
+
+        return rows;
+    }
+
     private static string Since(int days) =>
         DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
             .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);

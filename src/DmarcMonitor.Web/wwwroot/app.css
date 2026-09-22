@@ -1536,3 +1536,99 @@ table.mini code { font-size: 11.5px; }
     .scorecards { grid-template-columns: 1fr; }
     .overview.two { grid-template-columns: 1fr; }
 }
+
+/* ---- the report views ---------------------------------------------------
+   One window read several ways. Tabs rather than five pages, because the
+   thing being switched is the grouping, not the subject. */
+
+.tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 10px;
+}
+
+.tab {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    /* The bottom border sits on the container's, rather than under it. */
+    margin-bottom: -1px;
+    border-radius: 4px 4px 0 0;
+}
+.tab:hover { background: var(--hover); color: var(--text); }
+.tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tab:focus-visible { outline: none; box-shadow: var(--ring); }
+
+.view-total { font-size: 12px; margin-bottom: 12px; }
+
+.panel + .panel { margin-top: 12px; }
+
+.bucket-blurb {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin: -4px 0 10px;
+    max-width: 82ch;
+}
+
+table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.grid th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 11.5px;
+    color: var(--muted);
+    padding: 0 10px 7px 0;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+}
+table.grid td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+table.grid tr:last-child td { border-bottom: 0; }
+table.grid .num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 0; }
+table.grid th.num { text-align: right; padding-right: 0; }
+table.grid th + th, table.grid td + td { padding-left: 14px; }
+table.grid .num.fine { color: var(--fine); }
+table.grid .num.watch { color: var(--watch); }
+table.grid .num.urgent { color: var(--urgent); }
+
+/* A sentence about the row above it, not a row of its own data. */
+.note-row td {
+    font-size: 12px;
+    color: var(--watch);
+    padding-top: 0;
+    border-bottom: 1px solid var(--line-soft);
+}
+
+.chip-none { background: var(--dim-bg); color: var(--muted); border-color: var(--line); }
+.chip-quarantine { background: var(--watch-bg); color: var(--watch); border-color: var(--watch-bg); }
+/* Rejected mail is the policy doing its job, so it is not painted as a fault. */
+.chip-reject { background: var(--accent-bg); color: var(--accent); border-color: var(--accent-bg); }
+
+.detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.detail-head .panel-h { margin-bottom: 0; }
+
+/* A named source: the name on its line, the address under it.
+   Both classes existed in the client report's own stylesheet and nowhere
+   here, so in the application the two spans ran together and a row read
+   "a3i117.smtp2go.com203.31.36.117". Defined once, for every table that
+   names a source. */
+.src-name { display: block; font-weight: 500; }
+.src-ip {
+    display: block;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    color: var(--dim);
+}

@@ -1,0 +1,493 @@
+@page "/reports/views"
+@using DmarcMonitor.Core.Reporting
+@using DmarcMonitor.Core.Storage
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
+@using DmarcMonitor.Web.Data
+@using System.Globalization
+@inject TimeSeriesService Series
+@inject ReportStoreConnection Db
+@inject OrgContext Org
+@inject OnboardingService Onboarding
+@inject NavigationManager Nav
+@rendermode InteractiveServer
+
+<PageTitle>Report views — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Aggregate reports</h1>
+        <p class="sub">
+            The same window read five ways. Every summary in this product is one of these
+            with the rows folded up; this is where they unfold.
+        </p>
+    </div>
+    <div class="head-actions">
+        @if (_clients.Count > 1 && _access?.RestrictedClient is null)
+        {
+            <label>
+                Client
+                <select @bind="_client" @bind:after="ReloadAsync" aria-label="Client">
+                    <option value="">All clients</option>
+                    @foreach (var c in _clients)
+                    {
+                        <option value="@c.Slug">@c.Name</option>
+                    }
+                </select>
+            </label>
+        }
+        <label>
+            Window
+            <select @bind="_days" @bind:after="ReloadAsync">
+                <option value="7">7 days</option>
+                <option value="14">14 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty">
+        <h2>No database yet</h2>
+        <p>Nothing has been imported, so there are no reports to read.</p>
+    </div>
+}
+else if (_loading)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_error is not null)
+{
+    <div class="empty">
+        <h2>Could not read the database</h2>
+        <p>@_error</p>
+    </div>
+}
+else if (_details.Count == 0)
+{
+    <div class="empty">
+        <h2>No reports in this window</h2>
+        <p>Nothing was reported in the last @_days days. Try a longer window, or import reports.</p>
+    </div>
+}
+else
+{
+    <div class="tabs" role="tablist">
+        @foreach (var tab in Tabs)
+        {
+            var on = _tab == tab;
+            <button type="button" role="tab" class="tab @(on ? "on" : "")"
+                    aria-selected="@on.ToString().ToLowerInvariant()"
+                    @onclick="() => Show(tab)">@tab</button>
+        }
+    </div>
+
+    @* Every view answers the same question about a different column, so the
+       count that anchors them is stated once rather than per tab. *@
+    <p class="muted view-total">
+        @_rows.ToString("N0", CultureInfo.InvariantCulture) messages reported in the last @_days days,
+        @_details.Count.ToString("N0", CultureInfo.InvariantCulture) row(s) behind them.
+    </p>
+
+    @if (_tab == "Per sending source")
+    {
+        <section class="panel">
+            @* The services, keyed on the domain each authenticates FOR. A
+               service with two hundred addresses is one row here and two
+               hundred under Per host, and both are worth having. *@
+            <h2 class="panel-h">Services, by the domain they authenticate for</h2>
+            <table class="grid">
+                <thead>
+                    <tr><th>Service domain</th><th class="num">Volume</th><th class="num">DMARC</th><th class="num">SPF</th><th class="num">DKIM</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in _sources)
+                    {
+                        <tr>
+                            <td><code>@s.Source</code></td>
+                            <td class="num">@N(s.Messages)</td>
+                            <td class="num @RateClass(s.DmarcRate)">@Pct(s.DmarcRate)</td>
+                            <td class="num">@Pct(s.SpfRate)</td>
+                            <td class="num">@Pct(s.DkimRate)</td>
+                        </tr>
+                        @if (s.AuthenticatesButDoesNotAlign)
+                        {
+                            <tr class="note-row">
+                                <td colspan="5">
+                                    Authenticates and does not align: this service is signing as itself rather than
+                                    as the customer. It is a configuration job, not an intruder.
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+    else if (_tab == "Per result")
+    {
+        @foreach (var (heading, blurb, rows) in Buckets())
+        {
+            <section class="panel">
+                <h2 class="panel-h">@heading — @N(rows.Sum(r => r.Messages)) message(s)</h2>
+                <p class="bucket-blurb">@blurb</p>
+                @if (rows.Count == 0)
+                {
+                    <p class="muted">Nothing in this bucket.</p>
+                }
+                else
+                {
+                    <table class="grid">
+                        <thead>
+                            <tr><th>Source</th><th>Sent as</th><th>Reported by</th><th class="num">Volume</th><th class="num">SPF</th><th class="num">DKIM</th><th>Applied</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var r in rows.Take(RowsPerBucket))
+                            {
+                                <tr>
+                                    <td>@Source(r)</td>
+                                    <td><code>@r.Domain</code></td>
+                                    <td>@r.Org</td>
+                                    <td class="num">@N(r.Messages)</td>
+                                    <td class="num">@N(r.SpfPass)</td>
+                                    <td class="num">@N(r.DkimPass)</td>
+                                    <td><span class="chip @DispositionClass(r.Disposition)">@r.Disposition</span></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                    @if (rows.Count > RowsPerBucket)
+                    {
+                        <p class="panel-sub">@(rows.Count - RowsPerBucket) more row(s) not shown. Detailed stats has all of them.</p>
+                    }
+                }
+            </section>
+        }
+    }
+    else if (_tab == "Per organization")
+    {
+        <section class="panel">
+            <h2 class="panel-h">The receivers that reported</h2>
+            @* Receivers disagree, and the disagreement is the information.
+               Google accepting what Microsoft quarantines usually means a
+               signature that survives one path and not the other. *@
+            <table class="grid">
+                <thead>
+                    <tr><th>Reporting organization</th><th class="num">Reports</th><th class="num">Volume</th><th class="num">DMARC</th><th class="num">SPF</th><th class="num">DKIM</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var o in _orgs)
+                    {
+                        <tr>
+                            <td>@o.Name</td>
+                            <td class="num">@N(o.Reports)</td>
+                            <td class="num">@N(o.Messages)</td>
+                            <td class="num @RateClass(o.DmarcRate)">@Pct(o.DmarcRate)</td>
+                            <td class="num">@Pct(o.SpfRate)</td>
+                            <td class="num">@Pct(o.DkimRate)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+    else if (_tab == "Per host")
+    {
+        <section class="panel">
+            <h2 class="panel-h">The machines that sent it</h2>
+            <table class="grid">
+                <thead>
+                    <tr><th>Host</th><th class="num">Volume</th><th class="num">DMARC</th><th class="num">SPF</th><th class="num">DKIM</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var h in _hosts)
+                    {
+                        <tr>
+                            <td>
+                                @if (h.IsNamed)
+                                {
+                                    <a href="/sources/@h.SourceIp"><span class="src-name">@h.ReverseName</span></a>
+                                    <span class="src-ip">@h.SourceIp</span>
+                                }
+                                else
+                                {
+                                    <a href="/sources/@h.SourceIp"><code>@h.SourceIp</code></a>
+                                }
+                            </td>
+                            <td class="num">@N(h.Messages)</td>
+                            <td class="num @RateClass(h.DmarcRate)">@Pct(h.DmarcRate)</td>
+                            <td class="num">@Pct(h.SpfRate)</td>
+                            <td class="num">@Pct(h.DkimRate)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+    else
+    {
+        <section class="panel">
+            <div class="detail-head">
+                <h2 class="panel-h">Every row behind the summaries</h2>
+                <input class="find" type="search" placeholder="Filter by host, address, domain or receiver"
+                       aria-label="Filter rows"
+                       @bind="_find" @bind:event="oninput" />
+            </div>
+
+            @{ var shown = Filtered(); }
+
+            @if (shown.Count == 0)
+            {
+                <p class="muted">Nothing matches "@_find".</p>
+            }
+            else
+            {
+                <div class="table-scroll">
+                    <table class="grid">
+                        <thead>
+                            <tr>
+                                <th>Source</th><th>Sent as</th><th>Reported by</th>
+                                <th class="num">Volume</th><th class="num">DMARC</th>
+                                <th class="num">SPF</th><th class="num">DKIM</th><th>Applied</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var r in shown.Take(RowsShown))
+                            {
+                                <tr>
+                                    <td>@Source(r)</td>
+                                    <td><code>@r.Domain</code></td>
+                                    <td>@r.Org</td>
+                                    <td class="num">@N(r.Messages)</td>
+                                    <td class="num">@N(r.DmarcPass)</td>
+                                    <td class="num">@N(r.SpfPass)</td>
+                                    <td class="num">@N(r.DkimPass)</td>
+                                    <td><span class="chip @DispositionClass(r.Disposition)">@r.Disposition</span></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                @if (shown.Count > RowsShown)
+                {
+                    <p class="panel-sub">Showing @RowsShown of @N(shown.Count) row(s). Narrow it with the filter.</p>
+                }
+            }
+        </section>
+    }
+}
+
+@code {
+    /// <summary>
+    /// How many rows one query fetches.
+    /// </summary>
+    /// <remarks>
+    /// A real month across ten domains is a few thousand; fetching all of them
+    /// to draw a page nobody scrolls to the end of costs a circuit's memory
+    /// for no reading. The busiest are what a person looks at, and the filter
+    /// reaches the rest.
+    /// </remarks>
+    private const int MaxRows = 1500;
+
+    private const int RowsShown = 200;
+    private const int RowsPerBucket = 25;
+
+    private static readonly string[] Tabs =
+        ["Per sending source", "Per result", "Per organization", "Per host", "Detailed stats"];
+
+    private OrganizationAccess? _access;
+    private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
+    private IReadOnlyList<DetailRow> _details = [];
+    private IReadOnlyList<SourceCompliance> _sources = [];
+    private IReadOnlyList<ReportingOrg> _orgs = [];
+    private IReadOnlyList<SendingHost> _hosts = [];
+
+    private long _rows;
+    private bool _loading = true;
+    private string? _error;
+    private int _days = 30;
+    private string _client = "";
+    private string _find = "";
+    private string _tab = Tabs[0];
+
+    [SupplyParameterFromQuery(Name = "client")] private string? FromQueryClient { get; set; }
+
+    [SupplyParameterFromQuery(Name = "view")] private string? FromQueryView { get; set; }
+
+    [SupplyParameterFromQuery(Name = "days")] private int? FromQueryDays { get; set; }
+
+    protected override Task OnInitializedAsync()
+    {
+        _client = FromQueryClient ?? "";
+        if (FromQueryDays is 7 or 14 or 30 or 90) { _days = FromQueryDays.Value; }
+
+        // Only a tab this page has. A hand-typed view=whatever would otherwise
+        // render nothing with every tab unselected.
+        if (FromQueryView is { } wanted &&
+            Array.Find(Tabs, t => t.Equals(wanted, StringComparison.OrdinalIgnoreCase)) is { } match)
+        {
+            _tab = match;
+        }
+
+        return LoadAsync();
+    }
+
+    private void Show(string tab)
+    {
+        _tab = tab;
+        Remember();
+    }
+
+    private async Task ReloadAsync()
+    {
+        Remember();
+        await LoadAsync();
+    }
+
+    private void Remember() => Nav.NavigateTo(
+        Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["client"] = string.IsNullOrEmpty(_client) ? null : _client,
+            ["view"] = _tab == Tabs[0] ? null : _tab,
+            ["days"] = _days == 30 ? null : _days,
+        }),
+        replace: true);
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        if (!Db.Exists) { _loading = false; return; }
+
+        try
+        {
+            _access = await Org.GetAsync();
+            var tenant = _access.TenantId;
+
+            _clients = [.. (await Onboarding.GetClientsAsync(tenant))
+                .Where(c => c.Slug != ReportStore.UnassignedClientSlug || c.Domains > 0)];
+            if (!string.IsNullOrEmpty(_client) && _clients.All(c => c.Slug != _client)) { _client = ""; }
+            if (_access.RestrictedClient is { } only) { _client = only; }
+
+            var client = string.IsNullOrEmpty(_client) ? null : _client;
+
+            _details = await Series.DetailsAsync(days: _days, top: MaxRows, tenantId: tenant, clientSlug: client);
+            _sources = await Series.SourcesAsync(days: _days, top: 50, tenantId: tenant, clientSlug: client);
+            _orgs = await Series.ReportersAsync(days: _days, top: 50, tenantId: tenant, clientSlug: client);
+            _hosts = await Series.HostsAsync(days: _days, top: 100, tenantId: tenant, clientSlug: client);
+
+            _rows = _details.Sum(d => d.Messages);
+        }
+        catch (Exception ex)
+        {
+            // An empty table under a heading reads as "no mail", which is the
+            // opposite of what a database this page cannot read means.
+            _error = ex.Message;
+            _details = [];
+            _sources = [];
+            _orgs = [];
+            _hosts = [];
+            _rows = 0;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    /// <summary>
+    /// The three outcomes, in the order they are worth reading.
+    /// </summary>
+    /// <remarks>
+    /// The middle one is the reason this view exists. A service that
+    /// authenticates and does not align is a real sender doing real work with
+    /// its own domain in the checks - a configuration job - and any view with
+    /// only pass and fail files it beside the forgers.
+    /// </remarks>
+    private IReadOnlyList<(string Heading, string Blurb, IReadOnlyList<DetailRow> Rows)> Buckets() =>
+    [
+        ("DMARC correct",
+         "A check passed and it was about the domain recipients see. This is mail arriving as you intended.",
+         [.. _details.Where(r => r.Aligned).OrderByDescending(r => r.Messages)]),
+
+        ("Authenticated, not aligned",
+         "SPF or DKIM passed for a different domain from the one in the From line. Usually a service signing as "
+         + "itself: real mail, real sender, and it counts for nothing under DMARC until it is configured to sign as you.",
+         [.. _details.Where(r => r.AuthenticatedNotAligned).OrderByDescending(r => r.Messages)]),
+
+        ("Invalid — neither check passed",
+         "Nothing verified at all. Forwarding and mailing lists land here legitimately; so does anybody sending as you.",
+         [.. _details.Where(r => r.Invalid).OrderByDescending(r => r.Messages)]),
+    ];
+
+    private IReadOnlyList<DetailRow> Filtered()
+    {
+        var find = _find.Trim();
+        if (find.Length == 0) { return _details; }
+
+        return
+        [
+            .. _details.Where(r =>
+                r.SourceIp.Contains(find, StringComparison.OrdinalIgnoreCase)
+                || r.ReverseName.Contains(find, StringComparison.OrdinalIgnoreCase)
+                || r.Domain.Contains(find, StringComparison.OrdinalIgnoreCase)
+                || r.Org.Contains(find, StringComparison.OrdinalIgnoreCase))
+        ];
+    }
+
+    private static RenderFragment Source(DetailRow row) => builder =>
+    {
+        // The name if there is one, with the address under it. Nobody
+        // recognises an address, and nobody can ask their host about a name
+        // without one.
+        builder.OpenElement(0, "a");
+        builder.AddAttribute(1, "href", $"/sources/{row.SourceIp}");
+
+        if (row.IsNamed)
+        {
+            builder.OpenElement(2, "span");
+            builder.AddAttribute(3, "class", "src-name");
+            builder.AddContent(4, row.ReverseName);
+            builder.CloseElement();
+            builder.CloseElement();
+
+            builder.OpenElement(5, "span");
+            builder.AddAttribute(6, "class", "src-ip");
+            builder.AddContent(7, row.SourceIp);
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(8, "code");
+        builder.AddContent(9, row.SourceIp);
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private static string N(long n) => n.ToString("N0", CultureInfo.InvariantCulture);
+
+    private static string Pct(double rate) =>
+        rate.ToString("0.#", CultureInfo.InvariantCulture) + "%";
+
+    private static string RateClass(double rate) => rate switch
+    {
+        >= ClientReport.HealthyPassRate => "fine",
+        >= 80 => "watch",
+        _ => "urgent",
+    };
+
+    /// <summary>
+    /// What the receiver did. Reject is the policy working, not a fault, so it
+    /// is not coloured as one.
+    /// </summary>
+    private static string DispositionClass(string disposition) => disposition switch
+    {
+        "reject" => "chip-reject",
+        "quarantine" => "chip-quarantine",
+        _ => "chip-none",
+    };
+}

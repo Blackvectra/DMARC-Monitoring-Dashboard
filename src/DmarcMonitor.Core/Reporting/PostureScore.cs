@@ -84,6 +84,53 @@ public sealed record SendingHost
 }
 
 /// <summary>
+/// One line of the detailed view: an address, the receiver that reported it,
+/// the domain it sent as, and what was done about it.
+/// </summary>
+/// <remarks>
+/// Grouped no further than this on purpose. Every summary in the product
+/// gathers these rows by one column or another, and the moment somebody
+/// disbelieves a summary - which is the moment that matters - they need the
+/// rows it was made of.
+/// </remarks>
+public sealed record DetailRow
+{
+    public required string SourceIp { get; init; }
+    public string ReverseName { get; init; } = "";
+    public string Org { get; init; } = "";
+    public string Domain { get; init; } = "";
+
+    /// <summary>What the receiver did: none, quarantine or reject.</summary>
+    public string Disposition { get; init; } = "none";
+
+    public long Messages { get; init; }
+    public long DmarcPass { get; init; }
+    public long SpfPass { get; init; }
+    public long DkimPass { get; init; }
+
+    public string Display => ReverseName.Length > 0 ? ReverseName : SourceIp;
+    public bool IsNamed => ReverseName.Length > 0;
+
+    /// <summary>Passed DMARC: a check passed AND it was about the visible domain.</summary>
+    public bool Aligned => Messages > 0 && DmarcPass == Messages;
+
+    /// <summary>
+    /// Something verified, but for the wrong domain.
+    /// </summary>
+    /// <remarks>
+    /// The bucket worth its own heading. These are almost always a real
+    /// service sending real mail, authenticating perfectly as itself, and
+    /// counting for nothing - which is a configuration job rather than a
+    /// threat, and reads as a threat in any view that only has two buckets.
+    /// </remarks>
+    public bool AuthenticatedNotAligned =>
+        DmarcPass < Messages && (SpfPass > 0 || DkimPass > 0);
+
+    /// <summary>Neither check passed at all.</summary>
+    public bool Invalid => DmarcPass == 0 && SpfPass == 0 && DkimPass == 0;
+}
+
+/// <summary>
 /// One receiver that reported, and what it saw.
 /// </summary>
 /// <remarks>
