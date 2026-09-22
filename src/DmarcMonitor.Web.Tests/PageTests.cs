@@ -225,6 +225,55 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("matched the domain recipients see", panel, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A URL that matches nothing answers with the page that says so, not a
+    /// blank screen.
+    /// </summary>
+    /// <remarks>
+    /// The middleware for this was in place and did nothing. With no explicit
+    /// UseRouting the framework inserts routing at the top of the pipeline, so
+    /// by the time the 404 came back up routing had already happened;
+    /// re-executing changed the path and nothing routed it again. The answer
+    /// was 404 with zero bytes - a white page with no layout and no way back -
+    /// which is exactly what that middleware exists to prevent.
+    ///
+    /// Asserted on the body rather than the status, because the status was
+    /// right the whole time.
+    /// </remarks>
+    [Fact]
+    public async Task AMistypedUrlGetsThePageThatSaysSoRatherThanNothing()
+    {
+        var response = await Client().GetAsync("/no-such-page-here");
+
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, response.StatusCode);
+
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.NotEmpty(body);
+        Assert.Contains("No such page", body, StringComparison.OrdinalIgnoreCase);
+
+        // And the layout around it, so there is a way back.
+        Assert.Contains("DMARC Monitor", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A sending mail server asking for a policy that is not there gets a
+    /// clean 404, never a sign-in redirect.
+    /// </summary>
+    /// <remarks>
+    /// Re-executing a 404 runs it back through the pipeline as a request for a
+    /// page, and that page needs authentication. Senders do not follow
+    /// redirects when fetching a policy (RFC 8461 3.3), so a 302 to Entra is
+    /// the wrong answer to a machine that cannot sign in.
+    /// </remarks>
+    [Fact]
+    public async Task AMissingMtaStsPolicyIsStillACleanRefusal()
+    {
+        var response = await Client().GetAsync("/.well-known/mta-sts.txt");
+
+        Assert.NotEqual(System.Net.HttpStatusCode.Redirect, response.StatusCode);
+        Assert.NotEqual(System.Net.HttpStatusCode.Found, response.StatusCode);
+    }
+
     [Fact]
     public async Task AWideTableScrollsAtEveryWidthRatherThanOnlyOnAPhone()
     {

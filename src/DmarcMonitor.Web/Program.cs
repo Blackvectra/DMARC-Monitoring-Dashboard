@@ -181,6 +181,15 @@ app.UseWhen(
     context => !context.Request.Path.StartsWithSegments("/.well-known"),
     branch => branch.UseStatusCodePagesWithReExecute("/not-found"));
 
+// Explicit, and it has to be HERE: below the re-execute and above the
+// endpoints. Without it the framework inserts routing at the TOP of the
+// pipeline, so by the time a 404 comes back up, routing has already happened
+// and re-executing only changes the path - nothing routes it again, no
+// endpoint matches, and the answer is a 404 with an empty body. Which is
+// precisely what the middleware above exists to prevent, and what it was
+// quietly doing.
+app.UseRouting();
+
 app.UseStaticFiles();
 app.UseAntiforgery();
 
