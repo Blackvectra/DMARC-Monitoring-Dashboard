@@ -113,6 +113,22 @@ else
                 @if (d is not null)
                 {
                     <span class="muted provider">via @d.ProviderName</span>
+
+                    @* Every finding in this section is a live reading of DNS
+                       and of what the policy host serves, and both of those
+                       change minutes after somebody publishes a record - which
+                       is exactly when this page gets looked at. Without this
+                       the only way to ask again was to reload the whole page
+                       and wait for every domain to be re-read.
+
+                       Reported as a bug, and it was one: a domain that had
+                       just had MTA-STS published correctly was still being
+                       told "there is no host at mta-sts.<domain>", with
+                       nothing on screen offering to look again. *@
+                    <button class="link-button" disabled="@(_rechecking is not null)"
+                            @onclick="() => RecheckAsync(row.Domain)">
+                        @(_rechecking == row.Domain ? "Checking…" : "Check again")
+                    </button>
                 }
             </h2>
 
@@ -147,11 +163,23 @@ else
                 }
                 else if (d.ReadyFor is { } next && next != d.CurrentPolicy && !d.Plans.Any(p => p.Type == ChangeType.DmarcPolicy && p.Summary.Contains("Move ", StringComparison.Ordinal)))
                 {
-                    <div class="form-row">
-                        <button class="primary" @onclick="() => PlanPolicyAsync(d.Domain, next)">Plan the move to p=@next</button>
-                    </div>
+                    @if (_canEscalate)
+                    {
+                        <div class="form-row">
+                            <button class="primary" @onclick="() => PlanPolicyAsync(d.Domain, next)">Plan the move to p=@next</button>
+                        </div>
+                    }
+                    else
+                    {
+                        @* Still say the domain is ready, because noticing that
+                           is the work a tech does and the reason an engineer
+                           gets asked. Withholding the finding as well as the
+                           button would mean nobody without the role ever knows
+                           there is a decision waiting. *@
+                        <p class="sub">Ready for <code>p=@next</code>. An engineer raises the policy.</p>
+                    }
                 }
-                else if (d.CurrentPolicy is "none" or "quarantine" && !d.Plans.Any(p => p.Summary.Contains("Move ", StringComparison.Ordinal)))
+                else if (_canEscalate && d.CurrentPolicy is "none" or "quarantine" && !d.Plans.Any(p => p.Summary.Contains("Move ", StringComparison.Ordinal)))
                 {
                     <div class="form-row">
                         @* Read with a default and written explicitly. @bind to a
@@ -270,9 +298,25 @@ else
                             <p class="sub">
                                 No policy has been created for this domain yet, so there is no version to
                                 announce and the <code>_mta-sts</code> record is not shown — publishing an id
-                                this app does not serve is worse than publishing nothing. Create one first:
-                                <code>dmarc mta-sts set --domain @d.Domain</code>
+                                this app does not serve is worse than publishing nothing.
                             </p>
+                            @if (_canOperate)
+                            {
+                                @* The button this page used to print a command
+                                   instead of. Testing mode only: it reports
+                                   failures and delivers the mail anyway, so it
+                                   cannot lose a message. Enforce is the mode
+                                   that refuses mail, and it stays a separate,
+                                   deliberate act. *@
+                                <button class="primary" disabled="@_busy"
+                                        @onclick="() => CreatePolicyAsync(d.Domain)">
+                                    Create the policy, in testing mode
+                                </button>
+                                <p class="sub">
+                                    Reads this domain's MX records and serves a policy listing them. Nothing
+                                    is published to DNS by this, and nothing is refused while it is in testing.
+                                </p>
+                            }
                         }
                     </details>
                 }
@@ -363,6 +407,10 @@ else
 
     /// <summary>Whether this person may change DNS. A viewer sees every plan and no button.</summary>
     private bool _canOperate;
+
+    // Separate from _canOperate because planning a policy move is still an
+    // operation: a viewer is stopped by the first, a tech by this one.
+    private bool _canEscalate;
     private IReadOnlyList<AppliedChange>? _history;
     private string? _error;
     private string? _message;
@@ -449,6 +497,7 @@ else
             var access = await Org.GetAsync();
             _tenant = access.TenantId;
             _canOperate = access.CanOperate;
+            _canEscalate = access.CanEscalatePolicy;
             _rows = await Fixes.DomainsAsync(_tenant, access.RestrictedClient);
             _history = await Fixes.HistoryAsync(_tenant, access.RestrictedClient);
             _pending = _rows.Count;
@@ -485,8 +534,46 @@ else
         }
     }
 
+    /// <summary>The domain being re-read, so its button can say so.</summary>
+    private string? _rechecking;
+
+    /// <summary>
+    /// Reads DNS and the policy host for one domain again.
+    /// </summary>
+    /// <remarks>
+    /// One domain rather than the page, because the reason to press it is
+    /// always "I just changed this one" - and re-reading eighteen domains to
+    /// answer a question about one is how a refresh becomes something nobody
+    /// presses.
+    /// </remarks>
+    private async Task RecheckAsync(string domain)
+    {
+        if (_rechecking is not null) { return; }
+        if (!_domains.TryGetValue(domain, out var current)) { return; }
+
+        _rechecking = domain;
+        try
+        {
+            _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, null, _tenant);
+        }
+        catch (Exception ex)
+        {
+            // A failed re-read must not take the section away. The finding on
+            // screen is still the last thing that was true.
+            _error = ex.Message;
+        }
+        finally
+        {
+            _rechecking = null;
+        }
+    }
+
     private async Task PlanPolicyAsync(string domain, string? policy)
     {
+        // Checked here and not only where the buttons are drawn. The buttons
+        // are the reason somebody cannot do this by accident; this is the
+        // reason they cannot do it on purpose.
+        if (!_canEscalate) { return; }
         if (string.IsNullOrEmpty(policy) || !_domains.TryGetValue(domain, out var current)) { return; }
 
         _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, policy, _tenant);
@@ -509,6 +596,36 @@ else
         {
             var outcome = await Fixes.ApplyAsync(plan, await WhoAsync(), reason);
             Set(outcome.Message, isError: !outcome.Applied);
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Creates the policy this product serves for a domain, so the record
+    /// that announces it can then be published.
+    /// </summary>
+    /// <remarks>
+    /// The role check is repeated here because a hidden button is not a
+    /// permission: the handler runs on the server, and the only thing
+    /// stopping a Viewer is this line.
+    /// </remarks>
+    private async Task CreatePolicyAsync(string domain)
+    {
+        if (!_canOperate) { return; }
+
+        _busy = true;
+        try
+        {
+            Set(await Fixes.CreatePolicyAsync(domain, await WhoAsync()), isError: false);
         }
         catch (Exception ex)
         {

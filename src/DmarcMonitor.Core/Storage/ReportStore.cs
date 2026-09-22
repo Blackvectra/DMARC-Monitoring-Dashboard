@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Forensic;
 using DmarcMonitor.Core.Tls;
 using Microsoft.Data.Sqlite;
 
@@ -372,6 +373,111 @@ public sealed class ReportStore
     }
 
     /// <summary>
+    /// Saves a DMARC failure report. Returns the id, or null when already present.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The third report type, and the first one whose rows are correspondence
+    /// rather than statistics. An aggregate report says a thousand messages
+    /// failed; this is one of them, with the envelope, the subject and the
+    /// headers of a real message that a real person sent or received.
+    /// </para>
+    /// <para>
+    /// Two consequences are in the code rather than in a policy document. The
+    /// parser has already dropped the message body, so what arrives here is
+    /// headers and nothing else. And retention for this table is separate and
+    /// shorter than for aggregate data - thirty days against four hundred -
+    /// which RetentionService enforces and Retention refuses to let anybody
+    /// configure the other way round.
+    /// </para>
+    /// </remarks>
+    /// <param name="arrivedAt">
+    /// When the message carrying this report arrived, or null when unknown.
+    /// Same reasoning as the other two: null rather than a stand-in.
+    /// </param>
+    public async Task<string?> SaveForensicAsync(
+        ForensicReport report, string rawContent, string? sourceMessageId = null,
+        DateTimeOffset? arrivedAt = null, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        if (string.IsNullOrWhiteSpace(report.Domain)) { return null; }
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+        var tx = (SqliteTransaction)transaction;
+
+        var ids = await EnsureDomainAsync(connection, tx, report.Domain, _organization, ct).ConfigureAwait(false);
+
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = tx;
+            command.CommandText = """
+                INSERT INTO forensic_reports
+                  (tenant_id, client_id, domain_id,
+                   arrival_date, source_ip, return_path, header_from, subject, message_id,
+                   dkim_result, spf_result, dkim_domain, auth_failure_type,
+                   delivery_result, reported_by,
+                   raw_headers, source_message_id, received_at, ingested_at, raw_hash)
+                VALUES
+                  ($tenant, $client, $domain,
+                   $arrival, $ip, $return, $from, $subject, $mid,
+                   $dkim, $spf, $dkimDomain, $failure,
+                   $delivery, $by,
+                   $headers, $msg, $received, $ingested, $hash)
+                """;
+            command.Parameters.AddWithValue("$tenant", ids.TenantId);
+            command.Parameters.AddWithValue("$client", ids.ClientId);
+            command.Parameters.AddWithValue("$domain", ids.DomainId);
+            command.Parameters.AddWithValue(
+                "$arrival", report.ArrivalDate is { } at ? Iso(at) : (object)DBNull.Value);
+            command.Parameters.AddWithValue("$ip", Nullable(report.SourceIp));
+            command.Parameters.AddWithValue("$return", Nullable(report.ReturnPath));
+            command.Parameters.AddWithValue("$from", Nullable(report.HeaderFrom));
+            command.Parameters.AddWithValue("$subject", Nullable(report.Subject));
+            command.Parameters.AddWithValue("$mid", Nullable(report.MessageId));
+            command.Parameters.AddWithValue("$dkim", Nullable(report.DkimResult));
+            command.Parameters.AddWithValue("$spf", Nullable(report.SpfResult));
+            command.Parameters.AddWithValue("$dkimDomain", Nullable(report.DkimDomain));
+            command.Parameters.AddWithValue("$failure", Nullable(report.AuthFailureType));
+            command.Parameters.AddWithValue("$delivery", Nullable(report.DeliveryResult));
+            command.Parameters.AddWithValue("$by", Nullable(report.ReportedBy));
+            command.Parameters.AddWithValue("$headers", Nullable(report.ReportedHeaders));
+            command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
+
+            // received_at is NOT NULL here, unlike the other two tables, and
+            // the arrival the receiver stated is the best answer there is:
+            // these are individual messages, so it is a real timestamp for a
+            // real event rather than the end of a reporting window.
+            command.Parameters.AddWithValue(
+                "$received", Iso(arrivedAt ?? report.ArrivalDate ?? DateTimeOffset.UtcNow));
+            command.Parameters.AddWithValue("$ingested", Iso(DateTimeOffset.UtcNow));
+            command.Parameters.AddWithValue("$hash", Sha256(rawContent));
+
+            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+        catch (SqliteException ex) when (IsAlreadyStored(ex))
+        {
+            await transaction.RollbackAsync(ct).ConfigureAwait(false);
+            return null;
+        }
+
+        // The row id, read back rather than generated: this table keys on the
+        // rowid that every other index here hangs off, which the schema chose
+        // long before anything wrote to it.
+        string id;
+        await using (var last = connection.CreateCommand())
+        {
+            last.Transaction = tx;
+            last.CommandText = "SELECT CAST(last_insert_rowid() AS TEXT)";
+            id = (string)(await last.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
+        }
+
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        return id;
+    }
+
+    /// <summary>
     /// Whether this is the database refusing a report it already holds, as
     /// opposed to refusing it for any other reason.
     /// </summary>
@@ -523,6 +629,264 @@ public sealed class ReportStore
         "mta_sts_policies",
     ];
 
+    /// <summary>
+    /// Every table carrying a denormalized tenant_id alongside a client_id.
+    ///
+    /// Moving a client to another organization has to move all of it. The
+    /// tenant_id on these tables is not a cache of the client's - it is what
+    /// every read filters on, because a boundary enforced by remembering to
+    /// write a JOIN is not a boundary. Update the clients row alone and the
+    /// customer's whole history stays filed under the organization they just
+    /// left: invisible from the new one, and still counted by the old one.
+    ///
+    /// Spelled out rather than discovered at run time so the SQL stays
+    /// greppable; ClientMoveTests recomputes the set from the live schema and
+    /// fails if a new table appears that is not handled here.
+    ///
+    /// Deliberately excludes the four tables that carry tenant_id WITHOUT a
+    /// client_id - users, threat_indicators, audit_log and the tenants row
+    /// itself. Those belong to the organization rather than to any customer
+    /// in it, and taking the audit log along would rewrite the record of who
+    /// did what while they were somewhere else.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ClientScopedTables =
+    [
+        "alerts",
+        "aggregate_records",
+        "aggregate_reports",
+        "client_contacts",
+        "client_settings",
+        "compliance_scores",
+        "cousin_domains",
+        "dkim_selectors",
+        "dns_change_plans",
+        "dns_changes",
+        "dns_drift_events",
+        "dns_provider_configs",
+        "dns_snapshots",
+        "domains",
+        "enforcement_assessments",
+        "forensic_reports",
+        "ingest_log",
+        "mta_sts_policies",
+        "senders",
+        "spf_flatten_state",
+        "tls_failure_details",
+        "tls_reports",
+        "user_client_access",
+    ];
+
+    /// <summary>What happened when a client was asked to move organization.</summary>
+    public enum MoveOutcome
+    {
+        Moved,
+        ClientNotFound,
+        OrganizationNotFound,
+
+        /// <summary>A different client in the destination already holds this slug.</summary>
+        SlugTaken,
+
+        /// <summary>It is already there.</summary>
+        AlreadyThere,
+
+        /// <summary>Unassigned is not a customer. Every organization has its own.</summary>
+        NotMovable,
+
+        /// <summary>
+        /// Several organizations hold a client with this slug, and none was
+        /// named as the one to move.
+        /// </summary>
+        /// <remarks>
+        /// Reachable only for a master, who is the one person able to see
+        /// more than one organization at a time. Anybody else is already
+        /// scoped to theirs. Guessing here would move somebody else's
+        /// customer.
+        /// </remarks>
+        Ambiguous,
+    }
+
+    /// <summary>
+    /// Changes a client's display name. The slug never moves.
+    /// </summary>
+    /// <remarks>
+    /// The slug is printed in report filenames and has been sent to the
+    /// customer, so it is permanent by design; the name is what a person
+    /// reads and is the thing with a typo in it. "Dakota Valley railRoad" was
+    /// on every report that client received and could not be corrected
+    /// anywhere in this product.
+    /// </remarks>
+    public async Task<bool> RenameClientAsync(
+        string slug, string name, string? tenantId = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(slug);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE clients SET name = $name, updated_at = $now
+            WHERE slug = $slug AND slug <> $unassigned
+              AND deleted_at IS NULL
+              AND ($tenant IS NULL OR tenant_id = $tenant)
+            """;
+        command.Parameters.AddWithValue("$name", name.Trim());
+        command.Parameters.AddWithValue("$now", Iso(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$slug", slug.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$unassigned", UnassignedClientSlug);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+
+        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0;
+    }
+
+    /// <summary>
+    /// Moves a client, its domains and its whole history into another
+    /// organization.
+    /// </summary>
+    /// <remarks>
+    /// The operation an install needs and did not have. A client can be
+    /// CREATED in an organization; nothing could move one afterwards - and
+    /// everybody imports reports first, so everybody's customers start in the
+    /// default organization with no way out except deleting and recreating
+    /// them, which burns the slug already printed on sent reports.
+    ///
+    /// One transaction over every scoped table. A half-moved client is worse
+    /// than an unmoved one: its reports answer to neither organization, so it
+    /// reads as a customer who has never sent mail.
+    /// </remarks>
+    /// <param name="fromTenantId">
+    /// The organization the client is being moved OUT of, or null to find it
+    /// by slug alone.
+    /// </param>
+    public async Task<MoveOutcome> MoveClientAsync(
+        string clientSlug, string toOrganizationSlug, string? fromTenantId = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
+        ArgumentException.ThrowIfNullOrWhiteSpace(toOrganizationSlug);
+
+        var slug = clientSlug.Trim().ToLowerInvariant();
+        var org = toOrganizationSlug.Trim().ToLowerInvariant();
+
+        // Every organization has its own Unassigned, and it is a waiting room
+        // rather than a customer. Moving one would merge two organizations'
+        // unfiled domains, which is the one thing this layer exists to stop.
+        if (slug.Equals(UnassignedClientSlug, StringComparison.OrdinalIgnoreCase))
+        {
+            return MoveOutcome.NotMovable;
+        }
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var transaction = (Microsoft.Data.Sqlite.SqliteTransaction)
+            await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        // Scoped by the caller's organization when there is one, and checked
+        // for ambiguity when there is not.
+        //
+        // Slugs are unique per organization rather than globally, so the same
+        // customer name in two organizations is a supported state - and a
+        // lookup by slug alone then silently picks whichever row the database
+        // returns first. Caught by the full suite: with one acme-corp in each
+        // of two organizations, a move reported "already there" because it
+        // had found the destination's client rather than the one being moved.
+        var client = await ScalarAsync(
+            connection, transaction,
+            """
+            SELECT id || '|' || tenant_id FROM clients
+            WHERE slug = $slug AND deleted_at IS NULL
+              AND ($from = '' OR tenant_id = $from)
+            ORDER BY tenant_id
+            LIMIT 1
+            """,
+            [("$slug", slug), ("$from", fromTenantId ?? "")], ct).ConfigureAwait(false);
+
+        if (client is null) { return MoveOutcome.ClientNotFound; }
+
+        if (fromTenantId is null)
+        {
+            var second = await ScalarAsync(
+                connection, transaction,
+                // CAST because the helper reads strings: a bare COUNT(*)
+                // comes back as a long and would be dropped, leaving the
+                // ambiguity check silently never firing.
+                "SELECT CAST(COUNT(*) AS TEXT) FROM clients WHERE slug = $slug AND deleted_at IS NULL",
+                [("$slug", slug)], ct).ConfigureAwait(false);
+
+            if (second is not null && int.TryParse(second, out var held) && held > 1)
+            {
+                return MoveOutcome.Ambiguous;
+            }
+        }
+
+        var parts = client.Split('|', 2);
+        var clientId = parts[0];
+        var fromTenant = parts[1];
+
+        var toTenant = await ScalarAsync(
+            connection, transaction,
+            "SELECT id FROM tenants WHERE slug = $org AND deleted_at IS NULL",
+            [("$org", org)], ct).ConfigureAwait(false);
+
+        if (toTenant is null) { return MoveOutcome.OrganizationNotFound; }
+        if (string.Equals(toTenant, fromTenant, StringComparison.Ordinal)) { return MoveOutcome.AlreadyThere; }
+
+        // Slugs are unique within an organization and permanent, so a
+        // collision has to be found before anything moves rather than after.
+        var clash = await ScalarAsync(
+            connection, transaction,
+            "SELECT id FROM clients WHERE slug = $slug AND tenant_id = $to AND deleted_at IS NULL",
+            [("$slug", slug), ("$to", toTenant)], ct).ConfigureAwait(false);
+
+        if (clash is not null) { return MoveOutcome.SlugTaken; }
+
+        await using (var move = connection.CreateCommand())
+        {
+            move.Transaction = transaction;
+            move.CommandText = "UPDATE clients SET tenant_id = $to, updated_at = $now WHERE id = $id";
+            move.Parameters.AddWithValue("$to", toTenant);
+            move.Parameters.AddWithValue("$now", Iso(DateTimeOffset.UtcNow));
+            move.Parameters.AddWithValue("$id", clientId);
+            await move.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        foreach (var table in ClientScopedTables)
+        {
+            await using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+
+            // The table name is from a constant list in this file, never from
+            // a caller, so it is interpolated; the values are all bound.
+            update.CommandText = $"UPDATE {table} SET tenant_id = $to WHERE client_id = $id";
+            update.Parameters.AddWithValue("$to", toTenant);
+            update.Parameters.AddWithValue("$id", clientId);
+            await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        return MoveOutcome.Moved;
+    }
+
+    /// <summary>One string out of the transaction, or null when there is no row.</summary>
+    private static async Task<string?> ScalarAsync(
+        Microsoft.Data.Sqlite.SqliteConnection connection,
+        Microsoft.Data.Sqlite.SqliteTransaction transaction,
+        string sql,
+        IReadOnlyList<(string Name, string Value)> parameters,
+        CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+
+        foreach (var (name, value) in parameters)
+        {
+            command.Parameters.AddWithValue(name, value);
+        }
+
+        return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) is string found and { Length: > 0 }
+            ? found
+            : null;
+    }
+
     /// <summary>Every client, with the Unassigned one included: unbilled work is worth seeing.</summary>
     /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<ClientSummary>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
@@ -589,8 +953,21 @@ public sealed class ReportStore
         await using (var exists = connection.CreateCommand())
         {
             exists.Transaction = transaction;
-            exists.CommandText = "SELECT 1 FROM clients WHERE slug = $slug LIMIT 1";
+
+            // Within this organization, which is what the schema declares -
+            // UNIQUE(tenant_id, slug) - and what the tenancy layer is for.
+            //
+            // This asked the whole table, so the first organization to file a
+            // customer as "acme-corp" silently prevented every other
+            // organization from having one. CreateClientAsync returned null,
+            // which reads as "that name is taken" and was true of somebody
+            // else's book of business. Found by a move test: creating the
+            // same client in a second organization to provoke a slug
+            // collision quietly created nothing at all.
+            exists.CommandText =
+                "SELECT 1 FROM clients WHERE slug = $slug AND tenant_id = $tenant LIMIT 1";
             exists.Parameters.AddWithValue("$slug", wanted);
+            exists.Parameters.AddWithValue("$tenant", tenantId);
             if (await exists.ExecuteScalarAsync(ct).ConfigureAwait(false) is not null)
             {
                 await transaction.RollbackAsync(ct).ConfigureAwait(false);

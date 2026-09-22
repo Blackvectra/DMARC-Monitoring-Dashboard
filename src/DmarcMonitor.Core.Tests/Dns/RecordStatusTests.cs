@@ -4,7 +4,7 @@ using Xunit;
 namespace DmarcMonitor.Core.Tests.Dns;
 
 /// <summary>
-/// What the three record indicators on the domains table are allowed to say.
+/// What the record indicators on the domains table are allowed to say.
 ///
 /// Most of these are about the cases where the honest answer is "I do not
 /// know". A cross is a claim - the resolver answered and there was no record -

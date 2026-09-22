@@ -28,6 +28,32 @@ public sealed record DomainSource
     /// <summary>Other clients this same address was seen failing against.</summary>
     public int OtherClients { get; init; }
 
+    /// <summary>What the address reverses to, or null when nothing has looked.</summary>
+    public string? ReverseName { get; init; }
+
+    /// <summary>
+    /// The source as it should be written down: the vendor the catalogue
+    /// recognises, else the reverse name, else the address.
+    /// </summary>
+    /// <remarks>
+    /// The "Authenticating cleanly" table on a live domain was ten rows of
+    /// 2a01:111:f403:c112::5 and a link reading "Show the other 31". All
+    /// forty-one were Microsoft. A reader learns nothing from that list and
+    /// cannot learn anything, because every row is the same fact written
+    /// forty-one ways.
+    ///
+    /// For reading only. Whoever holds an address writes its PTR, so a name
+    /// says who owns the wire and nothing about whether the mail is
+    /// legitimate; every verdict here still comes from what was signed.
+    /// </remarks>
+    public string Display =>
+        DmarcMonitor.Core.Intelligence.SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
+        : SourceIp;
+
+    /// <summary>Whether anything better than the address is known.</summary>
+    public bool IsNamed => Display != SourceIp;
+
     /// <summary>
     /// Signatures this source made that VERIFIED, on messages that failed DMARC
     /// anyway.
@@ -577,6 +603,14 @@ public sealed class DomainDetailService(string databasePath)
                      CASE WHEN r.dmarc_result <> 'pass'
                                AND r.dkim_domain IS NOT NULL AND TRIM(r.dkim_domain) <> ''
                           THEN r.dkim_domain END), ''), '')
+                   ,
+                   -- What the address reverses to, if the nightly pass has
+                   -- reached it. Joined rather than resolved per row: this
+                   -- query already runs while a page renders, and a DNS call
+                   -- per source against addresses chosen by whoever mailed the
+                   -- reports would make the page wait on somebody else's dead
+                   -- reverse zone.
+                   (SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip)
             FROM aggregate_records r
             WHERE r.domain_id = $domain AND r.date_begin >= $since
               -- Overridden FAILURES only. A mailing list breaking
@@ -617,6 +651,7 @@ public sealed class DomainDetailService(string databasePath)
                 EnvelopeDomains = [.. Split(reader.IsDBNull(7) ? "" : reader.GetString(7))],
                 SignedAsOnFailure = [.. Split(reader.IsDBNull(9) ? "" : reader.GetString(9))],
                 DkimOnPassingMail = [.. Split(reader.IsDBNull(8) ? "" : reader.GetString(8))],
+                ReverseName = reader.IsDBNull(10) ? null : reader.GetString(10),
             });
         }
         return results;

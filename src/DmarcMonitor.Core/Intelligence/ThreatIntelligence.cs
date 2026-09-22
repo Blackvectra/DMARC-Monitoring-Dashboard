@@ -90,9 +90,25 @@ public sealed record ThreatIndicator
         IndicatorClassification.ConfirmedMalicious => "Confirmed by an operator.",
         IndicatorClassification.KnownGood => "Marked as a real service by an operator.",
         IndicatorClassification.Ignored => "Marked as not worth reporting by an operator.",
+        // "Only a forger signs as its target" was wrong, and wrong in the
+        // direction that gets a customer's own security vendor reported as an
+        // attacker. A gateway that re-signs mail in transit - Avanan, Mimecast,
+        // Proofpoint - signs as the domain it is carrying, and breaks its own
+        // signature doing it, which is character for character what this
+        // detects. Found on a real estate: 35.174.145.124 against two clients,
+        // rated High with that sentence, reversing to us.cloud-sec-av.com.
+        //
+        // The RATING is deliberately unchanged. A PTR is written by whoever
+        // holds the address and is not forward-confirmed, so a friendly name
+        // is not evidence and must never soften a verdict. What changes is
+        // that the sentence now states both explanations and says which
+        // question separates them, which is the thing an operator can
+        // actually answer.
         _ when AttemptedForgery =>
-            $"Attempted to sign as a client domain using selector {string.Join(", ", ForgedSelectors)} and failed. "
-          + "A misconfigured sender signs as itself; only a forger signs as its target.",
+            $"Signed as a client domain using selector {string.Join(", ", ForgedSelectors)}, and the "
+          + "signature failed. A third-party service normally signs as itself, so this is either "
+          + "somebody forging the domain or a gateway re-signing mail in transit. Ask whether the "
+          + "customer uses a mail security gateway: if they do not, treat it as forgery.",
         _ when IsMultiTarget && !EverAuthenticated =>
             $"Authenticated nothing, against {DomainCount} unrelated domains"
           + (ClientCount > 1 ? $" across {ClientCount} clients" : "")

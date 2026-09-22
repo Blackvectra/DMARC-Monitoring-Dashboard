@@ -270,4 +270,51 @@ public sealed class ThreatIntelligenceTests : IDisposable
 
         Assert.DoesNotContain(await service.GetIndicatorsAsync(), i => i.Value == "203.0.113.9");
     }
+
+    /// <summary>
+    /// The wording of the strongest accusation this product makes.
+    /// </summary>
+    /// <remarks>
+    /// It used to read "A misconfigured sender signs as itself; only a forger
+    /// signs as its target", which is not true. A mail security gateway that
+    /// re-signs in transit signs as the domain it is carrying and breaks its
+    /// own signature doing it - character for character what this detects.
+    /// Seen on a real estate: one address against two clients, rated High
+    /// with that sentence, reversing to a Check Point Harmony host.
+    ///
+    /// Reporting a customer's own security vendor as an attacker is the way
+    /// an operator loses a customer's trust in the tool and then in the
+    /// finding that was real.
+    /// </remarks>
+    [Fact]
+    public async Task TheForgeryRationaleOffersBothExplanations()
+    {
+        await StoreAsync("acme.com", Row("203.0.113.44", 6, "fail", "acme.com", "acme.com", "fail", "selector1"));
+
+        var indicator = await IndicatorAsync("203.0.113.44");
+
+        Assert.True(indicator!.AttemptedForgery);
+        Assert.Contains("gateway re-signing", indicator.Rationale, StringComparison.Ordinal);
+        Assert.DoesNotContain("only a forger", indicator.Rationale, StringComparison.Ordinal);
+
+        // And it names the question that separates them, because an operator
+        // can answer "does this customer use a gateway" and cannot answer
+        // "is this a forger".
+        Assert.Contains("Ask whether", indicator.Rationale, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The rating is deliberately untouched. A PTR is written by whoever
+    /// holds the address and is not forward-confirmed, so a friendly name is
+    /// not evidence and must never soften a verdict - only the wording of it.
+    /// </summary>
+    [Fact]
+    public async Task SofteningTheWordingDoesNotSoftenTheRating()
+    {
+        await StoreAsync("acme.com", Row("203.0.113.45", 6, "fail", "acme.com", "acme.com", "fail", "selector1"));
+
+        var indicator = await IndicatorAsync("203.0.113.45");
+
+        Assert.Equal(IndicatorConfidence.High, indicator!.Confidence);
+    }
 }

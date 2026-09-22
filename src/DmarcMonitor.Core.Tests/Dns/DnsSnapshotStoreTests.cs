@@ -1,5 +1,6 @@
 using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Dns;
+using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 using Xunit;
@@ -334,6 +335,114 @@ public sealed class DnsSnapshotStoreTests : IDisposable
         Assert.Empty(await _store.LatestAsync(tenantId: "an-organization-that-does-not-exist"));
         Assert.NotEmpty(await _store.LatestAsync());
     }
+
+    /// <summary>
+    /// The mode of the served policy is stored, because DNS cannot answer it.
+    /// </summary>
+    /// <remarks>
+    /// mta_sts_record carries an id and nothing else; the mode lives in a file
+    /// fetched over HTTPS. Without this column a snapshot can say a domain
+    /// announces a policy and cannot say whether that policy requires
+    /// anything, and a policy in testing requires nothing at all.
+    /// </remarks>
+    [Fact]
+    public async Task RemembersWhatModeTheServedPolicyWasIn()
+    {
+        var domain = await DomainAsync();
+
+        await _store.SaveAsync(domain, Announcing(domain, MtaStsMode.Enforce));
+
+        Assert.Equal(MtaStsMode.Enforce, (await _store.LatestAsync())[domain].MtaStsMode);
+    }
+
+    /// <summary>
+    /// A domain announcing a policy nobody can fetch is its own state, not an
+    /// absent record: the TXT is published, so a sender looks, and finds
+    /// nothing it can apply.
+    /// </summary>
+    [Fact]
+    public async Task AnnouncedAndNotServedIsRecordedAsSuch()
+    {
+        var domain = await DomainAsync();
+
+        await _store.SaveAsync(domain, Announcing(domain, mode: null));
+
+        Assert.Equal("unreachable", (await _store.LatestAsync())[domain].MtaStsMode);
+    }
+
+    /// <summary>
+    /// A reading taken by something that does not fetch must not erase a mode
+    /// that was really observed.
+    /// </summary>
+    /// <remarks>
+    /// Both callers that store readings fetch the policy now, but only for a
+    /// domain that announces one, and nothing stops an offline caller storing
+    /// a reading. Overwriting enforce with "we did not look" would have the
+    /// table say a protected domain stopped being protected on the day
+    /// somebody ran a scan that makes no HTTPS requests.
+    /// </remarks>
+    [Fact]
+    public async Task AReadingThatDidNotFetchLeavesTheKnownModeAlone()
+    {
+        var domain = await DomainAsync();
+
+        await _store.SaveAsync(domain, Announcing(domain, MtaStsMode.Enforce));
+        await _store.SaveAsync(domain, Announcing(domain, mode: null) with { ServedMtaSts = null });
+
+        Assert.Equal(MtaStsMode.Enforce, (await _store.LatestAsync())[domain].MtaStsMode);
+    }
+
+    /// <summary>
+    /// The served mode is not part of the content hash, so observing it does
+    /// not insert a row and does not report that the zone was edited.
+    /// </summary>
+    /// <remarks>
+    /// The file is fetched over HTTPS from a host that can time out on its
+    /// own schedule. Hashing it would let one flaky minute of network announce
+    /// a DNS change to somebody who would then go looking for an edit that
+    /// never happened.
+    /// </remarks>
+    [Fact]
+    public async Task APolicyThatBecameUnreachableIsNotADnsChange()
+    {
+        var domain = await DomainAsync();
+
+        await _store.SaveAsync(domain, Announcing(domain, MtaStsMode.Enforce));
+        var again = await _store.SaveAsync(domain, Announcing(domain, mode: null));
+
+        Assert.False(again.Changed);
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM dns_snapshots"));
+        Assert.Equal("unreachable", (await _store.LatestAsync())[domain].MtaStsMode);
+    }
+
+    [Fact]
+    public async Task CarriesTheTransportRecordsBackOutOfTheDatabase()
+    {
+        var domain = await DomainAsync();
+
+        await _store.SaveAsync(domain, Announcing(domain, MtaStsMode.Testing));
+
+        var read = (await _store.LatestAsync())[domain];
+        Assert.Equal("v=STSv1; id=20260101000000Z", read.MtaStsRecord);
+        Assert.Equal("v=TLSRPTv1; rua=mailto:tls@example.net", read.TlsRptRecord);
+    }
+
+    /// <summary>A domain publishing both transport records, serving the given mode.</summary>
+    /// <param name="mode">Null for a policy that was asked for and could not be had.</param>
+    private static PublishedRecords Announcing(string domain, string? mode) => Good(domain) with
+    {
+        MtaStsRecord = "v=STSv1; id=20260101000000Z",
+        TlsRptRecord = "v=TLSRPTv1; rua=mailto:tls@example.net",
+        ServedMtaSts = mode is null
+            ? ServedPolicy.Missing("there is no file there")
+            : new ServedPolicy(true, new MtaStsPolicy
+            {
+                Mode = mode,
+                Mx = ["mx.example.net"],
+                MaxAgeSeconds = MtaStsPolicy.DefaultMaxAgeSeconds,
+                Id = "20260101000000Z",
+            }, null),
+    };
 
     private static string Key()
     {

@@ -102,13 +102,18 @@ CREATE TABLE tenants (
     billing_reference   TEXT,
 
     -- Who belongs here: the object ids of Entra security groups, matched
-    -- against the groups claim of whoever signs in. Operators (entra_group_id)
-    -- assign domains, apply fixes and import; admins also run the
-    -- organization's settings; viewers read. NULL throughout means nobody but
-    -- the master group (named in configuration) can see this organization.
+    -- against the groups claim of whoever signs in. Techs (entra_group_id) do
+    -- the daily work: assign domains, import, run reports and checks, repair
+    -- SPF and DKIM. Engineers may also move a domain up the DMARC ladder,
+    -- which is the one change that can stop real mail being delivered. Admins
+    -- also run the organization's settings; viewers read. NULL throughout
+    -- means nobody but the master group (named in configuration) can see this
+    -- organization, and a null engineer group simply means the Tech group is
+    -- as far as the ladder is concerned - nobody escalates.
     entra_group_id      TEXT,
     admin_group_id      TEXT,
     viewer_group_id     TEXT,
+    engineer_group_id   TEXT,
 
     -- White-label: the sidebar and the reports carry these.
     brand_primary_color TEXT,
@@ -460,12 +465,32 @@ CREATE TABLE forensic_reports (
     dkim_domain         TEXT,
     auth_failure_type   TEXT,                          -- dmarc / spf / dkim
 
-    raw_headers         TEXT,                          -- full rfc822 part, redactable
+    -- What the receiver did with it: reject / quarantine / delivered / none.
+    -- A report of a message that was DELIVERED anyway is a domain at p=none
+    -- watching a forgery reach somebody; the same report with 'reject' is the
+    -- policy working. Without this the two are indistinguishable.
+    delivery_result     TEXT,
+
+    -- Which receiver sent it, from the feedback part's User-Agent. So few
+    -- receivers send these that knowing which ones do is most of what an
+    -- operator needs to read the silence from the rest.
+    reported_by         TEXT,
+
+    -- The reported message's HEADERS, never its body. RFC 6591 allows a
+    -- receiver to attach the whole original mail; the parser stops at the
+    -- blank line that ends the headers, so a customer's correspondence is not
+    -- kept on an MSP's server because somebody published a ruf address.
+    raw_headers         TEXT,
     source_message_id   TEXT,
     received_at         TEXT NOT NULL,
-    ingested_at         TEXT NOT NULL
+    ingested_at         TEXT NOT NULL,
+
+    -- SHA-256 of the report as it arrived, so importing the same mailbox
+    -- twice is a no-op rather than a second copy of everybody's mail.
+    raw_hash            TEXT
 );
 
+CREATE UNIQUE INDEX ux_forensic_hash ON forensic_reports(raw_hash);
 CREATE INDEX ix_forensic_tenant_date ON forensic_reports(tenant_id, received_at DESC);
 CREATE INDEX ix_forensic_client_date ON forensic_reports(client_id, received_at DESC);
 CREATE INDEX ix_forensic_domain      ON forensic_reports(domain_id, received_at DESC);
@@ -588,6 +613,22 @@ CREATE TABLE dns_snapshots (
     dmarc_aspf          TEXT,
     dmarc_rua           TEXT,
     dmarc_ruf           TEXT,
+
+    -- The mode of the MTA-STS policy really being served, which is the one
+    -- thing about MTA-STS that DNS cannot answer: mta_sts_record above carries
+    -- an id and nothing else, and the mode lives in a file fetched over HTTPS
+    -- from mta-sts.<domain>. Without this a snapshot can say a domain
+    -- announces a policy and cannot say whether that policy requires anything,
+    -- and a policy in testing requires nothing at all.
+    --
+    -- One of 'enforce', 'testing', 'none', 'unreachable' (announced, and the
+    -- file could not be fetched or did not parse), or NULL for nobody asked.
+    -- Deliberately outside content_hash: the file is not a DNS record, it is
+    -- an HTTPS fetch that can time out on its own schedule, and hashing it
+    -- would let a flaky minute of network announce that the zone was edited.
+    -- It is written onto whichever row is current when it is observed, and
+    -- left alone when it is not.
+    mta_sts_mode        TEXT,
 
     content_hash        TEXT NOT NULL                  -- SHA-256 of all record values
 );
@@ -1026,6 +1067,24 @@ CREATE INDEX ix_indicators_class ON threat_indicators(tenant_id, classification)
 
 
 -- ============================================================================
+--  WHAT AN ADDRESS REVERSES TO
+-- ============================================================================
+
+-- The Sources page listed addresses, and every line of it was research
+-- somebody had to go and do, with the same answer every time for the same
+-- address. See db/migrations/0015-source-names.sql for why this is a cache
+-- rather than a column, and for what a PTR is and is not evidence of.
+CREATE TABLE source_names (
+    ip            TEXT PRIMARY KEY,
+    reverse_name  TEXT,                              -- NULL: asked, there is none
+    checked_at    TEXT NOT NULL,
+    answered      INTEGER NOT NULL DEFAULT 1         -- 0: the reverse zone did not answer
+);
+
+CREATE INDEX ix_source_names_checked ON source_names(checked_at);
+
+
+-- ============================================================================
 --  SCHEMA VERSIONING
 -- ============================================================================
 
@@ -1067,6 +1126,18 @@ VALUES ('0012', datetime('now'), 'DNS freshness: when a domain was last read and
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0013', datetime('now'), 'received_at nullable on aggregate_reports and tls_reports: it was being filled with the window end, which is a different fact and was already in the row');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0014', datetime('now'), 'engineer_group_id on tenants: splits the working role in two, so the person who repairs SPF and DKIM and the person who decides a domain may start rejecting mail can be different people');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0015', datetime('now'), 'source_names: what an address reverses to, so a report can name its senders instead of printing digits at an operator');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0016', datetime('now'), 'mta_sts_mode on dns_snapshots: the mode of the policy really being served, which DNS cannot answer, so a chip can tell enforcement from a policy in testing that requires nothing');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0017', datetime('now'), 'forensic_reports gains delivery_result, reported_by and a unique raw_hash: the table had never been written to, and storing failure reports for the first time showed what it was missing');
 
 
 -- ============================================================================

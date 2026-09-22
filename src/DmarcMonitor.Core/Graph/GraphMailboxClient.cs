@@ -137,6 +137,55 @@ public sealed class GraphMailboxClient : IMailboxClient
         return results;
     }
 
+    /// <summary>
+    /// How much of one raw message is read.
+    /// </summary>
+    /// <remarks>
+    /// A failure report is a few kilobytes: some fields and a header block. A
+    /// megabyte is room for a receiver that attached the whole original mail
+    /// with a photograph in it, and a firm stop before a mailbox full of
+    /// holiday pictures is read into memory one message at a time looking for
+    /// reports that are not there.
+    /// </remarks>
+    public const int MaxRawMessageBytes = 1024 * 1024;
+
+    /// <inheritdoc />
+    public async Task<byte[]?> GetRawMessageAsync(
+        string messageId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+
+        var uri = $"{UserBase}/messages/{Uri.EscapeDataString(messageId)}/$value";
+
+        using var response = await _http
+            .GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Null rather than an exception, deliberately. This is only ever
+        // reached for a message whose attachments held no report, so every
+        // failure here means "still not a report" - and throwing would turn a
+        // mailbox containing one odd message into a run that stops.
+        if (!response.IsSuccessStatusCode) { return null; }
+
+        if (response.Content.Headers.ContentLength > MaxRawMessageBytes) { return null; }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var buffer = new MemoryStream();
+
+        // Copied with a bound rather than ReadAsByteArrayAsync: Content-Length
+        // is what the server claims, and a response without one would
+        // otherwise be read until the mailbox ran the process out of memory.
+        var chunk = new byte[64 * 1024];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
+        {
+            if (buffer.Length + read > MaxRawMessageBytes) { return null; }
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
+    }
+
     public async Task MoveMessageAsync(
         string messageId, string destinationFolderId, CancellationToken cancellationToken = default)
     {

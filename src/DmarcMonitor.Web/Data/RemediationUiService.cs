@@ -254,6 +254,55 @@ public sealed class RemediationUiService(
         return await remediation.RollBackAsync(change.Id, provider, by, reason, ct);
     }
 
+    /// <summary>
+    /// Creates the MTA-STS policy this product will serve for a domain, in
+    /// testing mode.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The Fix page needed this because it could not offer it. A domain that
+    /// announces MTA-STS without a policy to serve is refused by the planner -
+    /// correctly, since publishing an id for a file nobody can fetch is worse
+    /// than publishing nothing - and the page's only answer was to print
+    /// <c>dmarc mta-sts set --domain …</c> and leave somebody to find a
+    /// terminal. It was the first row on the page.
+    /// </para>
+    /// <para>
+    /// Testing, always, and deliberately not offered as a choice. A policy in
+    /// testing has its failures reported and its mail delivered anyway, so
+    /// creating one cannot lose a message; <c>enforce</c> is the mode that
+    /// refuses mail to a host the policy does not list, and that decision
+    /// belongs with the person who has checked the MX list rather than with
+    /// whoever clicked first. The CLI keeps it behind --i-have-checked for the
+    /// same reason.
+    /// </para>
+    /// <para>
+    /// The MX hosts are read live rather than taken from a form. They are the
+    /// part that decides which servers may receive the mail, and a typo in one
+    /// is exactly the failure this mode exists to catch before it matters.
+    /// </para>
+    /// </remarks>
+    public async Task<string> CreatePolicyAsync(string domain, string by, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(domain);
+
+        var mx = await lookup.MxAsync(domain, ct).ConfigureAwait(false);
+        if (mx.Count == 0)
+        {
+            // Refused rather than written empty. A policy listing no hosts is
+            // one that matches nothing, which in enforce mode later would
+            // refuse every message the domain is sent.
+            return $"No MX records answered for {domain}, so there is nothing to list in a policy. "
+                 + "Check the domain receives mail at all before publishing one.";
+        }
+
+        var policy = await _policies.SetAsync(domain, MtaStsMode.Testing, [.. mx], by, ct: ct).ConfigureAwait(false);
+
+        return $"Policy created for {domain} in testing mode, listing {string.Join(", ", policy.Mx)}. "
+             + "Testing reports failures and delivers the mail anyway, so nothing is at risk yet — "
+             + "publish the record below, then move it to enforce once the reports are clean.";
+    }
+
     public Task<IReadOnlyList<AppliedChange>> HistoryAsync(string? tenantId, string? clientSlug = null, CancellationToken ct = default) =>
         remediation.HistoryAsync(null, 200, tenantId, clientSlug, ct);
 

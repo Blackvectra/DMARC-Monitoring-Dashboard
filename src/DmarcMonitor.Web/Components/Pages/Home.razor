@@ -16,13 +16,14 @@
 @inject ReportStoreConnection Db
 @inject OrgContext Org
 @inject OnboardingService Onboarding
+@inject NavigationManager Nav
 @rendermode InteractiveServer
 
 <PageTitle>Triage — DMARC Monitor</PageTitle>
 
 <header class="page-head">
     <div>
-        <h1>Triage</h1>
+        <h1>Dashboard</h1>
         <p class="sub">Every domain, worst first. Not an average — an average across a whole book of
            domains hides the one that is broken.</p>
     </div>
@@ -34,7 +35,7 @@
         {
             <label>
                 Client
-                <select @bind="_client" @bind:after="LoadAsync" aria-label="Client">
+                <select @bind="_client" @bind:after="ClientChangedAsync" aria-label="Client">
                     <option value="">All clients</option>
                     @foreach (var c in _clients)
                     {
@@ -45,7 +46,7 @@
         }
         <label>
             Window
-            <select @bind="_days" @bind:after="LoadAsync">
+            <select @bind="_days" @bind:after="ClientChangedAsync">
                 <option value="7">7 days</option>
                 <option value="14">14 days</option>
                 <option value="30">30 days</option>
@@ -164,7 +165,7 @@ else
 
         <input class="find" type="search" placeholder="Find a domain or client"
                aria-label="Find a domain or client"
-               @bind="_find" @bind:event="oninput" />
+               @bind="_find" @bind:event="oninput" @bind:after="Remember" />
     </div>
 
     var shown = Shown();
@@ -185,6 +186,19 @@ else
         <thead>
             <tr>
                 <th></th>
+                @* Domain and what to do about it share a cell.
+
+                   They used to be the second and the ninth of nine columns,
+                   in a table wide enough to scroll sideways - so the sentence
+                   telling an operator what to do sat eight columns from the
+                   domain it was about, and a screenshot of that column alone
+                   was eight rows of advice with nothing saying which domain
+                   any of it belonged to. Three of them read "Quarantining
+                   with nothing failing. Ready to move to p=reject." and were
+                   indistinguishable.
+
+                   Stacking them drops the table from nine columns to six,
+                   which is also what stops it scrolling. *@
                 <th>Domain</th>
                 @if (AcrossOrganizations) { <th>Organization</th> }
                 <th>Client</th>
@@ -192,7 +206,6 @@ else
                 <th class="num">Messages</th>
                 <th class="num">Passing</th>
                 <th class="spark-col">Trend</th>
-                <th>What needs doing</th>
             </tr>
         </thead>
         <tbody>
@@ -200,7 +213,13 @@ else
             {
                 <tr class="@Css(row.Level)">
                     <td><span class="pip @Css(row.Level)" title="@Label(row.Level)"></span></td>
-                    <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
+                    <td class="domain-cell">
+                        <a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a>
+                        @if (!string.IsNullOrWhiteSpace(row.Headline))
+                        {
+                            <span class="needs-doing">@row.Headline</span>
+                        }
+                    </td>
                     @if (AcrossOrganizations) { <td class="muted">@row.Organization</td> }
                     @* Onboarding by domain name makes these identical for most
                        rows, and a column repeating the one beside it eighteen
@@ -236,7 +255,6 @@ else
                             <span class="muted">—</span>
                         }
                     </td>
-                    <td>@row.Headline</td>
                 </tr>
             }
         </tbody>
@@ -285,7 +303,68 @@ else
         !string.IsNullOrEmpty(_client) ? _clients.FirstOrDefault(c => c.Slug == _client)?.Name ?? "This client"
         : _access?.Current?.Name ?? "All domains";
 
-    protected override Task OnInitializedAsync() => LoadAsync();
+    /// <summary>
+    /// The view somebody was last looking at, carried in the address.
+    /// </summary>
+    /// <remarks>
+    /// Working through one customer's domains meant retyping the filter every
+    /// time: open a domain, press Back, and the page was showing all
+    /// seventeen again. Held in the query string rather than in a field, so
+    /// the scoped view survives navigating away and back, survives a refresh,
+    /// and can be sent to somebody - "here is the one I mean" is a link now.
+    ///
+    /// Read once, on the first render. Every later change writes the address
+    /// with replace: true, which updates the bar without adding a history
+    /// entry, so Back leaves the page rather than stepping through every
+    /// letter somebody typed into the search box.
+    /// </remarks>
+    [SupplyParameterFromQuery(Name = "client")] private string? FromQueryClient { get; set; }
+
+    [SupplyParameterFromQuery(Name = "find")] private string? FromQueryFind { get; set; }
+
+    [SupplyParameterFromQuery(Name = "level")] private string? FromQueryLevel { get; set; }
+
+    [SupplyParameterFromQuery(Name = "days")] private int? FromQueryDays { get; set; }
+
+    protected override Task OnInitializedAsync()
+    {
+        _client = FromQueryClient ?? "";
+        _find = FromQueryFind ?? "";
+
+        // Only the windows the control offers. A hand-typed days=900 would
+        // otherwise leave the select showing one thing and the page showing
+        // another.
+        if (FromQueryDays is 7 or 14 or 30 or 90) { _days = FromQueryDays.Value; }
+
+        _level = Enum.TryParse<TriageLevel>(FromQueryLevel, ignoreCase: true, out var level) ? level : null;
+
+        return LoadAsync();
+    }
+
+    private async Task ClientChangedAsync()
+    {
+        Remember();
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Writes the current view into the address bar.
+    /// </summary>
+    /// <remarks>
+    /// Nulls rather than empty strings, because
+    /// GetUriWithQueryParameters drops a null and keeps an empty one - and a
+    /// URL trailing "?client=&amp;find=&amp;level=" is noise on the link
+    /// somebody is about to paste into a ticket.
+    /// </remarks>
+    private void Remember() => Nav.NavigateTo(
+        Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            ["client"] = string.IsNullOrEmpty(_client) ? null : _client,
+            ["find"] = string.IsNullOrWhiteSpace(_find) ? null : _find.Trim(),
+            ["level"] = _level?.ToString().ToLowerInvariant(),
+            ["days"] = _days == 14 ? null : _days,
+        }),
+        replace: true);
 
     /// <summary>
     /// Everything sent as these domains, split by what it turned out to be.
@@ -350,12 +429,17 @@ else
     }
 
     /// <summary>Clicking the chosen severity again clears it, as a toggle.</summary>
-    private void Filter(TriageLevel? level) => _level = _level == level ? null : level;
+    private void Filter(TriageLevel? level)
+    {
+        _level = _level == level ? null : level;
+        Remember();
+    }
 
     private void ClearFilters()
     {
         _level = null;
         _find = "";
+        Remember();
     }
 
     private async Task LoadAsync()

@@ -78,6 +78,31 @@ Or look at it with nothing in it first: the pages explain what they would be
 showing you.
 
 
+TWO COMMANDS WORTH RUNNING ONCE THE REPORTS ARE IN
+---------------------------------------------------
+Reports say what happened. These two say who and what, and without them the
+application is honest about not knowing - which looks like a fault and is
+not. Open PowerShell in this folder:
+
+    .\dmarc.exe check --all --save        reads what each domain publishes
+    .\dmarc.exe intel --names             looks up who each sending address is
+
+The first fills the SPF / DKIM / DMARC / MTA-STS / TLS-RPT marks on Domain
+health. Until it has run, every one of them reads "not read yet", because
+nothing has asked DNS and a tick nobody can date is worse than no tick.
+
+The second turns the Sending sources page from a list of addresses into a
+list of names - "vmi3366424.contaboserver.net" instead of "13.140.173.0".
+Nobody recognises an address.
+
+Both take a minute or two on a few dozen domains, both only need doing once,
+and a scheduled install runs them nightly on its own.
+
+Then, on the Reports page, it asks for your company's name the first time.
+That name goes on every client report, so it will not produce one until you
+have given it.
+
+
 IF THE PORT IS ALREADY TAKEN
 ----------------------------
 Port 5000 is a popular default and something else may have it. Open

@@ -55,6 +55,50 @@ else if (_rows.Count == 0)
 }
 else
 {
+    @if (_operators.Count > 0)
+    {
+        @* One operator, several addresses, customers unrelated to each other.
+           Above the per-address table because the table cannot show it: four
+           rows at one hosting provider against three customers read as four
+           unrelated findings, and changing address between customers costs
+           nothing on a VPS host. *@
+        <section class="callout urgent">
+            <h2>@_operators.Count operator(s) using several addresses across your customers</h2>
+            <p>
+                The same operator, reaching customers that have nothing to do with each other. Each
+                address below is listed again in the table underneath — blocking is done by address —
+                but the pattern is only visible here.
+            </p>
+
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>Operator</th>
+                        <th class="num">Addresses</th>
+                        <th class="num">Domains</th>
+                        <th>Seen against</th>
+                        <th class="num">Failed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var o in _operators)
+                    {
+                        <tr class="@Css(o.Verdict)">
+                            <td>
+                                <span class="source-name">@o.Name</span>
+                                <code class="source-ip muted">@o.Domain</code>
+                            </td>
+                            <td class="num">@o.AddressCount</td>
+                            <td class="num"><strong class="bad">@o.Domains.Count</strong></td>
+                            <td class="muted">@string.Join(", ", o.Domains)</td>
+                            <td class="num">@o.FailedMessages.ToString("N0")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+
     @if (_crossClient.Count > 0)
     {
         <section class="callout urgent">
@@ -72,7 +116,10 @@ else
             <tr>
                 <th></th>
                 <th>Source</th>
-                <th class="num">Clients</th>
+                @* "Parties", not "Clients": a domain still in the Unassigned
+                   bucket counts for itself here, so the number is not always a
+                   count of customers. *@
+                <th class="num">Parties</th>
                 <th class="num">Failed</th>
                 <th>Seen against</th>
                 <th>What it looks like</th>
@@ -83,15 +130,29 @@ else
             {
                 <tr class="@Css(row.Verdict)">
                     <td><span class="pip @Css(row.Verdict)"></span></td>
-                    <td><code>@row.SourceIp</code></td>
+                    @* The name first and the address under it, because the
+                       name is what the row is about and the address is how to
+                       look it up. An unnamed source prints exactly as it
+                       always did - one line, the address - so the worst case
+                       here is the old case rather than a gap where a name
+                       should be. *@
+                    <td><SourceLabel Address="@row.SourceIp" Name="@row.Display" /></td>
+                    @* IndependentParties, not ClientCount, because that is the
+                       number the verdict was reached on. Every domain still in
+                       the Unassigned bucket counts for itself - two domains
+                       waiting there are no more related than two belonging to
+                       different customers - so on a fresh install, where
+                       everything is unassigned, ClientCount is 1 for every row
+                       in the table. Printing it put "against 1 unrelated
+                       clients" beside a row flagged for hitting several. *@
                     <td class="num">
                         @if (row.IsCrossClient)
                         {
-                            <strong class="bad">@row.ClientCount</strong>
+                            <strong class="bad">@row.IndependentParties</strong>
                         }
                         else
                         {
-                            <span class="muted">@row.ClientCount</span>
+                            <span class="muted">@row.IndependentParties</span>
                         }
                     </td>
                     <td class="num">@row.FailedMessages.ToString("N0")</td>
@@ -106,6 +167,7 @@ else
 @code {
     private IReadOnlyList<FailingSource>? _rows;
     private IReadOnlyList<FailingSource> _crossClient = [];
+    private IReadOnlyList<FailingOperator> _operators = [];
     private string? _error;
     private int _days = 30;
 
@@ -123,11 +185,13 @@ else
             var access = await Org.GetAsync();
             _rows = await Correlation.GetFailingSourcesAsync(_days, tenantId: access.TenantId, clientSlug: access.RestrictedClient);
             _crossClient = [.. _rows.Where(r => r.IsCrossClient)];
+            _operators = CorrelationService.ByOperator(_rows);
         }
         catch (Exception ex)
         {
             _rows = Array.Empty<FailingSource>();
             _crossClient = [];
+            _operators = [];
             _error = ex.Message;
         }
     }
@@ -146,8 +210,9 @@ else
     private static string Explain(FailingSource row) => row.Verdict switch
     {
         SourceVerdict.CrossClientImpersonation =>
-            $"Authenticated nothing, against {row.ClientCount} unrelated clients. "
-          + "One domain would be noise; several is somebody working through a list.",
+            $"Authenticated nothing, against {row.IndependentParties} unrelated "
+          + $"{(row.IndependentParties == 1 ? "party" : "parties")}. "
+          + "One would be noise; several is somebody working through a list.",
 
         SourceVerdict.Unauthenticated =>
             "Authenticated nothing. Either a service nobody recorded, or somebody sending as this domain.",

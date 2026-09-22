@@ -155,12 +155,13 @@ public sealed class OrganizationAccessTests
     }
 
     [Fact]
-    public void AnOperatorOperatesButDoesNotAdminister()
+    public void ATechOperatesButNeitherEscalatesNorAdministers()
     {
         var access = OrganizationAccess.Resolve(Roles, [NrgGroup], MasterGroup, null, everyoneIsMaster: false);
 
-        Assert.Equal(OrganizationRole.Operator, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Tech, access.CurrentRole);
         Assert.True(access.CanOperate);
+        Assert.False(access.CanEscalatePolicy);
         Assert.False(access.CanAdminister);
     }
 
@@ -219,7 +220,7 @@ public sealed class OrganizationAccessTests
 
         var access = OrganizationAccess.Resolve(Roles, [CustomerGroup, NrgGroup], MasterGroup, null, everyoneIsMaster: false, clients);
 
-        Assert.Equal(OrganizationRole.Operator, access.CurrentRole);
+        Assert.Equal(OrganizationRole.Tech, access.CurrentRole);
         Assert.Null(access.RestrictedClient);
     }
 

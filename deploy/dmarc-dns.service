@@ -22,6 +22,20 @@ Type=oneshot
 User=dmarc
 ExecStart=/usr/local/bin/dmarc check --all --save --db /opt/dmarc/data/dmarc.db
 
+# And what the sending addresses reverse to, so the pages can name a sender
+# instead of printing digits. Here rather than in its own unit because it is
+# the same job - reading public DNS and writing the answers down - with the
+# same sandbox, the same schedule and nothing of its own to configure.
+#
+# A second ExecStart in a oneshot unit runs after the first finishes, and a
+# failure in it fails the unit. That is the right way round: the records
+# above are what the domains page is for, and names are what makes the
+# sources page readable. Neither blocks the other, because the resolver
+# treats a reverse zone that does not answer as an ordinary answer rather
+# than an error - an address with no name is printed as an address, which is
+# what every address was before any of this existed.
+ExecStart=/usr/local/bin/dmarc intel --names --db /opt/dmarc/data/dmarc.db
+
 # 'check' exits 1 when it finds a breaking fault in somebody's records, which
 # is what makes it useful in a pipeline and useless as a service: systemd
 # would mark the unit failed for doing its job and finding a real problem.

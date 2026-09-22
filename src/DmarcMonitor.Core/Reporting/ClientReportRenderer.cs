@@ -205,7 +205,7 @@ public static class ClientReportRenderer
               <p class="note">A domain is <strong>protected</strong> once mail that fails the checks is
               refused or sent to junk by the receiving provider. Until then it is only being watched.</p>
               <table>
-                <thead><tr><th>Domain</th><th>Status</th><th class="n">Messages</th><th class="n">Genuinely yours</th></tr></thead>
+                <thead><tr><th>Domain</th><th>Status</th><th class="n">Messages</th><th class="n">Not yours</th><th class="n">Genuinely yours</th></tr></thead>
                 <tbody>
 
             """);
@@ -225,11 +225,22 @@ public static class ClientReportRenderer
             // would read as total failure rather than as no mail.
             var rate = d.Messages == 0 ? "no mail" : $"{d.PassRate}%";
 
+            // The count beside the percentage, because a percentage on its own
+            // is what lets a bad month read as a good one. "45.5%" is a number
+            // to scroll past; "6 messages that were not yours" is a thing that
+            // happened.
+            var failing = d.Messages == 0 ? "-" : N(d.Failing);
+
+            // A domain below the line is marked whatever the estate's total
+            // says. It is the row a client needs to find.
+            var css = d.IsStruggling ? "bad" : d.IsEnforcing ? "ok" : "warn";
+
             html.Append(CultureInfo.InvariantCulture, $"""
-                    <tr class="{(d.IsEnforcing ? "ok" : "warn")}">
+                    <tr class="{css}">
                       <td class="mono">{E(d.Domain)}</td>
                       <td>{E(status)}</td>
                       <td class="n">{N(d.Messages)}</td>
+                      <td class="n">{E(failing)}</td>
                       <td class="n">{E(rate)}</td>
                     </tr>
 
@@ -309,7 +320,7 @@ public static class ClientReportRenderer
             // this table looking for exactly that difference.
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="bad">
-                      <td class="mono">{E(s.SourceIp)}</td>
+                      <td>{Source(s)}</td>
                       <td class="n">{N(s.Messages)}</td>
                       <td class="n">{N(s.Failing)}</td>
                       <td class="mono">{E(string.Join(", ", s.Domains))}</td>
@@ -353,7 +364,7 @@ public static class ClientReportRenderer
             // that sent one message rather than one that mostly works.
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="warn">
-                      <td class="mono">{E(s.SourceIp)}</td>
+                      <td>{Source(s)}</td>
                       <td class="n">{N(s.Messages)}</td>
                       <td class="n">{N(s.Failing)}</td>
                       {signedAs}
@@ -391,15 +402,19 @@ public static class ClientReportRenderer
         foreach (var s in senders.Take(Shown))
         {
             // A service says how many addresses it came from, because that is
-            // the number that used to fill the table. An unrecognized address
-            // says nothing extra: "1 address" beside an address is noise.
+            // the number that used to fill the table. A single sender that has
+            // a name says its address instead, which is the part the client
+            // has to quote to anybody. An address with neither says nothing
+            // extra: "1 address" beside an address is noise.
             var detail = s.IsService
                 ? $"""<br><span class="note">{N(s.Addresses)} address(es)</span>"""
-                : "";
+                : s.IsNamed
+                    ? $"""<span class="src-ip">{E(s.SourceIp)}</span>"""
+                    : "";
 
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="ok">
-                      <td class="{(s.IsService ? "" : "mono")}">{E(s.Name)}{detail}</td>
+                      <td class="{(s.IsService || s.IsNamed ? "" : "mono")}">{E(s.Name)}{detail}</td>
                       <td class="n">{N(s.Messages)}</td>
                       <td class="mono">{E(string.Join(", ", s.Domains))}</td>
                     </tr>
@@ -519,6 +534,26 @@ public static class ClientReportRenderer
     // ---- helpers ------------------------------------------------------------
 
     /// <summary>Escapes anything that came out of the database.</summary>
+    /// <summary>
+    /// A sending source: its name where it has one, with the address under it.
+    /// </summary>
+    /// <remarks>
+    /// The Sources page has named these since reverse lookups were stored, and
+    /// the report did not - so a client was handed a row of digits and asked
+    /// whether they recognised it. Nobody recognises an address. They
+    /// recognise "a Comcast connection" or "one of our own servers", and the
+    /// name is the only part of that row they can act on.
+    ///
+    /// Both, never one. The name is what a person reads; the address is what
+    /// anybody has to quote to a hosting provider, and it is the part that is
+    /// verifiable. A PTR is written by whoever holds the address, so printing
+    /// it alone would be repeating a claim the sender made about themselves.
+    /// </remarks>
+    private static string Source(ReportSource source) =>
+        source.IsNamed
+            ? $"""<span class="src-name">{E(source.ReverseName)}</span><span class="src-ip">{E(source.SourceIp)}</span>"""
+            : $"""<span class="mono">{E(source.SourceIp)}</span>""";
+
     private static string E(string? value) => WebUtility.HtmlEncode(value ?? string.Empty);
 
     private static string N(long value) => value.ToString("N0", CultureInfo.InvariantCulture);
@@ -567,8 +602,21 @@ public static class ClientReportRenderer
                  vertical-align:top; word-break:break-word; }
         th { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
              border-bottom:2px solid var(--line); }
-        td.n, th.n { text-align:right; white-space:nowrap; }
+        /* Shrink-to-content, so a table of four columns does not stretch three
+           words across a page and leave a corridor of white down the middle.
+           1% with nowrap is the old trick that means "as narrow as the content
+           allows"; the first column then takes whatever is left. */
+        td.n, th.n { text-align:right; white-space:nowrap; width:1%; }
         .mono { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; }
+
+        /* A named source: the name is what a person reads, the address is what
+           they have to quote to a hosting provider. Both, one above the other,
+           so the row is legible without the address stopping being visible. */
+        .src-name { display:block; font-weight:500; }
+        .src-ip {
+            display:block; margin-top:1px; color:var(--muted);
+            font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px;
+        }
         tr.ok td:first-child { border-left:3px solid var(--ok); }
         tr.warn td:first-child { border-left:3px solid var(--warn); }
         tr.bad td:first-child { border-left:3px solid var(--bad); }

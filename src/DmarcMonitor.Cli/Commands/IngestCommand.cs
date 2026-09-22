@@ -288,6 +288,14 @@ public static class IngestCommand
                         await store.SaveAggregateAsync(report.Aggregate, report.FileName, report.MessageId, report.ArrivedAt, ct).ConfigureAwait(false),
                     ReportKind.TlsRpt when report.Tls is not null =>
                         await store.SaveTlsAsync(report.Tls, report.FileName, report.MessageId, report.ArrivedAt, ct).ConfigureAwait(false),
+
+                    // The report itself rather than its file name, unlike the
+                    // two above. A failure report's deduplication hash has to
+                    // be taken over what arrived, and it may have come out of
+                    // the message body, where there is no file to name.
+                    ReportKind.DmarcFailure when report.Forensic is not null =>
+                        await store.SaveForensicAsync(report.Forensic, report.RawContent, report.MessageId, report.ArrivedAt, ct).ConfigureAwait(false),
+
                     _ => null,
                 };
 
@@ -459,6 +467,10 @@ internal sealed class ReadOnlyMailbox(IMailboxClient inner) : IMailboxClient
 
     public Task<IReadOnlyList<MailAttachment>> GetAttachmentsAsync(string messageId, CancellationToken cancellationToken = default) =>
         _inner.GetAttachmentsAsync(messageId, cancellationToken);
+
+    /// <summary>Passed through: reading a message does not change the mailbox.</summary>
+    public Task<byte[]?> GetRawMessageAsync(string messageId, CancellationToken cancellationToken = default) =>
+        _inner.GetRawMessageAsync(messageId, cancellationToken);
 
     public Task MoveMessageAsync(string messageId, string destinationFolderId, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;

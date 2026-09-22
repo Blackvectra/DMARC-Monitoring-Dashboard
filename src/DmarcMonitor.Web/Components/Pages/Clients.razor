@@ -142,7 +142,7 @@ else
                        scopes and no labels is how somebody concludes one of
                        them is broken. *@
                     <th class="num">Messages (all time)</th>
-                    @if (CanAdminister) { <th>Customer login group</th><th></th> }
+                    @if (CanAdminister) { <th>Customer login group</th><th>Organization</th><th></th> }
                 </tr>
             </thead>
             <tbody>
@@ -154,7 +154,24 @@ else
                     var unassigned = c.Slug == ReportStore.UnassignedClientSlug;
                     <tr class="@(unassigned && c.Domains > 0 ? "act" : "")">
                         @if (AcrossOrganizations) { <td class="muted">@c.OrganizationName</td> }
-                        <td>@c.Name</td>
+                        <td>
+                            @if (CanAdminister && !unassigned)
+                            {
+                                @* The name is the thing with a typo in it.
+                                   "Dakota Valley railRoad" was on every report
+                                   that customer received, and could not be
+                                   corrected anywhere in this product. *@
+                                <input class="name-edit" aria-label="@($"Name for {c.Name}")"
+                                       value="@_nameEdits.GetValueOrDefault(c.Slug, c.Name)"
+                                       @onchange="e => _nameEdits[c.Slug] = e.Value?.ToString() ?? string.Empty" />
+                            }
+                            else
+                            {
+                                @c.Name
+                            }
+                        </td>
+                        @* The slug is not editable and never will be: it is in
+                           the filename of every report already sent. *@
                         <td><code>@c.Slug</code></td>
                         <td class="num">@c.Domains</td>
                         <td class="num">@c.Messages.ToString("N0")</td>
@@ -169,9 +186,29 @@ else
                                 }
                             </td>
                             <td>
+                                @if (!unassigned && MoveTargets(c).Any())
+                                {
+                                    @* Everybody imports reports before they
+                                       think about structure, so every customer
+                                       starts in the default organization. This
+                                       is the way out, and until now there was
+                                       none short of deleting and recreating
+                                       them - which burns the slug already on
+                                       sent reports. *@
+                                    <select aria-label="@($"Move {c.Name} to another organization")"
+                                            @onchange="e => _moveTo[c.Slug] = e.Value?.ToString() ?? string.Empty">
+                                        <option value="">Move to…</option>
+                                        @foreach (var o in MoveTargets(c))
+                                        {
+                                            <option value="@o.Slug">@o.Name</option>
+                                        }
+                                    </select>
+                                }
+                            </td>
+                            <td>
                                 @if (!unassigned)
                                 {
-                                    <button @onclick="() => SaveGroupAsync(c)">Save</button>
+                                    <button disabled="@_busy" @onclick="() => SaveClientAsync(c)">Save</button>
                                 }
                             </td>
                         }
@@ -188,6 +225,9 @@ else
     private IReadOnlyList<ReportStore.DomainSummary> _domains = [];
     private IReadOnlyList<string> _unassigned = [];
     private readonly Dictionary<string, string> _groupEdits = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _nameEdits = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _moveTo = new(StringComparer.Ordinal);
+    private bool _busy;
     private string? _error;
 
     private string? _message;
@@ -301,6 +341,115 @@ else
 
         await LoadAsync();
     }
+
+    /// <summary>
+    /// The organizations this client could move to: every one the signed-in
+    /// person can see, except the one it is already in.
+    /// </summary>
+    /// <remarks>
+    /// Empty for somebody who can see only one organization, and the control
+    /// is not drawn at all then - a "Move to..." box with nothing in it is a
+    /// promise the page cannot keep.
+    /// </remarks>
+    private IEnumerable<Organization> MoveTargets(ReportStore.ClientSummary c) =>
+        (_access?.Visible ?? [])
+            .Where(o => !o.Slug.Equals(c.OrganizationSlug, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Applies whatever changed on one row: the name, the customer login
+    /// group, the organization, or any combination.
+    /// </summary>
+    /// <remarks>
+    /// One button rather than three. Three would be three chances to change a
+    /// name, not press the right Save, and lose it - and the row is short
+    /// enough that a person reads it as one thing.
+    ///
+    /// The move goes last on purpose. It changes which organization the
+    /// client answers to, and a rename applied afterwards would be scoped to
+    /// the organization it has just left.
+    /// </remarks>
+    private async Task SaveClientAsync(ReportStore.ClientSummary c)
+    {
+        if (!CanAdminister || _busy) { return; }
+
+        _busy = true;
+        try
+        {
+            var changed = new List<string>();
+
+            var name = _nameEdits.GetValueOrDefault(c.Slug, c.Name).Trim();
+            if (name.Length > 0 && !name.Equals(c.Name, StringComparison.Ordinal))
+            {
+                if (await Onboarding.RenameClientAsync(c.Slug, name, _access?.TenantId))
+                {
+                    changed.Add($"renamed to {name}");
+                    await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "",
+                        "client.rename", $"{c.Slug}: {c.Name} -> {name}");
+                }
+            }
+
+            var group = _groupEdits.GetValueOrDefault(c.Slug, c.EntraGroupId ?? "").Trim();
+            if (!string.Equals(group, c.EntraGroupId ?? "", StringComparison.OrdinalIgnoreCase)
+                && await Onboarding.SetClientGroupAsync(c.Slug, group, _access?.TenantId))
+            {
+                changed.Add(group.Length == 0
+                    ? "customer login cleared"
+                    : $"customer login group {group} — they may need to sign out and back in");
+                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "",
+                    "client.login-group", $"{c.Slug}: {(group.Length == 0 ? "cleared" : group)}");
+            }
+
+            var to = _moveTo.GetValueOrDefault(c.Slug, "").Trim();
+            if (to.Length > 0)
+            {
+                var outcome = await Onboarding.MoveClientAsync(c.Slug, to, _access?.TenantId);
+                if (outcome == ReportStore.MoveOutcome.Moved)
+                {
+                    changed.Add($"moved to {to}, with its domains and history");
+                    await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "",
+                        "client.move", $"{c.Slug}: {c.OrganizationSlug} -> {to}");
+                }
+                else
+                {
+                    Set(Explain(outcome, c, to), isError: true);
+                    return;
+                }
+            }
+
+            Set(changed.Count == 0 ? "Nothing changed." : $"{name}: {string.Join("; ", changed)}.",
+                isError: false);
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+        finally
+        {
+            _busy = false;
+            _nameEdits.Clear();
+            _moveTo.Clear();
+        }
+
+        await LoadAsync();
+    }
+
+    /// <summary>Why a move was refused, in terms of what to do about it.</summary>
+    private static string Explain(ReportStore.MoveOutcome outcome, ReportStore.ClientSummary c, string to) =>
+        outcome switch
+        {
+            ReportStore.MoveOutcome.SlugTaken =>
+                $"{to} already has a client filed as '{c.Slug}'. Slugs are permanent because they are in "
+                + "report filenames, so one of the two has to be renamed by somebody who knows which is which.",
+            ReportStore.MoveOutcome.OrganizationNotFound => $"No organization called '{to}'.",
+            ReportStore.MoveOutcome.ClientNotFound => $"No client filed as '{c.Slug}'.",
+            ReportStore.MoveOutcome.AlreadyThere => $"{c.Name} is already in {to}.",
+            ReportStore.MoveOutcome.NotMovable =>
+                "Unassigned is a waiting room rather than a customer, and every organization has its own.",
+            ReportStore.MoveOutcome.Ambiguous =>
+                $"More than one organization has a client filed as '{c.Slug}'. Switch to the one this "
+                + "client belongs to and move it from there.",
+            _ => "The move did not happen.",
+        };
 
     private async Task SaveGroupAsync(ReportStore.ClientSummary c)
     {

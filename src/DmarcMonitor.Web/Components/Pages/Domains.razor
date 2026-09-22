@@ -62,9 +62,12 @@
         }
         else if (_lastRead is null)
         {
+            @* The button that does this is in this same div, three lines
+               below. Naming a command to type beside it was the page telling
+               somebody to go and do by hand the thing it was offering. *@
             <span class="muted">
-                DNS has not been read yet, so the SPF, DKIM and DMARC columns say only that.
-                The scheduled scan fills them: <code>dmarc check --all --save</code>
+                DNS has not been read yet, so the Records column says only that.
+                Read it now, or leave it to the nightly scan.
             </span>
         }
         else if (_stale > 0)

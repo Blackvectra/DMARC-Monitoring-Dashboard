@@ -89,12 +89,19 @@ public sealed class OrganizationStoreTests : IDisposable
         await _store.CreateAsync("NRG Tech Services", slug: "nrg");
 
         Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Admin, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
-        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Operator, "11111111-1111-1111-1111-111111111111"));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Engineer, "44444444-4444-4444-4444-444444444444"));
+        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Tech, "11111111-1111-1111-1111-111111111111"));
         Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Viewer, " bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb "));
 
         var org = await _store.GetAsync("nrg");
         Assert.NotNull(org);
         Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", org.AdminGroupId);
+
+        // Reading this back is what proves the column is selected and mapped
+        // at the right position. A misplaced index here would not fail to
+        // compile; it would hand one role's group to another, which is the
+        // quietest way a permission gate can be wrong.
+        Assert.Equal("44444444-4444-4444-4444-444444444444", org.EngineerGroupId);
         Assert.Equal("11111111-1111-1111-1111-111111111111", org.EntraGroupId);
         Assert.Equal("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", org.ViewerGroupId);
 
@@ -102,6 +109,14 @@ public sealed class OrganizationStoreTests : IDisposable
         org = await _store.GetAsync("nrg");
         Assert.Null(org!.ViewerGroupId);
         Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", org.AdminGroupId);
+        Assert.Equal("44444444-4444-4444-4444-444444444444", org.EngineerGroupId);
+
+        // And clearing the engineer group is the supported way back to one
+        // working role, so it must not take the tech group with it.
+        Assert.True(await _store.SetGroupAsync("nrg", OrganizationRole.Engineer, null));
+        org = await _store.GetAsync("nrg");
+        Assert.Null(org!.EngineerGroupId);
+        Assert.Equal("11111111-1111-1111-1111-111111111111", org.EntraGroupId);
     }
 
     [Fact]

@@ -60,6 +60,25 @@ public sealed record DomainDns
     public string DmarcPolicy { get; init; } = "";
     public string DmarcRua { get; init; } = "";
 
+    /// <summary>The TXT record at _mta-sts, which announces a policy id and nothing else.</summary>
+    public string? MtaStsRecord { get; init; }
+
+    /// <summary>
+    /// The mode of the policy file really being served, as last observed.
+    /// </summary>
+    /// <remarks>
+    /// One of enforce, testing, none, or <c>unreachable</c> when the domain
+    /// announces a policy and the file could not be fetched or did not parse.
+    /// Empty means nobody asked, which is a third answer and not an absence:
+    /// the mode is not in DNS at all - <see cref="MtaStsRecord"/> carries an id
+    /// and the mode lives in a file at mta-sts.&lt;domain&gt; - so a reading
+    /// taken by something that does not fetch simply does not know it.
+    /// </remarks>
+    public string MtaStsMode { get; init; } = "";
+
+    /// <summary>The TXT record at _smtp._tls, if there is one.</summary>
+    public string? TlsRptRecord { get; init; }
+
     /// <summary>Selectors the reports have named, with what DNS says about each.</summary>
     public IReadOnlyList<ObservedSelector> DkimSelectors { get; init; } = [];
 
@@ -181,7 +200,8 @@ public sealed class DnsSnapshotStore(string databasePath)
             command.CommandText = """
                 SELECT d.id, d.name, d.dns_checked_at, d.dns_check_status,
                        s.captured_at, s.spf_record, s.spf_record_count, s.spf_lookup_count,
-                       s.spf_all_mechanism, s.dmarc_record, s.dmarc_p, s.dmarc_rua
+                       s.spf_all_mechanism, s.dmarc_record, s.dmarc_p, s.dmarc_rua,
+                       s.mta_sts_record, s.mta_sts_mode, s.tls_rpt_record
                 FROM domains d
                 LEFT JOIN dns_snapshots s
                        ON s.id = (SELECT x.id FROM dns_snapshots x
@@ -214,6 +234,9 @@ public sealed class DnsSnapshotStore(string databasePath)
                     DmarcRecord = reader.IsDBNull(9) ? null : reader.GetString(9),
                     DmarcPolicy = reader.IsDBNull(10) ? "" : reader.GetString(10),
                     DmarcRua = reader.IsDBNull(11) ? "" : reader.GetString(11),
+                    MtaStsRecord = reader.IsDBNull(12) ? null : reader.GetString(12),
+                    MtaStsMode = reader.IsDBNull(13) ? "" : reader.GetString(13),
+                    TlsRptRecord = reader.IsDBNull(14) ? null : reader.GetString(14),
                 };
             }
         }
@@ -386,6 +409,8 @@ public sealed class DnsSnapshotStore(string databasePath)
             }
         }
 
+        await WriteServedModeAsync(db, transaction, domainId, hash, published, ct).ConfigureAwait(false);
+
         if (dmarc is { IsValid: true })
         {
             // The denormalized pair the schema has always carried a comment
@@ -403,6 +428,50 @@ public sealed class DnsSnapshotStore(string databasePath)
         }
 
         return changed;
+    }
+
+    /// <summary>
+    /// What mode the served policy file was in, written onto the row that is
+    /// now current.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately outside the content hash, and so outside the insert. The
+    /// policy file is not a DNS record: it is an HTTPS fetch from a host that
+    /// can time out on its own schedule, and folding it into the hash would
+    /// have a flaky minute of network insert a snapshot row and report that
+    /// the zone had been edited - which is a sentence somebody acts on.
+    /// </para>
+    /// <para>
+    /// Written only when a fetch really happened. A null
+    /// <see cref="PublishedRecords.ServedMtaSts"/> means this run did not ask -
+    /// an offline caller, or a domain announcing no policy worth asking about -
+    /// and overwriting a known mode with "we did not look" would turn every
+    /// reading taken by something that does not fetch into an erasure.
+    /// </para>
+    /// </remarks>
+    private static async Task WriteServedModeAsync(
+        SqliteConnection db, SqliteTransaction transaction, string domainId, string hash,
+        PublishedRecords published, CancellationToken ct)
+    {
+        if (published.ServedMtaSts is not { } served) { return; }
+
+        // Reachable with a policy that parsed is the only case with a mode.
+        // Everything else is a domain announcing a policy senders cannot use,
+        // which protects nothing and is its own state rather than an absence.
+        var mode = served is { Reachable: true, Policy: { } policy } ? policy.Mode : "unreachable";
+
+        await using var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE dns_snapshots SET mta_sts_mode = $mode
+            WHERE domain_id = $domain AND content_hash = $hash
+            """;
+        command.Parameters.AddWithValue("$mode", mode);
+        command.Parameters.AddWithValue("$domain", domainId);
+        command.Parameters.AddWithValue("$hash", hash);
+
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     private static async Task<string?> LatestHashAsync(

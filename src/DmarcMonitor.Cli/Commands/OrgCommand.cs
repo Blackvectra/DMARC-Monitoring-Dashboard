@@ -166,16 +166,41 @@ public static class OrgCommand
         var slug = Args.Value(args, "--org");
         if (string.IsNullOrWhiteSpace(slug))
         {
-            return Usage("dmarc org set-group --org <slug> --group <entra group object id> [--role operator|admin|viewer] [--db <path>]   (omit --group to clear it)");
+            return Usage("dmarc org set-group --org <slug> --group <entra group object id> [--role tech|engineer|admin|viewer] [--db <path>]   (omit --group to clear it)");
         }
 
-        var role = (Args.Value(args, "--role") ?? "operator").ToLowerInvariant() switch
+        var named = (Args.Value(args, "--role") ?? "tech").ToLowerInvariant();
+        var role = named switch
         {
-            "operator" => OrganizationRole.Operator,
+            "tech" => OrganizationRole.Tech,
+
+            // The role Tech was called until it was split. Kept because it is
+            // written down in runbooks and shell history on machines already
+            // installed, and silently meaning something else - or failing on
+            // a word that was correct last week - is worse than an alias.
+            "operator" => OrganizationRole.Tech,
+
+            "engineer" => OrganizationRole.Engineer,
             "admin" => OrganizationRole.Admin,
             "viewer" => OrganizationRole.Viewer,
-            var other => throw new ArgumentException($"--role {other}: one of operator, admin, viewer."),
+            _ => OrganizationRole.None,
         };
+
+        // A word that is not a role is a typo, not a defect. Throwing here
+        // reached Program's last-resort handler, which printed "This is a bug.
+        // The detail below is worth reporting:" over a stack trace - blaming
+        // the tool for the reader's spelling, and burying the four words that
+        // would have fixed it.
+        if (role == OrganizationRole.None)
+        {
+            Console.Error.WriteLine($"--role {named}: one of tech, engineer, admin, viewer.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("  tech      assigns domains, imports, repairs SPF and DKIM");
+            Console.Error.WriteLine("  engineer  also raises a DMARC policy: none to quarantine to reject");
+            Console.Error.WriteLine("  admin     also sets this organization's groups, branding and providers");
+            Console.Error.WriteLine("  viewer    reads, changes nothing");
+            return 64;
+        }
 
         var group = Args.Value(args, "--group");
         if (!await store.SetGroupAsync(slug, role, group, ct).ConfigureAwait(false))
@@ -216,7 +241,7 @@ public static class OrgCommand
         Console.Error.WriteLine();
         Console.Error.WriteLine("  dmarc org list");
         Console.Error.WriteLine("  dmarc org add       --name \"<name>\" [--slug <slug>] [--group <id>]");
-        Console.Error.WriteLine("  dmarc org set-group --org <slug> --group <entra group object id> [--role operator|admin|viewer]");
+        Console.Error.WriteLine("  dmarc org set-group --org <slug> --group <entra group object id> [--role tech|engineer|admin|viewer]");
         Console.Error.WriteLine("  dmarc org rename    --org <slug> --name \"<name>\"");
         Console.Error.WriteLine("  dmarc org brand     --org <slug> [--color #rrggbb] [--provider-name <n>] [--contact <text>] [--logo <file>]");
         return 64;

@@ -79,6 +79,25 @@
     --shadow: 0 1px 2px rgba(0, 0, 0, .04);
     --ring: 0 0 0 3px rgba(79, 70, 229, .18);
     --radius: 10px;
+
+    /*
+        The navigation rail, and deliberately NOT part of the light/dark
+        theme. It stays dark whichever theme the content is in, so flipping
+        to dark does not lose the distinction between the frame and the page.
+
+        This does not contradict the light-first rule above. That rule is
+        about the CONTENT: a screenshot of a page lands in a client's ticket
+        or a printed report, and a dark one looks like a terminal in a
+        document. The rail is never in that screenshot.
+    */
+    --side:        #16182a;   /* the rail */
+    --side-2:      #1e2138;   /* hover, and the fold headers */
+    --side-text:   #e6e7ee;
+    --side-muted:  #9498b4;
+    --side-dim:    #6b7094;
+    --side-line:   #272a45;
+    --side-accent: #8b93f8;   /* readable on the rail, where --accent is not */
+    --side-on:     #ffffff;   /* the active label, brighter than --side-text */
 }
 
 /*
@@ -402,9 +421,13 @@ section[id] { scroll-margin-top: 16px; }
 .chart-svg .line-total { fill: none; stroke: var(--accent); stroke-width: 1.5; }
 .chart-svg .fill-fail  { fill: var(--urgent); opacity: .30; }
 
-/* A day nobody reported on. Marked on the baseline so an absent stretch
-   reads as a collection failure rather than a quiet week. */
-.chart-svg .no-report { fill: var(--dim); }
+/* The stretches nobody reported on, shaded full height.
+   
+   Faint on purpose: it has to be unmistakable that the chart has no readings
+   there, and it must not compete with the data drawn over it. A hatch would
+   read better still but cannot be drawn without a <pattern>, which does not
+   survive this SVG being inlined into an emailed report. */
+.chart-svg .no-report { fill: var(--dim); opacity: .10; }
 
 .chart-axis {
     display: flex;
@@ -637,6 +660,52 @@ section[id] { scroll-margin-top: 16px; }
    from once". */
 .spark-dot, .chart-svg .lone-point { fill: var(--accent); }
 
+/* ---- a named sending source ------------------------------------------- */
+
+/*
+   "Avanan (Check Point Harmony)" over "35.174.145.124", rather than the
+   address alone. The name is what the row is about; the address is how to
+   look it up, so it is still there and still selectable, just quieter.
+
+   A source nobody has a name for renders as a bare <code> exactly as every
+   row did before, so a table part-way through its first nightly pass is a
+   mixture rather than a column of gaps.
+*/
+/*
+   "Check again", beside a domain on the Fix page. A quiet control on
+   purpose: it sits in a heading next to the domain name and the policy, and
+   anything with a border there competes with the findings underneath, which
+   are the point of the page.
+*/
+.link-button {
+    background: none;
+    border: 0;
+    padding: 0 0 0 10px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--accent);
+    cursor: pointer;
+}
+
+.link-button:hover:not(:disabled) { text-decoration: underline; }
+.link-button:disabled { color: var(--dim); cursor: default; }
+
+.source-name { display: block; font-weight: 500; }
+
+.source-ip {
+    /* Block so it sits under the name, but only as wide as the address.
+       A plain block takes the whole cell, and .triage td code has a tinted
+       background - so a short address rendered as an eight-hundred-pixel
+       grey bar that reads as a progress meter. */
+    display: block;
+    width: fit-content;
+    font-size: 11px;
+    /* Addresses are compared down a column - two /24s from the same range
+       should line up - which proportional digits make impossible. */
+    font-variant-numeric: tabular-nums;
+}
+
 /* The sparkline column is fixed-width so the shapes line up down the page:
    comparison is the entire point, and shapes at differing widths cannot be
    compared. */
@@ -669,7 +738,28 @@ section[id] { scroll-margin-top: 16px; }
 .triage td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
 .triage tbody tr:last-child td { border-bottom: 0; }
 .triage tbody tr:hover { background: var(--hover); }
+/*
+    Numbers and dates shrink to their content; the descriptive columns take
+    the slack.
+
+    Every table here is width:100%, and with five short columns a browser
+    shares the leftover width across all of them - which is why a row read
+    "Source | Sent | Failed | Signs as .......... Last seen" with six hundred
+    pixels of nothing in the middle. width:1% with nowrap is the old trick
+    for "as narrow as the content allows": the percentage cannot be honoured,
+    so the column collapses to its minimum and the remaining columns divide
+    what is left.
+
+    Reported as "overall bad layout", and this was most of it.
+*/
+.triage .num,
+.triage .when {
+    width: 1%;
+    white-space: nowrap;
+}
+
 .triage .num { text-align: right; font-variant-numeric: tabular-nums; }
+.triage .when { color: var(--muted); }
 .triage th.num { text-align: right; }
 .triage td a { font-weight: 500; color: var(--text); }
 .triage td a:hover { color: var(--link); }
@@ -710,7 +800,13 @@ section[id] { scroll-margin-top: 16px; }
     means the resolver answered and there was no record, and it has to keep
     meaning only that.
 */
-.records { white-space: nowrap; }
+/* Five chips, not three, since MTA-STS and TLS-RPT joined them - and two of
+   the five have long names. Wrapping rather than widening: this column sits
+   between the domain and the policy, and letting it grow to fit
+   "MTA-STS ✓ TLS-RPT ✓" on one line pushes everything worth reading off the
+   right of the table. Authentication ends up on the first line and transport
+   on the second, which is the order they are built in anyway. */
+.records { display: flex; flex-wrap: wrap; row-gap: 3px; max-width: 15rem; }
 
 .chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -719,6 +815,7 @@ section[id] { scroll-margin-top: 16px; }
     font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
     border: 1px solid transparent;
     vertical-align: middle;
+    white-space: nowrap;
 }
 .chip:last-child { margin-right: 0; }
 .chip-name { font-weight: 500; }
@@ -830,6 +927,19 @@ section[id] { scroll-margin-top: 16px; }
 .figure-n { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.02em; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .figure-l { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 
+/* The headers of a message a failure report is about. Monospaced and scrolled
+   rather than wrapped: these are evidence, and a Received chain rewrapped to
+   the width of a table cell is no longer the thing the receiver sent. The
+   height cap is because one heavily forwarded message runs to forty lines and
+   would push every other row off the screen. */
+.headers {
+    background: var(--dim-bg); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 10px 12px; margin: 6px 0 0;
+    font-size: 11.5px; line-height: 1.5;
+    max-height: 420px; overflow: auto;
+    white-space: pre; tab-size: 4;
+}
+
 section { margin-bottom: 28px; }
 
 /* A button that reads as a link: this expands a list in place rather than
@@ -878,6 +988,17 @@ a.primary-link {
     background: var(--accent); color: var(--on-accent); border-radius: 6px;
     padding: 6px 14px; font-weight: 500; text-decoration: none;
     display: inline-block; box-shadow: var(--shadow);
+}
+
+/* The same control with the action withheld. Rendered as a span rather than
+   a disabled anchor because HTML has no disabled anchor, and it still has to
+   look like the button it will become once the reason beneath it is fixed -
+   greyed out and inert reads as "not yet", where hiding it reads as a
+   feature that is missing. */
+span.primary-link.disabled {
+    background: var(--dim-bg); color: var(--dim); box-shadow: none;
+    border-radius: 6px; padding: 6px 14px; font-weight: 500;
+    display: inline-block; cursor: not-allowed;
 }
 
 /* An inline warning that is not a whole callout: for something worth
@@ -1107,3 +1228,182 @@ pre.policy {
 @media (prefers-reduced-motion: reduce) {
     .sidebar { transition: none; }
 }
+
+/* ---- a triage row ------------------------------------------------------ */
+
+/*
+    The domain, and under it the sentence saying what to do about it.
+
+    These were columns two and nine of nine, in a table wide enough to scroll
+    sideways, so the most useful thing on the row was as far from its subject
+    as the layout could put it. Stacked, they read as one statement and the
+    table stops scrolling.
+
+    The sentence is allowed to be long - it is the content - so the cell takes
+    the slack and the numeric columns stay narrow.
+*/
+.domain-cell { max-width: 52ch; }
+
+.needs-doing {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+/* On a row already coloured by severity the advice carries that colour, so
+   the sentence and the pip beside it agree without repeating the word. */
+tr.urgent .needs-doing { color: var(--urgent); }
+tr.act    .needs-doing { color: var(--act); }
+
+/* ---- folded navigation groups ------------------------------------------ */
+
+/*
+    Reporting and Settings collapse; the daily items do not, because a group
+    you open every morning is a click somebody pays for every morning.
+
+    <details> rather than a scripted toggle. This application is installed on
+    machines that cannot reach the internet and the shell is statically
+    rendered, so a control that needs a circuit to work is a control that
+    sometimes does not.
+*/
+.nav-fold { margin-top: 10px; }
+
+.nav-fold > summary {
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+}
+
+/* The disclosure triangle, drawn rather than inherited, so it sits where the
+   text does and turns without the browser's own spacing. */
+.nav-fold > summary::-webkit-details-marker { display: none; }
+
+.nav-fold > summary::after {
+    content: "›";
+    float: right;
+    transform: rotate(90deg);
+    transition: transform .12s ease;
+}
+
+.nav-fold:not([open]) > summary::after { transform: rotate(0deg); }
+
+.nav-fold > summary:hover { color: var(--text); }
+
+/* ---- two small figures, side by side ----------------------------------- */
+
+/*
+    A ring with a two-line legend, and a bar with one line under it. Each was
+    a full-width card about four fifths empty, and stacked they pushed the
+    tables that answer "what do I do" a screen further down.
+
+    minmax(0, 1fr) rather than 1fr: a grid track defaults to min-content
+    width, and an SVG or a long caption inside one will otherwise refuse to
+    shrink and overflow the row.
+*/
+.figure-pair {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
+    gap: 14px;
+    align-items: start;
+}
+
+.figure-pair > * { min-width: 0; }
+
+/* ============================================================================
+   THE SIDEBAR IS DARK
+   ============================================================================
+
+   Asked for: styling closer to the platforms this is weighed against. Their
+   shared signature is a dark rail against light content, and it is the single
+   most recognisable thing about them - more than any accent colour.
+
+   It does not contradict the light-first rule at the top of this file. That
+   rule is about the CONTENT: a screenshot of a page lands in a client's
+   ticket or a printed report, and a dark one looks like a terminal in a
+   document. The rail is never in that screenshot, and it earns its darkness -
+   the eye stops treating the navigation as part of the page and starts
+   treating it as the frame.
+
+   Its own tokens, deliberately not the theme's. The rail stays dark whichever
+   theme the content is in, so a person who flips to dark does not lose the
+   distinction between frame and page.
+*/
+.sidebar {
+    background: var(--side);
+    border-right: 0;
+    color: var(--side-text);
+}
+
+.brand-name { color: var(--side-text); }
+
+/* Inverted from the content's mark: light tile, dark glyph, so it reads as a
+   logo rather than as a hole in the rail. */
+.brand-mark { background: var(--side-text); color: var(--side); }
+
+.nav-item { color: var(--side-muted); }
+.nav-item:hover { color: var(--side-text); background: var(--side-2); }
+
+/*
+   The active item is a tinted block with a bar down its leading edge, rather
+   than the raised white pill the light rail used. A white pill on a dark rail
+   is a hole punched in it.
+*/
+.sidebar .nav-item.active {
+    color: var(--side-on);
+    background: var(--side-2);
+    box-shadow: inset 2px 0 0 var(--side-accent);
+}
+
+.sidebar .nav-group { color: var(--side-dim); }
+.sidebar .nav-fold > summary:hover { color: var(--side-text); }
+
+.sidebar .org-label,
+.sidebar .org-role { color: var(--side-dim); }
+.sidebar .org-name { color: var(--side-text); }
+
+/* The switcher has to read as a control on the rail, not a white box sitting
+   on it. */
+.sidebar .org-switch {
+    background: var(--side-2);
+    border-color: var(--side-line);
+    color: var(--side-text);
+}
+
+.sidebar-foot { border-top-color: var(--side-line); }
+.sidebar .who { color: var(--side-muted); }
+.sidebar .signout,
+.sidebar .theme-toggle { color: var(--side-accent); }
+.sidebar .theme-toggle:hover { color: var(--side-on); }
+
+/* ---- an icon per navigation item --------------------------------------- */
+
+/*
+    Inline SVG, sized to the text. No icon font and no sprite sheet: this
+    application is installed on machines that cannot reach a CDN, and a font
+    that fails to load leaves a column of empty boxes where the navigation was.
+
+    currentColor throughout, so an icon is exactly as bright as the label
+    beside it in every state without a second rule per state.
+*/
+.nav-item { display: flex; align-items: center; gap: 9px; }
+
+.nav-icon {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 15px;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: .85;
+}
+
+.nav-item.active .nav-icon { opacity: 1; }
+
+/* The fold headers line up with the items under them. */
+.nav-fold > summary { display: flex; align-items: center; gap: 9px; padding: 6px 10px; }
+.nav-fold > summary::after { margin-left: auto; float: none; }
+.nav-fold .nav-item { padding-left: 34px; }

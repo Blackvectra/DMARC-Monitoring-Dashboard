@@ -39,10 +39,28 @@ else
 
         <svg viewBox="0 0 @W @H" class="chart-svg" role="img" preserveAspectRatio="none"
              aria-label="@Describe()">
-            @* Gridlines first, so the data sits on top of them. *@
+            @* Unreported stretches first and full height, so everything else
+               is drawn on top of them and the shading reads as ground the
+               chart has no readings for rather than as a series of its own.
+
+               This used to be a two-unit square on the baseline per silent
+               day. On a 600-unit canvas stretched across a browser window
+               that is about four pixels by two, at the very bottom: on a
+               domain with twenty-five silent days out of thirty, the legend
+               announced them and not one was findable. Three quarters of the
+               picture was empty and read as a quiet month, which is the one
+               conclusion it must never invite - a day nobody reported on is
+               not a day nobody sent mail on. *@
+            @foreach (var (x, w) in Chart.Gaps(Reported, W))
+            {
+                <rect x="@x" y="0" width="@w" height="@H" class="no-report" />
+            }
+
+            @* Gridlines next, so the data sits on top of them. *@
             @foreach (var f in new[] { 0.0, 0.5, 1.0 })
             {
-                <line x1="0" x2="@W" y1="@(H * f)" y2="@(H * f)" class="grid" />
+                <line x1="0" x2="@W" y1="@(H * f)" y2="@(H * f)" class="grid"
+                      vector-effect="non-scaling-stroke" />
             }
 
             @* Total volume as an area, with the failing part drawn over it:
@@ -50,25 +68,26 @@ else
                lower edge moves makes the upper band unreadable. *@
             <path d="@Chart.Area(Totals, W, H, Ceiling)" class="fill-total" />
             <path d="@Chart.Area(Failing, W, H, Ceiling)" class="fill-fail" />
-            <path d="@Chart.Line(Totals, W, H, Ceiling)" class="line-total" />
+
+            @* non-scaling-stroke because preserveAspectRatio="none" stretches
+               this canvas to whatever width it is given - better than two
+               thirds again horizontally on a wide screen - and a stroke scales
+               with it. Without this the line is noticeably heavier on its
+               horizontal runs than its vertical ones, which is the difference
+               between a chart that looks drawn and one that looks stretched. *@
+            <path d="@Chart.Line(Totals, W, H, Ceiling)" class="line-total"
+                  vector-effect="non-scaling-stroke" />
 
             @* A day with nothing either side of it draws no line, so it is
-               marked instead of vanishing. *@
+               marked instead of vanishing.
+
+               A rect rather than a circle, for the same reason: a circle on a
+               stretched canvas is an ellipse, and a row of ellipses is the
+               kind of detail that makes a page look cheap without anybody
+               being able to say why. *@
             @foreach (var (x, y) in Chart.IsolatedPoints(Totals, W, H, Ceiling))
             {
-                <circle cx="@x" cy="@y" r="2.5" class="lone-point" />
-            }
-
-            @* Unreported days marked on the baseline. Without this an absent
-               stretch looks like a quiet week rather than a collection
-               failure, which is the more dangerous of the two. *@
-            @foreach (var (point, i) in Points.Select((p, i) => (p, i)))
-            {
-                @if (!point.Reported)
-                {
-                    <rect x="@(Chart.X(i, Points.Count, W) - 1)" y="@(H - 2)" width="2" height="2"
-                          class="no-report" />
-                }
+                <rect x="@(x - 1.5)" y="@(y - 1.5)" width="3" height="3" class="lone-point" />
             }
         </svg>
 
@@ -97,6 +116,9 @@ else
 
     private const double W = 600;
     private const double H = 120;
+
+    /// <summary>One flag per day, for shading the stretches nobody reported on.</summary>
+    private bool[] Reported => [.. Points.Select(p => p.Reported)];
 
     private double?[] Totals => [.. Points.Select(p => p.Reported ? (double?)p.Messages : null)];
     private double?[] Failing => [.. Points.Select(p => p.Reported ? (double?)p.Failing : null)];

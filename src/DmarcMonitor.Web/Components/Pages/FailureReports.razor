@@ -1,0 +1,304 @@
+@page "/failures"
+@using DmarcMonitor.Core.Forensic
+@using DmarcMonitor.Web.Data
+@using DmarcMonitor.Web.Auth
+@using DmarcMonitor.Core.Tenancy
+@inject ForensicReportService Failures
+@inject ReportStoreConnection Db
+@inject OrgContext Org
+@inject AuditLog Audit
+@rendermode InteractiveServer
+
+@*
+    Failure reports: the one report type that is about a message rather than
+    about a number.
+
+    An aggregate report says a thousand messages from an address failed last
+    Tuesday. This is one of them - the envelope, the subject, the headers - and
+    it is what answers "show me one" when a customer disputes a finding or when
+    somebody needs to see the forgery rather than a count of forgeries.
+
+    Two things shape this page and neither is cosmetic.
+
+    These rows are correspondence, so the subject and the headers are behind a
+    role and every look at them is written to the audit log. Nothing else here
+    needs that, because nothing else here is somebody's mail.
+
+    And almost no large receiver sends these, so the normal state of this page
+    is empty. That has to be said out loud: a page that shows nothing and
+    explains nothing reads as broken, and the fix an operator would reach for -
+    republishing ruf= - is not the problem.
+*@
+
+<PageTitle>Failure reports — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Failure reports</h1>
+        <p class="sub">Individual messages that failed authentication, as the receiver reported them.
+           The only place this product holds a real subject line rather than a count.</p>
+    </div>
+    <div class="head-actions">
+        <label>
+            Window
+            <select @bind="_days" @bind:after="LoadAsync">
+                <option value="7">7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty"><h2>No database yet</h2><p>Nothing has been ingested.</p></div>
+}
+else if (_error is not null)
+{
+    <div class="empty"><h2>Could not read the database</h2><p>@_error</p></div>
+}
+else if (_rows is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_rows.Count == 0)
+{
+    @* The state this page will normally be in, explained rather than left
+       looking like a fault. Publishing ruf= is not the missing step. *@
+    <div class="empty">
+        <h2>No failure reports in the last @_days days</h2>
+        <p>
+            That is the usual state, and it is not a sign that anything is misconfigured.
+            Almost no large receiver sends failure reports: Google, Microsoft and Yahoo do not send
+            them at all, because forwarding a copy of a customer's message to a third party is a
+            privacy problem for the receiver as much as for anyone. Publishing <code>ruf=</code>
+            gets reports from a handful of smaller providers and silence from most of the internet.
+        </p>
+        <p>
+            So this page fills up rarely, and when it does the reports are worth reading: each one is
+            a single message, with the envelope and headers the receiver saw.
+        </p>
+        <p class="muted">
+            Nothing is lost by the silence. Aggregate reports still count every failing message, and
+            <a href="domains">Domain health</a> is where to see them.
+        </p>
+    </div>
+}
+else
+{
+    @if (_summary is { Delivered: > 0 })
+    {
+        @* The finding, separated from the rest. A forgery that was refused is
+           the policy working; one that was delivered reached a person. *@
+        <section class="callout urgent">
+            <h2>@_summary.Delivered of @_summary.Total reported message(s) were delivered anyway</h2>
+            <p>
+                Each of these failed authentication and reached somebody's inbox. At
+                <code>p=none</code> that is exactly what the policy asks receivers to do, which makes
+                it the clearest argument there is for moving the domain to quarantine or reject.
+            </p>
+        </section>
+    }
+
+    <section class="figure-pair">
+        <div class="figure">
+            <span class="figure-n">@_summary!.Total.ToString("N0")</span>
+            <span class="figure-l">report(s), across @_summary.Domains domain(s)</span>
+        </div>
+        <div class="figure">
+            <span class="figure-n">@_summary.Reporters.Count.ToString("N0")</span>
+            <span class="figure-l">
+                receiver(s) sending the reports@(_summary.Reporters.Count > 0 ? ": " + string.Join(", ", _summary.Reporters) : "")
+            </span>
+        </div>
+    </section>
+
+    @if (!_mayReadContent)
+    {
+        <section class="callout">
+            <h2>Subjects and headers are hidden</h2>
+            <p>
+                These reports carry the subject line and headers of real messages. Reading them needs
+                the Tech role or above in this organization; everything else on this page — who sent
+                the message, from where, what failed, and whether it was delivered — is shown.
+            </p>
+        </section>
+    }
+
+    <section>
+        <h2>Reported messages</h2>
+        <div class="table-scroll">
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th class="when">Arrived</th>
+                        <th>Domain</th>
+                        <th>Client</th>
+                        <th>From</th>
+                        <th>Subject</th>
+                        <th>Sent from</th>
+                        <th>What happened</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in _rows)
+                    {
+                        <tr class="@(row.WasDelivered ? "urgent" : "")">
+                            <td class="when">@(row.ArrivedAt is { } at ? at.ToString("d MMM HH:mm") : "—")</td>
+                            <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
+                            <td class="muted">@row.ClientName</td>
+                            <td>
+                                @if (_mayReadContent && row.HeaderFrom.Length > 0)
+                                {
+                                    <span class="source-name">@row.HeaderFrom</span>
+                                }
+                                else if (row.ReturnPath.Length > 0)
+                                {
+                                    <code>@row.ReturnPath</code>
+                                }
+                                else
+                                {
+                                    <span class="muted">—</span>
+                                }
+                            </td>
+                            <td>
+                                @if (!_mayReadContent)
+                                {
+                                    <span class="muted">hidden</span>
+                                }
+                                else if (row.Subject.Length > 0)
+                                {
+                                    <span class="source-name">@row.Subject</span>
+                                }
+                                else
+                                {
+                                    <span class="muted">—</span>
+                                }
+                            </td>
+                            <td>
+                                @if (row.SourceIp.Length > 0)
+                                {
+                                    <a href="@($"sources/{Uri.EscapeDataString(row.SourceIp)}")"><code>@row.SourceIp</code></a>
+                                }
+                                else
+                                {
+                                    <span class="muted">—</span>
+                                }
+                            </td>
+                            <td>
+                                <span class="needs-doing">@row.Explain()</span>
+                                @if (_mayReadContent)
+                                {
+                                    <button class="link-button" @onclick="() => ShowHeadersAsync(row)">
+                                        @(_openId == row.Id ? "Hide headers" : "Show headers")
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+
+                        @if (_openId == row.Id)
+                        {
+                            <tr>
+                                <td colspan="7">
+                                    @* Headers only. The body of a reported message is dropped
+                                       at the parser and was never stored, so there is nothing
+                                       here to reveal beyond what the envelope says. *@
+                                    <pre class="headers">@(_openHeaders ?? "The receiver sent no headers with this report.")</pre>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (_rows.Count >= ForensicReportService.MaxRows)
+        {
+            <p class="muted">
+                Showing the most recent @ForensicReportService.MaxRows. There are more in this window.
+            </p>
+        }
+    </section>
+
+    <p class="muted">
+        Failure reports are kept for a shorter time than everything else — @_retentionDays days by
+        default — because they hold real message headers. <code>dmarc prune</code> enforces it.
+    </p>
+}
+
+@code {
+    private IReadOnlyList<StoredFailure>? _rows;
+    private FailureSummary? _summary;
+    private int _days = 30;
+    private string? _error;
+
+    private bool _mayReadContent;
+    private string? _openId;
+    private string? _openHeaders;
+
+    private string? _tenantId;
+    private string? _client;
+    private string _actor = "";
+
+    private readonly int _retentionDays = new DmarcMonitor.Core.Storage.RetentionPolicy().ForensicDays;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        _openId = null;
+        _openHeaders = null;
+
+        if (!Db.Exists) { _rows = []; return; }
+
+        try
+        {
+            var access = await Org.GetAsync();
+            _tenantId = access.TenantId;
+            _client = access.RestrictedClient;
+            _actor = access.User;
+            _mayReadContent = access.CanReadMessageContent;
+
+            _rows = await Failures.ListAsync(_days, _tenantId, _client);
+            _summary = await Failures.SummariseAsync(_days, _tenantId, _client);
+        }
+        catch (Exception ex)
+        {
+            _rows = [];
+            _summary = null;
+            _error = ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Reveals the headers of one reported message, and records that somebody
+    /// did.
+    /// </summary>
+    /// <remarks>
+    /// The audit line is the point. A role decides who may look; the log is
+    /// what makes "who read this customer's mail, and when" a question with an
+    /// answer. Written before the headers are fetched, so a read that then
+    /// fails is still a read that was attempted.
+    /// </remarks>
+    private async Task ShowHeadersAsync(StoredFailure row)
+    {
+        if (_openId == row.Id)
+        {
+            _openId = null;
+            _openHeaders = null;
+            return;
+        }
+
+        if (!_mayReadContent) { return; }
+
+        await Audit.RecordAsync(
+            _tenantId, _actor, "forensic.read",
+            $"headers of a failure report for {row.Domain}"
+            + (row.ArrivedAt is { } at ? $", message of {at:u}" : ""));
+
+        _openId = row.Id;
+        _openHeaders = await Failures.HeadersAsync(row.Id, _tenantId, _client);
+    }
+}

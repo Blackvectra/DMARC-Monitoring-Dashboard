@@ -167,10 +167,10 @@ public static class Program
               dmarc <command> [options]
 
             COMMANDS
-              explain <file>     Read a DMARC or TLS report and explain it in plain English.
-                                 Works on any report file. Needs no mailbox, no database and
-                                 no configuration, so it also works on a report somebody has
-                                 just sent you.
+              explain <file>     Read a report and explain it in plain English. Aggregate
+                                 (RUA), TLS (TLS-RPT) and failure (RUF) reports all work.
+                                 Needs no mailbox, no database and no configuration, so it
+                                 also works on a report somebody has just sent you.
 
               init-db            Create the SQLite database.
                 --db <path>      Database file. Default: dmarc.db

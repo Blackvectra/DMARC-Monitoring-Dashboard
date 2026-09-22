@@ -47,12 +47,30 @@ The `forensic_reports` table holds `subject`, `return_path`, `message_id` and
 `raw_headers`. Those are message headers of real mail, and they **can** contain
 personal data: a subject line, a sender, a recipient.
 
-**It is empty.** RUF reports are not parsed by this build, so nothing is
-written to it. The table and its 30-day retention exist ahead of a parser.
+This build parses them. That makes the retention window the control that
+matters, so tell clients about this table before turning reporting on rather
+than after.
 
-If a parser is ever added, this section stops being reassuring and the
-retention window becomes the control that matters. Say so to clients before
-turning it on, not after.
+Four things bound what is kept and who sees it:
+
+- **Headers only, never a body.** RFC 6591 lets a receiver attach the whole
+  original message. The parser stops at the blank line that ends the headers,
+  so a message body is never written to the database and there is nothing
+  stored for anybody to reveal later.
+- **30 days, not 400.** Failure reports are pruned on their own, shorter clock,
+  and `dmarc prune` refuses a policy that would let them outlive the aggregate
+  data.
+- **Reading them needs the Tech role.** Everyone signed in can see that a
+  report arrived, from what address, what failed and whether it was delivered.
+  The subject line and the headers are hidden below Tech — which is where a
+  customer's own login normally sits.
+- **Every look is in the audit log.** Revealing the headers of one report
+  writes a `forensic.read` entry naming who did it and which domain, so "who
+  read this customer's mail" is a question with an answer.
+
+In practice the table stays small. Google, Microsoft and Yahoo do not send
+failure reports at all, so publishing `ruf=` produces a trickle from a handful
+of smaller receivers rather than a copy of the mail stream.
 
 ### Credentials
 

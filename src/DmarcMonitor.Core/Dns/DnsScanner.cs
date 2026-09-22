@@ -48,11 +48,28 @@ public sealed record ScanSummary(IReadOnlyList<ScanResult> Results, int Skipped 
 /// resolver starts rate-limiting it - which would arrive as a page full of
 /// failures and read as every customer's DNS breaking at the same moment.
 /// </summary>
-public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
+public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, MtaStsFetcher? mtaSts = null)
 {
     private readonly string _databasePath = NotBlank(databasePath);
     private readonly DnsLookup _lookup = lookup ?? new DnsLookup();
     private readonly DnsSnapshotStore _store = new(NotBlank(databasePath));
+
+    /// <summary>
+    /// Fetches the policy file a domain is serving, for the one thing about
+    /// MTA-STS that DNS cannot answer.
+    /// </summary>
+    /// <remarks>
+    /// The TXT record announces a policy id; the mode - the part that decides
+    /// whether anything is required of senders - is in a file served over
+    /// HTTPS. Without this a scan can store that a domain announces a policy
+    /// and cannot store whether that policy enforces anything, which is the
+    /// difference between protected and a domain in testing that has been
+    /// producing clean reports for two years while protecting nothing.
+    ///
+    /// Passed in where a caller has one already, so a long-lived process
+    /// reuses its connections rather than opening a pool per refresh.
+    /// </remarks>
+    private readonly MtaStsFetcher _mtaSts = mtaSts ?? new MtaStsFetcher();
 
     private static string NotBlank(string value)
     {
@@ -100,6 +117,18 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null)
             ct.ThrowIfCancellationRequested();
 
             var published = await _lookup.ReadAsync(name, ct).ConfigureAwait(false);
+
+            // The policy a sender would really get. Only for a domain that
+            // announces one: fetching for the rest would be an HTTPS request
+            // per domain to a host nobody has claimed exists.
+            if (!string.IsNullOrWhiteSpace(published.MtaStsRecord))
+            {
+                published = published with
+                {
+                    ServedMtaSts = await _mtaSts.FetchAsync(name, ct: ct).ConfigureAwait(false),
+                };
+            }
+
             var result = await SaveAsync(name, published, tenantId, ct).ConfigureAwait(false);
 
             results.Add(result);

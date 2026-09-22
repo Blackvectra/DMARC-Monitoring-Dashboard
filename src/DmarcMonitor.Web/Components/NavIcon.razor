@@ -1,0 +1,66 @@
+@*
+    One small line icon for a navigation item.
+
+    Inline SVG rather than an icon font or a sprite sheet. This application is
+    installed on machines that cannot reach a CDN, and a webfont that fails to
+    load leaves a column of empty boxes where the navigation was - which is the
+    same failure mode the charts avoid by being drawn on the server.
+
+    Everything is stroked in currentColor, so an icon is exactly as bright as
+    the label beside it in every state - hover, active, disabled - without a
+    second rule per state anywhere.
+
+    aria-hidden on all of them: the label is the accessible name, and a screen
+    reader announcing "chart icon, Dashboard" is worse than "Dashboard".
+*@
+
+<svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    @switch (Name)
+    {
+        case "dashboard":
+            @* Bars: what the page is, at a glance. *@
+            <path d="M2.5 13.5v-4M6.5 13.5v-7M10.5 13.5v-9M14 13.5H2" />
+            break;
+
+        case "domains":
+            @* A globe. Domain health is about names on the internet. *@
+            <circle cx="8" cy="8" r="5.5" />
+            <path d="M2.5 8h11M8 2.5c1.6 1.7 2.4 3.6 2.4 5.5S9.6 12.3 8 13.5C6.4 11.8 5.6 9.9 5.6 8S6.4 4.2 8 2.5Z" />
+            break;
+
+        case "sources":
+            @* Nodes converging: many senders, one domain. *@
+            <circle cx="3.5" cy="4" r="1.6" />
+            <circle cx="3.5" cy="12" r="1.6" />
+            <circle cx="12.5" cy="8" r="1.6" />
+            <path d="M5 4.8 11 7.3M5 11.2 11 8.7" />
+            break;
+
+        case "fix":
+            @* A spanner, because the page changes DNS. *@
+            <path d="M10.2 2.4a3.6 3.6 0 0 0-4.6 4.4L2.6 9.8a1.3 1.3 0 0 0 0 1.8l1.8 1.8a1.3 1.3 0 0 0 1.8 0l3-3a3.6 3.6 0 0 0 4.4-4.6l-2 2-1.8-1.8Z" />
+            break;
+
+        case "reporting":
+            @* A document. *@
+            <path d="M4 2.5h5l3 3v8a.5.5 0 0 1-.5.5h-7.5a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5Z" />
+            <path d="M9 2.5v3h3M6 8.5h4M6 10.5h4" />
+            break;
+
+        case "settings":
+            @* A cog, kept simple: at fifteen pixels a toothed ring is mud. *@
+            <circle cx="8" cy="8" r="2.2" />
+            <path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7 3.6 3.6" />
+            break;
+
+        default:
+            @* Never drawn in practice; a dot rather than nothing, so a
+               mistyped name shows up as odd rather than as absent. *@
+            <circle cx="8" cy="8" r="2" />
+            break;
+    }
+</svg>
+
+@code {
+    [Parameter, EditorRequired] public string Name { get; set; } = "";
+}

@@ -29,10 +29,38 @@ public sealed class FakeMailboxClient : IMailboxClient
     /// <summary>Counts how many times each message's attachments were fetched.</summary>
     public Dictionary<string, int> AttachmentFetches { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// The whole message on the wire, for the ones that have one.
+    /// </summary>
+    /// <remarks>
+    /// Only failure reports come from here, and only when the attachments held
+    /// nothing - which is the point of the fallback and the thing worth
+    /// asserting, so this is kept separate from the attachments rather than
+    /// derived from them.
+    /// </remarks>
+    private readonly Dictionary<string, byte[]> _raw = new(StringComparer.Ordinal);
+
+    /// <summary>Counts how many times each message's raw form was fetched.</summary>
+    public Dictionary<string, int> RawFetches { get; } = new(StringComparer.Ordinal);
+
     public void Add(MailMessage message, params MailAttachment[] attachments)
     {
         _messages.Add(message);
         _attachments[message.Id] = [.. attachments];
+    }
+
+    /// <summary>A message whose report is in its body rather than attached to it.</summary>
+    public void AddRaw(MailMessage message, string mime)
+    {
+        _messages.Add(message);
+        _attachments[message.Id] = [];
+        _raw[message.Id] = System.Text.Encoding.UTF8.GetBytes(mime);
+    }
+
+    public Task<byte[]?> GetRawMessageAsync(string messageId, CancellationToken cancellationToken = default)
+    {
+        RawFetches[messageId] = RawFetches.GetValueOrDefault(messageId) + 1;
+        return Task.FromResult(_raw.TryGetValue(messageId, out var bytes) ? bytes : null);
     }
 
     public static MailAttachment Attachment(string name, string content) => new()

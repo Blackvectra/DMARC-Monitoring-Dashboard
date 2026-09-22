@@ -460,4 +460,48 @@ public sealed class DnsLookup(ILookupClient? client = null)
         // corrupts them.
         return [.. response.Answers.TxtRecords().Select(r => string.Concat(r.Text))];
     }
+
+    /// <summary>
+    /// The name an address reverses to, or null when it has none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The one lookup that turns a report into something an operator can act
+    /// on. "35.174.145.124 failed against four of your clients" is a line
+    /// somebody has to go and research; "Avanan (Check Point Harmony) failed
+    /// against four of your clients" is a line that names their own security
+    /// gateway breaking their own signatures.
+    /// </para>
+    /// <para>
+    /// Null is an ordinary answer and means two different things that are not
+    /// worth separating here: the address has no PTR, or the reverse zone did
+    /// not respond. Neither lets anything be concluded about the sender, and
+    /// both mean the same to a caller - there is no name, print the address.
+    /// A PTR is also not proof of anything: whoever holds the address writes
+    /// it, so it identifies a source the way a return address does. That is
+    /// enough to recognise a provider and not enough to trust one, which is
+    /// why nothing here feeds a verdict.
+    /// </para>
+    /// </remarks>
+    public async Task<string?> ReverseAsync(string address, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(address);
+
+        if (!IPAddress.TryParse(address.Trim(), out var parsed)) { return null; }
+
+        try
+        {
+            var result = await _client.QueryReverseAsync(parsed, ct).ConfigureAwait(false);
+
+            var name = result.Answers.PtrRecords().FirstOrDefault()?.PtrDomainName.Value;
+
+            return string.IsNullOrWhiteSpace(name)
+                ? null
+                : name.TrimEnd('.').ToLowerInvariant();
+        }
+        catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
+        {
+            return null;
+        }
+    }
 }

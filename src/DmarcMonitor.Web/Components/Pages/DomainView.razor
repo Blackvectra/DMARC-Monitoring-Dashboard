@@ -159,38 +159,59 @@ else
         </div>
     </div>
 
-    @if (_breakdown is { Total: > 0 })
+    @*
+        Two small figures side by side rather than one above the other.
+
+        Each was a full-width card holding very little: the ring with a
+        two-line legend beside it, and the disposition bar with one line under
+        it. On a wide screen that is about four fifths white space each, twice
+        over, pushing the tables that answer "what do I do" a screen further
+        down. They pair naturally - one says how much of the mail
+        authenticated, the other says what happened to the part that did not -
+        and they are read together.
+
+        They stack again under 900px, where side by side would make both
+        unreadable.
+    *@
+    @if (_breakdown is { Total: > 0 } || _detail.Failing > 0)
     {
-        @* The split the pass rate above cannot give: of this domain's mail,
-           how much authenticated, how much broke for a reason the receiver
-           called expected, and how much proved nothing at all. *@
-        <Gauge Slices="@Volume()" Caption="@($"Everything sent as {Domain}, last {_days} days")" />
+        <div class="figure-pair">
+            @if (_breakdown is { Total: > 0 })
+            {
+                @* The split the pass rate above cannot give: of this domain's
+                   mail, how much authenticated, how much broke for a reason
+                   the receiver called expected, and how much proved nothing
+                   at all. *@
+                <Gauge Slices="@Volume()" Caption="@($"Everything sent as {Domain}, last {_days} days")" />
+            }
+
+            @if (_detail.Failing > 0)
+            {
+                <div class="chart">
+                    <figcaption>What happened to the @_detail.Failing.ToString("N0") message(s) that failed</figcaption>
+                    <ProportionBar Slices="@Disposition()"
+                                   Empty="Nothing failed in this window." />
+                    @if (DeliveredAnyway > 0 && _detail.Policy is "reject" or "quarantine")
+                    {
+                        @* The number that says how much protection the policy
+                           is actually giving, as opposed to what it claims. *@
+                        <p class="sub">
+                            @DeliveredAnyway.ToString("N0") failing message(s) were delivered anyway despite
+                            <code>p=@_detail.Policy</code>@(_detail.Pct < 100 ? $", which is what pct={_detail.Pct} does" : "").
+                        </p>
+                    }
+                </div>
+            }
+        </div>
     }
 
     @* The shape of the domain over time, which no total can show. A domain
        that was fine until Tuesday and has been rejecting a third of its mail
-       since reads as "97% passing" in the figures above: true, and useless. *@
+       since reads as "97% passing" in the figures above: true, and useless.
+       Full width, because a thirty-day series needs the horizontal room. *@
     @if (_series is not null && _series.Count > 0)
     {
         <VolumeChart Points="_series" Caption="@($"Mail per day, last {_days} days")" />
-    }
-
-    @if (_detail.Failing > 0)
-    {
-        <div class="chart">
-            <figcaption>What happened to the @_detail.Failing.ToString("N0") message(s) that failed</figcaption>
-            <ProportionBar Slices="@Disposition()"
-                           Empty="Nothing failed in this window." />
-            @if (DeliveredAnyway > 0 && _detail.Policy is "reject" or "quarantine")
-            {
-                @* The number that says how much protection the policy is
-                   actually giving, as opposed to what it claims. *@
-                <p class="sub">
-                    @DeliveredAnyway.ToString("N0") failing message(s) were delivered anyway despite
-                    <code>p=@_detail.Policy</code>@(_detail.Pct < 100 ? $", which is what pct={_detail.Pct} does" : "").
-                </p>
-            }
-        </div>
     }
 
     @*
@@ -270,7 +291,7 @@ else
                     @foreach (var s in _detail.Forwarders)
                     {
                         <tr class="warn">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td>
                                 @* Named where it can be, and otherwise the
                                    evidence itself. A hosted gateway re-sends
@@ -293,7 +314,7 @@ else
                             </td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="num">@s.Failing.ToString("N0")</td>
-                            <td class="muted">@Ago(s.LastSeen)</td>
+                            <td class="when">@Ago(s.LastSeen)</td>
                         </tr>
                     }
                 </tbody>
@@ -337,7 +358,7 @@ else
                     @foreach (var s in _detail.Impersonating)
                     {
                         <tr class="@(s.OtherClients > 0 ? "urgent" : "act")">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="num">@s.Failing.ToString("N0")</td>
                             <td class="num">
@@ -350,7 +371,7 @@ else
                                     <span class="muted">—</span>
                                 }
                             </td>
-                            <td class="muted">@Ago(s.LastSeen)</td>
+                            <td class="when">@Ago(s.LastSeen)</td>
                         </tr>
                     }
                 </tbody>
@@ -404,7 +425,7 @@ else
                             <tr class="act">
                                 @if (i == 0)
                                 {
-                                    <td rowspan="@s.UnalignedDkim.Count"><code>@s.SourceIp</code></td>
+                                    <td rowspan="@s.UnalignedDkim.Count"><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                                     <td class="num" rowspan="@s.UnalignedDkim.Count">@s.Failing.ToString("N0")</td>
                                 }
                                 <td><code>d=@u.Domain</code></td>
@@ -474,7 +495,7 @@ else
                     switched over:
                     @foreach (var (s, i) in group.Select((s, i) => (s, i)))
                     {
-                        @(i > 0 ? ", " : "")<code>@s.SourceIp</code>
+                        @(i > 0 ? ", " : "")<code title="@s.SourceIp">@s.Display</code>
                     }.
                 </p>
             }
@@ -501,7 +522,7 @@ else
                     @foreach (var s in _detail.Misconfigured)
                     {
                         <tr class="act">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="num">@s.Failing.ToString("N0")</td>
                             <td>
@@ -514,7 +535,7 @@ else
                                     <span class="muted"> — DKIM valid, not aligned</span>
                                 }
                             </td>
-                            <td class="muted">@Ago(s.LastSeen)</td>
+                            <td class="when">@Ago(s.LastSeen)</td>
                         </tr>
                     }
                 </tbody>
@@ -538,9 +559,9 @@ else
                     @foreach (var s in _detail.Clean.Take(_showAllClean ? int.MaxValue : 10))
                     {
                         <tr class="fine">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
-                            <td class="muted">@Ago(s.LastSeen)</td>
+                            <td class="when">@Ago(s.LastSeen)</td>
                         </tr>
                     }
                 </tbody>
@@ -876,7 +897,7 @@ else
                             </td>
                             <td class="num">@r.Reports</td>
                             <td class="num">@r.Share.ToString("0.#")%</td>
-                            <td class="muted">@Ago(r.LastReport)</td>
+                            <td class="when">@Ago(r.LastReport)</td>
                         </tr>
                     }
                 </tbody>

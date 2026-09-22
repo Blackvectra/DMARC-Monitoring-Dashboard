@@ -5,6 +5,8 @@
 @inject ReportUiService ReportUi
 @inject ReportStoreConnection Db
 @inject OrgContext Org
+@inject DmarcMonitor.Core.Tenancy.OrganizationStore Organizations
+@inject DmarcMonitor.Core.Tenancy.AuditLog Audit
 @rendermode InteractiveServer
 
 <PageTitle>Reports — DMARC Monitor</PageTitle>
@@ -47,7 +49,7 @@ else
 {
     <section>
         <div class="form-row">
-            <select @bind="_slug" @bind:after="PreviewAsync">
+            <select @bind="_slug" @bind:after="ClientChangedAsync">
                 @foreach (var c in _clients)
                 {
                     <option value="@c.Slug">@c.Name</option>
@@ -59,27 +61,75 @@ else
                     <option value="@m.Value">@m.Label</option>
                 }
             </select>
-            <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open</a>
+            @* Not a link while the document would be signed "your IT provider".
+               The warning below was there all along and did not stop anybody:
+               a page that explains why the report is wrong and then offers a
+               button to open it has told somebody what to ignore. *@
+            @if (Named)
+            {
+                <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open</a>
+            }
+            else
+            {
+                <span class="primary-link disabled" aria-disabled="true"
+                      title="Set Reporting:ProviderName before a report can be opened.">Open</span>
+            }
         </div>
-        @if (ReportUi.IsProviderNameSet)
+        @if (Named)
         {
-            <p class="sub">Reported as “@ReportUi.ProviderName”.</p>
+            <p class="sub">Reported as “@(_preview?.ProviderName ?? ReportUi.ProviderName)”.</p>
+
+            @* The one thing a browser will not let the document control.
+               Chrome and Edge print their own header and footer over every
+               page - the date, the tab title, and the URL, which on this
+               machine reads localhost:5000 and goes to a paying customer like
+               that. No stylesheet can suppress them; only the person at the
+               print dialog can. *@
+            <p class="sub">
+                Printing to PDF: turn <strong>Headers and footers</strong> off in the print dialog,
+                under More settings. Left on, the browser stamps the page with the date and this
+                server's address, and both end up in the customer's copy.
+            </p>
         }
         else
         {
             @* This is the page somebody opens a report from and sends it. A
                document going to a customer signed "your IT provider" is worth
-               stopping for, not a footnote. *@
+               stopping for, not a footnote.
+
+               And fixable here rather than somewhere else. Sending somebody to
+               another page to find one field, with nothing to tell them which,
+               is how a first run ends: the one thing the product is for is
+               behind a setting nobody knew existed. It is two words and they
+               are already looking at the place that needs them. *@
             <p class="sub warn-inline">
-                Reports will be signed “@ReportUi.ProviderName”, literally, because
-                <code>Reporting:ProviderName</code> is not set. Set it before sending anything.
+                Reports cannot be opened yet: they would be signed “@ReportUi.ProviderName”,
+                literally. Name yourself and this unlocks.
             </p>
+            <div class="form-row">
+                <input placeholder="e.g. NRG TechServices" @bind="_provider" @bind:event="oninput"
+                       aria-label="Your name on reports" />
+                <button class="primary" disabled="@(_savingProvider || string.IsNullOrWhiteSpace(_provider))"
+                        @onclick="SaveProviderAsync">Use this name</button>
+            </div>
+            <p class="sub">
+                It goes on every report this organization sends, under the client's name: “prepared by
+                @(string.IsNullOrWhiteSpace(_provider) ? "…" : _provider.Trim())”. Change it any time on
+                <a href="settings">Configuration</a>.
+            </p>
+            @if (_providerError is not null)
+            {
+                <p class="sub bad">@_providerError</p>
+            }
         }
     </section>
 
     @if (_preview is not null)
     {
-        <section class="callout @(_preview.Messages == 0 ? "act" : "fine")">
+        @* The verdict decides the colour, not the message count. A client
+           with one domain losing half its mail inside an estate averaging
+           96.6% used to get a green box; see ClientReport.StrugglingDomains. *@
+        <section class="callout @(_summary is { NeedsAttention: true } || _preview.Messages == 0 ? "act" : "fine")">
             <h2>@_summary?.Headline</h2>
             @foreach (var point in _summary?.Points ?? [])
             {
@@ -93,7 +143,9 @@ else
                 <span class="figure-l">messages</span>
             </div>
             <div class="figure">
-                <span class="figure-n @(_preview.Messages > 0 && _preview.PassRate < 95 ? "bad" : "good")">
+                @* Any one domain below the line, never the estate's average -
+                   which is the arithmetic that hides a failing domain. *@
+                <span class="figure-n @(_preview.Messages > 0 && _preview.StrugglingDomains.Count > 0 ? "bad" : "good")">
                     @(_preview.Messages > 0 ? $"{_preview.PassRate}%" : "—")
                 </span>
                 <span class="figure-l">authenticated</span>
@@ -127,6 +179,76 @@ else
     private string? _tenant;
 
     private string _slug = "";
+
+    /// <summary>
+    /// Whether the report for the client on screen would carry a real
+    /// provider name.
+    /// </summary>
+    /// <remarks>
+    /// Read from the built report where there is one, because the
+    /// organization's own name on the Configuration page beats the
+    /// install-wide setting - so an install with a blank
+    /// <c>Reporting:ProviderName</c> can still produce correctly signed
+    /// reports for an organization that named itself. The configuration is
+    /// only the fallback answer, for the instant before a preview exists.
+    /// </remarks>
+    private bool Named =>
+        _preview is { } preview ? !preview.ProviderIsUnnamed : ReportUi.IsProviderNameSet;
+
+    private string _provider = "";
+    private bool _savingProvider;
+    private string? _providerError;
+
+    /// <summary>
+    /// Names this organization on its reports, from the page that needs it.
+    /// </summary>
+    /// <remarks>
+    /// Written to the organization rather than to appsettings.json: the app
+    /// cannot edit its own configuration file, and on a multi-organization
+    /// install the per-organization name is the right answer anyway - it is
+    /// what NextLayerSec's reports say on an install NRG configured.
+    /// </remarks>
+    private async Task SaveProviderAsync()
+    {
+        var wanted = _provider.Trim();
+        if (wanted.Length == 0) { return; }
+
+        _savingProvider = true;
+        _providerError = null;
+
+        try
+        {
+            var access = await Org.GetAsync();
+            var organization = access.Current
+                ?? (await Organizations.ListAsync()).FirstOrDefault();
+
+            if (organization is null)
+            {
+                _providerError = "No organization to name. Create one on Configuration first.";
+                return;
+            }
+
+            await Organizations.SetBrandAsync(organization.Slug, organization.Brand with { ProviderName = wanted });
+            await Audit.RecordAsync(access.TenantId, access.User, "organization.updated",
+                $"{organization.Slug}: provider name set to {wanted} from the reports page");
+
+            // Rebuilt rather than patched, so what unlocks the button is the
+            // same thing the document will say.
+            await PreviewAsync();
+        }
+        catch (Exception ex)
+        {
+            _providerError = ex.Message;
+        }
+        finally
+        {
+            _savingProvider = false;
+        }
+    }
+
+    // Replaced as soon as a client is known, by the most recent month that
+    // client has data for. This is only the value the control holds for the
+    // instant before that.
     private string _month = ReportUiService.RecentMonths()[0].Value;
 
     protected override async Task OnInitializedAsync()
@@ -148,7 +270,7 @@ else
             if (_clients.Count > 0)
             {
                 _slug = _clients[0].Slug;
-                await PreviewAsync();
+                await ClientChangedAsync();
             }
         }
         catch (Exception ex)
@@ -156,6 +278,36 @@ else
             _clients = [];
             _error = ex.Message;
         }
+    }
+
+    /// <summary>
+    /// Opens the month picker on a month that has something in it.
+    /// </summary>
+    /// <remarks>
+    /// The picker used to start at the last month that had ENDED, which on a
+    /// three-week-old install is a month from before it existed. What an
+    /// operator saw first was "Nothing stored for that month" against a
+    /// database holding three weeks of reports - and a real report went to a
+    /// customer saying exactly that and nothing else.
+    ///
+    /// Per client, not per install: two customers onboarded months apart
+    /// have different newest months, and a default worked out from the whole
+    /// database would be wrong for one of them.
+    ///
+    /// A client with no data at all keeps whatever the picker was showing.
+    /// There is no better month to choose, and moving the control to no
+    /// purpose is worse than leaving it.
+    /// </remarks>
+    private async Task ClientChangedAsync()
+    {
+        if (!string.IsNullOrEmpty(_slug)
+            && await ReportUi.LatestMonthWithDataAsync(_slug, _tenant) is { } month
+            && ReportUiService.RecentMonths().Any(m => m.Value == month))
+        {
+            _month = month;
+        }
+
+        await PreviewAsync();
     }
 
     private async Task PreviewAsync()

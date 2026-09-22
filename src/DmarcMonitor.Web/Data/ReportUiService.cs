@@ -19,7 +19,7 @@ public sealed class ReportUiService(DatabaseInfo database, IConfiguration config
 
     /// <summary>How the provider names itself in reports. One place, not one per run.</summary>
     public string ProviderName =>
-        IsProviderNameSet ? _configuration["Reporting:ProviderName"]! : "your IT provider";
+        IsProviderNameSet ? _configuration["Reporting:ProviderName"]! : DmarcMonitor.Core.Reporting.ClientReport.UnnamedProvider;
 
     /// <summary>
     /// False when reports would go out signed with the placeholder.
@@ -46,14 +46,34 @@ public sealed class ReportUiService(DatabaseInfo database, IConfiguration config
     /// <summary>The months worth offering, newest first, ending with the last complete one.</summary>
     public static IReadOnlyList<(string Value, string Label)> RecentMonths(int count = 12)
     {
-        var months = new List<(string, string)>(count);
+        var months = new List<(string, string)>(count + 1);
 
-        // Starts at the month that has ENDED. Offering the current one by
-        // default invites a report whose numbers change between two runs in
-        // the same week, which cannot be reconciled against an invoice.
-        var month = new DateTimeOffset(DateTimeOffset.UtcNow.Year, DateTimeOffset.UtcNow.Month, 1, 0, 0, 0, TimeSpan.Zero)
-            .AddMonths(-1);
+        var thisMonth = new DateTimeOffset(
+            DateTimeOffset.UtcNow.Year, DateTimeOffset.UtcNow.Month, 1, 0, 0, 0, TimeSpan.Zero);
 
+        // The month in progress, named as being in progress.
+        //
+        // It was left out entirely, and the reasoning was sound as far as it
+        // went: a report whose numbers change between two runs in the same
+        // week cannot be reconciled against an invoice, so the list started
+        // at the month that had ENDED.
+        //
+        // What that missed is that a new install's data is almost always in
+        // the month it is installed. On 22 September the whole list read
+        // August back to September 2025, September 2026 was not on it at all,
+        // and the first thing anybody saw was "Nothing stored for that month"
+        // on a database holding three weeks of reports. A real report was
+        // produced for a customer that way, and the only thing it said was
+        // that no reports had arrived.
+        //
+        // So it is offered and labelled, not hidden. "so far" is the whole
+        // safeguard: nobody sends a month called "so far" to a customer as a
+        // final statement, and everybody wants to look at it.
+        months.Add((
+            thisMonth.ToString("yyyy-MM", CultureInfo.InvariantCulture),
+            thisMonth.ToString("MMMM yyyy", CultureInfo.InvariantCulture) + " (so far)"));
+
+        var month = thisMonth.AddMonths(-1);
         for (var i = 0; i < count; i++, month = month.AddMonths(-1))
         {
             months.Add((
@@ -63,6 +83,18 @@ public sealed class ReportUiService(DatabaseInfo database, IConfiguration config
 
         return months;
     }
+
+    /// <summary>
+    /// The most recent month this client has any report data for, or null.
+    /// </summary>
+    /// <remarks>
+    /// What the month picker should open on. Defaulting to the last complete
+    /// month is right for an install that has been collecting for a year and
+    /// wrong for every install in its first few weeks - which is every
+    /// install somebody is deciding about.
+    /// </remarks>
+    public Task<string?> LatestMonthWithDataAsync(string slug, string? tenantId, CancellationToken ct = default) =>
+        _builder.LatestMonthWithDataAsync(slug, tenantId, ct);
 
     public static bool TryParseMonth(string? value, out ReportPeriod period)
     {

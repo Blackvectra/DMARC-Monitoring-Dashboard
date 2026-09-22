@@ -285,4 +285,217 @@ public sealed class CorrelationServiceTests : IDisposable
 
         Assert.Null(await SourceAsync("192.0.2.50"));
     }
+
+    /// <summary>
+    /// The row an operator actually reads.
+    /// </summary>
+    /// <remarks>
+    /// "192.3.180.38 against two clients" is homework. "ColoCrossing against
+    /// two clients" is a finding, and it is the same row.
+    /// </remarks>
+    [Fact]
+    public async Task ASourceWithAKnownReverseNameIsReportedByVendorName()
+    {
+        await StoreUnassignedAsync("a.example", Row("35.174.145.124", 5, "fail", "a.example", "fail"));
+        await new SourceNameStore(_dbPath).SaveAsync("35.174.145.124", "us.cloud-sec-av.com", answered: true);
+
+        var row = await SourceAsync("35.174.145.124");
+
+        Assert.NotNull(row);
+        Assert.True(row!.IsNamed);
+        Assert.Equal("us.cloud-sec-av.com", row.ReverseName);
+
+        // The address is still the identity; only the label changed.
+        Assert.Equal("35.174.145.124", row.SourceIp);
+        Assert.NotEqual(row.SourceIp, row.Display);
+    }
+
+    /// <summary>
+    /// The state every install is in for its first night, and the one that
+    /// must not look broken: nothing has been looked up yet.
+    /// </summary>
+    [Fact]
+    public async Task ASourceNobodyHasLookedUpStillReportsItsAddress()
+    {
+        await StoreUnassignedAsync("a.example", Row("203.0.113.77", 5, "fail", "a.example", "fail"));
+
+        var row = await SourceAsync("203.0.113.77");
+
+        Assert.NotNull(row);
+        Assert.Null(row!.ReverseName);
+        Assert.False(row.IsNamed);
+        Assert.Equal("203.0.113.77", row.Display);
+    }
+
+    /// <summary>
+    /// A reverse name the catalogue has never seen is still worth showing: it
+    /// is a domain somebody can search for, where an address is not.
+    /// </summary>
+    [Fact]
+    public async Task AnUnrecognisedReverseNameIsShownRatherThanDiscarded()
+    {
+        await StoreUnassignedAsync("a.example", Row("198.51.100.4", 5, "fail", "a.example", "fail"));
+        await new SourceNameStore(_dbPath).SaveAsync("198.51.100.4", "smtp3.some-isp.example", answered: true);
+
+        var row = await SourceAsync("198.51.100.4");
+
+        Assert.Equal("smtp3.some-isp.example", row!.Display);
+    }
+
+    /// <summary>
+    /// Naming is for reading, never for judging. A PTR is written by whoever
+    /// holds the address, so a friendly name is not evidence of anything -
+    /// and a source that authenticated nothing against several unrelated
+    /// parties stays exactly as damning with a name on it.
+    /// </summary>
+    [Fact]
+    public async Task ANameDoesNotSoftenTheVerdict()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.200", 5, "fail", "a.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("192.0.2.200", 5, "fail", "b.example", "fail"));
+
+        var before = await SourceAsync("192.0.2.200");
+        await new SourceNameStore(_dbPath).SaveAsync("192.0.2.200", "mail.colocrossing.com", answered: true);
+        var after = await SourceAsync("192.0.2.200");
+
+        Assert.True(after!.IsNamed);
+        Assert.Equal(before!.Verdict, after.Verdict);
+        Assert.Equal(before.IsCrossClient, after.IsCrossClient);
+        Assert.Equal(before.IndependentParties, after.IndependentParties);
+    }
+
+    // ---- one source, across the whole estate ---------------------------------
+
+    private Task<SourceDetail?> DetailAsync(string ip, string? tenantId = null, string? clientSlug = null) =>
+        new CorrelationService(_dbPath).GetSourceAsync(ip, tenantId: tenantId, clientSlug: clientSlug);
+
+    /// <summary>
+    /// The finding the page exists for, and the one a single-tenant tool
+    /// cannot make: the same address working through unrelated businesses.
+    /// </summary>
+    [Fact]
+    public async Task GathersEveryDomainOneSourceWasSeenAgainst()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.10", 5, "fail", "a.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("192.0.2.10", 7, "fail", "b.example", "fail"));
+        await StoreAsync("c.example", "gamma", Row("192.0.2.10", 3, "fail", "c.example", "fail"));
+
+        var source = await DetailAsync("192.0.2.10");
+
+        Assert.NotNull(source);
+        Assert.Equal(3, source!.DomainCount);
+        Assert.Equal(3, source.IndependentParties);
+        Assert.True(source.IsCrossClient);
+        Assert.Equal(15, source.Messages);
+        Assert.Equal(15, source.Failing);
+    }
+
+    /// <summary>
+    /// All traffic, not only the failing rows. A source that authenticates
+    /// nine times in ten and fails on the tenth is the commonest real case,
+    /// and a page showing only the tenth describes a working mail path as a
+    /// threat.
+    /// </summary>
+    [Fact]
+    public async Task CountsThePassingMailToo()
+    {
+        await StoreAsync("a.example", "alpha",
+            Row("192.0.2.11", 90, "pass", "a.example", "pass"),
+            Row("192.0.2.11", 10, "fail", "a.example", "fail"));
+
+        var source = await DetailAsync("192.0.2.11");
+
+        Assert.Equal(100, source!.Messages);
+        Assert.Equal(90, source.Passing);
+        Assert.Equal(10, source.Failing);
+    }
+
+    /// <summary>
+    /// Per domain, which is the whole value of the column. Passing is what a
+    /// forger cannot do - but only for the domain it passed for.
+    /// </summary>
+    [Fact]
+    public async Task RecordsWhetherItEverPassedForEachDomainSeparately()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.12", 5, "pass", "a.example", "pass"));
+        await StoreAsync("b.example", "beta", Row("192.0.2.12", 5, "fail", "b.example", "fail"));
+
+        var source = await DetailAsync("192.0.2.12");
+
+        Assert.True(source!.Appearances.Single(a => a.Domain == "a.example").EverPassed);
+        Assert.False(source.Appearances.Single(a => a.Domain == "b.example").EverPassed);
+
+        // And so it is not a sending path for everything it touches.
+        Assert.False(source.IsOwnSendingPath);
+    }
+
+    /// <summary>
+    /// The two screens must not disagree about one address. An operator who
+    /// sees a source called impersonation in a list and misconfiguration on
+    /// its own page cannot tell which to believe, which is worse than either
+    /// being wrong.
+    /// </summary>
+    [Fact]
+    public async Task AgreesWithTheListAboutTheVerdict()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.13", 5, "fail", "a.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("192.0.2.13", 5, "fail", "b.example", "fail"));
+
+        var listed = await SourceAsync("192.0.2.13");
+        var detail = await DetailAsync("192.0.2.13");
+
+        Assert.Equal(SourceVerdict.CrossClientImpersonation, listed!.Verdict);
+        Assert.Equal(listed.Verdict, detail!.Verdict);
+        Assert.Equal(listed.IndependentParties, detail.IndependentParties);
+    }
+
+    [Fact]
+    public async Task NamesTheSourceWhenSomethingHasResolvedIt()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.14", 5, "fail", "a.example", "fail"));
+        await new SourceNameStore(_dbPath).SaveAsync("192.0.2.14", "us.cloud-sec-av.com", answered: true);
+
+        var source = await DetailAsync("192.0.2.14");
+
+        Assert.True(source!.IsNamed);
+        Assert.Equal(SourceKind.SecurityGateway, source.Kind);
+    }
+
+    /// <summary>
+    /// Not an empty page about an address that may not exist.
+    /// </summary>
+    [Fact]
+    public async Task AnAddressWithNoReportsIsNotFound()
+    {
+        Assert.Null(await DetailAsync("192.0.2.222"));
+    }
+
+    /// <summary>
+    /// Across one organization's clients is the product; across two
+    /// organizations is a leak. The same rule the list obeys.
+    /// </summary>
+    [Fact]
+    public async Task DoesNotReachIntoAnotherOrganization()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.15", 5, "fail", "a.example", "fail"));
+
+        Assert.Null(await DetailAsync("192.0.2.15", tenantId: "another-organization"));
+    }
+
+    /// <summary>
+    /// A customer's own login sees their own domain and not the six others
+    /// the same address was seen against.
+    /// </summary>
+    [Fact]
+    public async Task ACustomerSeesOnlyTheirOwnDomain()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.16", 5, "fail", "a.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("192.0.2.16", 5, "fail", "b.example", "fail"));
+
+        var source = await DetailAsync("192.0.2.16", clientSlug: "alpha");
+
+        Assert.Equal(1, source!.DomainCount);
+        Assert.Equal("a.example", source.Appearances[0].Domain);
+        Assert.False(source.IsCrossClient);
+    }
 }

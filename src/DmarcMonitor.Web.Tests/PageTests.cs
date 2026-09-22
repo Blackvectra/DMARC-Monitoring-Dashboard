@@ -302,15 +302,41 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
-    public async Task TheShellSeparatesDailyWorkFromSetup()
+    public async Task TheShellKeepsDailyWorkAtTheTopAndFoldsTheRest()
     {
-        // Nine links in one flat list made Triage, which is where every
-        // morning starts, look like the same kind of thing as Updates.
+        // Nine links in one flat list made the dashboard, where every morning
+        // starts, look like the same kind of thing as Updates. The shape now
+        // matches the platforms this is compared against: the few things
+        // looked at daily are top level, the rest are named groups.
         var html = await Client().GetStringAsync("/");
 
         Assert.Contains("nav-group", html, StringComparison.Ordinal);
-        Assert.Contains(">Daily<", html, StringComparison.Ordinal);
-        Assert.Contains(">Setup<", html, StringComparison.Ordinal);
+        Assert.Contains(">Reporting<", html, StringComparison.Ordinal);
+        Assert.Contains(">Settings<", html, StringComparison.Ordinal);
+
+        // Daily work is not inside a fold: a group opened every morning is a
+        // click paid for every morning.
+        var dashboard = html.IndexOf(">Dashboard<", StringComparison.Ordinal);
+        var firstFold = html.IndexOf("nav-fold", StringComparison.Ordinal);
+        Assert.True(dashboard >= 0 && firstFold >= 0 && dashboard < firstFold,
+            "the dashboard link must sit above the first collapsible group");
+    }
+
+    /// <summary>
+    /// A group that stays shut while you are inside it makes the sidebar
+    /// disagree with the page, and the person hunting for where they are is
+    /// the one least able to afford that.
+    /// </summary>
+    [Fact]
+    public async Task TheGroupYouAreInsideIsOpen()
+    {
+        var onReports = await Client().GetStringAsync("/reports");
+        var onDashboard = await Client().GetStringAsync("/");
+
+        Assert.Contains("<details class=\"nav-fold\" open", onReports, StringComparison.Ordinal);
+
+        // And shut when you are not in it, or the fold is decoration.
+        Assert.DoesNotContain("<details class=\"nav-fold\" open", onDashboard, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -419,7 +445,8 @@ public sealed class PageTests : IClassFixture<SeededApp>
 
         Assert.Contains("id=\"forwarded\"", html, StringComparison.Ordinal);
         Assert.Contains("Broken in transit by a gateway", html, StringComparison.Ordinal);
-        Assert.Contains("INKY Phish Fence", html, StringComparison.Ordinal);
+        // The catalog's name, which is what every other page calls it.
+        Assert.Contains("INKY", html, StringComparison.Ordinal);
 
         // And the sentence that stops the wrong fix being attempted.
         Assert.Contains("No DNS record fixes this", html, StringComparison.Ordinal);
@@ -483,14 +510,185 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
-    public async Task ReportsWarnsThatItWouldSignWithThePlaceholder()
+    public async Task ReportsNamesTheProviderItWouldSignAs()
     {
-        // Reporting:ProviderName is unset in the test host, as it is in a
-        // fresh install. This page is where a document is opened and sent.
         var html = await Client().GetStringAsync("/reports");
 
-        Assert.Contains("Reports will be signed", html, StringComparison.Ordinal);
+        Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
         Assert.Contains("Acme Corp", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The print dialog owns the one part of the page the document cannot
+    /// style, so the page has to say so.
+    /// </summary>
+    /// <remarks>
+    /// Chrome and Edge stamp the date, the tab title and the URL over every
+    /// printed page. On a report opened from this app that URL reads
+    /// localhost:5000, and it went to a paying customer that way. No
+    /// stylesheet can suppress it; only the person at the dialog can.
+    /// </remarks>
+    [Fact]
+    public async Task ReportsSaysToTurnOffTheBrowsersHeadersAndFooters()
+    {
+        var html = await Client().GetStringAsync("/reports");
+
+        Assert.Contains("Headers and footers", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The page behind a source's name, asked for as "should also be able to
+    /// navigate to whats highlighted to see what to fix". Every table listed
+    /// sources as dead text, so a row was the end of the trail rather than
+    /// the start of it.
+    /// </summary>
+    [Fact]
+    public async Task ASourceHasAPageOfItsOwn()
+    {
+        var html = await Client().GetStringAsync("/sources/192.0.2.25");
+
+        Assert.Contains("192.0.2.25", html, StringComparison.Ordinal);
+        Assert.Contains("Seen sending as", html, StringComparison.Ordinal);
+        Assert.Contains("What to do", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheSourcesListLinksToThatPage()
+    {
+        var html = await Client().GetStringAsync("/sources");
+
+        Assert.Contains("/sources/", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An address nobody has a report for is not an empty page about an
+    /// address that may not exist.
+    /// </summary>
+    [Fact]
+    public async Task AnAddressWithNoReportsSaysSoRatherThanRenderingBlank()
+    {
+        var html = await Client().GetStringAsync("/sources/198.51.100.200");
+
+        Assert.Contains("Nothing from this address", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// IPv6 is most of the volume on a Microsoft-hosted estate, and its
+    /// addresses are full of colons. A link that only worked for IPv4 would
+    /// have been broken for the commonest sender there is.
+    /// </summary>
+    [Fact]
+    public async Task AnIpv6AddressSurvivesTheRoundTripThroughTheUrl()
+    {
+        var html = await Client().GetStringAsync(
+            "/sources/" + Uri.EscapeDataString("2a01:111:f403:c112::5"));
+
+        // Either it has reports or it does not; what matters is that the page
+        // renders and the address arrived intact rather than 404ing on a colon.
+        Assert.Contains("2a01:111:f403:c112::5", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// TLS reports have been parsed and stored since the importer was
+    /// written, and no page in the product ever referenced them. On a real
+    /// estate the records are published and point at the operator's own
+    /// mailbox, so they have been arriving, being filed, and being invisible.
+    /// </summary>
+    [Fact]
+    public async Task TlsReportsHaveAPage()
+    {
+        var html = await Client().GetStringAsync("/tls");
+
+        Assert.Contains("TLS reports", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Three states look identical as an empty list and need different
+    /// fixes: no record published, a record pointing at somebody else's
+    /// mailbox, or a record that is right and nothing has arrived yet.
+    /// Saying which saves an afternoon.
+    /// </summary>
+    [Fact]
+    public async Task AnEmptyTlsPageSaysWhichKindOfEmptyItIs()
+    {
+        var html = await Client().GetStringAsync("/tls");
+
+        Assert.Contains("_smtp._tls", html, StringComparison.Ordinal);
+        Assert.Contains("rua=", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReportingGroupLinksToTls()
+    {
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("href=\"tls\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A scoped view is a place, not something you retype.
+    /// </summary>
+    /// <remarks>
+    /// The filter box filtered as you typed and forgot the moment you opened
+    /// a domain, so working through one customer meant retyping it on every
+    /// return. Held in the address now, which also makes it a link: "here is
+    /// the one I mean" can be pasted into a ticket.
+    /// </remarks>
+    [Fact]
+    public async Task TheTriageViewIsRestoredFromTheAddress()
+    {
+        var html = await Client().GetStringAsync("/?find=acme&level=urgent");
+
+        // The controls come back holding what the address asked for, rather
+        // than the page opening on everything again.
+        Assert.Contains("value=\"acme\"", html, StringComparison.Ordinal);
+        Assert.Contains("aria-pressed=\"true\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A hand-typed window the control does not offer is ignored rather than
+    /// obeyed, so the select and the page cannot disagree.
+    /// </summary>
+    [Fact]
+    public async Task AnImpossibleWindowInTheAddressIsNotAdopted()
+    {
+        var html = await Client().GetStringAsync("/?days=900");
+
+        Assert.DoesNotContain("value=\"900\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FailureReportsHaveAPage()
+    {
+        var html = await Client().GetStringAsync("/failures");
+
+        Assert.Contains("Failure reports", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The normal state of this page is empty, and it has to say why.
+    /// </summary>
+    /// <remarks>
+    /// Almost no large receiver sends failure reports. A page that shows
+    /// nothing and explains nothing reads as broken, and the fix an operator
+    /// would reach for - republishing ruf= - is not the problem, so they would
+    /// spend an afternoon on a record that was already correct.
+    /// </remarks>
+    [Fact]
+    public async Task AnEmptyFailuresPageSaysWhyItIsEmpty()
+    {
+        var html = await Client().GetStringAsync("/failures");
+
+        Assert.Contains("not a sign that anything is misconfigured", html, StringComparison.Ordinal);
+        Assert.Contains("ruf=", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReportingGroupLinksToFailureReports()
+    {
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("href=\"failures\"", html, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -596,7 +794,7 @@ public sealed class PageTests : IClassFixture<SeededApp>
 /// One database for the whole class: these are read-only pages, and building
 /// it per test would make the suite slower than the thing it is testing.
 /// </summary>
-public sealed class SeededApp : WebApplicationFactory<Program>
+public class SeededApp : WebApplicationFactory<Program>
 {
     private readonly string _dbPath =
         Path.Combine(Path.GetTempPath(), $"dmarc-pages-{Guid.NewGuid():N}.db");
@@ -631,7 +829,17 @@ public sealed class SeededApp : WebApplicationFactory<Program>
         // configuration is also what a real deployment does.
         builder.UseSetting("Database:Path", _dbPath);
         builder.UseSetting("Secrets:Directory", _secretsDir);
+
+        // A configured install, which is what one looks like before anybody
+        // sends a report: without this the download refuses, because a
+        // document signed "your IT provider" must not reach a customer. The
+        // unset case has its own fixture below, since it is a behaviour in
+        // its own right rather than the default state of these tests.
+        if (ProviderName is { } provider) { builder.UseSetting("Reporting:ProviderName", provider); }
     }
+
+    /// <summary>How this host names itself on reports, or null for not configured.</summary>
+    protected virtual string? ProviderName => "NRG Tech Services";
 
     private async Task Seed()
     {
@@ -794,5 +1002,77 @@ public sealed class SeededApp : WebApplicationFactory<Program>
             try { File.Delete(_dbPath + suffix); } catch (IOException) { }
         }
         try { Directory.Delete(_secretsDir, recursive: true); } catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// The same install with nobody's name on it, which is how it arrives.
+/// </summary>
+/// <remarks>
+/// A fresh install has no <c>Reporting:ProviderName</c>, and a report built
+/// on one is signed "prepared by your IT provider", literally. That happened
+/// to a real customer. The page warned about it and still offered the link,
+/// which is a page telling somebody what to ignore.
+/// </remarks>
+public sealed class UnnamedProviderApp : SeededApp
+{
+    protected override string? ProviderName => null;
+}
+
+public sealed class UnnamedProviderTests : IClassFixture<UnnamedProviderApp>
+{
+    private readonly UnnamedProviderApp _app;
+
+    public UnnamedProviderTests(UnnamedProviderApp app) => _app = app;
+
+    private HttpClient Client() => _app.CreateClient(new WebApplicationFactoryClientOptions
+    {
+        AllowAutoRedirect = true,
+        HandleCookies = true,
+    });
+
+    [Fact]
+    public async Task AReportThatWouldBeSignedByNobodyIsRefused()
+    {
+        var response = await Client().GetAsync("/reports/download/acme-corp/2026-08");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains(
+            "your IT provider",
+            await response.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ThePageSaysWhyItCannotBeOpenedRatherThanOfferingTheLink()
+    {
+        var html = await Client().GetStringAsync("/reports");
+
+        Assert.Contains("Reports cannot be opened yet", html, StringComparison.Ordinal);
+        Assert.Contains("Reporting:ProviderName", html, StringComparison.Ordinal);
+
+        // And the control is inert rather than gone: a missing button reads as
+        // a feature that does not exist, where a greyed one reads as "not yet".
+        Assert.Contains("primary-link disabled", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports/download/acme-corp", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The way out is on the page that is blocked, not on another one.
+    /// </summary>
+    /// <remarks>
+    /// Refusing is right and sending somebody elsewhere to find one field is
+    /// not: on a first run it leaves the one thing the product is for behind
+    /// a setting nobody knew existed. The field that unlocks it is here, and
+    /// it writes to the organization - which is also the correct answer on a
+    /// multi-organization install, where each one signs its own reports.
+    /// </remarks>
+    [Fact]
+    public async Task ThePageOffersTheFieldThatUnlocksItself()
+    {
+        var html = await Client().GetStringAsync("/reports");
+
+        Assert.Contains("Your name on reports", html, StringComparison.Ordinal);
+        Assert.Contains("Use this name", html, StringComparison.Ordinal);
     }
 }

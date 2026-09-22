@@ -11,12 +11,19 @@ namespace DmarcMonitor.Core.Tenancy;
 /// start; what changed is that it is now filtered on.
 /// </summary>
 /// <param name="EntraGroupId">
-/// The object id of the Entra security group whose members operate here:
-/// assign domains, apply fixes, import. Null when nobody but the master
-/// group, or an admin or viewer group, can see it.
+/// The object id of the Entra security group whose members do the day-to-day
+/// work here: assign domains, import, run reports and checks, repair SPF and
+/// DKIM. The Tech role. Still called entra_group_id in the database, because
+/// it is the column that has always held this and renaming it would rewrite
+/// every existing install's configuration to say the same thing.
 /// </param>
 /// <param name="AdminGroupId">The group whose members also run the organization's settings.</param>
 /// <param name="ViewerGroupId">The group whose members read and change nothing.</param>
+/// <param name="EngineerGroupId">
+/// The group whose members may also tighten a DMARC policy. Separated from
+/// the Tech group because every other change repairs delivery and this one
+/// starts refusing it.
+/// </param>
 public sealed record Organization(
     string Id,
     string Name,
@@ -26,6 +33,7 @@ public sealed record Organization(
     int Domains,
     string? AdminGroupId = null,
     string? ViewerGroupId = null,
+    string? EngineerGroupId = null,
     OrganizationBrand? Brand = null)
 {
     /// <summary>How the organization looks, never null.</summary>
@@ -79,8 +87,32 @@ public enum OrganizationRole
     /// <summary>Reads everything in scope, changes nothing.</summary>
     Viewer,
 
-    /// <summary>Assigns domains, applies fixes, imports.</summary>
-    Operator,
+    /// <summary>
+    /// The daily work: assigns domains, imports, runs reports and checks, and
+    /// repairs SPF and DKIM.
+    /// </summary>
+    /// <remarks>
+    /// Called Operator until the role was split. The CLI still accepts
+    /// "operator" so that written-down commands and runbooks keep working.
+    /// </remarks>
+    Tech,
+
+    /// <summary>
+    /// Also moves a domain up the DMARC ladder: none to quarantine to reject.
+    /// </summary>
+    /// <remarks>
+    /// The one change in this product that can stop a customer's real mail
+    /// being delivered. Every other repair - an SPF include, a DKIM selector,
+    /// a flattened record - exists to make legitimate mail authenticate;
+    /// raising the policy is the step that acts on the ones that still do
+    /// not, and the ones that still do not are sometimes a mail stream
+    /// nobody remembered to tell you about.
+    ///
+    /// So it is separated from Tech by the question "can this bounce real
+    /// mail?" rather than by seniority, and it is the only capability gate
+    /// between them.
+    /// </remarks>
+    Engineer,
 
     /// <summary>Also runs the organization's settings: groups, branding, providers.</summary>
     Admin,
@@ -138,11 +170,43 @@ public sealed record OrganizationAccess
         : Current is null ? OrganizationRole.None
         : Roles.GetValueOrDefault(Current.Slug, OrganizationRole.None);
 
-    /// <summary>May assign domains, apply fixes and import here.</summary>
-    public bool CanOperate => CurrentRole >= OrganizationRole.Operator;
+    /// <summary>May assign domains, import, and repair SPF and DKIM here.</summary>
+    public bool CanOperate => CurrentRole >= OrganizationRole.Tech;
+
+    /// <summary>
+    /// May move a domain from p=none to quarantine to reject here.
+    /// </summary>
+    /// <remarks>
+    /// Checked in addition to <see cref="CanOperate"/>, never instead of it:
+    /// planning a policy change is still an operation, so a Viewer is stopped
+    /// by the first gate and a Tech by this one.
+    /// </remarks>
+    public bool CanEscalatePolicy => CurrentRole >= OrganizationRole.Engineer;
 
     /// <summary>May change this organization's groups, branding and providers.</summary>
     public bool CanAdminister => CurrentRole >= OrganizationRole.Admin;
+
+    /// <summary>
+    /// May read the subject and headers of a message a failure report is
+    /// about.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The only gate in this product that is about content rather than about
+    /// capability, because failure reports are the only thing here that is
+    /// correspondence. Every other page holds counts: how many messages, from
+    /// which address, passing or failing. A failure report holds one real
+    /// message - who sent it, who it was going to, and what it was about.
+    /// </para>
+    /// <para>
+    /// Set at Tech rather than at Viewer for that reason. Somebody given a
+    /// login to watch their domains' compliance has not thereby been given a
+    /// window into individual mail, and the commonest Viewer here is a
+    /// customer's own account. Whoever is investigating a forgery is an
+    /// operator, and that is the role this follows.
+    /// </para>
+    /// </remarks>
+    public bool CanReadMessageContent => CurrentRole >= OrganizationRole.Tech;
 
     /// <summary>The one client this person is confined to here, or null for all of them.</summary>
     public string? RestrictedClient =>
@@ -201,7 +265,8 @@ public sealed record OrganizationAccess
             var role =
                 isMaster ? OrganizationRole.Master
                 : In(o.AdminGroupId) ? OrganizationRole.Admin
-                : In(o.EntraGroupId) ? OrganizationRole.Operator
+                : In(o.EngineerGroupId) ? OrganizationRole.Engineer
+                : In(o.EntraGroupId) ? OrganizationRole.Tech
                 : In(o.ViewerGroupId) ? OrganizationRole.Viewer
                 : OrganizationRole.None;
 

@@ -116,6 +116,10 @@ builder.Services.AddScoped(sp => new DmarcMonitor.Core.Remediation.DnsProviderCo
     dbPath, sp.GetRequiredService<DmarcMonitor.Core.Remediation.ISecretStore>()));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Remediation.RemediationService(dbPath));
 builder.Services.AddScoped<RemediationUiService>();
+// The TLS reports that have been arriving with nowhere to be read. Scoped
+// like the other read services; it opens its own read-only connection.
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tls.TlsReportService(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Forensic.ForensicReportService(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());
@@ -236,6 +240,7 @@ app.MapGet("/reports/download/{slug}/{month}", async (
         return Results.BadRequest("Month must look like 2026-08.");
     }
 
+
     // Scoped like every page: a slug guessed for another organization's
     // customer is not found, not served. Resolved from the request's own
     // principal, because there is no component here to hold an
@@ -251,6 +256,22 @@ app.MapGet("/reports/download/{slug}/{month}", async (
 
     var report = await reports.BuildAsync(slug, period, access.TenantId, ct).ConfigureAwait(false);
     if (report is null) { return Results.NotFound($"No client filed as '{slug}'."); }
+
+    // Refused, not merely warned about. The page warned and still offered the
+    // link, which is a page telling somebody what to ignore - and a report
+    // duly reached a customer signed "prepared by your IT provider",
+    // literally. Asked of the finished report rather than of configuration,
+    // because an organization with its own name on the Configuration page
+    // produces correctly signed reports on an install whose
+    // Reporting:ProviderName is blank.
+    if (report.ProviderIsUnnamed)
+    {
+        return Results.Problem(
+            $"This report would be signed \"{ClientReport.UnnamedProvider}\", literally. Set "
+            + "Reporting:ProviderName in appsettings.json, or give this organization a name on the "
+            + "Configuration page, and it can be opened.",
+            statusCode: StatusCodes.Status409Conflict);
+    }
 
     var html = ClientReportRenderer.ToHtml(report);
 

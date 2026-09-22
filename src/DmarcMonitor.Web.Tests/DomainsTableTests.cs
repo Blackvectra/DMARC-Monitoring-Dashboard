@@ -36,11 +36,23 @@ public sealed class DomainsTableUnreadTests : IClassFixture<SeededApp>
         Assert.DoesNotContain("chip ok", html, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The unread state explains itself, and points at the control rather
+    /// than at a terminal.
+    /// </summary>
+    /// <remarks>
+    /// A dash with no explanation is a feature that looks broken. Naming a
+    /// command to type is barely better when the button that runs it is in
+    /// the same div, which is what this used to assert.
+    /// </remarks>
     [Fact]
-    public async Task TheUnreadStateNamesTheCommandThatFillsIt()
+    public async Task TheUnreadStateExplainsItselfAndOffersTheControl()
     {
-        // A dash with no explanation is a feature that looks broken.
-        Assert.Contains("dmarc check --all --save", await PageAsync(), StringComparison.Ordinal);
+        var html = await PageAsync();
+
+        Assert.Contains("DNS has not been read yet", html, StringComparison.Ordinal);
+        Assert.Contains("Read DNS now", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("dmarc check --all --save", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -119,10 +131,28 @@ public sealed class DomainsTableReadingsTests : IClassFixture<SeededApp>
         Assert.Contains("p=reject, reports to mailto:dmarc@example.net.", html, StringComparison.Ordinal);
 
         // The rule this whole column rests on: a lookup that failed is drawn
-        // as not knowing, never as an absent record.
+        // as not knowing, never as an absent record. Checked per chip on the
+        // failed domain rather than by looking for "chip missing" anywhere on
+        // the page - acme.com really does publish no MTA-STS and no TLS-RPT,
+        // so a cross for those is now correct, and an assertion about the
+        // whole page would have to be weakened to stay true.
         Assert.Contains("chip unreadable", html, StringComparison.Ordinal);
-        Assert.Contains("not the same as having no", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("chip missing", html, StringComparison.Ordinal);
+
+        foreach (var record in new[] { "SPF", "DKIM", "DMARC", "MTA-STS", "TLS-RPT" })
+        {
+            Assert.Contains(
+                $"aria-label=\"{record} for signed.example: The last attempt to read the DNS",
+                html, StringComparison.Ordinal);
+        }
+
+        // And the domain that really publishes neither transport record says
+        // so, which is the reason those two chips exist.
+        Assert.Contains(
+            "aria-label=\"MTA-STS for acme.com: No TXT record at _mta-sts.acme.com",
+            html, StringComparison.Ordinal);
+        Assert.Contains(
+            "aria-label=\"TLS-RPT for acme.com: No TXT record at _smtp._tls.acme.com",
+            html, StringComparison.Ordinal);
 
         // And the banner now dates the readings rather than saying there are
         // none.

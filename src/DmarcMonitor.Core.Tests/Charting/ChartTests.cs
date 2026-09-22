@@ -509,4 +509,97 @@ public sealed class ChartTests
             CultureInfo.CurrentCulture = original;
         }
     }
+
+    // ---- unreported stretches ------------------------------------------------
+
+    /// <summary>
+    /// A day nobody reported on is not a quiet day, and the chart has to say
+    /// so. Drawn flat at zero the two are identical, and the difference is
+    /// the whole point: a quiet day is mail nobody sent, an unreported day is
+    /// mail nobody can account for.
+    /// </summary>
+    [Fact]
+    public void ARunOfSilentDaysIsOneBandRatherThanOneBoxPerDay()
+    {
+        // Twenty-five silent days then five reported, which is the shape a
+        // three-week-old install has and the shape that produced the report.
+        var reported = Enumerable.Repeat(false, 25).Concat(Enumerable.Repeat(true, 5)).ToArray();
+
+        var band = Assert.Single(Chart.Gaps(reported, 600));
+
+        Assert.Equal(0, band.X, 3);
+        Assert.True(band.Width > 400, $"the silent five sixths of the window drew only {band.Width} of 600");
+    }
+
+    [Fact]
+    public void SeparateSilencesAreSeparateBands()
+    {
+        Assert.Equal(2, Chart.Gaps([true, false, true, false, true], 600).Count);
+    }
+
+    /// <summary>
+    /// A band reaches halfway towards the readings either side, so it covers
+    /// the ground the missing days would have occupied rather than a line
+    /// through the middle of it.
+    /// </summary>
+    [Fact]
+    public void ABandCoversTheGroundBetweenTheReadingsEitherSide()
+    {
+        // Five buckets across 400: points at 0, 100, 200, 300, 400.
+        var band = Assert.Single(Chart.Gaps([true, true, false, true, true], 400));
+
+        Assert.Equal(150, band.X, 3);
+        Assert.Equal(100, band.Width, 3);
+    }
+
+    /// <summary>
+    /// A silence that starts or ends the window has nothing beyond it to
+    /// share the gap with, so it runs to the edge. Without this the chart
+    /// draws a clean margin where the data actually stops, which reads as
+    /// deliberate white space.
+    /// </summary>
+    [Fact]
+    public void ASilenceAtEitherEndReachesTheEdge()
+    {
+        var leading = Assert.Single(Chart.Gaps([false, true, true], 300));
+        Assert.Equal(0, leading.X, 3);
+
+        var trailing = Assert.Single(Chart.Gaps([true, true, false], 300));
+        Assert.Equal(300, trailing.X + trailing.Width, 3);
+    }
+
+    [Fact]
+    public void NothingIsShadedWhenEveryDayWasReported()
+    {
+        Assert.Empty(Chart.Gaps([true, true, true], 600));
+    }
+
+    [Fact]
+    public void EverySilentDayShadesTheWholeCanvas()
+    {
+        var band = Assert.Single(Chart.Gaps([false, false, false], 600));
+
+        Assert.Equal(0, band.X, 3);
+        Assert.Equal(600, band.Width, 3);
+    }
+
+    /// <summary>
+    /// One bucket is a real case - a one-day window - and the general rule
+    /// would put its single point in the middle and shade a band of no width,
+    /// which draws nothing at all.
+    /// </summary>
+    [Fact]
+    public void ASingleSilentBucketStillShadesSomething()
+    {
+        var band = Assert.Single(Chart.Gaps([false], 600));
+
+        Assert.Equal(0, band.X, 3);
+        Assert.Equal(600, band.Width, 3);
+    }
+
+    [Fact]
+    public void NoBucketsAtAllShadeNothing()
+    {
+        Assert.Empty(Chart.Gaps([], 600));
+    }
 }
