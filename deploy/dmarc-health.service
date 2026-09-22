@@ -31,7 +31,7 @@
 [Unit]
 Description=Check the DMARC collector is still working
 After=network-online.target
-OnFailure=dmarc-alert@%n.service
+OnFailure=dmarc-alert@%N.service
 
 [Service]
 Type=oneshot

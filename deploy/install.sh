@@ -293,6 +293,38 @@ systemctl enable --now dmarc-prune.timer >/dev/null
 echo "  enabling the nightly database backup (${ROOT}/backups, 14 kept)"
 systemctl enable --now dmarc-backup.timer >/dev/null
 
+# And take one now, rather than leaving the first until 03:20 tomorrow.
+#
+# Two reasons, and the second is the one that matters. The first is that the
+# health check below treats "no backups at all" as broken and is right to -
+# so an install at 10:00 with the first copy twelve hours away fails its own
+# check at 21:10 on day one, over a fault that is really just a clock. A
+# product that pages its new owner on the evening they installed it has taught
+# them to ignore it before it has ever been right.
+#
+# The second: this is the run that proves the backup works ON THIS MACHINE -
+# that the service account can read the database, that the sandbox lets it
+# write where the unit says, that the disk has room. Left to the timer, all
+# of that is first attempted unattended at 03:20, and a failure then is a
+# journal line nobody reads until the day they need a restore.
+#
+# Never fatal. Everything above is installed and running by this point, and
+# aborting over a backup would leave a working install looking like a failed
+# one. It says what went wrong and carries on.
+echo "  taking the first backup"
+if backup_output="$(systemctl start dmarc-backup 2>&1)"; then
+    first_backup="$(ls -1t "${ROOT}/backups"/dmarc-*.bak 2>/dev/null | head -1 || true)"
+    if [[ -n "$first_backup" ]]; then
+        echo "    $(basename "$first_backup") ($(du -h "$first_backup" | cut -f1))"
+    else
+        echo "    dmarc-backup reported success but wrote nothing to ${ROOT}/backups" >&2
+    fi
+else
+    echo "    the first backup failed; the install is fine, this is not:" >&2
+    [[ -n "$backup_output" ]] && echo "      ${backup_output}" >&2
+    echo "      see why: journalctl -u dmarc-backup -n 30" >&2
+fi
+
 # The check that notices this install has stopped working. Enabled because
 # the failure it catches - a collector that quietly stopped - is the one this
 # product is worst at noticing on its own: every screen goes on showing the
@@ -339,4 +371,17 @@ Next, in this order:
 
 Until step 2 is done, see it from your own machine through an SSH tunnel:
   ssh -L 5000:127.0.0.1:5000 <this server>   then open http://127.0.0.1:5000
+
+Running on their own from now on:
+  dmarc-backup.timer   nightly 03:20, ${ROOT}/backups, 14 kept. One was taken
+                       just now. A copy on this disk survives a bad change and
+                       not a dead machine - set DMARC_BACKUP_S3 in
+                       /etc/dmarc-backup.env to sync it off the box.
+  dmarc-health.timer   09:10 and 21:10. Notices a collector that has quietly
+                       stopped, which nothing else here will tell you. It
+                       fails its unit; /etc/systemd/system/dmarc-alert@.service
+                       is where that becomes mail, Slack or SNS, and until you
+                       edit it nothing is sent anywhere.
+  dmarc-dns.timer      nightly, reads each domain's published records.
+  dmarc-prune.timer    weekly, aggregate 400 days, forensic 30.
 DONE

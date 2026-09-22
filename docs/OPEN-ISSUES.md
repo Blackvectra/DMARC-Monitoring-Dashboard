@@ -330,20 +330,45 @@ only trivially.
 **Area** `.github/workflows/release.yml`, `docs/DEPLOYING.md`
 **Severity** Low.
 
-**ARM: done.** The release now publishes `linux-arm64` too, verified locally
-to be a 36 MB self-contained `ARM aarch64` executable. It is the one build
-whose smoke test cannot run it - an x64 runner cannot execute an ARM binary -
-so CI checks the architecture and the size instead and says so. That is
-genuinely weaker than the x64 and Windows checks, which make the binary
-create a database and read a report.
+**ARM: done, and now actually executed.** The release publishes
+`linux-arm64`, and it is no longer the one build whose smoke test cannot run
+it. It was cross-compiled from an x64 runner, so CI checked its ELF header
+and its file size and said plainly that this was weaker than the x64 and
+Windows checks, which make the binary create a database and read a report.
+
+It stayed that way for one reason - there was no ARM runner - and that reason
+stopped being true: GitHub's `ubuntu-24.04-arm` runners are free for public
+repositories. `linux-arm64` is now built on an arm64 machine and started
+there, and `tests.yml` runs the whole of `install.sh` on arm64 on every pull
+request: the service answering, the four timers enabled, a backup taken and a
+health check passed. The architecture check stayed, applied to every build
+rather than only the ARM one, because it catches a different failure - a
+runner label that changes under the matrix and publishes an x64 binary named
+`dmarc-linux-arm64`, which would pass every other check and die on the
+instance.
+
+This mattered more than "Low" suggested: `docs/AWS.md` recommended
+`t4g.small`, so the instance the runbook told somebody to buy was the one
+architecture nothing had ever run. That page now recommends `t3.small`, and
+ARM is offered as what it now is - a tested alternative that is cheaper.
 
 **Deployment: partly done.** `deploy/install.sh` now runs on every push, on
-a fresh Ubuntu runner with real systemd: it creates the account, unpacks the
-bundle, creates the database, installs the units and starts the service, and
-the job then checks the service is active and sandboxed, answers on loopback,
-refuses a proxied request, and keeps its cookie keys beside the database
-where the sandbox can reach them. That is the Ubuntu half of `DEPLOYING.md`
-done for real.
+a fresh Ubuntu runner with real systemd - on x64 and on arm64 - creating the
+account, unpacking the bundle, creating the database, installing the units
+and starting the service. The job then checks the service is active and
+sandboxed, answers on loopback, refuses a proxied request, and keeps its
+cookie keys beside the database where the sandbox can reach them. That is the
+Ubuntu half of `DEPLOYING.md` done for real.
+
+And, since the scheduled jobs were added, that every one of them actually
+runs: the four timers enabled and active, `dmarc-backup` writing a copy that
+`sqlite3` then opens and integrity-checks, `dmarc-health` green on a fresh
+install *and* failing when pointed at a directory with no backups in it -
+which is what separates a check that passes from a check that is not looking
+- with `dmarc-alert@` starting off the back of that failure. A templated
+`dmarc-ingest@nrg` is instantiated with its own environment file and
+certificate and gets as far as authentication, which is the multi-mailbox
+shape this is deployed in and had never been exercised.
 
 **One command, both operating systems.** `deploy/bootstrap.sh` and
 `deploy/bootstrap.ps1` do the whole path from a fresh machine - runtime,
@@ -362,6 +387,31 @@ hosted runner - its package names and the Caddy static-binary steps come from
 the vendors' documentation and the live package repository, not from a
 machine - a real Entra tenant, a real mailbox, and a hardened Windows Server
 rather than the hosted runner. The doc says so in its own last section.
+
+## 10b. A Windows install has no backup, no retention and no health check
+
+**Area** `deploy/bootstrap.ps1`
+**Severity** Medium on Windows, none on Linux.
+
+The scheduled work is systemd units, and `bootstrap.ps1` registers only two
+scheduled tasks: **DMARC ingest** and **DMARC DNS scan**. There is no Windows
+equivalent of `dmarc-backup.timer`, `dmarc-prune.timer` or
+`dmarc-health.timer`, so a Windows install has nothing protecting the reports,
+nothing applying the retention window, and nothing that will tell you the
+collector has quietly stopped - the three things the Linux path now switches
+on during the install and takes the first backup for.
+
+Nothing claims otherwise: the backup section of `RUNNING.md` says "on a Linux
+install", `AWS.md` is Linux throughout, and the commands themselves are
+cross-platform - `dmarc backup --to`, `dmarc prune` and `dmarc health` all run
+on Windows today. What is missing is only the three `Register-ScheduledTask`
+calls that would make them happen without being remembered, plus the
+assertions in the `bootstrap-windows` CI job that would keep them honest.
+
+Left undone deliberately rather than overlooked: the deployment this is
+actually going into is Ubuntu on EC2, and adding Windows scheduling without a
+Windows server to watch it on would be three untested tasks that *look* like
+protection.
 
 ## 11. The apply path has never written to a real zone
 

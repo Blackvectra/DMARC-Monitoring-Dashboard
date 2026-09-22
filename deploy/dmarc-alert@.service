@@ -2,9 +2,14 @@
 # and usable from any other unit the same way:
 #
 #   [Unit]
-#   OnFailure=dmarc-alert@%n.service
+#   OnFailure=dmarc-alert@%N.service
 #
 # %i is the name of the unit that failed, so one instance serves all of them.
+#
+# %N and not %n. Both name the failing unit; %n keeps its ".service" suffix,
+# so the alert arrives as dmarc-alert@dmarc-health.service.service - a name an
+# operator reasonably reads as a bug in the thing that is supposed to be
+# telling them about a bug. %N drops the suffix: dmarc-alert@dmarc-health.
 #
 # NOT INSTALLED WITH A DEFAULT ACTION ON PURPOSE
 #

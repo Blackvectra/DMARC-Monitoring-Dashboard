@@ -477,6 +477,14 @@ safe: it returns what it has already done, and the next run resumes.
 `rollback.sh` roll the *binary* back; years of a customer's history had
 nothing at all, on a product designed to run on one machine.
 
+On a Linux install you do not have to start it: `install.sh` enables
+`dmarc-backup.timer` (nightly, 03:20, 14 kept in `/opt/dmarc/backups`) and
+takes the first copy during the install, so a machine has a backup before
+anybody has put anything in it. That first run is also the one that proves the
+thing works *on that machine* — the service account can read the database, the
+sandbox lets it write where the unit says, the disk has room. Left to the
+timer, all of that is first attempted unattended at 03:20.
+
 Safe to run while the collector is working. The copy comes from SQLite rather
 than from the filesystem, so it is a transactionally consistent snapshot — not
 whatever the bytes happened to be mid-write. `cp dmarc.db` is not equivalent:

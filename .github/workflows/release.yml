@@ -27,14 +27,15 @@ jobs:
           # Windows is where an MSP runs this. Linux because the eventual
           # hosted deployment is a container, and finding out it does not
           # publish there at release time is finding out too late.
-          - { os: windows-latest, rid: win-x64,     exe: dmarc.exe, runs: true }
-          - { os: ubuntu-latest,  rid: linux-x64,   exe: dmarc,     runs: true }
+          - { os: windows-latest,   rid: win-x64,     exe: dmarc.exe, machine: ''            }
+          - { os: ubuntu-latest,    rid: linux-x64,   exe: dmarc,     machine: 'x86-64'      }
           # ARM, because the cheapest instance at both AWS and Azure is one
-          # (t4g, Dpsv5) and without this build there is nothing to put on it.
-          # Cross-compiled from an x64 runner, so the binary cannot be executed
-          # here to prove it works - see the architecture check below for what
-          # is verified instead.
-          - { os: ubuntu-latest,  rid: linux-arm64, exe: dmarc,     runs: false }
+          # (t4g, Dpsv5). Built AND RUN on an arm64 runner: this was
+          # cross-compiled from x64 and shipped having never been executed,
+          # with its ELF header and its file size standing in for knowing it
+          # starts. GitHub's arm64 runners are free for public repositories,
+          # so that trade no longer buys anything.
+          - { os: ubuntu-24.04-arm, rid: linux-arm64, exe: dmarc,     machine: 'ARM aarch64' }
 
     steps:
       - uses: actions/checkout@v4
@@ -85,8 +86,10 @@ jobs:
             -p:Version=${{ steps.version.outputs.number }} \
             --output publish/${{ matrix.rid }}
 
+      # No longer conditional. Every published binary is now built on the
+      # machine it targets, so every one of them can be started here, and the
+      # only build that was exempt was the one the AWS runbook recommended.
       - name: Prove the single file actually runs on its own
-        if: matrix.runs
         shell: bash
         run: |
           # The whole point of this job. Copy the binary somewhere with
@@ -105,21 +108,25 @@ jobs:
           # And that it can read a report without a database or configuration.
           ./${{ matrix.exe }} explain ../src/DmarcMonitor.Core.Tests/Fixtures/google-aggregate.xml
 
-      - name: Check the cross-compiled binary is for the architecture it claims
-        if: ${{ !matrix.runs }}
+      - name: Check the binary is for the architecture it claims
+        if: matrix.machine
         shell: bash
         run: |
-          # It cannot be run here, so this is what is left: that a single file
-          # exists, that it is an executable for the right machine, and that it
-          # is big enough to be self-contained rather than a stub expecting a
-          # runtime beside it. Short of executing it, which needs an ARM
-          # runner, and worth saying plainly that this is weaker.
+          # Running it proves it works on this runner. This proves the runner
+          # is the machine the artifact is named after - which is the failure
+          # a matrix has when a runner label changes under it, and the one
+          # that would be invisible: an x64 binary published as
+          # dmarc-linux-arm64 passes every test above and dies on the
+          # instance.
+          #
+          # And that it is big enough to be self-contained rather than a stub
+          # expecting a runtime beside it.
           binary=publish/${{ matrix.rid }}/${{ matrix.exe }}
           test -f "$binary" || { echo "nothing was published"; exit 1; }
 
           file "$binary"
-          file "$binary" | grep -q "ARM aarch64" \
-            || { echo "published binary is not an ARM executable"; exit 1; }
+          file "$binary" | grep -q '${{ matrix.machine }}' \
+            || { echo "published binary is not a ${{ matrix.machine }} executable"; exit 1; }
 
           size=$(stat -c%s "$binary")
           test "$size" -gt 20000000 \

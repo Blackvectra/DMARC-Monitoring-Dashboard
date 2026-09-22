@@ -16,7 +16,7 @@ links out rather than repeating.
 - No password belonging to this product. Sign-in is Entra, so MFA, passkeys,
   conditional access and revoking somebody are all things your tenant already
   does.
-- About **$18–20 a month**.
+- About **$21–23 a month**.
 
 ---
 
@@ -107,7 +107,7 @@ and it works from a car park.
 |---|---|
 | Name | `dmarc-monitor` |
 | AMI | **Ubuntu Server 24.04 LTS**, and note the architecture |
-| Type | **`t4g.small`** (ARM, 2 GB) — the release ships `linux-arm64`. `t3.small` if you prefer x86 |
+| Type | **`t3.small`** (x86, 2 GB). `t4g.small` (ARM) also works and costs ~$3/month less |
 | Key pair | **Proceed without a key pair.** You are using SSM |
 | Network | Default VPC, a public subnet, **auto-assign public IP enabled** |
 | Security group | the `dmarc-monitor` one from 1.3 |
@@ -132,6 +132,24 @@ OS, logs and a local backup copy.
 **On instance type:** 2 GB is the floor. The web app is a Blazor Server app and
 holds a little state per open browser tab; 1 GB works until two people have it
 open and then it does not.
+
+**x86 or ARM.** Both are built and both are installed end to end by CI on
+every change — the whole `install.sh` run, the service answering, the timers,
+a backup and a health check, on each architecture. `t3.small` is what this
+page uses because it is the ordinary choice and because every third-party
+thing you might add later (an agent, a package, a container) has an x86 build
+without you checking. `t4g.small` is ARM, saves about $3 a month, and is a
+supported path rather than an experiment; if you take it, the only difference
+is that you download `dmarc-linux-arm64` instead — `bootstrap.sh` picks the
+right one from `uname -m` on its own.
+
+**One `t3` billing note.** `t3` instances default to **unlimited** CPU-credit
+mode, which means a sustained CPU spike bills extra rather than throttling.
+This workload does not get near the baseline — a few browser tabs and an
+hourly collector — so in practice you will not see it, but it is the one line
+on a `t3` bill that surprises people. *EC2 → the instance → Actions →
+Instance settings → Change credit specification* turns it off if you would
+rather be throttled than billed.
 
 ## 1.5 An Elastic IP
 
@@ -191,13 +209,29 @@ That installs the CLI and the web app, writes the systemd units, installs and
 configures Caddy, and gets a certificate. [`DEPLOYING.md`](DEPLOYING.md) has
 what it does step by step and how to do it by hand.
 
-It also enables three timers from the first day:
+> **It installs the latest *release*, not `main`.** The script itself comes
+> from `main`, which is why the URL says so, but the binaries it downloads are
+> whichever version was last tagged. Merging a change does not produce
+> anything installable — pushing a `v1.2.3` tag does, and that is what builds
+> and attaches the files this line fetches. So: tag first, then run this, or
+> you will install last month's build and spend an afternoon wondering where
+> a feature went. `--release v1.2.3` pins a specific one.
+
+It also enables four scheduled jobs from the first day, and leaves a fifth
+switched off until you can fill it in:
 
 | timer | what |
 |---|---|
 | `dmarc-dns.timer` | nightly — reads each domain's published records |
+| `dmarc-backup.timer` | nightly at 03:20 — a verified copy of the database, 14 kept |
+| `dmarc-health.timer` | 09:10 and 21:10 — asks whether collection has quietly stopped |
 | `dmarc-prune.timer` | weekly — applies the retention window |
-| `dmarc-ingest.timer` | enabled but **inert** until you give it a certificate and a mailbox |
+| `dmarc-ingest.timer` | **not** enabled — it waits until you give it a certificate and a mailbox (Part 6) |
+
+The install also takes the first backup itself rather than leaving it until
+03:20, so there is a copy before you have put anything in — and so the health
+check is green from the start instead of failing on the evening of install day
+over a backup that has not had a chance to run yet.
 
 ## 2.3 Check it before you go further
 
@@ -391,11 +425,20 @@ filling up.
 
 Two layers, and they fail differently — which is why both.
 
-**`dmarc backup`, nightly.** Enabled by `install.sh`. It integrity-checks the
-live database, writes a consistent copy (`0600`, in a `0700` directory) and
-keeps 14. See [`RUNNING.md`](RUNNING.md#backups). This is the one that survives
-a bad change, and the only one that tells you the database has started to
-corrupt.
+**`dmarc backup`, nightly.** Enabled by `install.sh`, which also takes the
+first copy during the install so there is one before you walk away. It
+integrity-checks the live database, writes a consistent copy (`0600`, in a
+`0700` directory) and keeps 14. See [`RUNNING.md`](RUNNING.md#backups). This is
+the one that survives a bad change, and the only one that tells you the
+database has started to corrupt.
+
+**`dmarc health`, twice a day.** Also enabled by `install.sh`. It is the
+thing that notices a backup has stopped happening — and a collector that has
+quietly stopped, which is the failure this product is worst at showing you on
+its own, because every screen goes on displaying the figures from before it
+stopped and those look fine. It writes to the journal and fails its unit;
+`/etc/systemd/system/dmarc-alert@.service` is where you turn a failed unit
+into mail, Slack or SNS, and until you do, nothing is sent anywhere.
 
 **EBS snapshots, daily.** *EC2 → Lifecycle Manager → Create lifecycle policy*,
 target by tag, daily, keep 7. Pennies. This is the one that survives losing the
@@ -471,11 +514,13 @@ before you rely on it.
 
 | | ~monthly |
 |---|---|
-| `t4g.small`, on all the time | $12 |
+| `t3.small`, on all the time | $15 |
 | 20 GB gp3 | $1.60 |
 | Public IPv4 | $3.60 |
 | Snapshots | <$1 |
-| | **≈ $18–20** |
+| | **≈ $21–23** |
+
+On `t4g.small` (ARM) the first line is $12 and the total ≈ $18–20.
 
 Stop the instance when you are not using it and you pay only for the disk and
 the address — about $5 — which is the right shape while you are still testing.
@@ -494,6 +539,9 @@ the address — about $5 — which is the right shape while you are still testin
 | Passkey will not register | **Key restrictions** in 4.1. This one costs people an afternoon |
 | Signed in but told to use a code, not a passkey | The CA policy is not applying. Check the sign-in logs, which name the policy |
 | Dashboard empty | Nothing collected yet. `dmarc import` a folder to see it populated |
+| `dmarc-health` shows as failed | It found something, which is its job. `journalctl -u dmarc-health -n 40` names the fault and the fix |
+| `dmarc-backup` failed | `journalctl -u dmarc-backup -n 30`. A full disk is the usual cause; a failed integrity check is the one to act on today |
+| Installed but an old version | `bootstrap.sh` installs the latest **tag**, not `main`. 2.2 |
 | MTA-STS checks say "could not be read" | Outbound 443 is restricted. 1.3 |
 | `"Attempting to reconnect"` on a phone | Blazor circuit dropped. Refresh. Part 5 |
 
@@ -501,9 +549,11 @@ the address — about $5 — which is the right shape while you are still testin
 
 # The short version
 
+0. Tag a release (`v1.2.3`) and wait for it to build — step 5 installs the
+   latest tag, not `main`
 1. IAM role with `AmazonSSMManagedInstanceCore`
 2. Security group: 443 and 80 in, nothing else, all out
-3. `t4g.small`, Ubuntu 24.04, 20 GB, no key pair, role attached
+3. `t3.small`, Ubuntu 24.04, 20 GB **encrypted**, no key pair, role attached
 4. Elastic IP → DNS A record
 5. Session Manager → `bootstrap.sh --host … --email …`
 6. Entra app registration — **tick ID tokens**, consent, assignment required

@@ -36,7 +36,7 @@ Wants=network-online.target
 # else - a corrupt database found at 03:20 and nobody told until somebody
 # happened to look. dmarc-health.service has had this from the start; this
 # unit, which is the one that can discover corruption, did not.
-OnFailure=dmarc-alert@%n.service
+OnFailure=dmarc-alert@%N.service
 
 [Service]
 Type=oneshot
