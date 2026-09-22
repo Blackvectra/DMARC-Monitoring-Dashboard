@@ -47,7 +47,7 @@ else
 {
     <section>
         <div class="form-row">
-            <select @bind="_slug" @bind:after="PreviewAsync">
+            <select @bind="_slug" @bind:after="ClientChangedAsync">
                 @foreach (var c in _clients)
                 {
                     <option value="@c.Slug">@c.Name</option>
@@ -127,6 +127,10 @@ else
     private string? _tenant;
 
     private string _slug = "";
+
+    // Replaced as soon as a client is known, by the most recent month that
+    // client has data for. This is only the value the control holds for the
+    // instant before that.
     private string _month = ReportUiService.RecentMonths()[0].Value;
 
     protected override async Task OnInitializedAsync()
@@ -148,7 +152,7 @@ else
             if (_clients.Count > 0)
             {
                 _slug = _clients[0].Slug;
-                await PreviewAsync();
+                await ClientChangedAsync();
             }
         }
         catch (Exception ex)
@@ -156,6 +160,36 @@ else
             _clients = [];
             _error = ex.Message;
         }
+    }
+
+    /// <summary>
+    /// Opens the month picker on a month that has something in it.
+    /// </summary>
+    /// <remarks>
+    /// The picker used to start at the last month that had ENDED, which on a
+    /// three-week-old install is a month from before it existed. What an
+    /// operator saw first was "Nothing stored for that month" against a
+    /// database holding three weeks of reports - and a real report went to a
+    /// customer saying exactly that and nothing else.
+    ///
+    /// Per client, not per install: two customers onboarded months apart
+    /// have different newest months, and a default worked out from the whole
+    /// database would be wrong for one of them.
+    ///
+    /// A client with no data at all keeps whatever the picker was showing.
+    /// There is no better month to choose, and moving the control to no
+    /// purpose is worse than leaving it.
+    /// </remarks>
+    private async Task ClientChangedAsync()
+    {
+        if (!string.IsNullOrEmpty(_slug)
+            && await ReportUi.LatestMonthWithDataAsync(_slug, _tenant) is { } month
+            && ReportUiService.RecentMonths().Any(m => m.Value == month))
+        {
+            _month = month;
+        }
+
+        await PreviewAsync();
     }
 
     private async Task PreviewAsync()

@@ -94,6 +94,41 @@ public sealed class ClientReportBuilder(string databasePath)
         return results;
     }
 
+    /// <summary>
+    /// The most recent month this client has report data for, as yyyy-MM, or
+    /// null when it has none at all.
+    /// </summary>
+    /// <remarks>
+    /// So a month picker can open on a month with something in it. Scoped by
+    /// tenant like every other read here: a month learned from another
+    /// organization's data would be a small leak, and a silly one to make in
+    /// a convenience.
+    /// </remarks>
+    public async Task<string?> LatestMonthWithDataAsync(
+        string slug, string? tenantId = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(slug);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT MAX(substr(r.date_begin, 1, 7))
+            FROM aggregate_records r
+            JOIN clients c ON c.id = r.client_id
+            WHERE c.slug = $slug
+              AND c.deleted_at IS NULL
+              AND ($tenant IS NULL OR r.tenant_id = $tenant)
+            """;
+        command.Parameters.AddWithValue("$slug", slug.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+
+        var value = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+
+        return value is string month && month.Length == 7 ? month : null;
+    }
+
     /// <summary>How the client's organization presents itself, all optional.</summary>
     private static async Task<(string? ProviderName, string? Color, string? Logo, string? Contact)> GetBrandAsync(
         SqliteConnection db, string clientId, CancellationToken ct)

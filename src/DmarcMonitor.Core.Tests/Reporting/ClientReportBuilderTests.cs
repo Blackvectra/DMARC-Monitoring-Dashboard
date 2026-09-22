@@ -297,4 +297,57 @@ public sealed class ClientReportBuilderTests : IDisposable
 
         Assert.Null(report);
     }
+
+    /// <summary>
+    /// Which month a month picker should open on.
+    /// </summary>
+    /// <remarks>
+    /// It used to open on the last month that had ENDED, which on a
+    /// three-week-old install is a month from before it existed. A real
+    /// report went to a customer that way: two pages whose entire content was
+    /// "No DMARC reports arrived for August 2026", generated from a database
+    /// holding three weeks of September.
+    /// </remarks>
+    [Fact]
+    public async Task FindsTheMostRecentMonthAClientHasDataFor()
+    {
+        await StoreAsync(Xml("acme.com", "none", Row("203.0.113.1", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), month: 7);
+        await StoreAsync(Xml("acme.com", "none", Row("203.0.113.1", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), month: 9);
+
+        var slug = await _store.CreateClientAsync("Acme Corp");
+        await _store.AssignDomainAsync("acme.com", slug!);
+
+        Assert.Equal("2026-09", await new ClientReportBuilder(_dbPath).LatestMonthWithDataAsync(slug!));
+    }
+
+    [Fact]
+    public async Task AClientWithNoDataHasNoMonth()
+    {
+        var slug = await _store.CreateClientAsync("Acme Corp");
+
+        Assert.Null(await new ClientReportBuilder(_dbPath).LatestMonthWithDataAsync(slug!));
+    }
+
+    [Fact]
+    public async Task AClientNobodyHasHeardOfHasNoMonth()
+    {
+        Assert.Null(await new ClientReportBuilder(_dbPath).LatestMonthWithDataAsync("no-such-client"));
+    }
+
+    /// <summary>
+    /// Scoped like every other read here. A month learned from another
+    /// organization's rows would be a small leak and a silly one to make in
+    /// a convenience.
+    /// </summary>
+    [Fact]
+    public async Task DoesNotSeeAMonthBelongingToAnotherOrganization()
+    {
+        await StoreAsync(Xml("acme.com", "none", Row("203.0.113.1", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), month: 9);
+
+        var slug = await _store.CreateClientAsync("Acme Corp");
+        await _store.AssignDomainAsync("acme.com", slug!);
+
+        Assert.Null(await new ClientReportBuilder(_dbPath)
+            .LatestMonthWithDataAsync(slug!, tenantId: "some-other-organization"));
+    }
 }
