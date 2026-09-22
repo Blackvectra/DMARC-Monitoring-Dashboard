@@ -131,6 +131,19 @@ public static class Program
                 assign           File a domain, and its stored history, under a client.
                   --domain <d>   Domain as it appears in the reports.
                   --client <s>   Client slug, from 'dmarc client list'.
+                erase            Remove a client and everything belonging to them,
+                                 permanently. The answer to "can we have our data
+                                 deleted". A dry run unless --apply, and --apply alone
+                                 is not enough: the slug must be typed again into
+                                 --confirm, because --apply is muscle memory by the
+                                 time anybody reaches this. Verified afterwards - every
+                                 table carrying a client_id is checked, and anything
+                                 left behind takes the whole thing back. The audit log
+                                 survives it, because proving a request was honoured is
+                                 the other half of honouring it. Says what your backups
+                                 still hold, and until when.
+                  --client <s>   Client slug.
+                  --apply --confirm <s> --by <name>
                 --org <slug>     Organization a new client belongs to. Default: local
                 --db <path>      Database file. Default: dmarc.db
 

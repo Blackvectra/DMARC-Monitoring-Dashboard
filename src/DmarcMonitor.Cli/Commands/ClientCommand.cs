@@ -1,4 +1,5 @@
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tenancy;
 
 namespace DmarcMonitor.Cli.Commands;
 
@@ -16,7 +17,7 @@ public static class ClientCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--name", "--slug", "--org", "--domain", "--client", "--group", "!--apply") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--name", "--slug", "--org", "--domain", "--client", "--group", "--by", "--confirm", "!--apply") is var bad and not 0) { return bad; }
 
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
@@ -38,6 +39,7 @@ public static class ClientCommand
             "assign" => await AssignAsync(store, rest, ct).ConfigureAwait(false),
             "auto-assign" => await AutoAssignAsync(store, rest, ct).ConfigureAwait(false),
             "set-group" => await SetGroupAsync(store, rest, ct).ConfigureAwait(false),
+            "erase" => await EraseAsync(dbPath, rest, ct).ConfigureAwait(false),
             _ => Usage($"Unknown: dmarc client {action}"),
         };
     }
@@ -288,6 +290,108 @@ public static class ClientCommand
         Console.Error.WriteLine("  dmarc client add    --name \"<name>\" [--slug <slug>] [--org <organization slug>]");
         Console.Error.WriteLine("  dmarc client assign --domain <domain> --client <slug>");
         Console.Error.WriteLine("  dmarc client set-group --client <slug> --group <entra group object id>   (the customer's own login)");
+        Console.Error.WriteLine("  dmarc client erase --client <slug> [--apply --confirm <slug> --by <name>]   (permanent)");
         return 64;
+    }
+
+    /// <summary>
+    /// Removes a client and everything belonging to them, permanently.
+    /// </summary>
+    /// <remarks>
+    /// The answer to "can we have our data deleted". Before this, the honest
+    /// reply was that a domain could be hidden and the reports would age out in
+    /// four hundred days - which is not an answer a paying customer accepts,
+    /// and not one a customer of an MSP should get either.
+    ///
+    /// Guarded harder than anything else here, because it is the only
+    /// operation in the product that cannot be undone from inside it. A dry
+    /// run by default, like prune and fix; and --apply alone is not enough,
+    /// because --apply is muscle memory by the time somebody reaches this. The
+    /// slug has to be typed again into --confirm, which is the one thing a
+    /// half-attentive paste of yesterday's command will not carry.
+    /// </remarks>
+    private static async Task<int> EraseAsync(string dbPath, string[] args, CancellationToken ct)
+    {
+        var client = Args.Value(args, "--client");
+        if (string.IsNullOrWhiteSpace(client))
+        {
+            Console.Error.WriteLine("dmarc client erase --client <slug>                       what would go");
+            Console.Error.WriteLine("dmarc client erase --client <slug> --apply --confirm <slug> --by <name>");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("  Permanent, and not undoable from here. Backups still hold a copy");
+            Console.Error.WriteLine("  until they age out - the preview says until when.");
+            return 64;
+        }
+
+        var erasure = new ClientErasure(dbPath);
+
+        // Organization-wide on the command line, which is what an operator
+        // standing at the machine has. Anything serving a signed-in person
+        // passes a tenant; erasure reaching across organizations would be the
+        // worst possible version of the cross-tenant bug.
+        var preview = await erasure.PreviewAsync(client, null, ct).ConfigureAwait(false);
+
+        if (preview is null)
+        {
+            Console.Error.WriteLine($"No client called '{client}'. Run: dmarc client list");
+            return 66;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"  {preview.Describe()}");
+        Console.WriteLine();
+
+        foreach (var domain in preview.Domains) { Console.WriteLine($"    {domain}"); }
+        if (preview.Domains.Count > 0) { Console.WriteLine(); }
+
+        foreach (var (table, rows) in preview.Rows)
+        {
+            Console.WriteLine($"    {table,-28} {rows,10:N0}");
+        }
+
+        Console.WriteLine();
+
+        if (!Args.Flag(args, "--apply"))
+        {
+            Console.WriteLine("  Nothing was removed. To do it:");
+            Console.WriteLine($"    dmarc client erase --client {preview.Slug} --apply --confirm {preview.Slug} --by <name>");
+            Console.WriteLine();
+            return 0;
+        }
+
+        // --apply is muscle memory by the time anybody reaches this command.
+        // Typing the slug again is not.
+        var confirmed = Args.Value(args, "--confirm");
+        if (!string.Equals(confirmed, preview.Slug, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine($"  Refusing. Add --confirm {preview.Slug} to erase this client.");
+            Console.Error.WriteLine("  Nothing was removed.");
+            return 64;
+        }
+
+        var by = Args.Value(args, "--by");
+        if (string.IsNullOrWhiteSpace(by))
+        {
+            Console.Error.WriteLine("  Refusing. --by <name> says who asked for this; it goes in the audit log.");
+            Console.Error.WriteLine("  Nothing was removed.");
+            return 64;
+        }
+
+        var result = await erasure
+            .ApplyAsync(preview.Slug, null, by, new AuditLog(dbPath), ct)
+            .ConfigureAwait(false);
+
+        Console.WriteLine($"  Erased. {result!.Total:N0} row(s) removed, and verified gone.");
+        Console.WriteLine("  Recorded in the audit log.");
+        Console.WriteLine();
+
+        // Said every time, because somebody is about to tell a customer their
+        // data is gone and it is not gone from the copies yet.
+        Console.WriteLine("  Backups still hold this data. A nightly backup kept for 14 days means the");
+        Console.WriteLine($"  last copy ages out around {DateTimeOffset.UtcNow.AddDays(14):yyyy-MM-dd}, and any offsite");
+        Console.WriteLine("  sync carries its own retention. Say that timeframe rather than \"it is gone\".");
+        Console.WriteLine();
+
+        return 0;
     }
 }

@@ -159,10 +159,32 @@ weekly by a job that writes to an audit log.
 **"Is it encrypted?"** In transit yes. At rest, at the volume and bucket
 level — say which, and do not claim application-level encryption.
 
-**"Can we have it deleted?"** Deleting a domain removes it from the book;
-`dmarc prune` ages the reports out. There is **no single "erase this client"
-command**, and backups hold copies for as long as your retention keeps them.
-Answer that honestly and give a timeframe based on your backup retention.
+**"Can we have it deleted?"** Yes, and it is one command:
+
+    dmarc client erase --client acme-corp                       # what would go
+    dmarc client erase --client acme-corp --apply --confirm acme-corp --by matthew
+
+It removes the client and everything belonging to them — reports, records,
+domains, selectors, DNS snapshots — and then **proves it**: every table in the
+schema carrying a `client_id` is checked afterwards, and anything left behind
+takes the whole transaction back rather than leaving a half-erased customer and
+a confident message.
+
+The table list is read from the schema rather than written down, because
+nineteen tables cascade from a client today and that number only goes up. A
+stale list would leave a table full of an erased customer's data that nobody
+counted.
+
+What survives, deliberately: the **audit log** entry recording that you did it,
+who asked, and how many rows went. It carries the client's name and the counts
+and none of the erased data. Proving a request was honoured is the other half
+of honouring it.
+
+**Backups are the honest caveat.** Erasing from the live database does not
+reach the nightly copies. With the default 14 kept, the last copy ages out
+about two weeks later, and any offsite sync carries its own retention on top.
+The command prints that date every time it runs. **Give the customer that
+timeframe rather than saying "it is gone".**
 
 **"Do you have SOC 2?"** No. Neither does a self-hosted install of anything.
 If a client's procurement requires it, that is an argument for a platform that
@@ -179,7 +201,7 @@ not cover it. At minimum that needs, before the first paying customer:
 - a real DPA and privacy policy, drafted by somebody qualified
 - a stated legal basis and a controller/processor position per customer
 - breach notification obligations you can actually meet, with a timeframe
-- per-tenant data deletion that works, including in backups
+- a backup retention story that matches what you promise on erasure
 - an answer on sub-processors (AWS is one)
 - and, honestly, an answer on SOC 2 — because enterprise procurement will ask
 
