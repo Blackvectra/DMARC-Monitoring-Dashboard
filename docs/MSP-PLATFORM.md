@@ -127,11 +127,11 @@ table with a lifecycle in it.
 
 | | state |
 |---|---|
-| White-label monthly client report | **have** — one self-contained HTML file that opens offline |
-| PDF | **none** — the browser's print dialog, with its own header and footer |
+| White-label monthly client report | **have** — a PDF, drawn server-side, with this product's own header, footer and page numbers |
+| PDF | **have** — `dmarc report` writes one per client, and the app serves it; `--html` still writes the long on-screen version |
 | CSV / XLSX | **partial** — `dmarc export` writes CSV and NDJSON of the raw data; no report appendix workbook |
 | Executive / technical / QBR split | **none** — one report, currently between executive and technical |
-| Logo, colours, client, period, analyst, confidentiality label, report ID | **partial** — first four yes, last three no |
+| Logo, colours, client, period, analyst, confidentiality label, report ID | **partial** — first four yes, in both renderings; last three no |
 | Scheduled per tenant, immutable history | **none** — generated on demand, not kept |
 | Raw and normalized export for audit | **have** |
 
@@ -174,7 +174,7 @@ table with a lifecycle in it.
 
 ## What Phase 1 actually needs
 
-The brief's Phase 1 is ten items. Six are done:
+The brief's Phase 1 is ten items. Seven are done:
 
 1. ~~Strict multi-tenancy and RBAC~~ — done
 2. MSP portfolio dashboard — **mostly**; needs the saved views and a findings column
@@ -182,7 +182,8 @@ The brief's Phase 1 is ten items. Six are done:
 4. **Sender inventory with approval workflow** — the classification is done, the table is not
 5. ~~DMARC/SPF/DKIM checks with historical snapshots~~ — done
 6. **Critical DNS drift alerts** — snapshots exist, diffing and alerting do not
-7. Client-facing monthly report — **have HTML**, needs PDF
+7. ~~Client-facing monthly report~~ — done, as a branded PDF; what is left is
+   sending and keeping it, which is item 8's table and a delivery path
 8. **Open remediation queue with owners, statuses, due dates** — the register is computed per report; nothing persists it
 9. CSV export plus documented API — **CSV done**, API not started
 10. ~~Audit logs and backup/restore verification~~ — done
