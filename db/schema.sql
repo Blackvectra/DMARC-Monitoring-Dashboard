@@ -102,13 +102,18 @@ CREATE TABLE tenants (
     billing_reference   TEXT,
 
     -- Who belongs here: the object ids of Entra security groups, matched
-    -- against the groups claim of whoever signs in. Operators (entra_group_id)
-    -- assign domains, apply fixes and import; admins also run the
-    -- organization's settings; viewers read. NULL throughout means nobody but
-    -- the master group (named in configuration) can see this organization.
+    -- against the groups claim of whoever signs in. Techs (entra_group_id) do
+    -- the daily work: assign domains, import, run reports and checks, repair
+    -- SPF and DKIM. Engineers may also move a domain up the DMARC ladder,
+    -- which is the one change that can stop real mail being delivered. Admins
+    -- also run the organization's settings; viewers read. NULL throughout
+    -- means nobody but the master group (named in configuration) can see this
+    -- organization, and a null engineer group simply means the Tech group is
+    -- as far as the ladder is concerned - nobody escalates.
     entra_group_id      TEXT,
     admin_group_id      TEXT,
     viewer_group_id     TEXT,
+    engineer_group_id   TEXT,
 
     -- White-label: the sidebar and the reports carry these.
     brand_primary_color TEXT,
@@ -1067,6 +1072,9 @@ VALUES ('0012', datetime('now'), 'DNS freshness: when a domain was last read and
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0013', datetime('now'), 'received_at nullable on aggregate_reports and tls_reports: it was being filled with the window end, which is a different fact and was already in the row');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0014', datetime('now'), 'engineer_group_id on tenants: splits the working role in two, so the person who repairs SPF and DKIM and the person who decides a domain may start rejecting mail can be different people');
 
 
 -- ============================================================================

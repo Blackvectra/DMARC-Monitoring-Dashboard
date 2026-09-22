@@ -147,11 +147,23 @@ else
                 }
                 else if (d.ReadyFor is { } next && next != d.CurrentPolicy && !d.Plans.Any(p => p.Type == ChangeType.DmarcPolicy && p.Summary.Contains("Move ", StringComparison.Ordinal)))
                 {
-                    <div class="form-row">
-                        <button class="primary" @onclick="() => PlanPolicyAsync(d.Domain, next)">Plan the move to p=@next</button>
-                    </div>
+                    @if (_canEscalate)
+                    {
+                        <div class="form-row">
+                            <button class="primary" @onclick="() => PlanPolicyAsync(d.Domain, next)">Plan the move to p=@next</button>
+                        </div>
+                    }
+                    else
+                    {
+                        @* Still say the domain is ready, because noticing that
+                           is the work a tech does and the reason an engineer
+                           gets asked. Withholding the finding as well as the
+                           button would mean nobody without the role ever knows
+                           there is a decision waiting. *@
+                        <p class="sub">Ready for <code>p=@next</code>. An engineer raises the policy.</p>
+                    }
                 }
-                else if (d.CurrentPolicy is "none" or "quarantine" && !d.Plans.Any(p => p.Summary.Contains("Move ", StringComparison.Ordinal)))
+                else if (_canEscalate && d.CurrentPolicy is "none" or "quarantine" && !d.Plans.Any(p => p.Summary.Contains("Move ", StringComparison.Ordinal)))
                 {
                     <div class="form-row">
                         @* Read with a default and written explicitly. @bind to a
@@ -363,6 +375,10 @@ else
 
     /// <summary>Whether this person may change DNS. A viewer sees every plan and no button.</summary>
     private bool _canOperate;
+
+    // Separate from _canOperate because planning a policy move is still an
+    // operation: a viewer is stopped by the first, a tech by this one.
+    private bool _canEscalate;
     private IReadOnlyList<AppliedChange>? _history;
     private string? _error;
     private string? _message;
@@ -449,6 +465,7 @@ else
             var access = await Org.GetAsync();
             _tenant = access.TenantId;
             _canOperate = access.CanOperate;
+            _canEscalate = access.CanEscalatePolicy;
             _rows = await Fixes.DomainsAsync(_tenant, access.RestrictedClient);
             _history = await Fixes.HistoryAsync(_tenant, access.RestrictedClient);
             _pending = _rows.Count;
@@ -487,6 +504,10 @@ else
 
     private async Task PlanPolicyAsync(string domain, string? policy)
     {
+        // Checked here and not only where the buttons are drawn. The buttons
+        // are the reason somebody cannot do this by accident; this is the
+        // reason they cannot do it on purpose.
+        if (!_canEscalate) { return; }
         if (string.IsNullOrEmpty(policy) || !_domains.TryGetValue(domain, out var current)) { return; }
 
         _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, policy, _tenant);

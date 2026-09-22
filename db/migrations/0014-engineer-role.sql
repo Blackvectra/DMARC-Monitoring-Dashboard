@@ -1,0 +1,21 @@
+-- Split the working role in two, on the question "can this bounce real mail?"
+--
+-- Until now one group held every change: assigning domains, importing,
+-- repairing SPF, adding a DKIM selector, and moving a domain from p=none to
+-- p=quarantine to p=reject. Those are not the same kind of act. Every repair
+-- above exists to make legitimate mail authenticate, and gets safer as it
+-- lands. Raising the policy is the one that acts on the mail that still does
+-- not authenticate - and some of that, on any real estate, is a mail stream
+-- nobody remembered to mention: a payroll system, a booking confirmation, a
+-- scanner in a warehouse.
+--
+-- So the person who repairs records and the person who decides a domain is
+-- ready to start refusing mail are now separable. They can still be the same
+-- person: leaving this column null changes nothing, because a null group
+-- matches nobody and the Tech group keeps doing exactly what it did.
+--
+-- entra_group_id is deliberately not renamed to tech_group_id. It has held
+-- the working group since the first release and every install's configuration
+-- names it; a migration that rewrites a column to say the same word is a
+-- migration that can only fail.
+ALTER TABLE tenants ADD COLUMN engineer_group_id TEXT;

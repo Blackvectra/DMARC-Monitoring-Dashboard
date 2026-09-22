@@ -440,15 +440,33 @@ removing them from the weaker one first.
 | Role | Group | May |
 | --- | --- | --- |
 | Viewer | `--role viewer` | Read every page in scope. Nothing else. |
-| Operator | `--role operator` (the default) | Also assign and move domains, add clients, import reports, apply and roll back DNS changes. |
+| Tech | `--role tech` (the default) | Also assign and move domains, add clients, import reports, and repair SPF and DKIM — apply and roll back those changes. |
+| Engineer | `--role engineer` | Also raise a DMARC policy: `p=none` → `quarantine` → `reject`. |
 | Admin | `--role admin` | Also set this organization's groups, branding and DNS providers, and read its activity log. |
 | Master | `Auth:MasterGroupId` | Every organization, and creating new ones. |
 
 ```bash
 dmarc org set-group --org nrg-tech-services --role admin    --group <id>
-dmarc org set-group --org nrg-tech-services --role operator --group <id>
+dmarc org set-group --org nrg-tech-services --role engineer --group <id>
+dmarc org set-group --org nrg-tech-services --role tech     --group <id>
 dmarc org set-group --org nrg-tech-services --role viewer   --group <id>
 ```
+
+**Why Tech and Engineer are separate.** Every other change in this product
+exists to make legitimate mail authenticate: an SPF include, a DKIM selector,
+a flattened record. They get safer as they land. Raising the policy is the
+one change that acts on the mail which still does *not* authenticate — and on
+any real estate some of that is a stream nobody remembered to mention: a
+payroll system, a booking confirmation, a scanner in a warehouse. The seam is
+"can this bounce real mail?", not seniority.
+
+They can still be the same people. Leave the engineer group unset and nothing
+changes: a null group matches nobody, and the Tech group keeps doing what it
+did — except that the policy buttons are no longer offered to anyone below
+Admin, so set the engineer group if you want that ladder used.
+
+`--role operator` still works and means `tech`. It is the name the role had
+before the split, and it is written down in runbooks.
 
 An admin can do the same from **Settings → Organizations → Edit** for their
 own organization. The sidebar says which role the person has, so a viewer

@@ -167,7 +167,11 @@
     {
         OrganizationRole.Master => "master: every organization",
         OrganizationRole.Admin => "admin",
-        OrganizationRole.Operator => "operator",
+        OrganizationRole.Engineer => "engineer",
+        // Says what is missing rather than only what is held: a tech who
+        // cannot find the policy buttons should learn from the sidebar that
+        // they are withheld, not conclude the page is broken.
+        OrganizationRole.Tech => "tech, no policy changes",
         OrganizationRole.Viewer when _access.RestrictedClient is not null => "your organization's view, read only",
         OrganizationRole.Viewer => "viewer, read only",
         _ => "",

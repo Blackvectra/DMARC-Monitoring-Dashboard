@@ -25,7 +25,8 @@ public sealed class OrganizationStore(string databasePath)
                (SELECT COUNT(*) FROM clients c WHERE c.tenant_id = t.id AND c.deleted_at IS NULL AND c.slug <> 'unassigned'),
                (SELECT COUNT(*) FROM domains d WHERE d.tenant_id = t.id AND d.deleted_at IS NULL),
                t.admin_group_id, t.viewer_group_id,
-               t.brand_primary_color, t.brand_logo, t.provider_name, t.brand_contact_block
+               t.brand_primary_color, t.brand_logo, t.provider_name, t.brand_contact_block,
+               t.engineer_group_id
         FROM tenants t
         WHERE t.deleted_at IS NULL
         """;
@@ -123,9 +124,9 @@ public sealed class OrganizationStore(string databasePath)
         return new Organization(id, name.Trim(), wanted, Clean(entraGroupId), 0, 0);
     }
 
-    /// <summary>Records which group operates an organization. Null clears it.</summary>
+    /// <summary>Records which group does the day-to-day work here. Null clears it.</summary>
     public Task<bool> SetGroupAsync(string slug, string? entraGroupId, CancellationToken ct = default) =>
-        SetGroupAsync(slug, OrganizationRole.Operator, entraGroupId, ct);
+        SetGroupAsync(slug, OrganizationRole.Tech, entraGroupId, ct);
 
     /// <summary>Records which group holds a role in an organization. Null clears it.</summary>
     public Task<bool> SetGroupAsync(string slug, OrganizationRole role, string? entraGroupId, CancellationToken ct = default)
@@ -133,9 +134,15 @@ public sealed class OrganizationStore(string databasePath)
         var column = role switch
         {
             OrganizationRole.Admin => "admin_group_id",
-            OrganizationRole.Operator => "entra_group_id",
+            OrganizationRole.Engineer => "engineer_group_id",
+            // Not "tech_group_id". This column has held the working group
+            // since the first release and every install's configuration
+            // points at it; renaming it would be a migration that changes
+            // nothing except the word.
+            OrganizationRole.Tech => "entra_group_id",
             OrganizationRole.Viewer => "viewer_group_id",
-            _ => throw new ArgumentOutOfRangeException(nameof(role), role, "A group holds the viewer, operator or admin role."),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(role), role, "A group holds the viewer, tech, engineer or admin role."),
         };
         return UpdateAsync(slug, $"{column} = $value", (object?)Clean(entraGroupId) ?? DBNull.Value, ct);
     }
@@ -207,6 +214,7 @@ public sealed class OrganizationStore(string databasePath)
         r.GetInt32(4), r.GetInt32(5),
         r.IsDBNull(6) ? null : r.GetString(6),
         r.IsDBNull(7) ? null : r.GetString(7),
+        r.IsDBNull(12) ? null : r.GetString(12),
         new OrganizationBrand(
             r.IsDBNull(8) ? null : r.GetString(8),
             r.IsDBNull(9) ? null : r.GetString(9),

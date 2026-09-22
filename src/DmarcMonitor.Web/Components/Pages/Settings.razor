@@ -120,9 +120,10 @@
 <section>
     <h2>Organizations</h2>
     <p class="sub">The layer above clients. Each organization has its own clients and domains, and the people
-       in its Entra security groups see those and nothing else: admins run its settings, operators assign
-       domains and apply fixes, viewers read. Setting a group here does nothing until the app
-       registration's token configuration includes the <code>groups</code> claim.</p>
+       in its Entra security groups see those and nothing else: admins run its settings, engineers raise
+       DMARC policies, techs assign domains and repair SPF and DKIM, viewers read. Setting a group here
+       does nothing until the app registration's token configuration includes the <code>groups</code>
+       claim.</p>
 
     @if (_organizations is null)
     {
@@ -151,8 +152,8 @@
                         </td>
                         <td><code>@o.Slug</code></td>
                         <td class="muted">
-                            @(o.AdminGroupId is { Length: > 0 } ? "admin " : "")@(o.EntraGroupId is { Length: > 0 } ? "operator " : "")@(o.ViewerGroupId is { Length: > 0 } ? "viewer" : "")
-                            @if (o.AdminGroupId is null && o.EntraGroupId is null && o.ViewerGroupId is null)
+                            @(o.AdminGroupId is { Length: > 0 } ? "admin " : "")@(o.EngineerGroupId is { Length: > 0 } ? "engineer " : "")@(o.EntraGroupId is { Length: > 0 } ? "tech " : "")@(o.ViewerGroupId is { Length: > 0 } ? "viewer" : "")
+                            @if (o.AdminGroupId is null && o.EngineerGroupId is null && o.EntraGroupId is null && o.ViewerGroupId is null)
                             {
                                 <span>none — only the master group sees it</span>
                             }
@@ -184,9 +185,14 @@
             </div>
             <div class="form-row">
                 <input placeholder="Admin group object id" @bind="_editAdmin" @bind:event="oninput" aria-label="Admin group" />
-                <input placeholder="Operator group object id" @bind="_editOperator" @bind:event="oninput" aria-label="Operator group" />
+                <input placeholder="Engineer group object id" @bind="_editEngineer" @bind:event="oninput" aria-label="Engineer group" />
+                <input placeholder="Tech group object id" @bind="_editOperator" @bind:event="oninput" aria-label="Tech group" />
                 <input placeholder="Viewer group object id" @bind="_editViewer" @bind:event="oninput" aria-label="Viewer group" />
             </div>
+            <p class="sub">Techs do the daily work and repair SPF and DKIM. Engineers may also raise a
+               DMARC policy from <code>p=none</code> to quarantine to reject — the one change that can
+               stop real mail being delivered. Leave the engineer group empty and nobody below admin
+               can raise a policy.</p>
             <p class="sub">White-label: the sidebar takes the color and logo, and this organization's reports say
                "prepared by" the provider name and end with the contact block.</p>
             <div class="form-row">
@@ -672,6 +678,7 @@
     private string _editName = "";
     private string _editAdmin = "";
     private string _editOperator = "";
+    private string _editEngineer = "";
     private string _editViewer = "";
     private string _editColor = "";
     private string _editProvider = "";
@@ -691,6 +698,7 @@
         _editName = o.Name;
         _editAdmin = o.AdminGroupId ?? "";
         _editOperator = o.EntraGroupId ?? "";
+        _editEngineer = o.EngineerGroupId ?? "";
         _editViewer = o.ViewerGroupId ?? "";
         _editColor = o.Brand.PrimaryColor ?? "";
         _editProvider = o.Brand.ProviderName ?? "";
@@ -748,7 +756,8 @@
             foreach (var (role, value, was) in new[]
                      {
                          (DmarcMonitor.Core.Tenancy.OrganizationRole.Admin, _editAdmin, org.AdminGroupId),
-                         (DmarcMonitor.Core.Tenancy.OrganizationRole.Operator, _editOperator, org.EntraGroupId),
+                         (DmarcMonitor.Core.Tenancy.OrganizationRole.Engineer, _editEngineer, org.EngineerGroupId),
+                         (DmarcMonitor.Core.Tenancy.OrganizationRole.Tech, _editOperator, org.EntraGroupId),
                          (DmarcMonitor.Core.Tenancy.OrganizationRole.Viewer, _editViewer, org.ViewerGroupId),
                      })
             {
