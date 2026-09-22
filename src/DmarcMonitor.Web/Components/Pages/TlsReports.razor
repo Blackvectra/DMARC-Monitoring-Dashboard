@@ -120,7 +120,22 @@ else
                     <tr class="@Css(d)">
                         <td><a href="@($"domains/{Uri.EscapeDataString(d.Domain)}")">@d.Domain</a></td>
                         <td class="muted">@d.ClientName</td>
-                        <td><span class="chip @ModeCss(d.PolicyMode)">@d.PolicyMode</span></td>
+                        <td>
+                            <span class="chip @ModeCss(d.PolicyMode)">@d.PolicyMode</span>
+                            @if (d.ModeChangedSinceReports)
+                            {
+                                @* The figures on this row were gathered under the
+                                   previous policy. Senders cache a policy for its
+                                   max_age - a week is normal - so this lag is the
+                                   expected state for days after a change, not a
+                                   fault. Saying so beats a reader concluding the
+                                   page is wrong. *@
+                                <span class="needs-doing">
+                                    Reports below still say @d.ReportedMode: senders cache the policy,
+                                    so they are from before this changed.
+                                </span>
+                            }
+                        </td>
                         <td class="num">@d.Sessions.ToString("N0")</td>
                         <td class="num">
                             @if (d.Failed > 0) { <span class="bad">@d.Failed.ToString("N0")</span> }
@@ -196,6 +211,11 @@ else
             _failures = await Tls.GetFailuresAsync(_days, access.TenantId, access.RestrictedClient);
 
             _losing = [.. _domains.Where(d => d.IsLosingMail)];
+
+            // PolicyMode, which prefers what the domain serves now. Judging
+            // on what reporters had put two domains that had just moved to
+            // enforce under "in testing mode, which protects nothing", while
+            // the domains table showed them enforcing.
             _testing = [.. _domains.Where(d =>
                 d.PolicyMode.Equals("testing", StringComparison.OrdinalIgnoreCase))];
         }

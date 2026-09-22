@@ -22,14 +22,48 @@ public sealed record TlsDomainSummary
     /// The strongest mode any reporter said it fetched during the window.
     /// </summary>
     /// <remarks>
-    /// As the RECEIVER fetched it, not whatever DNS says today. This is the
-    /// field that decides whether TLS was actually enforced: a domain in
-    /// testing has its failures reported and its mail delivered over
-    /// plaintext anyway, so it can sit there for years generating perfectly
-    /// clean reports while being no better protected than a domain with no
-    /// policy at all.
+    /// As the RECEIVER had it, which is not the same as what the domain
+    /// serves now and can lag it by a long way: MTA-STS policies are cached
+    /// for max_age, a week on one of these domains, so a domain that moved to
+    /// enforce on Monday goes on being reported as testing until every
+    /// sender's copy expires.
     /// </remarks>
-    public string PolicyMode { get; init; } = "unknown";
+    public string ReportedMode { get; init; } = "unknown";
+
+    /// <summary>
+    /// What the domain serves now, from the last DNS scan, or empty when
+    /// nobody has fetched it.
+    /// </summary>
+    public string ServedMode { get; init; } = "";
+
+    /// <summary>
+    /// The mode to judge the domain by: what it serves now where that is
+    /// known, and what reporters had otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The current policy wins, and it has to. Two of these domains moved to
+    /// enforce and the reports from the days before still said testing, so
+    /// this page raised "in testing mode, which protects nothing" against two
+    /// domains that were protected - while the domains table, reading the
+    /// served policy, showed them enforcing. One product, two pages, two
+    /// answers about the same domain on the same morning.
+    /// </remarks>
+    public string PolicyMode => ServedMode.Length > 0 ? ServedMode : ReportedMode;
+
+    /// <summary>
+    /// True when the reports were taken under a policy the domain has since
+    /// changed.
+    /// </summary>
+    /// <remarks>
+    /// Worth saying rather than hiding. Without it the figures below read as
+    /// evidence about the current policy, and they are evidence about the
+    /// previous one - which is the single most confusing thing this page can
+    /// do on the week somebody moves a domain to enforce.
+    /// </remarks>
+    public bool ModeChangedSinceReports =>
+        ServedMode.Length > 0
+        && ReportedMode is not ("unknown" or "")
+        && !ServedMode.Equals(ReportedMode, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>How many reporting organizations sent anything for this domain.</summary>
     public int Reporters { get; init; }
@@ -158,7 +192,15 @@ public sealed class TlsReportService(string databasePath)
               -- as enforce and once as testing in the same window is
               -- enforcing: the testing reporter simply had a stale copy.
               MAX(CASE r.policy_mode
-                    WHEN 'enforce' THEN 3 WHEN 'testing' THEN 2 WHEN 'none' THEN 1 ELSE 0 END)
+                    WHEN 'enforce' THEN 3 WHEN 'testing' THEN 2 WHEN 'none' THEN 1 ELSE 0 END),
+              -- What the domain serves NOW, from the last DNS scan. A report
+              -- says what its sender had CACHED, and MTA-STS policies are
+              -- cached for max_age - a week on one of these domains. So a
+              -- domain that moved to enforce on Monday goes on being reported
+              -- as testing until every sender's copy expires.
+              (SELECT x.mta_sts_mode FROM dns_snapshots x
+                WHERE x.domain_id = d.id AND x.mta_sts_mode IS NOT NULL
+                ORDER BY x.last_seen_seq DESC LIMIT 1)
             FROM tls_reports r
             JOIN domains d ON d.id = r.domain_id
             JOIN clients c ON c.id = r.client_id
@@ -183,13 +225,14 @@ public sealed class TlsReportService(string databasePath)
                 Failed = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 Reporters = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
                 LastReport = ParseDate(reader.IsDBNull(6) ? null : reader.GetString(6)),
-                PolicyMode = (reader.IsDBNull(7) ? 0 : reader.GetInt32(7)) switch
+                ReportedMode = (reader.IsDBNull(7) ? 0 : reader.GetInt32(7)) switch
                 {
                     3 => "enforce",
                     2 => "testing",
                     1 => "none",
                     _ => "unknown",
                 },
+                ServedMode = reader.IsDBNull(8) ? "" : reader.GetString(8),
             });
         }
 
