@@ -90,6 +90,7 @@ public static class ClientReportPdf
         Senders(section, report);
         WhyFailed(section, report);
         Actions(section, report);
+        Covered(section, report);
         Explainer(section, report);
 
         return document;
@@ -288,7 +289,8 @@ public static class ClientReportPdf
         Heading(section, "Your domains");
         Note(section, "A domain is protected once mail that fails the checks is refused or sent to junk by "
                     + "the receiving provider. Aligned means the check was about your domain rather than the "
-                    + "sender's own, which is the only kind DMARC counts.");
+                    + "sender's own, which is the only kind DMARC counts. A message is yours if either one "
+                    + "aligns, so the two columns can differ widely with every message still protected.");
 
         var table = Grid(section, [4.6, 2.0, 2.0, 2.0, 2.0, 4.4]);
         HeaderRow(table, ["Domain", "Messages", "Yours", "SPF aligned", "DKIM aligned", "What to do"]);
@@ -388,6 +390,11 @@ public static class ClientReportPdf
 
         if (report.Remediation.Count == 0)
         {
+            // Reachable only with mail in the period and no finding against
+            // any of it - the register carries an item of its own for a month
+            // nothing was reported in, because an empty register once printed
+            // this sentence over a domain at p=none that no receiver had said
+            // a word about.
             var clear = section.AddParagraph(
                 "Nothing. Every domain is enforcing, its own mail is arriving, and no sender needs correcting.");
             clear.Format.Font.Color = Good;
@@ -417,6 +424,40 @@ public static class ClientReportPdf
             Small(row[2], item.Action);
             Small(row[3], item.Target);
             Small(row[4], item.Owner);
+        }
+    }
+
+    /// <summary>
+    /// What was watched, and what the policy turned away.
+    /// </summary>
+    /// <remarks>
+    /// The section a healthy month needs. "Nothing to do" is the right answer
+    /// and a poor document: it is sent every month to the client who is
+    /// happiest with the service, and on its own it reads as an invoice with
+    /// no work attached.
+    /// </remarks>
+    private static void Covered(Section section, ClientReport report)
+    {
+        if (report.Covered.Count == 0) { return; }
+
+        Heading(section, "What this covered");
+
+        var table = Grid(section, [5.2, 2.4, 9.4]);
+
+        foreach (var fact in report.Covered)
+        {
+            var row = table.AddRow();
+            row.Borders.Bottom.Width = 0.5;
+            row.Borders.Bottom.Color = Rule;
+
+            var label = row[0].AddParagraph(fact.Label);
+            label.Format.Font.Size = 8.5;
+
+            Value(row[1], fact.Value, fact.Label.StartsWith("Turned away", StringComparison.Ordinal) ? Good : Ink);
+
+            var note = row[2].AddParagraph(fact.Note);
+            note.Format.Font.Size = 8;
+            note.Format.Font.Color = Muted;
         }
     }
 

@@ -572,3 +572,146 @@ public sealed class VerdictTests
         Assert.Equal("7 days", Assert.Single(report.Remediation, i => i.Priority == "Critical").Target);
     }
 }
+
+/// <summary>
+/// A month nobody reported on, which is not a clean month.
+/// </summary>
+/// <remarks>
+/// Four of ten real clients had no data for September, and each of their
+/// reports printed, under "What to do next": "Nothing. Every domain is
+/// enforcing, its own mail is arriving, and no sender needs correcting."
+/// The same page showed mortonnd.gov at p=none, no messages at all, and
+/// "confirm whether this domain sends mail" - three claims contradicted by
+/// the table above them. An empty register is not an all-clear.
+/// </remarks>
+public sealed class QuietMonthTests
+{
+    private static ClientReport Report(string policy = "none") =>
+        new()
+        {
+            ClientName = "Morton ND",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [new ReportDomainHealth { Domain = "mortonnd.gov", Policy = policy }],
+        };
+
+    [Fact]
+    public void AMonthWithNoReportsIsAFindingRatherThanAnAllClear()
+    {
+        var item = Assert.Single(Report().Remediation);
+
+        Assert.Contains("No receiver reported", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("mortonnd.gov", item.Finding, StringComparison.Ordinal);
+
+        // With something to actually do, and a way to know it is finished.
+        Assert.Contains("rua", item.Action, StringComparison.Ordinal);
+        Assert.NotEmpty(item.Target);
+        Assert.NotEmpty(item.Validation);
+    }
+
+    /// <summary>
+    /// Silence over an unenforcing domain is worse than silence over an
+    /// enforcing one: nothing is watching and nothing is stopping anybody.
+    /// </summary>
+    [Fact]
+    public void SilenceOverAnUnprotectedDomainRanksHigher()
+    {
+        Assert.Equal("High", Assert.Single(Report().Remediation).Priority);
+        Assert.Equal("Medium", Assert.Single(Report("reject").Remediation).Priority);
+    }
+
+    [Fact]
+    public void TheQuietMonthSaysSoWhereItSaysWhatWasCovered()
+    {
+        var report = Report() with
+        {
+            Daily = [.. Enumerable.Range(1, 30).Select(d => new DayPoint
+            {
+                Day = new DateOnly(2026, 9, d),
+                Reported = false,
+            })],
+        };
+
+        var days = Assert.Single(report.Covered, f => f.Label == "Days covered");
+
+        Assert.Equal("0 of 30", days.Value);
+        Assert.Contains("No receiver reported on any day", days.Note, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// What the month's work was, for the client with nothing wrong.
+/// </summary>
+/// <remarks>
+/// The healthy estate's report said "Protected" and "Nothing to do" over
+/// half a page of white space - sent monthly to the client happiest with the
+/// service, and reading as an invoice with no work attached.
+/// </remarks>
+public sealed class CoveredTests
+{
+    private static ClientReport Report(long stopped = 0, long overridden = 0) =>
+        new()
+        {
+            ClientName = "ND United",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Messages = 318,
+            Passing = 318,
+            OverriddenMessages = overridden,
+            Domains = [new ReportDomainHealth
+            {
+                Domain = "ndunited.org", Policy = "quarantine", Messages = 318, Passing = 318,
+            }],
+            Daily = [.. Enumerable.Range(1, 30).Select(d => new DayPoint
+            {
+                Day = new DateOnly(2026, 9, d),
+                Reported = true,
+                Messages = 10,
+                Passing = 10,
+                Rejected = stopped / 30,
+            })],
+        };
+
+    [Fact]
+    public void AHealthyMonthStillSaysWhatWasDone()
+    {
+        var covered = Report().Covered;
+
+        Assert.Contains(covered, f => f.Label == "Days covered" && f.Value == "30 of 30");
+        Assert.Contains(covered, f => f.Label == "Messages examined" && f.Value == "318");
+        Assert.Contains(covered, f => f.Label == "Domains watched" && f.Value == "1");
+        Assert.All(covered, f => Assert.NotEmpty(f.Note));
+    }
+
+    /// <summary>
+    /// Protection as delivered, taken from what the receivers did rather than
+    /// from the failure count.
+    /// </summary>
+    /// <remarks>
+    /// A message that failed under p=none was delivered. Counted as stopped,
+    /// it would tell a client they were protected by a policy that asked for
+    /// nothing - which is the single most consequential thing a report of
+    /// this kind can get wrong.
+    /// </remarks>
+    [Fact]
+    public void WhatTheReceiversActuallyDidIsWhatIsClaimed()
+    {
+        Assert.DoesNotContain(Report().Covered, f => f.Label.StartsWith("Turned away", StringComparison.Ordinal));
+
+        var busy = Report(stopped: 600);
+
+        Assert.Equal(600, busy.Stopped);
+        Assert.Contains(busy.Covered, f => f.Label.StartsWith("Turned away", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ForwardedMailIsNamedAsForwardedRatherThanAsFailure()
+    {
+        var forwarded = Assert.Single(
+            Report(overridden: 40).Covered,
+            f => f.Label.StartsWith("Forwarded", StringComparison.Ordinal));
+
+        Assert.Equal("40", forwarded.Value);
+        Assert.Contains("Mailing lists", forwarded.Note, StringComparison.Ordinal);
+    }
+}

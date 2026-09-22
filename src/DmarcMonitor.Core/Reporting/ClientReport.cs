@@ -226,6 +226,23 @@ public sealed record RemediationItem
 /// address, so the report can say "17 addresses" for the one and nothing for
 /// the other.
 /// </param>
+/// <summary>
+/// One line of what the month's monitoring covered.
+/// </summary>
+/// <remarks>
+/// A client whose estate is healthy gets a report that says, correctly, that
+/// there is nothing to do - and a page of white space under it. That is the
+/// report the client who is happiest with you receives, and it reads as an
+/// invoice with no work attached. These are the facts that say what was
+/// watched and what it stopped, which is the thing being paid for.
+/// </remarks>
+public sealed record ReportFact
+{
+    public required string Label { get; init; }
+    public required string Value { get; init; }
+    public required string Note { get; init; }
+}
+
 public sealed record ReportSender
 {
     public required string Name { get; init; }
@@ -500,6 +517,126 @@ public sealed record ClientReport
 
     /// <summary>True when there is a previous period to compare against at all.</summary>
     public bool HasComparison => PreviousMessages > 0;
+
+    /// <summary>
+    /// Messages a receiver refused or filed as junk because the policy told
+    /// it to. The protection, as delivered, rather than as configured.
+    /// </summary>
+    /// <remarks>
+    /// Taken from the dispositions the receivers reported, not from the
+    /// failure count: a message that failed under p=none was delivered, and
+    /// counting it here would tell a client they were protected by a policy
+    /// that asked for nothing.
+    /// </remarks>
+    public long Stopped => Daily.Sum(d => d.Rejected + d.Quarantined);
+
+    /// <summary>
+    /// True when no receiver said anything about this client in this period.
+    /// </summary>
+    /// <remarks>
+    /// Asked of the domains and the sources as well as the total, not of the
+    /// total alone. They are filled by the same query and cannot disagree in
+    /// practice, but "nothing at all was observed" is the premise the register
+    /// uses to refuse to give an all-clear, and a premise that strong should
+    /// not rest on one field being right.
+    /// </remarks>
+    public bool NothingWasReported =>
+        Messages == 0 && !Domains.Any(d => d.Messages > 0) && !Sources.Any(s => s.Messages > 0);
+
+    /// <summary>
+    /// What the month's monitoring covered, for the client paying for it.
+    /// </summary>
+    /// <remarks>
+    /// The report for a healthy estate correctly says there is nothing to do,
+    /// and then stops - half a page, sent monthly, to the client who is
+    /// happiest with the service. Nothing on it says what was watched, how
+    /// much was read, or what the policy turned away, so the one client with
+    /// no problems is the one with no evidence of the work.
+    /// </remarks>
+    public IReadOnlyList<ReportFact> Covered
+    {
+        get
+        {
+            var facts = new List<ReportFact>();
+
+            var days = Daily.Count;
+            var reported = Daily.Count(d => d.Reported);
+            if (days > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Days covered",
+                    Value = $"{reported} of {days}",
+
+                    // Said plainly, because it qualifies everything above it.
+                    // A month with four days of reports in it can show a
+                    // perfect pass rate, and a client reading "100%" is
+                    // entitled to know it describes four days.
+                    Note = reported switch
+                    {
+                        0 => "No receiver reported on any day of this period, so the figures above describe "
+                           + "nothing that was observed.",
+                        _ when reported == days =>
+                            "Every day of the period was reported on by at least one receiver.",
+                        _ => $"The figures above describe the {reported} day(s) that were reported on. A day with "
+                           + "no report is not a day with no mail: receivers miss runs.",
+                    },
+                });
+            }
+
+            facts.Add(new ReportFact
+            {
+                Label = "Messages examined",
+                Value = Messages.ToString("N0", CultureInfo.InvariantCulture),
+                Note = "Every message that claimed to come from your domains, as the receiving providers "
+                     + "described it.",
+            });
+
+            facts.Add(new ReportFact
+            {
+                Label = "Domains watched",
+                Value = Domains.Count.ToString("N0", CultureInfo.InvariantCulture),
+                Note = "Their DMARC, SPF and DKIM records were read and checked over the period, not taken on "
+                     + "trust from a previous month.",
+            });
+
+            var senders = LegitimateSenders.Count + InventoryOf(SenderClass.Misconfigured).Count;
+            if (senders > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Sending services identified",
+                    Value = senders.ToString("N0", CultureInfo.InvariantCulture),
+                    Note = "Named rather than left as addresses, so an unfamiliar one is something you can "
+                         + "recognise or query.",
+                });
+            }
+
+            if (Stopped > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Turned away on your behalf",
+                    Value = Stopped.ToString("N0", CultureInfo.InvariantCulture),
+                    Note = "Refused or filed as junk by the receiving provider because your policy said to. This "
+                         + "is the protection doing its job.",
+                });
+            }
+
+            if (OverriddenMessages > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Forwarded, and allowed for",
+                    Value = OverriddenMessages.ToString("N0", CultureInfo.InvariantCulture),
+                    Note = "Mailing lists and forwarders break authentication as a matter of course. These are "
+                         + "counted apart from the failures so they do not read as a problem.",
+                });
+            }
+
+            return facts;
+        }
+    }
 
     /// <summary>
     /// Sources with nothing failing at all.
@@ -791,6 +928,44 @@ public sealed record ClientReport
         get
         {
             var items = new List<RemediationItem>();
+
+            // A month with nothing in it is not a clean month.
+            //
+            // The register was empty for a client no receiver reported on,
+            // and an empty register printed "Nothing. Every domain is
+            // enforcing, its own mail is arriving, and no sender needs
+            // correcting." Every one of those three claims was false for a
+            // domain sitting at p=none that nobody had confirmed sends mail
+            // at all - and it went out under the heading that tells a client
+            // what to do next.
+            if (NothingWasReported)
+            {
+                var watched = Domains.Where(d => !d.IsEnforcing).Select(d => d.Domain).ToList();
+
+                items.Add(new RemediationItem
+                {
+                    // Nothing can be seen, and on an unenforcing domain that
+                    // means nothing is stopping anybody either.
+                    Priority = watched.Count > 0 ? "High" : "Medium",
+                    Finding = "No receiver reported on "
+                            + (Domains.Count == 1 ? Domains[0].Domain : $"{Domains.Count} domain(s)")
+                            + $" in {Period.Label}, so nothing about this period can be confirmed.",
+                    Impact = "Either these domains sent no mail, or the reports are not reaching us. The two are "
+                           + "indistinguishable from here, and only one of them is fine"
+                           + (watched.Count > 0
+                               ? $". {string.Join(", ", watched)} also asks receivers to do nothing about mail "
+                               + "that fails, so anybody can send as it today."
+                               : "."),
+                    Action = "Check that each domain's DMARC record names this service in its rua address, and that "
+                           + "a report has arrived since. If a domain genuinely sends no mail, say so: it can be "
+                           + "set to reject and left alone.",
+                    Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
+                    Validation = "A report arrives for each domain, or the domain is recorded as non-sending and "
+                               + "moved to p=reject.",
+                });
+
+                return items;
+            }
 
             // Worst first: mail that is not arriving, because that is the one
             // with a cost the client can already feel.
