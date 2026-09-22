@@ -224,7 +224,7 @@ public sealed class ReportStore
                 await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
         }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+        catch (SqliteException ex) when (IsAlreadyStored(ex))
         {
             // UNIQUE(org_name, external_report_id, domain_id). The database is
             // the last line of defense against double-counting, behind the
@@ -361,7 +361,7 @@ public sealed class ReportStore
 
             await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+        catch (SqliteException ex) when (IsAlreadyStored(ex))
         {
             await transaction.RollbackAsync(ct).ConfigureAwait(false);
             return null;
@@ -370,6 +370,35 @@ public sealed class ReportStore
         await transaction.CommitAsync(ct).ConfigureAwait(false);
         return reportId;
     }
+
+    /// <summary>
+    /// Whether this is the database refusing a report it already holds, as
+    /// opposed to refusing it for any other reason.
+    /// </summary>
+    /// <remarks>
+    /// This used to be <c>SqliteErrorCode == 19</c>, which is wrong in a way
+    /// that took real data to notice. 19 is SQLITE_CONSTRAINT - the whole
+    /// family. NOT NULL, FOREIGN KEY, CHECK and UNIQUE all arrive as 19, and
+    /// treating them alike meant that ANY constraint failure was reported to
+    /// the operator as "already stored".
+    ///
+    /// What that cost: migration 0013 made received_at nullable, and `dmarc
+    /// import` has no arrival time to record, so it writes NULL. Run against a
+    /// database still at 0012 - which is every install that has not had
+    /// init-db run since the upgrade - every insert hit NOT NULL, every report
+    /// came back as a duplicate, and the command printed "404 files seen, 0
+    /// stored, 404 already stored" and exited 0. Sixty-five real reports,
+    /// silently discarded, with a summary that read like success.
+    ///
+    /// So only the extended codes that actually mean "this row is already
+    /// there" count. Everything else is a fault and must reach the operator,
+    /// because a report that could not be stored is data lost.
+    /// </remarks>
+    private static bool IsAlreadyStored(SqliteException ex) =>
+        ex.SqliteExtendedErrorCode is SqliteConstraintUnique or SqliteConstraintPrimaryKey;
+
+    private const int SqliteConstraintPrimaryKey = 1555;   // SQLITE_CONSTRAINT_PRIMARYKEY
+    private const int SqliteConstraintUnique = 2067;       // SQLITE_CONSTRAINT_UNIQUE
 
     /// <summary>Domains with no client assigned: reports arriving that nobody is billed for.</summary>
     /// <param name="tenantId">One organization's, or null for every organization's.</param>

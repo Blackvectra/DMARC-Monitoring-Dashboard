@@ -203,6 +203,12 @@ From the release page, three files: `dmarc-web.zip`, `dmarc-linux-x64` (or
 and the systemd units. The server has no checkout; that is why they travel
 with the release.
 
+Not `dmarc-windows-trial.zip`. That one is a self-contained copy for looking
+at the product on a laptop - no runtime, no service, no sign-in, serving
+loopback only. It is the right way to decide whether to do any of this, and
+the wrong thing to put on a server: it has no authentication because it has
+no way to be reached by anybody but the person running it.
+
 ```bash
 tar xzf dmarc-deploy.tar.gz
 sudo ./deploy/install.sh
@@ -222,15 +228,30 @@ loopback. What it did, so that it is not magic:
   `/opt/dmarc/data/dmarc.db` as that account.
 - Wrote `/opt/dmarc/app/appsettings.Production.json` (step 3) and
   `/etc/dmarc-ingest.env` (step 6) as templates.
-- Installed `dmarc-web.service`, `dmarc-ingest.service`,
-  `dmarc-ingest.timer`, `dmarc-dns.service` and `dmarc-dns.timer` from
-  `deploy/`, and started the web app.
-- Enabled `dmarc-dns.timer`, which reads every domain's published SPF, DKIM
-  and DMARC records nightly and is what fills the Records column on the
-  domains page. It is on from the start, unlike the collector, because it
-  needs no mailbox, no app registration and no certificate - only public DNS.
-  Run it whenever you like with `sudo systemctl start dmarc-dns`, or by hand
-  as `dmarc check --all --save --db /opt/dmarc/data/dmarc.db`.
+- Installed every unit in `deploy/` - `dmarc-web.service`, the collector pair
+  `dmarc-ingest.service`/`.timer` and its templated equivalents
+  `dmarc-ingest@.service`/`.timer`, `dmarc-dns`, `dmarc-prune`,
+  `dmarc-backup`, `dmarc-health` and `dmarc-alert@.service` - and started the
+  web app.
+- **Enabled four timers**, all of which need nothing configured to be useful:
+
+  | timer | what, and when |
+  |---|---|
+  | `dmarc-dns.timer` | nightly 03:20 - reads every domain's published SPF, DKIM and DMARC records. Fills the Records column on the domains page |
+  | `dmarc-backup.timer` | nightly 03:20 - a verified copy into `/opt/dmarc/backups`, 14 kept |
+  | `dmarc-health.timer` | 09:10 and 21:10 - whether collection and backups are still happening |
+  | `dmarc-prune.timer` | Sunday 04:40 - the retention window, aggregate 400 days and forensic 30 |
+
+  Each can be run by hand at any time with `sudo systemctl start dmarc-dns`
+  and so on.
+- **Took the first backup**, rather than leaving it until 03:20 tomorrow. It
+  is the run that proves the thing works on this machine, and without it the
+  health check above fails on the evening of install day over a copy that has
+  not had a chance to exist.
+
+The collector is the one thing NOT enabled: it cannot run until you have
+finished an app registration and given it a certificate, and an hourly unit
+failing on an empty environment file is worse than one you had to switch on.
 
 Somewhere other than `/opt/dmarc`, or under a different account name:
 `DMARC_ROOT=/srv/dmarc DMARC_USER=svc-dmarc sudo -E ./deploy/install.sh`.
@@ -580,15 +601,30 @@ announcing one nothing is serving does nothing at all.
 
 ## 8. Backups
 
-Two files matter and they are both small:
+**You do not have to set this up.** `install.sh` enables `dmarc-backup.timer`
+and takes the first copy during the install, so a machine has a backup before
+anybody has put anything in it. Nightly at 03:20, into `/opt/dmarc/backups`,
+14 kept. [`RUNNING.md`](RUNNING.md#backups) has what it checks and how long it
+takes; the short version is that it integrity-checks the **live** database
+before copying it, so a database that has begun to corrupt stops the run
+rather than filling the retention window with copies of the damage.
 
 ```bash
-sudo -u dmarc sqlite3 /opt/dmarc/data/dmarc.db ".backup '/opt/dmarc/data/backup.db'"
+sudo systemctl start dmarc-backup          # whenever you want one now
+dmarc backup --to /mnt/elsewhere --keep 30 # or by hand, anywhere
 ```
 
-`.backup` rather than `cp`, because copying a SQLite file while something has
-it open can produce a file that looks fine and is not. Then take `backup.db`
-and the `secrets/` and `keys/` directories off the machine. The keys only
+`dmarc-health.timer` fails its unit — and so raises an alert through
+`dmarc-alert@` — if the newest backup is more than a week old, which is the
+timer having stopped rather than one late night.
+
+**Offsite is the part still worth your attention.** A copy on the same disk
+survives a bad change and not a dead machine. Set `DMARC_BACKUP_S3` in
+`/etc/dmarc-backup.env` and the unit syncs after each run; `AWS.md` has how to
+harden that bucket, and the single most important line there is that the
+instance role must **not** have `s3:DeleteObject`.
+
+Take the `secrets/` and `keys/` directories off the machine too. The keys only
 sign the sign-in cookie; a restore without them means everybody signs in
 again, nothing worse.
 
@@ -617,9 +653,14 @@ Tagging is the decision. Until you tag, you can change whatever you like on
 git tag v1.3.0 && git push origin v1.3.0
 ```
 
-That builds `dmarc.exe`, `dmarc-linux-x64`, `dmarc-linux-arm64` and
-`dmarc-web.zip`, stamps each with `1.3.0`, and attaches them to a GitHub
-release.
+That builds `dmarc.exe`, `dmarc-linux-x64`, `dmarc-linux-arm64`,
+`dmarc-web.zip`, `dmarc-deploy.tar.gz` and `dmarc-windows-trial.zip`, stamps
+each with `1.3.0`, and attaches them to a GitHub release.
+
+**Merging is not releasing.** Nothing on `main` is installable until a tag
+builds it, and `bootstrap.sh` fetches the *latest release* - so an install run
+straight after a merge gets the previous tag's binaries, with the same version
+number it always had and no error to explain the missing work.
 
 **The server can tell you when it is behind.** Set `Updates:Repository` in
 `appsettings.Production.json` and the Settings page reports what it is running

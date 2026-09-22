@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DmarcMonitor.Core\DmarcMonitor.Core.csproj" />
+    <InternalsVisibleTo Include="DmarcMonitor.Web.Tests" />
   </ItemGroup>
 
   <ItemGroup>

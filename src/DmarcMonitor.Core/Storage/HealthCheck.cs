@@ -77,8 +77,27 @@ public static class HealthCheck
     /// </remarks>
     public const int QuietAfterDays = 7;
 
-    /// <summary>How stale the newest backup may be before it is a finding.</summary>
+    /// <summary>How stale the newest backup may be before it is worth saying.</summary>
     public const int BackupStaleAfterHours = 48;
+
+    /// <summary>How old the newest backup has to be before backups have STOPPED.</summary>
+    /// <remarks>
+    /// The same two-threshold shape as collection above, and for the same
+    /// reason. One missed night is a late job - a slow disk, a machine that
+    /// was off - and paging somebody for it is how a check gets muted. Seven
+    /// consecutive missed nights is not lateness, it is a timer that is not
+    /// running, and the difference has to be visible in the exit code because
+    /// that is what <c>OnFailure=</c> hangs off.
+    ///
+    /// Without this there was a hole exactly where it hurt most. "No backups
+    /// at all" was Breaking, so it alerted - but <c>install.sh</c> now takes
+    /// the first copy during the install, which makes that branch unreachable
+    /// on a real machine. The only backup failure a running install can
+    /// develop is the timer stopping and the copies ageing out, and that was
+    /// a Weakness: printed, exit 0, unit successful, nobody told. The one
+    /// case left was the one nothing covered.
+    /// </remarks>
+    public const int BackupStoppedAfterDays = 7;
 
     /// <summary>
     /// The findings, worst first.
@@ -211,6 +230,26 @@ public static class HealthCheck
 
         var age = now - facts.LastBackup.Value;
         if (age.TotalHours < BackupStaleAfterHours) { return; }
+
+        // Past a week the nightly timer has missed seven runs, which is not a
+        // late job. Breaking, so the unit fails and the alert carries it.
+        if (age.TotalDays >= BackupStoppedAfterDays)
+        {
+            findings.Add(new HygieneFinding
+            {
+                Severity = HygieneSeverity.Breaking,
+                Record = "backup",
+                Problem = $"Backups have stopped. The newest in {facts.BackupDirectory} is {Describe(age)} "
+                        + "old and the timer is meant to take one nightly, so it has missed every run "
+                        + "since. Nothing else here protects the reports.",
+                Fix = "Check the timer and why the last runs failed: "
+                    + "`systemctl list-timers dmarc-backup.timer` and `journalctl -u dmarc-backup -n 50`. "
+                    + "A full disk is the usual cause. Take one now with "
+                    + "`sudo systemctl start dmarc-backup`.",
+            });
+
+            return;
+        }
 
         findings.Add(new HygieneFinding
         {

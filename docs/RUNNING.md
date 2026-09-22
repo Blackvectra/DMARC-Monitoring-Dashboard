@@ -12,7 +12,30 @@ shows an empty state until something has been collected.
 
 ---
 
-## Quickest possible start
+## Quickest possible start: the Windows trial download
+
+Nothing installed at all. `dmarc-windows-trial.zip` from the latest release,
+unzipped, and `DmarcMonitor.Web.exe` double-clicked. A browser opens on the
+dashboard.
+
+There is no .NET runtime to install, no administrator prompt, no service and
+no server. The application creates its own database in the folder it was run
+from — that is the only state it has, along with the `keys\` directory beside
+it that signs your session cookie — so deleting the folder removes every
+trace. Put data in by dropping report files onto the Import page, or with the
+`dmarc.exe` in the same folder:
+
+```
+dmarc.exe import --from "C:\some-folder-of-reports"
+```
+
+It is the same build a server runs, in **local trial mode**: it serves
+requests from that machine and refuses anything that arrived through a proxy,
+and says so in a banner on every page. That makes it safe on a laptop and
+wrong on a server — for a server, see [`DEPLOYING.md`](DEPLOYING.md), which
+starts from the same application with sign-in configured.
+
+## Quickest possible start from the command line
 
 No mailbox, no app registration, no configuration. Enough to see whether the
 product is worth the rest of the setup.
@@ -595,12 +618,20 @@ What it checks:
 |---|---|
 | Collection, **per organization** | Nothing stored in 36 hours. Per organization because two collectors break independently, and one still working keeps the install-wide figure looking healthy while a whole customer book goes dark. |
 | Domains gone quiet | Reports stopped more than 7 days ago while others kept arriving. Not raised when collection itself is broken — then everything is quiet, and saying so 17 times buries the finding that matters. |
-| Backups | Only when you name a directory. Left out, nothing is concluded rather than assumed missing. |
+| Backups | Only when you name a directory. Left out, nothing is concluded rather than assumed missing. None at all, or a newest copy more than **7 days** old, is backups having stopped. Between 2 and 7 days is one late night and only prints. |
 | A name in two organizations | Usually a mistyped `--org` on a collector. Reported, not judged. |
 
 **Exit 1 only when something is actually broken.** A weakness prints and exits
-0, because a check that pages every night over a stale backup is a check
+0, because a check that pages every night over one late job is a check
 somebody mutes — and then the collector stops into a muted channel.
+
+The two backup thresholds exist because the single one left a hole. "No
+backups at all" used to be the only case that failed the unit, and
+`install.sh` now takes the first copy during the install — which makes that
+case unreachable on a machine anybody installed. The failure a running
+install actually develops is the timer stopping and the copies ageing out, and
+with one threshold that printed and exited 0. The only case left in practice
+was the only case that did not alert.
 
 That exit code is the whole alerting story: it needs no SMTP client, no
 webhook signer and no credentials of its own. `deploy/install.sh` enables

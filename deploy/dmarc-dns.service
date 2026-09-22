@@ -27,7 +27,18 @@ ExecStart=/usr/local/bin/dmarc check --all --save --db /opt/dmarc/data/dmarc.db
 # would mark the unit failed for doing its job and finding a real problem.
 # The findings are in the journal either way; what matters here is whether the
 # run itself worked.
-SuccessExitStatus=0 1
+#
+# 66 for the same reason, and it is the one an operator meets first. This
+# timer is enabled during the install, but the collector is deliberately not -
+# it cannot run until somebody has finished an Entra app registration - so a
+# new machine has no domains for at least the first night and usually several.
+# `dmarc check --all` says "No domains in the database yet" and exits 66
+# (EX_NOINPUT), which is the right answer to a person who typed it and the
+# wrong thing to fail a unit over. Without this, the first thing a new owner
+# sees the morning after installing is `systemctl --failed` naming this unit,
+# every morning, until the collector starts working. The run worked; there
+# was simply nothing to scan.
+SuccessExitStatus=0 1 66
 
 # The same reason as dmarc-ingest: the self-contained binary unpacks its
 # native SQLite library on first run and needs somewhere writable to do it.

@@ -6,7 +6,22 @@ using DmarcMonitor.Web.Components;
 using DmarcMonitor.Web.Data;
 using Microsoft.AspNetCore.DataProtection;
 
-var builder = WebApplication.CreateBuilder(args);
+// Content root beside the executable rather than wherever it happened to be
+// started from. That is where wwwroot is, and ASP.NET Core's default - the
+// current working directory - is only the same thing by luck.
+//
+// Both deployments already pin it: the systemd unit sets
+// WorkingDirectory=/opt/dmarc/app and bootstrap.ps1 passes --contentRoot, so
+// neither changes. What changes is every other way it can be started - a
+// shortcut with a different "start in", a terminal in another directory, the
+// portable Windows copy launched from anywhere but its own folder - where it
+// used to log "The WebRootPath was not found" and serve the whole application
+// unstyled. An explicit --contentRoot still wins over this.
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+});
 
 // On Windows the app runs as a service (deploy/bootstrap.ps1 installs it as
 // one). Without this the process never tells the Service Control Manager it
@@ -248,6 +263,24 @@ else
     StartupLog.SignInNoneLocal(logger);
 }
 StartupLog.Database(logger, dbPath);
+
+// Before the first request, not on the first request. A managed install has
+// already run `dmarc init-db` by this point and this does nothing; a copy
+// somebody downloaded and double-clicked has not, and without this every page
+// reports a table that does not exist.
+await FirstRun.EnsureDatabaseAsync(dbPath, logger).ConfigureAwait(false);
+
+// Only ever for the Windows trial download - see TrialBrowser for the four
+// cases this is deliberately not. Hooked to ApplicationStarted so the address
+// is the one Kestrel actually bound, and so nothing opens if startup fails.
+if (TrialBrowser.ShouldOpen(app.Configuration))
+{
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        var address = app.Urls.FirstOrDefault() ?? "http://localhost:5000";
+        TrialBrowser.Open(address.Replace("0.0.0.0", "localhost", StringComparison.Ordinal), logger);
+    });
+}
 
 await app.RunAsync();
 
