@@ -203,7 +203,7 @@ From the release page, three files: `dmarc-web.zip`, `dmarc-linux-x64` (or
 and the systemd units. The server has no checkout; that is why they travel
 with the release.
 
-Not `dmarc-windows-trial.zip`. That one is a self-contained copy for looking
+Not `DMARC-Monitor-Windows.zip`. That one is a self-contained copy for looking
 at the product on a laptop - no runtime, no service, no sign-in, serving
 loopback only. It is the right way to decide whether to do any of this, and
 the wrong thing to put on a server: it has no authentication because it has
@@ -654,8 +654,9 @@ git tag v1.3.0 && git push origin v1.3.0
 ```
 
 That builds `dmarc.exe`, `dmarc-linux-x64`, `dmarc-linux-arm64`,
-`dmarc-web.zip`, `dmarc-deploy.tar.gz` and `dmarc-windows-trial.zip`, stamps
-each with `1.3.0`, and attaches them to a GitHub release.
+`dmarc-web.zip`, `dmarc-deploy.tar.gz` and `DMARC-Monitor-Windows.zip`, stamps
+each with `1.3.0`, and attaches them to a GitHub release along with
+`SHA256SUMS.txt`.
 
 **Merging is not releasing.** Nothing on `main` is installable until a tag
 builds it, and `bootstrap.sh` fetches the *latest release* - so an install run

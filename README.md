@@ -19,8 +19,21 @@ Neither needs the other running.
 
 ## Just want to look at it?
 
-Download **`dmarc-windows-trial.zip`** from the latest release, unzip it, and
-double-click `DmarcMonitor.Web.exe`. The dashboard opens in your browser.
+Download **`DMARC-Monitor-Windows.zip`** from the latest release, unzip it, and
+double-click **`Start DMARC Monitor.cmd`**. The dashboard opens in your
+browser.
+
+Two things Windows will do on the way, neither of which means anything is
+wrong. Right-click the .zip → Properties → tick **Unblock** *before*
+extracting, which saves clearing the download mark from five hundred files
+one at a time. And SmartScreen will say "Windows protected your PC", because
+these binaries are not signed yet — *More info*, then *Run anyway*.
+`SHA256SUMS.txt` on the release page is there if you would rather check the
+file than trust it. See [docs/SIGNING.md](docs/SIGNING.md).
+
+Do not download `dmarc-web.zip` for this. That is the Linux server bundle and
+it contains no Windows executable at all. `dmarc.exe` is the command-line
+tool, not the dashboard; double-clicked, it prints its help and exits.
 
 No .NET install, no administrator, no service, no reverse proxy, no Entra app
 registration, no server. It creates its own database in the folder it is run

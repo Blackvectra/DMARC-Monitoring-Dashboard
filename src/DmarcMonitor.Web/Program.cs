@@ -127,7 +127,22 @@ builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel(
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.UpdateSpool(
     Path.Combine(Path.GetDirectoryName(dbPath) ?? ".", "updates")));
 
-var app = builder.Build();
+// Where a startup failure gets written down. Beside the database, because
+// that is the one directory this application is known to be able to write to,
+// and because it is the folder somebody will be looking in.
+var reportTo = Path.GetDirectoryName(dbPath) ?? AppContext.BaseDirectory;
+
+WebApplication app;
+try
+{
+    app = builder.Build();
+}
+catch (Exception ex)
+{
+    // A service resolved wrongly, or a configuration value is not what its
+    // type says. On a desktop this used to be a window that closed.
+    return StartupFailure.Report(ex, reportTo);
+}
 
 // First, so everything after it sees the caller's real address and scheme.
 app.UseProxyHeaders();
@@ -247,42 +262,57 @@ app.MapGet("/reports/download/{slug}/{month}", async (
 
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
-// Say plainly at startup which mode this is. An operator who cannot tell
-// whether sign-in is on has no way to notice that it is not.
-var logger = app.Services.GetRequiredService<ILogger<Program>>();
-if (AuthSetup.IsEntraConfigured(app.Configuration))
+// Everything from here can fail in a way somebody on a desktop has to be
+// told about: the port is taken, the folder is read-only, the database will
+// not open. Under systemd the journal catches all of it; in a window Explorer
+// created, nothing does. See StartupFailure.
+try
 {
-    StartupLog.SignInEntra(logger);
-}
-else if (AuthSetup.LocalModeAllowedRemotely(app.Configuration))
-{
-    StartupLog.SignInNoneRemote(logger);
-}
-else
-{
-    StartupLog.SignInNoneLocal(logger);
-}
-StartupLog.Database(logger, dbPath);
-
-// Before the first request, not on the first request. A managed install has
-// already run `dmarc init-db` by this point and this does nothing; a copy
-// somebody downloaded and double-clicked has not, and without this every page
-// reports a table that does not exist.
-await FirstRun.EnsureDatabaseAsync(dbPath, logger).ConfigureAwait(false);
-
-// Only ever for the Windows trial download - see TrialBrowser for the four
-// cases this is deliberately not. Hooked to ApplicationStarted so the address
-// is the one Kestrel actually bound, and so nothing opens if startup fails.
-if (TrialBrowser.ShouldOpen(app.Configuration))
-{
-    app.Lifetime.ApplicationStarted.Register(() =>
+    // Say plainly at startup which mode this is. An operator who cannot tell
+    // whether sign-in is on has no way to notice that it is not.
+    var logger = app.Services.GetRequiredService<ILogger<Program>>();
+    if (AuthSetup.IsEntraConfigured(app.Configuration))
     {
-        var address = app.Urls.FirstOrDefault() ?? "http://localhost:5000";
-        TrialBrowser.Open(address.Replace("0.0.0.0", "localhost", StringComparison.Ordinal), logger);
-    });
+        StartupLog.SignInEntra(logger);
+    }
+    else if (AuthSetup.LocalModeAllowedRemotely(app.Configuration))
+    {
+        StartupLog.SignInNoneRemote(logger);
+    }
+    else
+    {
+        StartupLog.SignInNoneLocal(logger);
+    }
+
+    StartupLog.Database(logger, dbPath);
+
+    // Before the first request, not on the first request. A managed install
+    // has already run `dmarc init-db` by this point and this does nothing; a
+    // copy somebody downloaded and double-clicked has not, and without this
+    // every page reports a table that does not exist.
+    await FirstRun.EnsureDatabaseAsync(dbPath, logger).ConfigureAwait(false);
+
+    // Only ever for the Windows trial download - see TrialBrowser for the four
+    // cases this is deliberately not. Hooked to ApplicationStarted so the
+    // address is the one Kestrel actually bound, and so nothing opens if
+    // startup fails.
+    if (TrialBrowser.ShouldOpen(app.Configuration))
+    {
+        app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            var address = app.Urls.FirstOrDefault() ?? "http://localhost:5000";
+            TrialBrowser.Open(address.Replace("0.0.0.0", "localhost", StringComparison.Ordinal), logger);
+        });
+    }
+
+    await app.RunAsync();
+}
+catch (Exception ex)
+{
+    return StartupFailure.Report(ex, reportTo);
 }
 
-await app.RunAsync();
+return 0;
 
 /// <summary>
 /// Exists so the test host can start this application in process.

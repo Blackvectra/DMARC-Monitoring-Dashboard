@@ -1,0 +1,16 @@
+# Batch files are parsed line by line by cmd.exe, and a label read with a
+# trailing LF is not always the label that was written. A .cmd checked out
+# with Unix endings can run its way past a `goto` and into the branch it was
+# meant to skip, which is a failure mode with no error message at all.
+#
+# Everything else here is either read by bash on a Linux server (where CRLF
+# is the mirror-image problem: `#!/bin/bash\r` is not an interpreter that
+# exists) or compiled, so only the Windows launcher is pinned.
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+*.sh      text eol=lf
+*.service text eol=lf
+*.timer   text eol=lf
+*.path    text eol=lf

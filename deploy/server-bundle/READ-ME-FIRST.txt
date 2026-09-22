@@ -1,0 +1,35 @@
+THIS IS THE SERVER BUNDLE. THERE IS NOTHING HERE TO DOUBLE-CLICK.
+=================================================================
+
+You are looking for a different download if you wanted to try the
+application. See below.
+
+What this is
+------------
+The compiled web application, for installing on a server that already has the
+ASP.NET Core 8 runtime. It is framework-dependent and platform-neutral on
+purpose, so the same bundle installs on x64 and arm64.
+
+There is no .exe in this folder and that is not a mistake. The only launcher
+here is "DmarcMonitor.Web", which is a Linux binary. On Windows nothing in
+this folder will run.
+
+Installing it
+-------------
+On a Linux server, this is not installed by hand. Unpack dmarc-deploy.tar.gz
+beside it and run:
+
+    sudo ./deploy/install.sh
+
+or skip all of it and use the one-line bootstrap in docs/DEPLOYING.md, which
+fetches this bundle for you.
+
+
+If you want to LOOK at the application
+--------------------------------------
+Download the Windows file from the same release page instead - the one whose
+name says Windows. It is bigger (about 88 MB) because it carries its own copy
+of .NET, and it needs nothing installed: unzip it, double-click
+"Start DMARC Monitor.cmd", and the dashboard opens in your browser.
+
+That copy is the same application this one is, running in local trial mode.

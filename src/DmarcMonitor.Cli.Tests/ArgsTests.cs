@@ -105,4 +105,52 @@ public sealed class ArgsTests
         // is not there.
         Assert.Equal(0, Args.Reject(["--client"], "--client", "--db"));
     }
+
+    /// <summary>
+    /// The command line that produced this, verbatim, from somebody pasting
+    /// twice into a terminal:
+    ///
+    ///     dmarc import --from .\dmarc.exe import --from "C:\dmarc-export"
+    ///
+    /// Every flag in it is spelled correctly, so Reject passed it. Value()
+    /// returns the FIRST --from, so the importer was pointed at dmarc.exe,
+    /// read it, reported "files seen 1, not reports 1" and exited 0 - while
+    /// the folder that was actually wanted was never opened. A successful
+    /// run that did nothing is the worst available outcome, because there is
+    /// nothing to notice.
+    /// </summary>
+    [Fact]
+    public void AFlagGivenTwiceIsRefusedRatherThanSilentlyResolvedToTheFirst()
+    {
+        var code = Args.Reject(
+            ["--from", @".\dmarc.exe", "import", "--from", @"C:\dmarc-export"],
+            "--db", "--from", "--org");
+
+        Assert.Equal(64, code);
+    }
+
+    [Fact]
+    public void ARepeatedValuelessFlagIsRefusedToo()
+    {
+        Assert.Equal(64, Args.Reject(["--all", "--all"], "--db", "!--all"));
+    }
+
+    /// <summary>
+    /// The boundary that keeps the check from being a nuisance: repetition is
+    /// only repetition when it is the same flag. Two different flags, and a
+    /// value that happens to equal another flag's name, are both ordinary.
+    /// </summary>
+    [Fact]
+    public void DifferentFlagsAreNotRepetition()
+    {
+        Assert.Equal(0, Args.Reject(["--from", "a", "--db", "b", "--org", "c"], "--db", "--from", "--org"));
+    }
+
+    [Fact]
+    public void AValueThatLooksLikeAnEarlierFlagIsNotRepetition()
+    {
+        // --db's value is the literal text "--from". It is a value, not a
+        // second occurrence of the flag, and Reject already steps over it.
+        Assert.Equal(0, Args.Reject(["--from", "reports", "--db", "--from"], "--db", "--from"));
+    }
 }
