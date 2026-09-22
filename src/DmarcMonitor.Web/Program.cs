@@ -6,7 +6,22 @@ using DmarcMonitor.Web.Components;
 using DmarcMonitor.Web.Data;
 using Microsoft.AspNetCore.DataProtection;
 
-var builder = WebApplication.CreateBuilder(args);
+// Content root beside the executable rather than wherever it happened to be
+// started from. That is where wwwroot is, and ASP.NET Core's default - the
+// current working directory - is only the same thing by luck.
+//
+// Both deployments already pin it: the systemd unit sets
+// WorkingDirectory=/opt/dmarc/app and bootstrap.ps1 passes --contentRoot, so
+// neither changes. What changes is every other way it can be started - a
+// shortcut with a different "start in", a terminal in another directory, the
+// portable Windows copy launched from anywhere but its own folder - where it
+// used to log "The WebRootPath was not found" and serve the whole application
+// unstyled. An explicit --contentRoot still wins over this.
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+});
 
 // On Windows the app runs as a service (deploy/bootstrap.ps1 installs it as
 // one). Without this the process never tells the Service Control Manager it

@@ -737,13 +737,17 @@ jobs:
             --output publish/cli
           Copy-Item publish/cli/dmarc.exe "bundle/DMARC Monitor/dmarc.exe"
 
-      - name: Double-click it in an empty folder
+      - name: Double-click it
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path run | Out-Null
-          $exe = (Resolve-Path "bundle/DMARC Monitor/DmarcMonitor.Web.exe").Path
-          $work = (Resolve-Path run).Path
+
+          # Started from its own folder, because that is what double-clicking
+          # in Explorer does - and it is where the database and the keys are
+          # meant to land, since the README promises that deleting the folder
+          # removes every trace.
+          $exe  = (Resolve-Path "bundle/DMARC Monitor/DmarcMonitor.Web.exe").Path
+          $work = (Resolve-Path "bundle/DMARC Monitor").Path
           $out  = Join-Path $PWD 'trial.out'
           $err  = Join-Path $PWD 'trial.err'
 
@@ -780,9 +784,18 @@ jobs:
             if (-not $session) { throw 'the published executable never answered on 127.0.0.1:5000' }
 
             # It made its own database, in the folder it was run from.
-            if (-not (Test-Path run/dmarc.db))        { throw 'no database was created' }
-            if ((Get-Item run/dmarc.db).Length -le 0) { throw 'the database it created is empty' }
-            if (-not (Test-Path run/keys))            { throw 'no key directory beside the database' }
+            $db = Join-Path $work 'dmarc.db'
+            if (-not (Test-Path $db))             { throw 'no database was created' }
+            if ((Get-Item $db).Length -le 0)      { throw 'the database it created is empty' }
+            if (-not (Test-Path (Join-Path $work 'keys'))) { throw 'no key directory beside the database' }
+
+            # Static files resolve. The content root is the executable's own
+            # directory rather than whatever the working directory happens to
+            # be, and when that was wrong the application served every page
+            # unstyled with one warning in a log nobody was reading.
+            $css = Invoke-WebRequest -Uri 'http://127.0.0.1:5000/app.css' -WebSession $session -SkipHttpErrorCheck
+            "app.css: $($css.StatusCode)"
+            if ($css.StatusCode -ne 200) { throw "the stylesheet answered $($css.StatusCode); the pages would render unstyled" }
 
             # And the dashboard reads it. "No domains yet" is the empty state;
             # "Could not read the database" is the bug this job exists for, and
@@ -803,15 +816,19 @@ jobs:
 
             'the published exe created a database and served the dashboard with no runtime installed'
           }
-          finally { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
+          finally {
+            # Stop-Process returns before the process has gone, and Windows
+            # keeps the database file locked until it has. The next step reads
+            # that file, so wait rather than race it.
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit(30000) | Out-Null }
+          }
 
       - name: A second run adopts the database rather than remaking it
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = (Resolve-Path "bundle/DMARC Monitor/DmarcMonitor.Web.exe").Path
-          $work = (Resolve-Path run).Path
-          $before = (Get-FileHash run/dmarc.db).Hash
+          $exe  = (Resolve-Path "bundle/DMARC Monitor/DmarcMonitor.Web.exe").Path
+          $work = (Resolve-Path "bundle/DMARC Monitor").Path
 
           $env:ASPNETCORE_URLS = 'http://127.0.0.1:5000'
           $env:DMARC_NO_BROWSER = '1'
@@ -827,12 +844,24 @@ jobs:
             $log
             if ($log -match 'Created a new database') { throw 'it created a second database over the first' }
           }
-          finally { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
-
-          if ((Get-FileHash run/dmarc.db).Hash -ne $before) {
-            throw 'the database changed on a start that should have left it alone'
+          finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit(30000) | Out-Null }
           }
-          'second run left the database exactly as it was'
+
+          # Not a byte comparison of the file. SQLite in WAL mode legitimately
+          # rewrites the main database when it checkpoints, so identical bytes
+          # is neither necessary nor sufficient - it would fail on a correct
+          # run and pass on a database that had been emptied and recreated at
+          # the same size. What matters is that it is still OUR database at
+          # the schema this build expects, which the shipped tool answers
+          # exactly, and which also proves dmarc.exe works from the bundle.
+          $check = & "bundle/DMARC Monitor/dmarc.exe" init-db --db (Join-Path $work 'dmarc.db') 2>&1 | Out-String
+          $check
+          if ($LASTEXITCODE -ne 0) { throw "dmarc.exe init-db exited $LASTEXITCODE against the database the app made" }
+          if ($check -notmatch 'already exists and is up to date') {
+            throw 'the database is not a current DMARC Monitor database after a second run'
+          }
+          'second run adopted the database it found'
 
   schema:
     name: SQLite schema
