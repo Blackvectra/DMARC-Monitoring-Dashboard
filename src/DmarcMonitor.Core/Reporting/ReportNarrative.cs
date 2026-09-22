@@ -30,7 +30,12 @@ public sealed record ReportSummary
 public static class ReportNarrative
 {
     /// <summary>Below this, enough mail is failing to be worth a client's attention.</summary>
-    public const double HealthyPassRate = 95;
+    /// <remarks>
+    /// Applied per domain. It lives on <see cref="ClientReport"/> because the
+    /// report model needs it to pick out the domains that are struggling, and
+    /// two copies of a threshold are two thresholds.
+    /// </remarks>
+    public const double HealthyPassRate = ClientReport.HealthyPassRate;
 
     public static ReportSummary Summarize(ClientReport report)
     {
@@ -101,6 +106,24 @@ public static class ReportNarrative
             }
         }
 
+        // Named before the estate total is allowed to speak for them. A
+        // domain losing half its mail inside a client averaging 96.6% is
+        // invisible to every figure above this line, and it is the only thing
+        // on the page that client needs to know.
+        var struggling = report.StrugglingDomains;
+        if (struggling.Count > 0)
+        {
+            points.Add(
+                (struggling.Count == 1
+                    ? $"{struggling[0].Domain} is the exception: {struggling[0].PassRate}% of the mail sent "
+                      + $"using it was genuinely yours, so {Count(struggling[0].Failing)} message(s) may not "
+                      + "have arrived."
+                    : $"{struggling.Count} of your domains are doing worse than the total above - "
+                      + $"{string.Join(", ", struggling.Select(d => $"{d.Domain} at {d.PassRate}%"))} - "
+                      + $"so {Count(report.StrugglingMessages)} message(s) may not have arrived.")
+                + $" {Opening(report.ProviderName)} is looking at this.");
+        }
+
         if (misconfigured.Count > 0)
         {
             points.Add(
@@ -119,8 +142,11 @@ public static class ReportNarrative
         {
             Headline = Headline(report, impersonating.Count > 0, misconfigured.Count > 0),
             Points = points,
+
+            // Any ONE domain below the line, not the estate's average. An
+            // average is the arithmetic that makes a failing domain vanish.
             NeedsAttention = !report.EveryDomainEnforcing
-                             || report.PassRate < HealthyPassRate
+                             || report.StrugglingDomains.Count > 0
                              || misconfigured.Count > 0,
         };
     }
@@ -145,9 +171,27 @@ public static class ReportNarrative
             return $"{enforcing} of your {domains} domains are protected. The rest are still being monitored.";
         }
 
-        if (report.PassRate < HealthyPassRate)
+        // Per domain, never against the estate's average.
+        //
+        // This is the line that separates this report from the ones it is
+        // meant to beat. A competitor's PDF, checked against its own CSV,
+        // announced "100% DMARC Compliance" and "0 Total Issues" for a domain
+        // where 55 of 496 messages aligned with neither SPF nor DKIM and 51
+        // were quarantined. Nobody had to lie: an average did it for them.
+        // Three domains at 100%, 100% and 45.5% average 96.6%, which clears
+        // any estate-wide threshold while more than half of one domain's mail
+        // is not arriving - and it is that client's invoices.
+        var struggling = report.StrugglingDomains;
+        if (struggling.Count == 1)
         {
-            return "Your domains are protected, but some of your own mail is failing and may not be arriving.";
+            return $"Your domains are protected, but mail sent using {struggling[0].Domain} is failing "
+                 + "and may not be arriving.";
+        }
+
+        if (struggling.Count > 1)
+        {
+            return $"Your domains are protected, but {struggling.Count} of them are losing mail that "
+                 + "may not be arriving.";
         }
 
         // A misconfigured service can sit below the pass-rate threshold and

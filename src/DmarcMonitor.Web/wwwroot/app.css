@@ -990,6 +990,17 @@ a.primary-link {
     display: inline-block; box-shadow: var(--shadow);
 }
 
+/* The same control with the action withheld. Rendered as a span rather than
+   a disabled anchor because HTML has no disabled anchor, and it still has to
+   look like the button it will become once the reason beneath it is fixed -
+   greyed out and inert reads as "not yet", where hiding it reads as a
+   feature that is missing. */
+span.primary-link.disabled {
+    background: var(--dim-bg); color: var(--dim); box-shadow: none;
+    border-radius: 6px; padding: 6px 14px; font-weight: 500;
+    display: inline-block; cursor: not-allowed;
+}
+
 /* An inline warning that is not a whole callout: for something worth
    stopping at, next to the control it applies to. */
 .warn-inline { color: var(--warn); }

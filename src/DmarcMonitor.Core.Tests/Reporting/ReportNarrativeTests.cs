@@ -52,7 +52,14 @@ public sealed class ReportNarrativeTests
             ClientName = "Acme Corp",
             ProviderName = "NRG Tech Services",
             Period = August,
-            Domains = domains ?? [Domain()],
+
+            // The default domain carries the estate's own figures, because in
+            // a real report the domains sum to the total. Left at a flat 1000
+            // of 1000, a report asked for with 800 of 1000 described an estate
+            // losing a fifth of its mail whose only domain was perfect - which
+            // cannot happen, and which quietly stopped the per-domain checks
+            // from being exercised at all.
+            Domains = domains ?? [Domain(messages: messages, passing: passing)],
             Sources = sources ?? [],
             Changes = changes ?? [],
             Messages = messages,

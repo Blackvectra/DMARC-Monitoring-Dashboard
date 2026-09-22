@@ -59,11 +59,35 @@ else
                     <option value="@m.Value">@m.Label</option>
                 }
             </select>
-            <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open</a>
+            @* Not a link while the document would be signed "your IT provider".
+               The warning below was there all along and did not stop anybody:
+               a page that explains why the report is wrong and then offers a
+               button to open it has told somebody what to ignore. *@
+            @if (Named)
+            {
+                <a class="primary-link" href="@($"reports/download/{_slug}/{_month}")" target="_blank">Open</a>
+            }
+            else
+            {
+                <span class="primary-link disabled" aria-disabled="true"
+                      title="Set Reporting:ProviderName before a report can be opened.">Open</span>
+            }
         </div>
-        @if (ReportUi.IsProviderNameSet)
+        @if (Named)
         {
-            <p class="sub">Reported as “@ReportUi.ProviderName”.</p>
+            <p class="sub">Reported as “@(_preview?.ProviderName ?? ReportUi.ProviderName)”.</p>
+
+            @* The one thing a browser will not let the document control.
+               Chrome and Edge print their own header and footer over every
+               page - the date, the tab title, and the URL, which on this
+               machine reads localhost:5000 and goes to a paying customer like
+               that. No stylesheet can suppress them; only the person at the
+               print dialog can. *@
+            <p class="sub">
+                Printing to PDF: turn <strong>Headers and footers</strong> off in the print dialog,
+                under More settings. Left on, the browser stamps the page with the date and this
+                server's address, and both end up in the customer's copy.
+            </p>
         }
         else
         {
@@ -71,15 +95,20 @@ else
                document going to a customer signed "your IT provider" is worth
                stopping for, not a footnote. *@
             <p class="sub warn-inline">
-                Reports will be signed “@ReportUi.ProviderName”, literally, because
-                <code>Reporting:ProviderName</code> is not set. Set it before sending anything.
+                Reports cannot be opened yet: they would be signed “@ReportUi.ProviderName”,
+                literally, because <code>Reporting:ProviderName</code> is not set. Set it in
+                <code>appsettings.json</code>, or give this organization a name on
+                <a href="settings">Configuration</a>, and this unlocks.
             </p>
         }
     </section>
 
     @if (_preview is not null)
     {
-        <section class="callout @(_preview.Messages == 0 ? "act" : "fine")">
+        @* The verdict decides the colour, not the message count. A client
+           with one domain losing half its mail inside an estate averaging
+           96.6% used to get a green box; see ClientReport.StrugglingDomains. *@
+        <section class="callout @(_summary is { NeedsAttention: true } || _preview.Messages == 0 ? "act" : "fine")">
             <h2>@_summary?.Headline</h2>
             @foreach (var point in _summary?.Points ?? [])
             {
@@ -93,7 +122,9 @@ else
                 <span class="figure-l">messages</span>
             </div>
             <div class="figure">
-                <span class="figure-n @(_preview.Messages > 0 && _preview.PassRate < 95 ? "bad" : "good")">
+                @* Any one domain below the line, never the estate's average -
+                   which is the arithmetic that hides a failing domain. *@
+                <span class="figure-n @(_preview.Messages > 0 && _preview.StrugglingDomains.Count > 0 ? "bad" : "good")">
                     @(_preview.Messages > 0 ? $"{_preview.PassRate}%" : "—")
                 </span>
                 <span class="figure-l">authenticated</span>
@@ -127,6 +158,21 @@ else
     private string? _tenant;
 
     private string _slug = "";
+
+    /// <summary>
+    /// Whether the report for the client on screen would carry a real
+    /// provider name.
+    /// </summary>
+    /// <remarks>
+    /// Read from the built report where there is one, because the
+    /// organization's own name on the Configuration page beats the
+    /// install-wide setting - so an install with a blank
+    /// <c>Reporting:ProviderName</c> can still produce correctly signed
+    /// reports for an organization that named itself. The configuration is
+    /// only the fallback answer, for the instant before a preview exists.
+    /// </remarks>
+    private bool Named =>
+        _preview is { } preview ? !preview.ProviderIsUnnamed : ReportUi.IsProviderNameSet;
 
     // Replaced as soon as a client is known, by the most recent month that
     // client has data for. This is only the value the control holds for the

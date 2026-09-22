@@ -509,14 +509,30 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
-    public async Task ReportsWarnsThatItWouldSignWithThePlaceholder()
+    public async Task ReportsNamesTheProviderItWouldSignAs()
     {
-        // Reporting:ProviderName is unset in the test host, as it is in a
-        // fresh install. This page is where a document is opened and sent.
         var html = await Client().GetStringAsync("/reports");
 
-        Assert.Contains("Reports will be signed", html, StringComparison.Ordinal);
+        Assert.Contains("NRG Tech Services", html, StringComparison.Ordinal);
         Assert.Contains("Acme Corp", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The print dialog owns the one part of the page the document cannot
+    /// style, so the page has to say so.
+    /// </summary>
+    /// <remarks>
+    /// Chrome and Edge stamp the date, the tab title and the URL over every
+    /// printed page. On a report opened from this app that URL reads
+    /// localhost:5000, and it went to a paying customer that way. No
+    /// stylesheet can suppress it; only the person at the dialog can.
+    /// </remarks>
+    [Fact]
+    public async Task ReportsSaysToTurnOffTheBrowsersHeadersAndFooters()
+    {
+        var html = await Client().GetStringAsync("/reports");
+
+        Assert.Contains("Headers and footers", html, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -745,7 +761,7 @@ public sealed class PageTests : IClassFixture<SeededApp>
 /// One database for the whole class: these are read-only pages, and building
 /// it per test would make the suite slower than the thing it is testing.
 /// </summary>
-public sealed class SeededApp : WebApplicationFactory<Program>
+public class SeededApp : WebApplicationFactory<Program>
 {
     private readonly string _dbPath =
         Path.Combine(Path.GetTempPath(), $"dmarc-pages-{Guid.NewGuid():N}.db");
@@ -780,7 +796,17 @@ public sealed class SeededApp : WebApplicationFactory<Program>
         // configuration is also what a real deployment does.
         builder.UseSetting("Database:Path", _dbPath);
         builder.UseSetting("Secrets:Directory", _secretsDir);
+
+        // A configured install, which is what one looks like before anybody
+        // sends a report: without this the download refuses, because a
+        // document signed "your IT provider" must not reach a customer. The
+        // unset case has its own fixture below, since it is a behaviour in
+        // its own right rather than the default state of these tests.
+        if (ProviderName is { } provider) { builder.UseSetting("Reporting:ProviderName", provider); }
     }
+
+    /// <summary>How this host names itself on reports, or null for not configured.</summary>
+    protected virtual string? ProviderName => "NRG Tech Services";
 
     private async Task Seed()
     {
@@ -943,5 +969,58 @@ public sealed class SeededApp : WebApplicationFactory<Program>
             try { File.Delete(_dbPath + suffix); } catch (IOException) { }
         }
         try { Directory.Delete(_secretsDir, recursive: true); } catch (IOException) { }
+    }
+}
+
+/// <summary>
+/// The same install with nobody's name on it, which is how it arrives.
+/// </summary>
+/// <remarks>
+/// A fresh install has no <c>Reporting:ProviderName</c>, and a report built
+/// on one is signed "prepared by your IT provider", literally. That happened
+/// to a real customer. The page warned about it and still offered the link,
+/// which is a page telling somebody what to ignore.
+/// </remarks>
+public sealed class UnnamedProviderApp : SeededApp
+{
+    protected override string? ProviderName => null;
+}
+
+public sealed class UnnamedProviderTests : IClassFixture<UnnamedProviderApp>
+{
+    private readonly UnnamedProviderApp _app;
+
+    public UnnamedProviderTests(UnnamedProviderApp app) => _app = app;
+
+    private HttpClient Client() => _app.CreateClient(new WebApplicationFactoryClientOptions
+    {
+        AllowAutoRedirect = true,
+        HandleCookies = true,
+    });
+
+    [Fact]
+    public async Task AReportThatWouldBeSignedByNobodyIsRefused()
+    {
+        var response = await Client().GetAsync("/reports/download/acme-corp/2026-08");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains(
+            "your IT provider",
+            await response.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ThePageSaysWhyItCannotBeOpenedRatherThanOfferingTheLink()
+    {
+        var html = await Client().GetStringAsync("/reports");
+
+        Assert.Contains("Reports cannot be opened yet", html, StringComparison.Ordinal);
+        Assert.Contains("Reporting:ProviderName", html, StringComparison.Ordinal);
+
+        // And the control is inert rather than gone: a missing button reads as
+        // a feature that does not exist, where a greyed one reads as "not yet".
+        Assert.Contains("primary-link disabled", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports/download/acme-corp", html, StringComparison.Ordinal);
     }
 }

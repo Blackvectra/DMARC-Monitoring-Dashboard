@@ -54,6 +54,29 @@ public sealed record ReportSource
     public long Passing { get; init; }
     public long Failing { get; init; }
 
+    /// <summary>
+    /// What the address reverses to, or empty when it has no name.
+    /// </summary>
+    /// <remarks>
+    /// The Sources page names these and the report did not, so a client was
+    /// handed a row of digits and asked whether they recognised it. Nobody
+    /// recognises an address; they recognise "a Comcast connection in Denver"
+    /// or "one of our own servers".
+    ///
+    /// Read for display and never for judgement. A PTR is written by whoever
+    /// holds the address, so it identifies a sender the way a return address
+    /// on an envelope does - enough to recognise a provider, nowhere near
+    /// enough to trust one. Nothing here feeds whether a source counts as
+    /// impersonating.
+    /// </remarks>
+    public string ReverseName { get; init; } = "";
+
+    /// <summary>The name if there is one, otherwise the address.</summary>
+    public string Display => ReverseName.Length > 0 ? ReverseName : SourceIp;
+
+    /// <summary>True when there is a name worth printing beside the address.</summary>
+    public bool IsNamed => ReverseName.Length > 0;
+
     /// <summary>The domain this source authenticated for, when it authenticated at all.</summary>
     public string AuthenticatedFor { get; init; } = "";
 
@@ -83,6 +106,21 @@ public sealed record ReportSender
     public int Addresses { get; init; }
     public long Messages { get; init; }
     public IReadOnlyList<string> Domains { get; init; } = [];
+
+    /// <summary>
+    /// The address behind the name, when the row is one address rather than a
+    /// service's fleet of them.
+    /// </summary>
+    /// <remarks>
+    /// A service row gathers dozens of addresses and naming one of them would
+    /// be arbitrary. A single unrecognised sender has exactly one, and the
+    /// client cannot ask their hosting provider about a reverse name.
+    /// </remarks>
+    public string SourceIp { get; init; } = "";
+
+    /// <summary>True when <see cref="Name"/> is something other than the address itself.</summary>
+    public bool IsNamed =>
+        SourceIp.Length > 0 && !Name.Equals(SourceIp, StringComparison.Ordinal);
 }
 
 /// <summary>A DNS change actually made for this client during the period.</summary>
@@ -123,6 +161,18 @@ public sealed record ReportDomainHealth
 
     public double PassRate => Messages == 0 ? 0 : Math.Round(Passing * 100.0 / Messages, 1);
     public bool IsEnforcing => Policy is "reject" or "quarantine";
+
+    public long Failing => Messages - Passing;
+
+    /// <summary>
+    /// True when enough of this domain's own mail is failing to be worth
+    /// saying out loud.
+    /// </summary>
+    /// <remarks>
+    /// Judged per domain, never against the estate's average - which is the
+    /// whole point. See <see cref="ClientReport.StrugglingDomains"/>.
+    /// </remarks>
+    public bool IsStruggling => Messages > 0 && PassRate < ClientReport.HealthyPassRate;
 }
 
 /// <summary>
@@ -134,8 +184,57 @@ public sealed record ReportDomainHealth
 /// </summary>
 public sealed record ClientReport
 {
+    /// <summary>
+    /// Below this, enough of a domain's mail is failing to be worth a client's
+    /// attention.
+    /// </summary>
+    /// <remarks>
+    /// Applied to each domain rather than to the estate, and that is the
+    /// difference between this report and the competitors' - one of whose
+    /// PDFs, measured against its own CSV, announced "100% DMARC Compliance"
+    /// and "0 Total Issues" for a domain where 55 of 496 messages aligned
+    /// with neither SPF nor DKIM and 51 were quarantined. A true rate of
+    /// 88.9%, rounded up to perfect.
+    ///
+    /// The same arithmetic does it here without anybody intending to. A
+    /// client with three domains at 100%, 100% and 45% averages 96.6%, which
+    /// clears any estate-wide threshold - while more than half of one
+    /// domain's mail is not arriving.
+    /// </remarks>
+    public const double HealthyPassRate = 95;
+
+    /// <summary>
+    /// What a report says instead of a provider's name when nobody has set
+    /// one.
+    /// </summary>
+    /// <remarks>
+    /// A constant rather than a literal in three files, because it is what
+    /// "has this been configured" is decided by - and two of those literals
+    /// had already drifted apart in capitalisation, so the check would have
+    /// been asking about a string that never appears.
+    ///
+    /// Reads correctly mid-sentence, which is how it got shipped: "your IT
+    /// provider is correcting this" is a fine sentence. It is only wrong on
+    /// the cover of a document a customer is paying for.
+    /// </remarks>
+    public const string UnnamedProvider = "your IT provider";
+
     public required string ClientName { get; init; }
     public required string ProviderName { get; init; }
+
+    /// <summary>
+    /// True when this report would go out signed by nobody in particular.
+    /// </summary>
+    /// <remarks>
+    /// Asked of the finished report rather than of configuration, because the
+    /// two can disagree: an organization with its own name on the Configuration
+    /// page produces correctly signed reports on an install whose
+    /// <c>Reporting:ProviderName</c> is blank, and refusing those would be
+    /// refusing a document that is perfectly fine.
+    /// </remarks>
+    public bool ProviderIsUnnamed =>
+        ProviderName.Length == 0
+        || ProviderName.Equals(UnnamedProvider, StringComparison.OrdinalIgnoreCase);
     public required ReportPeriod Period { get; init; }
 
     /// <summary>The organization's accent color, #rrggbb, or null for the default.</summary>
@@ -219,13 +318,25 @@ public sealed record ClientReport
     public IReadOnlyList<ReportSender> LegitimateSenders =>
         [.. LegitimateSources
             .GroupBy(s => SenderCatalog.Label(s.SourceIp), StringComparer.OrdinalIgnoreCase)
-            .Select(g => new ReportSender
+            .Select(g =>
             {
-                Name = g.Key,
-                IsService = SenderCatalog.Identify(g.First().SourceIp) is not null,
-                Addresses = g.Count(),
-                Messages = g.Sum(s => s.Messages),
-                Domains = [.. g.SelectMany(s => s.Domains).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal)],
+                var service = SenderCatalog.Identify(g.First().SourceIp) is not null;
+                var only = g.Count() == 1 ? g.First() : null;
+
+                return new ReportSender
+                {
+                    // The catalog first, because "Microsoft 365" beats any
+                    // reverse name its load balancers carry. Where it does not
+                    // recognise the sender, the reverse name is what turns a
+                    // row of digits into something a client can say yes or no
+                    // to - and a row they cannot read is a row they skip.
+                    Name = service || only is not { IsNamed: true } ? g.Key : only.ReverseName,
+                    IsService = service,
+                    SourceIp = service ? "" : only?.SourceIp ?? "",
+                    Addresses = g.Count(),
+                    Messages = g.Sum(s => s.Messages),
+                    Domains = [.. g.SelectMany(s => s.Domains).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal)],
+                };
             })
             .OrderByDescending(s => s.Messages)];
 
@@ -261,4 +372,22 @@ public sealed record ClientReport
         Domains.Where(d => d.IsEnforcing).Sum(d => d.Messages - d.Passing);
 
     public bool EveryDomainEnforcing => Domains.Count > 0 && Domains.All(d => d.IsEnforcing);
+
+    /// <summary>
+    /// Domains losing enough of their own mail to be worth saying, worst
+    /// first.
+    /// </summary>
+    /// <remarks>
+    /// Read before anything is called protected. An estate average cannot
+    /// answer this question and will confidently answer it wrongly: three
+    /// domains at 100%, 100% and 45.5% come to 96.6% overall, so every
+    /// estate-wide check passes while one domain loses more than half its
+    /// mail. A client whose invoices stopped arriving does not care what the
+    /// other two domains did.
+    /// </remarks>
+    public IReadOnlyList<ReportDomainHealth> StrugglingDomains =>
+        [.. Domains.Where(d => d.IsStruggling).OrderBy(d => d.PassRate)];
+
+    /// <summary>The client's own messages that failed, across the domains that are struggling.</summary>
+    public long StrugglingMessages => StrugglingDomains.Sum(d => d.Failing);
 }

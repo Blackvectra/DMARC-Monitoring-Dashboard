@@ -25,7 +25,7 @@ public sealed class ClientReportBuilder(string databasePath)
     /// another organization is reported as not found.
     /// </param>
     public async Task<ClientReport?> BuildAsync(
-        string clientSlug, ReportPeriod period, string providerName = "Your IT provider", string? tenantId = null,
+        string clientSlug, ReportPeriod period, string providerName = ClientReport.UnnamedProvider, string? tenantId = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
@@ -350,13 +350,23 @@ public sealed class ClientReportBuilder(string databasePath)
     private static async Task<List<ReportSource>> GetSourcesAsync(
         SqliteConnection db, string clientId, ReportPeriod period, CancellationToken ct)
     {
+        // source_names arrived in migration 0015 and is a cache, so a database
+        // that has not been upgraded simply has no names. Reporting is a read
+        // path and must not fail on one, the way the changes query already
+        // does not fail on a remediation table nobody has written to.
+        var name = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false)
+            ? "(SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip)"
+            : "NULL";
+
         await using var command = db.CreateCommand();
 
         // The correlated subquery counts OTHER clients the same source was
         // seen failing against. That is the part of this report no
         // single-tenant tool can produce, and it belongs in front of the
         // client rather than only in the operator's console.
-        command.CommandText = """
+        // Interpolated with $$ so the SQL's own $client and $from stay
+        // literal and only {{name}} is substituted.
+        command.CommandText = $$"""
             SELECT r.source_ip,
                    SUM(r.message_count),
                    SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count ELSE 0 END),
@@ -377,7 +387,14 @@ public sealed class ClientReportBuilder(string databasePath)
                       FROM aggregate_records o
                      WHERE o.source_ip = r.source_ip
                        AND o.client_id <> $client
-                       AND o.dmarc_result = 'fail')
+                       AND o.dmarc_result = 'fail'),
+                   -- What the address reverses to, so a client is not handed
+                   -- a row of digits and asked whether they recognise it.
+                   -- Nobody recognises an address. A correlated subquery
+                   -- rather than a join, because source_names is a cache that
+                   -- may not have been filled - a LEFT JOIN would do as well
+                   -- and this keeps the grouping above untouched.
+                   {{name}}
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.client_id = $client AND r.date_begin >= $from AND r.date_begin <= $to
@@ -410,6 +427,7 @@ public sealed class ClientReportBuilder(string databasePath)
                 Domains = reader.IsDBNull(3) ? [] : [.. reader.GetString(3).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)],
                 AuthenticatedFor = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 OtherClientsAffected = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                ReverseName = reader.IsDBNull(6) ? "" : reader.GetString(6),
             });
         }
         return results;

@@ -19,7 +19,7 @@ public sealed class ReportUiService(DatabaseInfo database, IConfiguration config
 
     /// <summary>How the provider names itself in reports. One place, not one per run.</summary>
     public string ProviderName =>
-        IsProviderNameSet ? _configuration["Reporting:ProviderName"]! : "your IT provider";
+        IsProviderNameSet ? _configuration["Reporting:ProviderName"]! : DmarcMonitor.Core.Reporting.ClientReport.UnnamedProvider;
 
     /// <summary>
     /// False when reports would go out signed with the placeholder.
