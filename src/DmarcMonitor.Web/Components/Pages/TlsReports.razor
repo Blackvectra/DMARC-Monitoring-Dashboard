@@ -1,0 +1,228 @@
+@page "/tls"
+@using DmarcMonitor.Core.Tls
+@using DmarcMonitor.Web.Data
+@using DmarcMonitor.Web.Auth
+@inject TlsReportService Tls
+@inject ReportStoreConnection Db
+@inject OrgContext Org
+@rendermode InteractiveServer
+
+@*
+    TLS reports, which have been arriving and had nowhere to be read.
+
+    The importer has parsed and stored them since it was written and the
+    schema has carried them just as long; no page ever referenced them. On a
+    real estate the records are published and point at the operator's own
+    mailbox, so they have been arriving, being filed, and being invisible.
+
+    What they answer that DMARC cannot: DMARC says whether a message was
+    authentically from the domain. This says whether it crossed the internet
+    encrypted. A domain can be at p=reject with perfect alignment and still
+    hand every message to a receiver in plaintext.
+*@
+
+<PageTitle>TLS reports — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>TLS reports</h1>
+        <p class="sub">Whether mail to your domains crossed the internet encrypted. DMARC says a message
+           was really from you; this says nobody could read it on the way.</p>
+    </div>
+    <div class="head-actions">
+        <label>
+            Window
+            <select @bind="_days" @bind:after="LoadAsync">
+                <option value="7">7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <div class="empty"><h2>No database yet</h2><p>Nothing has been ingested.</p></div>
+}
+else if (_error is not null)
+{
+    <div class="empty"><h2>Could not read the database</h2><p>@_error</p></div>
+}
+else if (_domains is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_domains.Count == 0)
+{
+    @* Three different states that all look like an empty list, and saying
+       which one this is saves somebody an afternoon. *@
+    <div class="empty">
+        <h2>No TLS reports in the last @_days days</h2>
+        <p>
+            Nothing has arrived. That usually means one of three things, and they need different fixes:
+        </p>
+        <ul>
+            <li>No domain publishes a <code>_smtp._tls</code> TXT record, so nobody is being asked to report.</li>
+            <li>A record exists but its <code>rua=</code> points somewhere other than the mailbox this
+                collects from — reports are going to whoever is named there.</li>
+            <li>The records are right and no reporter has sent anything yet. They arrive daily, so give it a day.</li>
+        </ul>
+    </div>
+}
+else
+{
+    @if (_losing.Count > 0)
+    {
+        @* The only urgent state on this page: enforcing, and refusing mail
+           because of it. Everything else here is information. *@
+        <section class="callout urgent">
+            <h2>@_losing.Count domain(s) enforcing and losing mail</h2>
+            <p>
+                These publish an MTA-STS policy in <code>enforce</code> mode and had sessions fail. A
+                failed session at enforce is mail that was not delivered — see what failed below, because
+                most of these are the receiving server's problem rather than yours.
+            </p>
+        </section>
+    }
+
+    @if (_testing.Count > 0)
+    {
+        <section class="callout act">
+            <h2>@_testing.Count domain(s) in testing mode, which protects nothing</h2>
+            <p>
+                A policy in <code>testing</code> has its failures reported and its mail delivered over
+                plaintext anyway. A domain can sit here for years producing perfectly clean reports and be
+                no better protected than one with no policy at all. Clean reports here are the signal to
+                move to <code>enforce</code>, not evidence that you already have.
+            </p>
+        </section>
+    }
+
+    <section>
+        <h2>By domain</h2>
+        <table class="triage">
+            <thead>
+                <tr>
+                    <th>Domain</th>
+                    <th>Client</th>
+                    <th>Mode in force</th>
+                    <th class="num">Sessions</th>
+                    <th class="num">Failed</th>
+                    <th class="num">Encrypted</th>
+                    <th class="num">Reporters</th>
+                    <th class="when">Last report</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var d in _domains)
+                {
+                    <tr class="@Css(d)">
+                        <td><a href="@($"domains/{Uri.EscapeDataString(d.Domain)}")">@d.Domain</a></td>
+                        <td class="muted">@d.ClientName</td>
+                        <td><span class="chip @ModeCss(d.PolicyMode)">@d.PolicyMode</span></td>
+                        <td class="num">@d.Sessions.ToString("N0")</td>
+                        <td class="num">
+                            @if (d.Failed > 0) { <span class="bad">@d.Failed.ToString("N0")</span> }
+                            else { <span class="muted">—</span> }
+                        </td>
+                        <td class="num @(d.SuccessRate < 100 ? "bad" : "good")">@d.SuccessRate%</td>
+                        <td class="num muted">@d.Reporters</td>
+                        <td class="when">@(d.LastReport is { } r ? r.ToString("d MMM") : "—")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+
+    @if (_failures.Count > 0)
+    {
+        <section>
+            <h2>What failed</h2>
+            <p class="sub">Grouped by the reason and the server it happened against. Most of these are the
+               receiving side's to fix — which is worth knowing before spending a morning on a certificate
+               that was never yours.</p>
+
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>Domain</th>
+                        <th>Receiving server</th>
+                        <th>What happened</th>
+                        <th class="num">Sessions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var f in _failures)
+                    {
+                        <tr class="@(f.IsOurs ? "act" : "")">
+                            <td><a href="@($"domains/{Uri.EscapeDataString(f.Domain)}")">@f.Domain</a></td>
+                            <td>
+                                @if (f.ReceivingMx.Length > 0) { <code>@f.ReceivingMx</code> }
+                                else { <span class="muted">—</span> }
+                            </td>
+                            <td>
+                                <span class="source-name">@f.ResultType</span>
+                                <span class="needs-doing">@f.Explain()</span>
+                            </td>
+                            <td class="num">@f.Sessions.ToString("N0")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+}
+
+@code {
+    private IReadOnlyList<TlsDomainSummary>? _domains;
+    private IReadOnlyList<TlsFailure> _failures = [];
+    private IReadOnlyList<TlsDomainSummary> _losing = [];
+    private IReadOnlyList<TlsDomainSummary> _testing = [];
+    private int _days = 30;
+    private string? _error;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        if (!Db.Exists) { _domains = []; return; }
+
+        try
+        {
+            var access = await Org.GetAsync();
+            _domains = await Tls.GetDomainsAsync(_days, access.TenantId, access.RestrictedClient);
+            _failures = await Tls.GetFailuresAsync(_days, access.TenantId, access.RestrictedClient);
+
+            _losing = [.. _domains.Where(d => d.IsLosingMail)];
+            _testing = [.. _domains.Where(d =>
+                d.PolicyMode.Equals("testing", StringComparison.OrdinalIgnoreCase))];
+        }
+        catch (Exception ex)
+        {
+            _domains = [];
+            _failures = [];
+            _losing = [];
+            _testing = [];
+            _error = ex.Message;
+        }
+    }
+
+    private static string Css(TlsDomainSummary d) =>
+        d.IsLosingMail ? "urgent"
+        : d.PolicyMode.Equals("testing", StringComparison.OrdinalIgnoreCase) ? "act"
+        : "";
+
+    /// <summary>
+    /// Testing reads as a warning rather than a success, which is the point.
+    /// It is the mode that looks like protection and is not.
+    /// </summary>
+    private static string ModeCss(string mode) => mode.ToLowerInvariant() switch
+    {
+        "enforce" => "fine",
+        "testing" => "watch",
+        "none" => "urgent",
+        _ => "",
+    };
+}

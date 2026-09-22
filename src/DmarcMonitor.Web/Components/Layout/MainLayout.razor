@@ -102,9 +102,10 @@
         <NavLink class="nav-item" href="sources">Sending sources</NavLink>
         <NavLink class="nav-item" href="fix">Fix</NavLink>
 
-        <details class="nav-fold" open="@In("reports", "import")">
+        <details class="nav-fold" open="@In("reports", "tls", "import")">
             <summary class="nav-group">Reporting</summary>
             <NavLink class="nav-item" href="reports">Client reports</NavLink>
+            <NavLink class="nav-item" href="tls">TLS reports</NavLink>
             @if (_access is not { RestrictedClient: not null })
             {
                 <NavLink class="nav-item" href="import">Import</NavLink>

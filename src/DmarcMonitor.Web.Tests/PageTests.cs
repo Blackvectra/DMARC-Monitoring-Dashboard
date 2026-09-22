@@ -571,6 +571,43 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("2a01:111:f403:c112::5", html, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// TLS reports have been parsed and stored since the importer was
+    /// written, and no page in the product ever referenced them. On a real
+    /// estate the records are published and point at the operator's own
+    /// mailbox, so they have been arriving, being filed, and being invisible.
+    /// </summary>
+    [Fact]
+    public async Task TlsReportsHaveAPage()
+    {
+        var html = await Client().GetStringAsync("/tls");
+
+        Assert.Contains("TLS reports", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Three states look identical as an empty list and need different
+    /// fixes: no record published, a record pointing at somebody else's
+    /// mailbox, or a record that is right and nothing has arrived yet.
+    /// Saying which saves an afternoon.
+    /// </summary>
+    [Fact]
+    public async Task AnEmptyTlsPageSaysWhichKindOfEmptyItIs()
+    {
+        var html = await Client().GetStringAsync("/tls");
+
+        Assert.Contains("_smtp._tls", html, StringComparison.Ordinal);
+        Assert.Contains("rua=", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReportingGroupLinksToTls()
+    {
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("href=\"tls\"", html, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("/settings")]
     [InlineData("/fix")]
