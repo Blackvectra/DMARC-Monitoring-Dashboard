@@ -66,7 +66,7 @@ letters.
 | route | before you can sign | then |
 |---|---|---|
 | Azure Artifact Signing | identity validation, **1-7 business days** officially, and reports of 12 days to 3 weeks are common. Cannot be expedited | reputation builds over weeks |
-| SignPath Foundation | an application, reviewed by a person | same |
+| SignPath Foundation | **not available - see below.** The licence rules it out | — |
 | Commercial OV | validation, plus getting a hardware token or HSM working in CI | same |
 
 Two Azure prerequisites that are easy to miss and will stop you on day one:
@@ -99,18 +99,52 @@ copies already downloaded.
 
 ## Which to choose
 
-**If this repository stays open source: [SignPath
-Foundation](https://signpath.org/), free.** OSI licence with no commercial
-dual-licensing, no proprietary components, actively maintained, already
-released, public repository with 2FA, and a written code-signing policy
-naming the official repository, what gets signed, that only the release
-workflow signs, and who approves a release. That last item is a description
-of how releases already work here, so writing it is mostly transcription.
+### SignPath Foundation is not available to this project
 
-**If it is heading towards being sold: Azure Artifact Signing, $9.99/month**
-on the Basic tier (5,000 signatures a month, about 4,998 more than a release
-needs). No hardware token, no key to hold, and it is what the workflow here
-already targets.
+It is the obvious first thing to reach for - free OV certificates and a
+signing service for open source - and it is ruled out by `LICENSE`. Their
+conditions require
+
+> an OSI-approved Open Source license
+
+with
+
+> no commercial dual-licensing for all components
+
+and no
+
+> proprietary, non open-source component.
+
+`LICENSE` here opens with `PROPRIETARY SOFTWARE LICENSE`, its second clause
+is headed **NO LICENSE GRANTED**, and its third offers paid licences for
+commercial use, managed-service deployment and white-label redistribution.
+That is three failures out of three, and the third is the exact arrangement
+the word "dual-licensing" excludes.
+
+A public repository is not an open source one. The source is readable on
+GitHub because the platform's terms let signed-in users read public
+repositories - which `LICENSE` says in as many words - and that grants
+nobody any right to use it. Applying anyway would mean representing this as
+something it is not, to an organisation whose whole purpose is vouching for
+identity.
+
+This changes only if the licence changes, and that is a business decision
+about clause 3, not a signing decision.
+
+### Azure Artifact Signing, $9.99/month
+
+So: this one. The Basic tier covers 5,000 signatures a month, about 4,998
+more than a release needs. No hardware token, no key to hold, and it is what
+the workflow here already targets - six secrets and the next tag is signed.
+
+It has no objection to proprietary software. What it validates is who you
+are, not how you licence.
+
+### SignPath's paid tiers
+
+SignPath also sells commercial subscriptions, which a proprietary project can
+use. Worth a look only if their release-approval workflow is wanted for its
+own sake; for signing alone it is more than Azure costs.
 
 **Commercial OV, roughly $200-400/year**, is worth it only if a customer
 demands a named CA. Since the CA/Browser Forum tightened key storage in June
