@@ -942,6 +942,29 @@ jobs:
           }
           'second run adopted the database it found'
 
+      # The bundle this job just built and proved, kept where somebody can
+      # download it.
+      #
+      # It was built on every commit and thrown away every time, so the only
+      # way to get a copy that runs was to merge and tag a release. That is a
+      # long way round when the question is "can I show this to someone on
+      # Thursday", and it means the artifact people actually try is never the
+      # one CI verified - it is a later build nobody watched.
+      #
+      # Every job above has already run against it: the launcher, the first
+      # run against no database, and dmarc.exe from inside the bundle. What is
+      # uploaded here is that exact folder.
+      - name: Keep the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmarc-windows-trial
+          path: 'bundle/DMARC Monitor'
+
+          # Long enough to cover a demo and a week of second thoughts, short
+          # enough that unsigned builds do not accumulate indefinitely.
+          retention-days: 14
+          if-no-files-found: error
+
   schema:
     name: SQLite schema
     runs-on: ubuntu-latest
