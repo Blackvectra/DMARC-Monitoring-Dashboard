@@ -38,7 +38,7 @@ public sealed class ChartTests
         var withZero = Chart.Line(Series(10, 0, 10), 100, 50);
 
         Assert.NotEqual(withZero, withGap);
-        Assert.Single(withZero.Where(c => c == 'M'));
+        Assert.Single(withZero, c => c == 'M');
     }
 
     [Fact]
@@ -244,7 +244,7 @@ public sealed class ChartTests
     {
         var path = Chart.Arc(50, 50, 40, 0, 0, 0.5);
 
-        Assert.Single(path.Where(c => c == 'A'));
+        Assert.Single(path, c => c == 'A');
         Assert.Contains("L50 50", path, StringComparison.Ordinal);
     }
 

@@ -110,6 +110,33 @@ jobs:
       - name: Test
         run: dotnet test src/DmarcMonitor.sln --no-build --configuration Release --verbosity normal
 
+      # A dependency with a published advisory is a finding whether or not the
+      # code here calls into it, and "it is only in the test projects" stops
+      # being an answer the moment somebody fills in a security questionnaire.
+      # This found two High advisories reaching the test projects through an
+      # old Microsoft.NET.Test.Sdk, which is exactly the kind of thing nobody
+      # goes looking for on purpose.
+      #
+      # --include-transitive because the direct references were never the
+      # problem: what ships is resolved, not what is written down.
+      #
+      # dotnet exits 0 whatever it finds, so the output is what decides.
+      - name: Vulnerable dependencies
+        run: |
+          dotnet list src/DmarcMonitor.sln package --vulnerable --include-transitive 2>&1 | tee audit.txt
+          if grep -qiE '^\s*>' audit.txt; then
+            echo "::error::A dependency has a published advisory. See the table above."
+            exit 1
+          fi
+          echo "No known advisories."
+
+      # Separate step, and deliberately not failing the build. A package that
+      # is deprecated is a thing to plan for, not a thing to stop a release at
+      # four in the morning.
+      - name: Deprecated dependencies
+        continue-on-error: true
+        run: dotnet list src/DmarcMonitor.sln package --deprecated --include-transitive
+
   install:
     name: Install on a fresh Ubuntu
     runs-on: ubuntu-latest

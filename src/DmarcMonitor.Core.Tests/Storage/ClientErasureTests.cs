@@ -273,9 +273,13 @@ public sealed class ClientErasureTests : IDisposable
     }
 
     [Fact]
-    public void RefusesAnEmptyDatabasePathOrClient()
+    public async Task RefusesAnEmptyDatabasePathOrClient()
     {
         Assert.Throws<ArgumentException>(() => new ClientErasure("  "));
-        Assert.ThrowsAsync<ArgumentException>(() => Erasure().PreviewAsync("  "));
+
+        // Awaited. Without it the assertion never ran and this passed whatever
+        // PreviewAsync did - caught by xunit's analyzers on the version bump,
+        // not by the test failing.
+        await Assert.ThrowsAsync<ArgumentException>(() => Erasure().PreviewAsync("  "));
     }
 }
