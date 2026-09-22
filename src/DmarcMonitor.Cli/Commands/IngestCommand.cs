@@ -277,9 +277,9 @@ public static class IngestCommand
                 var id = report.Kind switch
                 {
                     ReportKind.DmarcAggregate when report.Aggregate is not null =>
-                        await store.SaveAggregateAsync(report.Aggregate, report.FileName, report.MessageId, ct).ConfigureAwait(false),
+                        await store.SaveAggregateAsync(report.Aggregate, report.FileName, report.MessageId, report.ArrivedAt, ct).ConfigureAwait(false),
                     ReportKind.TlsRpt when report.Tls is not null =>
-                        await store.SaveTlsAsync(report.Tls, report.FileName, report.MessageId, ct).ConfigureAwait(false),
+                        await store.SaveTlsAsync(report.Tls, report.FileName, report.MessageId, report.ArrivedAt, ct).ConfigureAwait(false),
                     _ => null,
                 };
 

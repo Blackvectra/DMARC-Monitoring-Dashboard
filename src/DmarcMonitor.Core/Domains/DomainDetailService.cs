@@ -453,18 +453,29 @@ public sealed class DomainDetailService(string databasePath)
         // may since have been changed, which is the thing an operator is most
         // often checking on this page.
         //
-        // received_at breaks the tie, because date_end alone does not:
+        // A tie-break is needed because date_end alone does not separate them:
         // receivers send several reports covering the same window, and during
-        // a rollout two of them can disagree about the policy. Without a
-        // tie-break SQLite picks whichever it likes, so the page can show a
-        // policy that was superseded hours ago and be right again on the next
-        // refresh, which is the hardest kind of wrong to notice.
+        // a rollout two of them can disagree about the policy. Without one
+        // SQLite picks whichever it likes, so the page can show a policy that
+        // was superseded hours ago and be right again on the next refresh,
+        // which is the hardest kind of wrong to notice.
+        //
+        // This used to order by received_at, and did not work. That column was
+        // written as a copy of date_end, so the second key equalled the first
+        // on every row and separated nothing - the bug this comment describes
+        // was never actually fixed, and it looked fixed, which is worse.
+        //
+        // ingested_at instead. Storage order is not a fact about the mail, and
+        // it is deliberately not received_at even now that the real arrival
+        // time is recorded: that is null for anything imported from a file, and
+        // a tie-break has to be total. What ingested_at is is a strict order
+        // that always exists, which is the whole job.
         command.CommandText = """
             SELECT policy_p, COALESCE(policy_sp, ''), COALESCE(policy_pct, 100), date_end,
                    COALESCE(policy_adkim, 'r'), COALESCE(policy_aspf, 'r')
             FROM aggregate_reports
             WHERE domain_id = $domain
-            ORDER BY date_end DESC, received_at DESC
+            ORDER BY date_end DESC, ingested_at DESC
             LIMIT 1
             """;
         command.Parameters.AddWithValue("$domain", domainId);

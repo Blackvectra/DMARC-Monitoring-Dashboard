@@ -148,6 +148,17 @@ public sealed record IngestedReport
     public AggregateReport? Aggregate { get; init; }
     public TlsReport? Tls { get; init; }
 
+    /// <summary>
+    /// When the message carrying this report arrived, or null when unknown.
+    /// </summary>
+    /// <remarks>
+    /// Read from the mailbox and carried through rather than reconstructed.
+    /// The report itself says only which period it covers; how long the
+    /// reporter then took to send it is a fact only the message has, and it
+    /// was being thrown away here.
+    /// </remarks>
+    public DateTimeOffset? ArrivedAt { get; init; }
+
     /// <summary>Plain-English explanation, safe to log or show an operator.</summary>
     public string Reason { get; init; } = "";
 
@@ -492,6 +503,7 @@ public sealed class ReportIngestor
             return new IngestedReport
             {
                 MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
                 FileName = extracted.FileName,
                 Outcome = IngestOutcome.Quarantined,
                 Kind = ReportKind.DmarcAggregate,
@@ -520,6 +532,7 @@ public sealed class ReportIngestor
             return new IngestedReport
             {
                 MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
                 FileName = extracted.FileName,
                 Outcome = IngestOutcome.Duplicate,
                 Kind = ReportKind.DmarcAggregate,
@@ -532,6 +545,7 @@ public sealed class ReportIngestor
         return new IngestedReport
         {
             MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
             FileName = extracted.FileName,
             Outcome = IngestOutcome.Ingested,
             Kind = ReportKind.DmarcAggregate,
@@ -559,6 +573,7 @@ public sealed class ReportIngestor
             return new IngestedReport
             {
                 MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
                 FileName = extracted.FileName,
                 Outcome = IngestOutcome.Quarantined,
                 Kind = ReportKind.TlsRpt,
@@ -584,6 +599,7 @@ public sealed class ReportIngestor
             return new IngestedReport
             {
                 MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
                 FileName = extracted.FileName,
                 Outcome = IngestOutcome.Duplicate,
                 Kind = ReportKind.TlsRpt,
@@ -596,6 +612,7 @@ public sealed class ReportIngestor
         return new IngestedReport
         {
             MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
             FileName = extracted.FileName,
             Outcome = IngestOutcome.Ingested,
             Kind = ReportKind.TlsRpt,
@@ -653,6 +670,7 @@ public sealed class ReportIngestor
     private static IngestedReport Unrecognized(MailMessage message, string fileName, string reason) => new()
     {
         MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
         FileName = fileName,
         Outcome = IngestOutcome.Unrecognized,
         Reason = reason,
@@ -669,6 +687,7 @@ public sealed class ReportIngestor
     private static IngestedReport Unattributed(MailMessage message, string fileName, ReportKind kind, string claimedDomain) => new()
     {
         MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
         FileName = fileName,
         Outcome = IngestOutcome.Unattributed,
         Kind = kind,

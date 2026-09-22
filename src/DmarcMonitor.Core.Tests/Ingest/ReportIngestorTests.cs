@@ -65,6 +65,31 @@ public sealed class ReportIngestorTests
     }
 
     [Fact]
+    public async Task CarriesTheMessagesRealArrivalTime()
+    {
+        // What the store needs to record a real received_at instead of
+        // inventing one from the report's own claimed window. The message is
+        // the only thing that actually knows when it arrived.
+        var arrived = DateTimeOffset.UtcNow.AddMinutes(-47);
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            new MailMessage
+            {
+                Id = "m1",
+                Subject = "Report Domain: nrgtechservices.com",
+                From = "noreply-dmarc-support@google.com",
+                ToAddresses = [$"{Token}@{ReportingDomain}"],
+                ReceivedAt = arrived,
+                HasAttachments = true,
+            },
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox).RunAsync();
+
+        Assert.Equal(arrived, Assert.Single(result.Reports).ArrivedAt);
+    }
+
+    [Fact]
     public async Task IngestsARealTlsReport()
     {
         var mailbox = new FakeMailboxClient();
