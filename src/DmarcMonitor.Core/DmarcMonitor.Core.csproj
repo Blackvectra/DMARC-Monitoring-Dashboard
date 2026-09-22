@@ -10,6 +10,14 @@
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="DnsClient" Version="1.8.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <!--
+      The client report as a PDF, because the monthly deliverable is emailed
+      and an .html attachment is the one thing a mail gateway is most likely
+      to strip or warn about. MIT, per the package's own licence expression -
+      which is why this rather than QuestPDF, whose community terms carry
+      revenue conditions this product would have to answer for.
+    -->
+    <PackageReference Include="PDFsharp-MigraDoc" Version="6.1.1" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
@@ -36,6 +44,22 @@
     <EmbeddedResource Include="..\..\db\migrations\*.sql">
       <LogicalName>migration.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
+
+    <!--
+      The fonts the PDF is drawn with, compiled in for the same reason as the
+      schema: a container has no fonts installed, and PDFsharp on anything but
+      Windows has no system fonts to fall back on. Without these a client
+      report renders on a laptop and throws on the server that is supposed to
+      produce it every month.
+
+      Liberation Sans, under the SIL Open Font License 1.1, whose text ships
+      beside them. Regular and bold only - nothing here is set in italic, and
+      each face is 400 KB.
+    -->
+    <EmbeddedResource Include="Fonts\*.ttf">
+      <LogicalName>font.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Fonts\LICENSE-Liberation.txt" LogicalName="font.LICENSE.txt" />
   </ItemGroup>
 
 </Project>
