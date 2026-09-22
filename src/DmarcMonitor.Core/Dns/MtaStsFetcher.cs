@@ -29,18 +29,40 @@ public sealed class MtaStsFetcher(HttpClient? client = null)
     /// <summary>Largest policy file read. A real one is a few hundred bytes.</summary>
     public const int MaxBytes = 64 * 1024;
 
+    /// <summary>
+    /// How long a pooled connection may live before the name behind it is
+    /// looked up again.
+    /// </summary>
+    /// <remarks>
+    /// The default is infinite, and this class is registered as a singleton,
+    /// so without this the process resolves mta-sts.&lt;domain&gt; once and keeps
+    /// that answer until it restarts. That is the documented long-lived
+    /// HttpClient problem, and it lands harder here than almost anywhere:
+    /// this application exists to tell an operator what DNS currently says,
+    /// so an instance that has pinned yesterday's answer is not degraded, it
+    /// is lying about its one subject.
+    ///
+    /// It showed up as a domain whose policy host had just been published
+    /// still being reported as "there is no host at mta-sts.&lt;domain&gt;" -
+    /// which was true when it was first asked and had not been true for
+    /// hours. Two minutes is the interval Microsoft's own guidance suggests,
+    /// and the cost of it is one extra DNS lookup per policy host per two
+    /// minutes.
+    /// </remarks>
+    internal static readonly TimeSpan DnsRefresh = TimeSpan.FromMinutes(2);
+
     private readonly HttpClient _http = client ?? Default();
 
-    private static HttpClient Default()
+    internal static SocketsHttpHandler DefaultHandler() => new()
     {
-        var handler = new HttpClientHandler
-        {
-            // A sender does not follow these, so neither does this.
-            AllowAutoRedirect = false,
-        };
+        // A sender does not follow these, so neither does this.
+        AllowAutoRedirect = false,
 
-        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
-    }
+        PooledConnectionLifetime = DnsRefresh,
+    };
+
+    private static HttpClient Default() =>
+        new(DefaultHandler()) { Timeout = TimeSpan.FromSeconds(10) };
 
     /// <summary>The host a policy is served from.</summary>
     internal static string HostFor(string domain) =>
@@ -243,9 +265,14 @@ public sealed class MtaStsFetcher(HttpClient? client = null)
 
             if (inner is System.Net.Sockets.SocketException socket)
             {
+                // The "yet" is not hedging. This check is most often run by
+                // somebody who is part-way through setting MTA-STS up, and a
+                // record published minutes ago has not reached every resolver.
+                // Saying so is the difference between a finding they act on
+                // and a flat contradiction of the browser tab next to it.
                 return socket.SocketErrorCode is System.Net.Sockets.SocketError.HostNotFound
                                               or System.Net.Sockets.SocketError.NoData
-                    ? $"there is no host at {host}"
+                    ? $"there is no host at {host} yet. If you have just created it, DNS takes a few minutes to spread - check again shortly"
                     : $"nothing answered at {host}";
             }
         }
