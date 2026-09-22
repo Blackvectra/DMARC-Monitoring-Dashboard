@@ -121,8 +121,20 @@ else
                         <td><a href="@($"domains/{Uri.EscapeDataString(d.Domain)}")">@d.Domain</a></td>
                         <td class="muted">@d.ClientName</td>
                         <td>
-                            <span class="chip @ModeCss(d.PolicyMode)">@d.PolicyMode</span>
-                            @if (d.ModeChangedSinceReports)
+                            <span class="chip @ModeCss(d)">@d.PolicyMode</span>
+                            @if (!d.ModeVerified)
+                            {
+                                @* What senders had cached, which is not the
+                                   same as what the domain serves now and can
+                                   lag it by a week. Stated as a fact it put a
+                                   domain serving enforce under "testing, which
+                                   protects nothing". *@
+                                <span class="needs-doing">
+                                    As senders had it. Nothing has read the policy being served —
+                                    <a href="/domains">read DNS</a> to confirm it.
+                                </span>
+                            }
+                            else if (d.ModeChangedSinceReports)
                             {
                                 @* The figures on this row were gathered under the
                                    previous policy. Senders cache a policy for its
@@ -216,8 +228,12 @@ else
             // on what reporters had put two domains that had just moved to
             // enforce under "in testing mode, which protects nothing", while
             // the domains table showed them enforcing.
+            // Only where the live policy was actually read. An unverified
+            // mode is what senders had cached, which is evidence about the
+            // past: raising "protects nothing" on it accused a domain that was
+            // serving enforce at the time.
             _testing = [.. _domains.Where(d =>
-                d.PolicyMode.Equals("testing", StringComparison.OrdinalIgnoreCase))];
+                d.ModeVerified && d.PolicyMode.Equals("testing", StringComparison.OrdinalIgnoreCase))];
         }
         catch (Exception ex)
         {
@@ -231,18 +247,24 @@ else
 
     private static string Css(TlsDomainSummary d) =>
         d.IsLosingMail ? "urgent"
-        : d.PolicyMode.Equals("testing", StringComparison.OrdinalIgnoreCase) ? "act"
+        : d.ModeVerified && d.PolicyMode.Equals("testing", StringComparison.OrdinalIgnoreCase) ? "act"
         : "";
 
     /// <summary>
     /// Testing reads as a warning rather than a success, which is the point.
     /// It is the mode that looks like protection and is not.
     /// </summary>
-    private static string ModeCss(string mode) => mode.ToLowerInvariant() switch
-    {
-        "enforce" => "fine",
-        "testing" => "watch",
-        "none" => "urgent",
-        _ => "",
-    };
+    /// <remarks>
+    /// A mode nobody has verified is drawn plainly whatever it says. Colouring
+    /// a cached value green or amber gives a second-hand reading the weight of
+    /// a measurement, and this page has already made that mistake once.
+    /// </remarks>
+    private static string ModeCss(TlsDomainSummary domain) =>
+        !domain.ModeVerified ? "unknown" : domain.PolicyMode.ToLowerInvariant() switch
+        {
+            "enforce" => "fine",
+            "testing" => "watch",
+            "none" => "urgent",
+            _ => "",
+        };
 }

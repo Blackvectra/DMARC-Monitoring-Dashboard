@@ -65,6 +65,27 @@ public sealed record TlsDomainSummary
         && ReportedMode is not ("unknown" or "")
         && !ServedMode.Equals(ReportedMode, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// True when the mode came from the live policy rather than from what
+    /// senders had cached.
+    /// </summary>
+    /// <remarks>
+    /// The earlier fix made the served policy win WHERE ONE HAD BEEN READ. It
+    /// left the ordinary case alone: on an install that has not scanned DNS -
+    /// which is every install until the nightly job first runs, and every copy
+    /// of the trial download - there is no served mode, so this falls back to
+    /// the reporters' and states it as fact.
+    ///
+    /// That put nrgtechservices.com under "in testing mode, which protects
+    /// nothing" while it was serving enforce with a seven-day max_age. The
+    /// reports were not wrong; they were months old, and the page presented a
+    /// cached second-hand value as the current policy.
+    ///
+    /// So an unverified mode is shown as what it is - what senders had - and
+    /// never counted into the warning.
+    /// </remarks>
+    public bool ModeVerified => ServedMode.Length > 0;
+
     /// <summary>How many reporting organizations sent anything for this domain.</summary>
     public int Reporters { get; init; }
 
