@@ -185,6 +185,19 @@ else
         <thead>
             <tr>
                 <th></th>
+                @* Domain and what to do about it share a cell.
+
+                   They used to be the second and the ninth of nine columns,
+                   in a table wide enough to scroll sideways - so the sentence
+                   telling an operator what to do sat eight columns from the
+                   domain it was about, and a screenshot of that column alone
+                   was eight rows of advice with nothing saying which domain
+                   any of it belonged to. Three of them read "Quarantining
+                   with nothing failing. Ready to move to p=reject." and were
+                   indistinguishable.
+
+                   Stacking them drops the table from nine columns to six,
+                   which is also what stops it scrolling. *@
                 <th>Domain</th>
                 @if (AcrossOrganizations) { <th>Organization</th> }
                 <th>Client</th>
@@ -192,7 +205,6 @@ else
                 <th class="num">Messages</th>
                 <th class="num">Passing</th>
                 <th class="spark-col">Trend</th>
-                <th>What needs doing</th>
             </tr>
         </thead>
         <tbody>
@@ -200,7 +212,13 @@ else
             {
                 <tr class="@Css(row.Level)">
                     <td><span class="pip @Css(row.Level)" title="@Label(row.Level)"></span></td>
-                    <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
+                    <td class="domain-cell">
+                        <a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a>
+                        @if (!string.IsNullOrWhiteSpace(row.Headline))
+                        {
+                            <span class="needs-doing">@row.Headline</span>
+                        }
+                    </td>
                     @if (AcrossOrganizations) { <td class="muted">@row.Organization</td> }
                     @* Onboarding by domain name makes these identical for most
                        rows, and a column repeating the one beside it eighteen
@@ -236,7 +254,6 @@ else
                             <span class="muted">—</span>
                         }
                     </td>
-                    <td>@row.Headline</td>
                 </tr>
             }
         </tbody>

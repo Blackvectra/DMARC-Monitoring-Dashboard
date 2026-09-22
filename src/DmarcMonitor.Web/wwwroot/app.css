@@ -1152,3 +1152,31 @@ pre.policy {
 @media (prefers-reduced-motion: reduce) {
     .sidebar { transition: none; }
 }
+
+/* ---- a triage row ------------------------------------------------------ */
+
+/*
+    The domain, and under it the sentence saying what to do about it.
+
+    These were columns two and nine of nine, in a table wide enough to scroll
+    sideways, so the most useful thing on the row was as far from its subject
+    as the layout could put it. Stacked, they read as one statement and the
+    table stops scrolling.
+
+    The sentence is allowed to be long - it is the content - so the cell takes
+    the slack and the numeric columns stay narrow.
+*/
+.domain-cell { max-width: 52ch; }
+
+.needs-doing {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+/* On a row already coloured by severity the advice carries that colour, so
+   the sentence and the pip beside it agree without repeating the word. */
+tr.urgent .needs-doing { color: var(--urgent); }
+tr.act    .needs-doing { color: var(--act); }
