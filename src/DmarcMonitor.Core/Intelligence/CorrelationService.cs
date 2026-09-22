@@ -281,4 +281,226 @@ public sealed class CorrelationService(string databasePath)
 
         return [.. domains.OrderBy(d => d, StringComparer.Ordinal)];
     }
+
+    /// <summary>
+    /// Everything one source has done, across every domain in scope.
+    /// </summary>
+    /// <remarks>
+    /// The page behind a source's name. Asked about one address, a domain
+    /// owner's dashboard can only say what it did to them; this says it did
+    /// the same to six unrelated businesses on the same afternoon, which is
+    /// the finding worth paying for.
+    ///
+    /// All traffic, not only the failing rows. A source that authenticates
+    /// properly nine times in ten and fails on the tenth is the commonest
+    /// real case, and a page that showed only the tenth would describe a
+    /// working mail path as a threat.
+    /// </remarks>
+    /// <param name="tenantId">One organization's clients, or null for all. Scoped for the same reason the list is.</param>
+    /// <param name="clientSlug">One client's domains, for a customer's own login, or null.</param>
+    public async Task<SourceDetail?> GetSourceAsync(
+        string sourceIp, int days = 30, string? tenantId = null, string? clientSlug = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceIp);
+
+        var ip = sourceIp.Trim();
+        var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
+            .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        var client = string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant();
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        var appearances = new List<SourceAppearance>();
+
+        await using (var command = db.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT
+                  d.name, c.name, c.slug,
+                  SUM(r.message_count),
+                  SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count ELSE 0 END),
+                  MAX(r.date_begin),
+                  -- Ever passed FOR THIS DOMAIN. Per domain because passing is
+                  -- the thing a forger cannot do, and only for the domain it
+                  -- passed for: an address carrying one customer's mail
+                  -- properly is not thereby cleared of forging the rest.
+                  MAX(CASE WHEN r.dmarc_result = 'pass' THEN 1 ELSE 0 END)
+                FROM aggregate_records r
+                JOIN domains d ON d.id = r.domain_id
+                JOIN clients c ON c.id = r.client_id
+                WHERE r.source_ip = $ip
+                  AND r.date_begin >= $since
+                  AND ($tenant IS NULL OR r.tenant_id = $tenant)
+                  AND ($client IS NULL OR c.slug = $client)
+                GROUP BY d.id
+                ORDER BY SUM(r.message_count) DESC
+                """;
+            command.Parameters.AddWithValue("$ip", ip);
+            command.Parameters.AddWithValue("$since", since);
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$client", (object?)client ?? DBNull.Value);
+
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                DateTimeOffset? last = null;
+                if (!reader.IsDBNull(5) && DateTime.TryParse(
+                        reader.GetString(5), CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+                {
+                    last = new DateTimeOffset(parsed, TimeSpan.Zero);
+                }
+
+                appearances.Add(new SourceAppearance
+                {
+                    Domain = reader.GetString(0),
+                    ClientName = reader.GetString(1),
+                    ClientSlug = reader.GetString(2),
+                    Messages = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    Passing = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                    LastSeen = last,
+                    EverPassed = !reader.IsDBNull(6) && reader.GetInt32(6) == 1,
+                });
+            }
+        }
+
+        // An address nobody has a report for in this window is not found,
+        // rather than an empty page about an address that may not exist.
+        if (appearances.Count == 0) { return null; }
+
+        string auth;
+        string? reverseName;
+
+        await using (var command = db.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT
+                  COALESCE(GROUP_CONCAT(DISTINCT
+                    CASE WHEN r.spf_auth_result = 'pass' THEN COALESCE(r.spf_domain, '') ELSE '' END
+                    || '|' ||
+                    CASE WHEN r.dkim_auth_result = 'pass' THEN COALESCE(r.dkim_domain, '') ELSE '' END), ''),
+                  (SELECT n.reverse_name FROM source_names n WHERE n.ip = $ip)
+                FROM aggregate_records r
+                JOIN clients c ON c.id = r.client_id
+                WHERE r.source_ip = $ip
+                  AND r.date_begin >= $since
+                  AND r.dmarc_result = 'fail'
+                  AND ($tenant IS NULL OR r.tenant_id = $tenant)
+                  AND ($client IS NULL OR c.slug = $client)
+                """;
+            command.Parameters.AddWithValue("$ip", ip);
+            command.Parameters.AddWithValue("$since", since);
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$client", (object?)client ?? DBNull.Value);
+
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var read = await reader.ReadAsync(ct).ConfigureAwait(false);
+            auth = read && !reader.IsDBNull(0) ? reader.GetString(0) : "";
+            reverseName = read && !reader.IsDBNull(1) ? reader.GetString(1) : null;
+        }
+
+        return new SourceDetail
+        {
+            SourceIp = ip,
+            ReverseName = reverseName,
+            Appearances = appearances,
+            AuthenticatedFor = ParseAuthDomains(auth),
+        };
+    }
+}
+
+/// <summary>One domain a source has been seen sending as.</summary>
+public sealed record SourceAppearance
+{
+    public required string Domain { get; init; }
+    public required string ClientName { get; init; }
+    public required string ClientSlug { get; init; }
+    public long Messages { get; init; }
+    public long Passing { get; init; }
+    public long Failing => Messages - Passing;
+    public DateTimeOffset? LastSeen { get; init; }
+
+    /// <summary>Whether this source has ever authenticated for this domain.</summary>
+    /// <remarks>
+    /// Per domain, and that is the whole value of the column. Passing is the
+    /// thing a forger cannot do - but only for the domain it passed for. A
+    /// source that carries one customer's mail properly and sends as three
+    /// others it has never passed for is not vindicated by the first.
+    /// </remarks>
+    public bool EverPassed { get; init; }
+}
+
+/// <summary>
+/// Everything one sending source has done across the whole estate.
+/// </summary>
+/// <remarks>
+/// The view a single-tenant tool cannot produce. Asked about 192.3.180.38, a
+/// domain owner's dashboard can say what it did to them; only something
+/// holding several customers' reports can say it did the same to six others
+/// on the same afternoon.
+/// </remarks>
+public sealed record SourceDetail
+{
+    public required string SourceIp { get; init; }
+    public string? ReverseName { get; init; }
+    public IReadOnlyList<SourceAppearance> Appearances { get; init; } = [];
+
+    /// <summary>Domains this source authenticated FOR, when it failed.</summary>
+    public IReadOnlyList<string> AuthenticatedFor { get; init; } = [];
+
+    public long Messages => Appearances.Sum(a => a.Messages);
+    public long Passing => Appearances.Sum(a => a.Passing);
+    public long Failing => Appearances.Sum(a => a.Failing);
+
+    public DateTimeOffset? LastSeen =>
+        Appearances.Where(a => a.LastSeen is not null).Max(a => a.LastSeen);
+
+    public int DomainCount => Appearances.Count;
+
+    /// <summary>
+    /// Unrelated parties, counting each unfiled domain for itself.
+    /// </summary>
+    /// <remarks>
+    /// Every imported domain starts in the single Unassigned bucket, so
+    /// counting clients made every source on a fresh install look like it
+    /// touched exactly one. Two domains nobody has filed yet are no more
+    /// related than two belonging to different customers.
+    /// </remarks>
+    public int IndependentParties => Appearances
+        .Select(a => a.ClientSlug.Equals("unassigned", StringComparison.OrdinalIgnoreCase)
+            ? $"domain:{a.Domain}" : $"client:{a.ClientSlug}")
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Count();
+
+    public bool IsCrossClient => IndependentParties > 1;
+
+    /// <summary>A real sending path for every domain it touches.</summary>
+    public bool IsOwnSendingPath => DomainCount > 0 && Appearances.All(a => a.EverPassed);
+
+    public bool AuthenticatedNothing => AuthenticatedFor.Count == 0;
+
+    /// <summary>The same judgement the list makes, from the same inputs.</summary>
+    /// <remarks>
+    /// Deliberately identical to <see cref="FailingSource.Verdict"/>. Two
+    /// screens disagreeing about one address is worse than either being
+    /// wrong, because an operator cannot tell which to believe.
+    /// </remarks>
+    public SourceVerdict Verdict =>
+        IsOwnSendingPath || !AuthenticatedNothing ? SourceVerdict.Misconfigured
+        : IsCrossClient ? SourceVerdict.CrossClientImpersonation
+        : SourceVerdict.Unauthenticated;
+
+    /// <summary>The vendor the catalogue recognises, else the reverse name, else the address.</summary>
+    public string Display =>
+        SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
+        : SourceIp;
+
+    public bool IsNamed => Display != SourceIp;
+
+    /// <summary>What kind of sender this is, when the catalogue knows.</summary>
+    public SourceKind Kind =>
+        SourceCatalog.Identify(ReverseName) is { } known ? known.Kind : SourceKind.Unknown;
 }

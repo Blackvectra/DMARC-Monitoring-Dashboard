@@ -1,0 +1,254 @@
+@page "/sources/{Address}"
+@using DmarcMonitor.Core.Intelligence
+@using DmarcMonitor.Web.Data
+@using DmarcMonitor.Web.Auth
+@inject CorrelationService Correlation
+@inject ReportStoreConnection Db
+@inject OrgContext Org
+@rendermode InteractiveServer
+
+@*
+    One sending source, everywhere it has been seen.
+
+    Asked for directly: "should also be able to navigate to whats highlighted
+    to see what to fix". Every table in this product listed sources as dead
+    text, so a row saying "INKY Phish Fence, 1 sent, 1 broken" was the end of
+    the trail rather than the start of it.
+
+    This is also the page only a multi-client platform can draw. A domain
+    owner's dashboard can say what an address did to them; this says it did
+    the same to six unrelated businesses on the same afternoon, which is the
+    whole argument for watching a book of customers together.
+*@
+
+<PageTitle>@(_source?.Display ?? Address) — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <p class="crumb"><a href="/sources">Sources</a></p>
+        <h1>@(_source?.Display ?? Address)</h1>
+        @if (_source is { IsNamed: true })
+        {
+            @* The address stays visible and selectable whatever the name is.
+               It is the identity, and it is what gets pasted into a ticket. *@
+            <p class="sub"><code>@_source.SourceIp</code>@if (_source.ReverseName is { Length: > 0 } ptr)
+                { <span class="muted"> — reverses to @ptr</span> }</p>
+        }
+    </div>
+    <div class="head-actions">
+        <label>
+            Window
+            <select @bind="_days" @bind:after="LoadAsync">
+                <option value="7">7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (!Db.Exists)
+{
+    <p class="muted">No database yet.</p>
+}
+else if (_error is not null)
+{
+    <p class="bad">@_error</p>
+}
+else if (!_loaded)
+{
+    <p class="muted">Looking…</p>
+}
+else if (_source is null)
+{
+    @* Not an empty page about an address that may not exist. *@
+    <section class="callout">
+        <h2>Nothing from this address in the last @_days days</h2>
+        <p>No report in scope mentions <code>@Address</code>. It may have sent nothing in this window,
+           or it may belong to an organization you cannot see.</p>
+    </section>
+}
+else
+{
+    <section class="callout @Css(_source.Verdict)">
+        <h2>@Headline()</h2>
+        <p>@Explain()</p>
+    </section>
+
+    <div class="stat-row">
+        <div class="stat">
+            <div class="stat-value">@_source.Messages.ToString("N0")</div>
+            <div class="stat-label">messages</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value @(_source.Failing > 0 ? "bad" : "")">@_source.Failing.ToString("N0")</div>
+            <div class="stat-label">failed DMARC</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value @(_source.IsCrossClient ? "bad" : "")">@_source.IndependentParties</div>
+            <div class="stat-label">unrelated parties</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">@(_source.LastSeen is { } seen ? Ago(seen) : "—")</div>
+            <div class="stat-label">last seen</div>
+        </div>
+    </div>
+
+    <section>
+        <h2>Seen sending as</h2>
+        <p class="sub">Every domain in your scope this address has sent as. "Ever passed" is per domain
+           on purpose: passing is the thing a forger cannot do, but only for the domain it passed for.</p>
+
+        <table class="triage">
+            <thead>
+                <tr>
+                    <th>Domain</th>
+                    <th>Client</th>
+                    <th class="num">Messages</th>
+                    <th class="num">Failed</th>
+                    <th>Ever passed</th>
+                    <th>Last seen</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var a in _source.Appearances)
+                {
+                    <tr>
+                        <td><a href="@($"domains/{Uri.EscapeDataString(a.Domain)}")">@a.Domain</a></td>
+                        <td class="muted">@a.ClientName</td>
+                        <td class="num">@a.Messages.ToString("N0")</td>
+                        <td class="num">
+                            @if (a.Failing > 0) { <span class="bad">@a.Failing.ToString("N0")</span> }
+                            else { <span class="muted">—</span> }
+                        </td>
+                        <td>
+                            @if (a.EverPassed) { <span class="chip fine">yes</span> }
+                            else { <span class="chip urgent">never</span> }
+                        </td>
+                        <td class="muted">@(a.LastSeen is { } s ? Ago(s) : "—")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+
+    @if (_source.AuthenticatedFor.Count > 0)
+    {
+        <section>
+            <h2>Authenticated for</h2>
+            <p class="sub">When this source failed, these are the domains it nonetheless proved it was
+               allowed to send for. A service signing as itself rather than as your customer is a real
+               service set up without alignment — not somebody forging your customer.</p>
+            <p>@foreach (var (d, i) in _source.AuthenticatedFor.Select((d, i) => (d, i)))
+               { @(i > 0 ? ", " : "")<code>@d</code> }</p>
+        </section>
+    }
+
+    <section>
+        <h2>What to do</h2>
+        <p>@Advice()</p>
+    </section>
+}
+
+@code {
+    [Parameter] public string Address { get; set; } = "";
+
+    private SourceDetail? _source;
+    private int _days = 30;
+    private bool _loaded;
+    private string? _error;
+
+    protected override Task OnParametersSetAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loaded = false;
+        _error = null;
+
+        if (!Db.Exists) { _loaded = true; return; }
+
+        try
+        {
+            var access = await Org.GetAsync();
+            _source = await Correlation.GetSourceAsync(
+                Address, _days, access.TenantId, access.RestrictedClient);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loaded = true;
+        }
+    }
+
+    private static string Css(SourceVerdict verdict) => verdict switch
+    {
+        SourceVerdict.CrossClientImpersonation => "urgent",
+        SourceVerdict.Unauthenticated => "act",
+        _ => "watch",
+    };
+
+    /// <summary>
+    /// Deliberately cautious, and worded the same way the list words it.
+    /// Calling a customer's own marketing platform an attacker is how an
+    /// operator blocks their client's invoices.
+    /// </summary>
+    private string Headline() => _source!.Verdict switch
+    {
+        SourceVerdict.CrossClientImpersonation =>
+            $"Authenticated nothing, against {_source.IndependentParties} unrelated parties",
+        SourceVerdict.Unauthenticated =>
+            "Authenticated nothing",
+        _ when _source.IsOwnSendingPath =>
+            "A real sending path for every domain it touches",
+        _ => "A real service, sending unaligned",
+    };
+
+    private string Explain() => _source!.Verdict switch
+    {
+        SourceVerdict.CrossClientImpersonation =>
+            "One domain would be noise. The same address proving nothing against several businesses "
+            + "that have nothing to do with each other is somebody working through a list.",
+        SourceVerdict.Unauthenticated =>
+            "It proved nothing when it failed, and it has been seen against one party only. That is "
+            + "as consistent with a forgotten mail service as with forgery, so it is worth "
+            + "identifying before it is blocked.",
+        _ when _source.IsOwnSendingPath =>
+            "It has authenticated for every domain it sends as, so it holds keys a forger would not. "
+            + "Failures here are alignment or a gateway breaking signatures in transit, not forgery.",
+        _ => "It authenticated for a domain of its own rather than your customer's, which is what a "
+            + "real service set up without alignment looks like.",
+    };
+
+    private string Advice() => _source!.Verdict switch
+    {
+        SourceVerdict.CrossClientImpersonation =>
+            "Do not add this to anybody's SPF record. Advancing the policy on the domains above is what "
+            + "stops it — the reports already show what enforcing would cost. If the same address keeps "
+            + "appearing after that, it is worth reporting to the network that owns it.",
+        SourceVerdict.Unauthenticated =>
+            "Find out what it is before changing anything. Ask the customer whether they recognise it: a "
+            + "scanner, a booking system or a payroll run nobody remembered is the usual answer. If they "
+            + "own it, align it; if they do not, enforcing the policy is what stops it.",
+        _ when _source.IsOwnSendingPath =>
+            "Nothing in DNS fixes a signature broken in transit. If mail is being lost, have the gateway "
+            + "stop modifying the body, or deliver without a re-send. Relaxing alignment or lowering the "
+            + "policy does not help — the signature is broken, not misaligned.",
+        _ => "Align it. Either have the service sign as the customer's domain, or add it to SPF if the "
+            + "customer owns the sending. Check the SPF lookup count before adding anything: ten is the "
+            + "limit and going over it breaks every sender at once.",
+    };
+
+    private static string Ago(DateTimeOffset when)
+    {
+        var days = (int)(DateTimeOffset.UtcNow - when).TotalDays;
+        return days switch
+        {
+            <= 0 => "today",
+            1 => "yesterday",
+            _ => $"{days} days ago",
+        };
+    }
+}

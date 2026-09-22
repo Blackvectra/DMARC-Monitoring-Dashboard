@@ -493,6 +493,58 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("Acme Corp", html, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The page behind a source's name, asked for as "should also be able to
+    /// navigate to whats highlighted to see what to fix". Every table listed
+    /// sources as dead text, so a row was the end of the trail rather than
+    /// the start of it.
+    /// </summary>
+    [Fact]
+    public async Task ASourceHasAPageOfItsOwn()
+    {
+        var html = await Client().GetStringAsync("/sources/192.0.2.25");
+
+        Assert.Contains("192.0.2.25", html, StringComparison.Ordinal);
+        Assert.Contains("Seen sending as", html, StringComparison.Ordinal);
+        Assert.Contains("What to do", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheSourcesListLinksToThatPage()
+    {
+        var html = await Client().GetStringAsync("/sources");
+
+        Assert.Contains("/sources/", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An address nobody has a report for is not an empty page about an
+    /// address that may not exist.
+    /// </summary>
+    [Fact]
+    public async Task AnAddressWithNoReportsSaysSoRatherThanRenderingBlank()
+    {
+        var html = await Client().GetStringAsync("/sources/198.51.100.200");
+
+        Assert.Contains("Nothing from this address", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// IPv6 is most of the volume on a Microsoft-hosted estate, and its
+    /// addresses are full of colons. A link that only worked for IPv4 would
+    /// have been broken for the commonest sender there is.
+    /// </summary>
+    [Fact]
+    public async Task AnIpv6AddressSurvivesTheRoundTripThroughTheUrl()
+    {
+        var html = await Client().GetStringAsync(
+            "/sources/" + Uri.EscapeDataString("2a01:111:f403:c112::5"));
+
+        // Either it has reports or it does not; what matters is that the page
+        // renders and the address arrived intact rather than 404ing on a colon.
+        Assert.Contains("2a01:111:f403:c112::5", html, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("/settings")]
     [InlineData("/fix")]

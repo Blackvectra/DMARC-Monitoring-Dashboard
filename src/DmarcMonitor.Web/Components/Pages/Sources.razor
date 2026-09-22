@@ -89,17 +89,7 @@ else
                        always did - one line, the address - so the worst case
                        here is the old case rather than a gap where a name
                        should be. *@
-                    <td>
-                        @if (row.IsNamed)
-                        {
-                            <span class="source-name">@row.Display</span>
-                            <code class="source-ip muted">@row.SourceIp</code>
-                        }
-                        else
-                        {
-                            <code>@row.SourceIp</code>
-                        }
-                    </td>
+                    <td><SourceLabel Address="@row.SourceIp" Name="@row.Display" /></td>
                     <td class="num">
                         @if (row.IsCrossClient)
                         {

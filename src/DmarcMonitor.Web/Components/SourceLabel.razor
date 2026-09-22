@@ -21,12 +21,12 @@
 
 @if (Named)
 {
-    <span class="source-name">@Name</span>
+    <a class="source-name" href="@Href">@Name</a>
     <code class="source-ip muted">@Address</code>
 }
 else
 {
-    <code>@Address</code>
+    <a href="@Href"><code>@Address</code></a>
 }
 
 @code {
@@ -38,4 +38,9 @@ else
 
     private bool Named => !string.IsNullOrWhiteSpace(Name)
         && !string.Equals(Name, Address, StringComparison.Ordinal);
+
+    // Escaped because an IPv6 address is full of colons, which are legal in a
+    // path segment but not worth relying on - and because whatever ends up in
+    // source_ip came out of somebody else's report.
+    private string Href => $"/sources/{Uri.EscapeDataString(Address)}";
 }
