@@ -608,6 +608,40 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("href=\"tls\"", html, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task FailureReportsHaveAPage()
+    {
+        var html = await Client().GetStringAsync("/failures");
+
+        Assert.Contains("Failure reports", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The normal state of this page is empty, and it has to say why.
+    /// </summary>
+    /// <remarks>
+    /// Almost no large receiver sends failure reports. A page that shows
+    /// nothing and explains nothing reads as broken, and the fix an operator
+    /// would reach for - republishing ruf= - is not the problem, so they would
+    /// spend an afternoon on a record that was already correct.
+    /// </remarks>
+    [Fact]
+    public async Task AnEmptyFailuresPageSaysWhyItIsEmpty()
+    {
+        var html = await Client().GetStringAsync("/failures");
+
+        Assert.Contains("not a sign that anything is misconfigured", html, StringComparison.Ordinal);
+        Assert.Contains("ruf=", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReportingGroupLinksToFailureReports()
+    {
+        var html = await Client().GetStringAsync("/");
+
+        Assert.Contains("href=\"failures\"", html, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("/settings")]
     [InlineData("/fix")]

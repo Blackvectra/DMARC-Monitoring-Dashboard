@@ -119,6 +119,7 @@ builder.Services.AddScoped<RemediationUiService>();
 // The TLS reports that have been arriving with nowhere to be read. Scoped
 // like the other read services; it opens its own read-only connection.
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tls.TlsReportService(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Forensic.ForensicReportService(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());

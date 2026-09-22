@@ -150,14 +150,15 @@ public sealed class ClientErasure(string databasePath)
             // forensic_reports and ingest_log carry a client_id and have NO
             // foreign keys whatsoever, so nothing cascades to them at all.
             //
-            // Both are empty today - forensic reports are not parsed yet, and
-            // ingest_log fills only under the collector - so the cascade
-            // looked complete. The moment either held a row, erasure would
-            // have left it behind and the verification below would have
-            // thrown, making erasure impossible for that client. Worse, had
-            // the verification been the thing relaxed instead, a customer's
-            // message headers would have quietly survived an erasure they
-            // asked for.
+            // Both were empty when this was written - nothing parsed failure
+            // reports, and ingest_log fills only under the collector - so the
+            // cascade looked complete. Failure reports are parsed now, and
+            // forensic_reports really does hold rows, which is exactly the
+            // moment this was written for: without it, erasure would have left
+            // them behind and the verification below would have thrown, making
+            // erasure impossible for that client. Worse, had the verification
+            // been the thing relaxed instead, a customer's message headers
+            // would have quietly survived an erasure they asked for.
             //
             // Children first, parent last: deleting in this order never
             // trips a constraint, and doing it explicitly makes the result

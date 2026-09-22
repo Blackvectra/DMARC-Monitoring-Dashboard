@@ -927,6 +927,19 @@ section[id] { scroll-margin-top: 16px; }
 .figure-n { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.02em; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .figure-l { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 
+/* The headers of a message a failure report is about. Monospaced and scrolled
+   rather than wrapped: these are evidence, and a Received chain rewrapped to
+   the width of a table cell is no longer the thing the receiver sent. The
+   height cap is because one heavily forwarded message runs to forty lines and
+   would push every other row off the screen. */
+.headers {
+    background: var(--dim-bg); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 10px 12px; margin: 6px 0 0;
+    font-size: 11.5px; line-height: 1.5;
+    max-height: 420px; overflow: auto;
+    white-space: pre; tab-size: 4;
+}
+
 section { margin-bottom: 28px; }
 
 /* A button that reads as a link: this expands a list in place rather than

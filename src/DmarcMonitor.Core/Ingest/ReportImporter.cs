@@ -1,4 +1,5 @@
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Forensic;
 using DmarcMonitor.Core.Storage;
 using DmarcMonitor.Core.Tls;
 
@@ -184,6 +185,13 @@ public sealed class ReportImporter(ReportStore store)
                 var parsed = TlsReportParser.Parse(report.Content);
                 if (!parsed.Success) { throw new InvalidDataException(parsed.Error); }
                 return await _store.SaveTlsAsync(parsed.Report!, report.Content, null, arrivedAt: null, ct).ConfigureAwait(false);
+            }
+
+            case ReportKind.DmarcFailure:
+            {
+                var parsed = ForensicReportParser.Parse(report.Content);
+                if (!parsed.Success) { throw new InvalidDataException(parsed.Error); }
+                return await _store.SaveForensicAsync(parsed.Report!, report.Content, null, arrivedAt: null, ct).ConfigureAwait(false);
             }
 
             default:

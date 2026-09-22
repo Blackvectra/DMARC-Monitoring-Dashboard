@@ -1,4 +1,5 @@
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Forensic;
 using DmarcMonitor.Core.Tls;
 
 namespace DmarcMonitor.Core.Ingest;
@@ -147,6 +148,18 @@ public sealed record IngestedReport
 
     public AggregateReport? Aggregate { get; init; }
     public TlsReport? Tls { get; init; }
+    public ForensicReport? Forensic { get; init; }
+
+    /// <summary>
+    /// The report exactly as it arrived, for the caller that has to store it.
+    /// </summary>
+    /// <remarks>
+    /// Only filled for failure reports, and only because storing one needs the
+    /// original text to hash for deduplication. The other two are re-read from
+    /// the attachment by the caller; a failure report may have come from the
+    /// message body instead, which the caller does not have.
+    /// </remarks>
+    public string RawContent { get; init; } = "";
 
     /// <summary>
     /// When the message carrying this report arrived, or null when unknown.
@@ -475,17 +488,56 @@ public sealed class ReportIngestor
 
             foreach (var extracted in ReportAttachment.Extract(attachment.Name, attachment.Content))
             {
-                results.Add(extracted.Kind switch
+                results.Add(Handle(message, extracted));
+            }
+        }
+
+        if (results.Count == 0)
+        {
+            // Nothing in the attachments. For one report type that is the
+            // normal case rather than a dead end: a DMARC failure report is a
+            // multipart/report whose PARTS are the report, and Graph surfaces
+            // the copy of the failed message as an itemAttachment, which
+            // carries no bytes. A mailbox receiving failure reports filed
+            // every one of them as unreadable junk while its attachment list
+            // was empty and entirely correct.
+            //
+            // Asked for only here, so ordinary report mail never costs the
+            // extra fetch, and a message that is simply not a report costs one
+            // bounded read and is then filed exactly as before.
+            var raw = await _mailbox.GetRawMessageAsync(message.Id, ct).ConfigureAwait(false);
+
+            if (raw is { Length: > 0 })
+            {
+                foreach (var extracted in ReportAttachment.Extract(MessageFileName(message), raw))
                 {
-                    ReportKind.DmarcAggregate => HandleAggregate(message, extracted),
-                    ReportKind.TlsRpt => HandleTls(message, extracted),
-                    _ => Unrecognized(message, extracted.FileName, "The attachment is not a report this version can read."),
-                });
+                    results.Add(Handle(message, extracted));
+                }
             }
         }
 
         return results;
     }
+
+    private IngestedReport Handle(MailMessage message, ExtractedReport extracted) => extracted.Kind switch
+    {
+        ReportKind.DmarcAggregate => HandleAggregate(message, extracted),
+        ReportKind.TlsRpt => HandleTls(message, extracted),
+        ReportKind.DmarcFailure => HandleFailure(message, extracted),
+        _ => Unrecognized(message, extracted.FileName, "The attachment is not a report this version can read."),
+    };
+
+    /// <summary>
+    /// A name for a report that came out of the message body rather than out
+    /// of an attachment.
+    /// </summary>
+    /// <remarks>
+    /// The file name is what an operator reads in the run log to find the
+    /// thing again, and "(no attachment)" would send them looking for a file
+    /// that never existed. The subject is what their mailbox shows.
+    /// </remarks>
+    private static string MessageFileName(MailMessage message) =>
+        string.IsNullOrWhiteSpace(message.Subject) ? "(message body)" : message.Subject.Trim();
 
     private IngestedReport HandleAggregate(MailMessage message, ExtractedReport extracted)
     {
@@ -619,6 +671,90 @@ public sealed class ReportIngestor
             Domain = attribution.Domain,
             ReportId = report.ReportId,
             Tls = report,
+            Reason = attribution.Reason,
+        };
+    }
+
+    /// <summary>
+    /// A DMARC failure report: one message that failed, rather than a count of
+    /// them.
+    /// </summary>
+    /// <remarks>
+    /// Attributed exactly as the other two are, and that matters more here
+    /// than anywhere else. These carry a real subject line and a real
+    /// envelope, so a report filed under the wrong customer is not a wrong
+    /// number on a dashboard - it is one client reading another client's mail.
+    /// </remarks>
+    private IngestedReport HandleFailure(MailMessage message, ExtractedReport extracted)
+    {
+        var parsed = ForensicReportParser.Parse(extracted.Content);
+        if (!parsed.Success)
+        {
+            return Unrecognized(message, extracted.FileName, parsed.Error);
+        }
+
+        var report = parsed.Report!;
+        var attribution = Attribute(message, report.Domain);
+
+        // The reported message's own id, which is what a sender searches their
+        // logs for, and the closest thing a failure report has to the report
+        // id the other two carry.
+        var reference = report.MessageId.Length > 0
+            ? report.MessageId
+            : $"{report.SourceIp}@{report.ArrivalDate?.ToString("O") ?? "unknown"}";
+
+        if (attribution.Outcome == AttributionOutcome.DomainMismatch)
+        {
+            return new IngestedReport
+            {
+                MessageId = message.Id,
+                ArrivedAt = message.ReceivedAt,
+                FileName = extracted.FileName,
+                Outcome = IngestOutcome.Quarantined,
+                Kind = ReportKind.DmarcFailure,
+                Domain = attribution.Domain,
+                ReportId = reference,
+                Reason = attribution.Reason,
+            };
+        }
+
+        if (IsUnattributed(attribution))
+        {
+            return Unattributed(message, extracted.FileName, ReportKind.DmarcFailure, report.Domain);
+        }
+
+        if (!attribution.ShouldIngest)
+        {
+            return Unrecognized(message, extracted.FileName, attribution.Reason);
+        }
+
+        var key = $"ruf|{attribution.Domain}|{reference}";
+        if (_isAlreadyIngested(key))
+        {
+            return new IngestedReport
+            {
+                MessageId = message.Id,
+                ArrivedAt = message.ReceivedAt,
+                FileName = extracted.FileName,
+                Outcome = IngestOutcome.Duplicate,
+                Kind = ReportKind.DmarcFailure,
+                Domain = attribution.Domain,
+                ReportId = reference,
+                Reason = "This report has already been ingested.",
+            };
+        }
+
+        return new IngestedReport
+        {
+            MessageId = message.Id,
+            ArrivedAt = message.ReceivedAt,
+            FileName = extracted.FileName,
+            Outcome = IngestOutcome.Ingested,
+            Kind = ReportKind.DmarcFailure,
+            Domain = attribution.Domain,
+            ReportId = reference,
+            Forensic = report,
+            RawContent = extracted.Content,
             Reason = attribution.Reason,
         };
     }

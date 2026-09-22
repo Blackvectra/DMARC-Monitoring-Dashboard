@@ -75,6 +75,29 @@ public interface IMailboxClient
     Task<IReadOnlyList<MailAttachment>> GetAttachmentsAsync(string messageId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// The whole message as it arrived on the wire, or null when it cannot be
+    /// had.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Needed because one report type is not an attachment. A DMARC failure
+    /// report (RFC 6591) is a <c>multipart/report</c> whose parts ARE the
+    /// report: a feedback part holding the fields, and a copy of the message
+    /// that failed. Graph surfaces the second of those as an itemAttachment,
+    /// which carries no bytes, and sometimes surfaces neither - so a mailbox
+    /// receiving failure reports filed every one of them as unreadable junk
+    /// while the attachment list was empty and correct.
+    /// </para>
+    /// <para>
+    /// Only asked for when the attachments yielded nothing, so ordinary report
+    /// mail costs no extra call. Null rather than throwing: a message whose
+    /// raw form cannot be fetched is one more message that is not a report,
+    /// which is a normal thing for a mailbox to contain.
+    /// </para>
+    /// </remarks>
+    Task<byte[]?> GetRawMessageAsync(string messageId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Moves a message to another folder.
     /// </summary>
     /// <remarks>

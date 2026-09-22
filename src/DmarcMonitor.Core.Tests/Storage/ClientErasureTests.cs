@@ -357,10 +357,11 @@ public sealed class ClientErasureTests : IDisposable
     public async Task ATableWithNoForeignKeyIsStillErased()
     {
         // forensic_reports and ingest_log carry a client_id and have NO
-        // foreign keys, so nothing cascades to them. Both are empty today,
-        // which is why the cascade looked complete - and why this would have
-        // surfaced as "erasure is impossible for this client" the first time
-        // a forensic report was parsed, long after the code was written.
+        // foreign keys, so nothing cascades to them. Both were empty when this
+        // was written, which is why the cascade looked complete - and why this
+        // would have surfaced as "erasure is impossible for this client" the
+        // first time a failure report was parsed. That has now happened, and
+        // this is what stopped it being a surprise.
         const string when = "2026-09-20 00:00:00";
 
         await RunAsync($"""

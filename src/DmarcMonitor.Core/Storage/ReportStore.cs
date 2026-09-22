@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Forensic;
 using DmarcMonitor.Core.Tls;
 using Microsoft.Data.Sqlite;
 
@@ -369,6 +370,111 @@ public sealed class ReportStore
 
         await transaction.CommitAsync(ct).ConfigureAwait(false);
         return reportId;
+    }
+
+    /// <summary>
+    /// Saves a DMARC failure report. Returns the id, or null when already present.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The third report type, and the first one whose rows are correspondence
+    /// rather than statistics. An aggregate report says a thousand messages
+    /// failed; this is one of them, with the envelope, the subject and the
+    /// headers of a real message that a real person sent or received.
+    /// </para>
+    /// <para>
+    /// Two consequences are in the code rather than in a policy document. The
+    /// parser has already dropped the message body, so what arrives here is
+    /// headers and nothing else. And retention for this table is separate and
+    /// shorter than for aggregate data - thirty days against four hundred -
+    /// which RetentionService enforces and Retention refuses to let anybody
+    /// configure the other way round.
+    /// </para>
+    /// </remarks>
+    /// <param name="arrivedAt">
+    /// When the message carrying this report arrived, or null when unknown.
+    /// Same reasoning as the other two: null rather than a stand-in.
+    /// </param>
+    public async Task<string?> SaveForensicAsync(
+        ForensicReport report, string rawContent, string? sourceMessageId = null,
+        DateTimeOffset? arrivedAt = null, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        if (string.IsNullOrWhiteSpace(report.Domain)) { return null; }
+
+        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+        var tx = (SqliteTransaction)transaction;
+
+        var ids = await EnsureDomainAsync(connection, tx, report.Domain, _organization, ct).ConfigureAwait(false);
+
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = tx;
+            command.CommandText = """
+                INSERT INTO forensic_reports
+                  (tenant_id, client_id, domain_id,
+                   arrival_date, source_ip, return_path, header_from, subject, message_id,
+                   dkim_result, spf_result, dkim_domain, auth_failure_type,
+                   delivery_result, reported_by,
+                   raw_headers, source_message_id, received_at, ingested_at, raw_hash)
+                VALUES
+                  ($tenant, $client, $domain,
+                   $arrival, $ip, $return, $from, $subject, $mid,
+                   $dkim, $spf, $dkimDomain, $failure,
+                   $delivery, $by,
+                   $headers, $msg, $received, $ingested, $hash)
+                """;
+            command.Parameters.AddWithValue("$tenant", ids.TenantId);
+            command.Parameters.AddWithValue("$client", ids.ClientId);
+            command.Parameters.AddWithValue("$domain", ids.DomainId);
+            command.Parameters.AddWithValue(
+                "$arrival", report.ArrivalDate is { } at ? Iso(at) : (object)DBNull.Value);
+            command.Parameters.AddWithValue("$ip", Nullable(report.SourceIp));
+            command.Parameters.AddWithValue("$return", Nullable(report.ReturnPath));
+            command.Parameters.AddWithValue("$from", Nullable(report.HeaderFrom));
+            command.Parameters.AddWithValue("$subject", Nullable(report.Subject));
+            command.Parameters.AddWithValue("$mid", Nullable(report.MessageId));
+            command.Parameters.AddWithValue("$dkim", Nullable(report.DkimResult));
+            command.Parameters.AddWithValue("$spf", Nullable(report.SpfResult));
+            command.Parameters.AddWithValue("$dkimDomain", Nullable(report.DkimDomain));
+            command.Parameters.AddWithValue("$failure", Nullable(report.AuthFailureType));
+            command.Parameters.AddWithValue("$delivery", Nullable(report.DeliveryResult));
+            command.Parameters.AddWithValue("$by", Nullable(report.ReportedBy));
+            command.Parameters.AddWithValue("$headers", Nullable(report.ReportedHeaders));
+            command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
+
+            // received_at is NOT NULL here, unlike the other two tables, and
+            // the arrival the receiver stated is the best answer there is:
+            // these are individual messages, so it is a real timestamp for a
+            // real event rather than the end of a reporting window.
+            command.Parameters.AddWithValue(
+                "$received", Iso(arrivedAt ?? report.ArrivalDate ?? DateTimeOffset.UtcNow));
+            command.Parameters.AddWithValue("$ingested", Iso(DateTimeOffset.UtcNow));
+            command.Parameters.AddWithValue("$hash", Sha256(rawContent));
+
+            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+        catch (SqliteException ex) when (IsAlreadyStored(ex))
+        {
+            await transaction.RollbackAsync(ct).ConfigureAwait(false);
+            return null;
+        }
+
+        // The row id, read back rather than generated: this table keys on the
+        // rowid that every other index here hangs off, which the schema chose
+        // long before anything wrote to it.
+        string id;
+        await using (var last = connection.CreateCommand())
+        {
+            last.Transaction = tx;
+            last.CommandText = "SELECT CAST(last_insert_rowid() AS TEXT)";
+            id = (string)(await last.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
+        }
+
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        return id;
     }
 
     /// <summary>

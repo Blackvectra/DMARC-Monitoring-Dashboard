@@ -186,6 +186,28 @@ public sealed record OrganizationAccess
     /// <summary>May change this organization's groups, branding and providers.</summary>
     public bool CanAdminister => CurrentRole >= OrganizationRole.Admin;
 
+    /// <summary>
+    /// May read the subject and headers of a message a failure report is
+    /// about.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The only gate in this product that is about content rather than about
+    /// capability, because failure reports are the only thing here that is
+    /// correspondence. Every other page holds counts: how many messages, from
+    /// which address, passing or failing. A failure report holds one real
+    /// message - who sent it, who it was going to, and what it was about.
+    /// </para>
+    /// <para>
+    /// Set at Tech rather than at Viewer for that reason. Somebody given a
+    /// login to watch their domains' compliance has not thereby been given a
+    /// window into individual mail, and the commonest Viewer here is a
+    /// customer's own account. Whoever is investigating a forgery is an
+    /// operator, and that is the role this follows.
+    /// </para>
+    /// </remarks>
+    public bool CanReadMessageContent => CurrentRole >= OrganizationRole.Tech;
+
     /// <summary>The one client this person is confined to here, or null for all of them.</summary>
     public string? RestrictedClient =>
         Current is null ? null : ClientRestrictions.GetValueOrDefault(Current.Slug);

@@ -13,6 +13,17 @@ public enum ReportKind
 
     /// <summary>SMTP TLS reporting (JSON).</summary>
     TlsRpt,
+
+    /// <summary>
+    /// DMARC failure report (RFC 6591), which is an email rather than a
+    /// document.
+    /// </summary>
+    /// <remarks>
+    /// The one report type that is neither XML nor JSON, which is why it went
+    /// unread for so long: a classifier that looks at the first meaningful
+    /// character sees a header line and has nothing to say about it.
+    /// </remarks>
+    DmarcFailure,
 }
 
 /// <summary>
@@ -393,9 +404,36 @@ public static class ReportAttachment
     /// .json extension. Looking at the first meaningful character is both
     /// simpler and more reliable.
     /// </remarks>
+    /// <summary>
+    /// How far into a file the failure-report markers are looked for.
+    /// </summary>
+    /// <remarks>
+    /// A failure report announces itself in the top Content-Type, and its
+    /// feedback part follows a short human-readable one - both comfortably
+    /// inside this. The bound exists so classifying a large file that is not a
+    /// report does not scan all of it twice.
+    /// </remarks>
+    internal const int FeedbackScanBytes = 32 * 1024;
+
     public static ReportKind Classify(string content)
     {
         if (string.IsNullOrWhiteSpace(content)) { return ReportKind.Unknown; }
+
+        // Checked before the shape tests, because this one is an email: it
+        // begins with a header line, which is neither '<' nor '{' and would
+        // otherwise fall through to Unknown - exactly as it did until failure
+        // reports were parsed at all.
+        //
+        // Both markers are needed. A whole message carries the report-type
+        // parameter on its Content-Type; a bare feedback part, which is what a
+        // mailbox export writes out, carries only the field.
+        var head = content.Length <= FeedbackScanBytes ? content : content[..FeedbackScanBytes];
+        if (head.Contains("report-type=feedback-report", StringComparison.OrdinalIgnoreCase)
+            || head.Contains("message/feedback-report", StringComparison.OrdinalIgnoreCase)
+            || head.Contains("Feedback-Type:", StringComparison.OrdinalIgnoreCase))
+        {
+            return ReportKind.DmarcFailure;
+        }
 
         var i = 0;
         while (i < content.Length && char.IsWhiteSpace(content[i])) { i++; }

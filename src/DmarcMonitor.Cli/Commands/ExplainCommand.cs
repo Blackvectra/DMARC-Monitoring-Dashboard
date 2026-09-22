@@ -1,5 +1,6 @@
 using System.Globalization;
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Forensic;
 using DmarcMonitor.Core.Ingest;
 using DmarcMonitor.Core.Tls;
 
@@ -51,8 +52,9 @@ public static class ExplainCommand
         var extracted = ReportAttachment.Extract(Path.GetFileName(path), bytes);
         if (extracted.Count == 0)
         {
-            Console.Error.WriteLine($"{Path.GetFileName(path)} does not contain a DMARC or TLS report.");
-            Console.Error.WriteLine("Aggregate reports are XML starting with <feedback>; TLS reports are JSON with a 'policies' array.");
+            Console.Error.WriteLine($"{Path.GetFileName(path)} does not contain a report this can read.");
+            Console.Error.WriteLine("Aggregate reports are XML starting with <feedback>; TLS reports are JSON with a");
+            Console.Error.WriteLine("'policies' array; failure reports are email with a message/feedback-report part.");
             return 65;   // EX_DATAERR
         }
 
@@ -66,6 +68,9 @@ public static class ExplainCommand
                     break;
                 case ReportKind.TlsRpt:
                     if (!ExplainTls(report.Content)) { anyFailed = true; }
+                    break;
+                case ReportKind.DmarcFailure:
+                    if (!ExplainFailure(report.Content)) { anyFailed = true; }
                     break;
                 default:
                     Console.Error.WriteLine($"{report.FileName}: not a report this version can read.");
@@ -214,6 +219,73 @@ public static class ExplainCommand
         return list.Count <= 3
             ? string.Join(", ", list)
             : string.Join(", ", list.Take(3)) + $" and {list.Count - 3} more";
+    }
+
+    /// <summary>
+    /// A failure report: one message, rather than a count of them.
+    /// </summary>
+    /// <remarks>
+    /// Printed in full, subject included, unlike the web page - which hides it
+    /// behind a role. Not an inconsistency: this reads a file the operator
+    /// already has on their own machine and could open in Notepad, so refusing
+    /// to print what is in front of them would be theatre. The page is
+    /// different because there the database is showing one person another
+    /// person's mail.
+    /// </remarks>
+    private static bool ExplainFailure(string content)
+    {
+        var parsed = ForensicReportParser.Parse(content);
+        if (!parsed.Success)
+        {
+            Console.Error.WriteLine($"Could not read this failure report: {parsed.Error}");
+            return false;
+        }
+
+        var report = parsed.Report!;
+
+        Console.WriteLine();
+        Console.WriteLine($"  A failure report about one message claiming to be from {report.Domain}");
+        if (report.ReportedBy.Length > 0) { Console.WriteLine($"  Reported by {report.ReportedBy}"); }
+        if (report.ArrivalDate is { } at) { Console.WriteLine($"  It arrived at the receiver on {at:d MMM yyyy HH:mm} UTC"); }
+        Console.WriteLine();
+
+        if (report.SourceIp.Length > 0) { Console.WriteLine($"  Sent from     {report.SourceIp}"); }
+        if (report.ReturnPath.Length > 0) { Console.WriteLine($"  Envelope from {report.ReturnPath}"); }
+        if (report.HeaderFrom.Length > 0) { Console.WriteLine($"  Header from   {report.HeaderFrom}"); }
+        if (report.Subject.Length > 0) { Console.WriteLine($"  Subject       {report.Subject}"); }
+        Console.WriteLine();
+
+        var checks = new List<string>();
+        if (report.SpfResult.Length > 0) { checks.Add($"SPF {report.SpfResult}"); }
+        if (report.DkimResult.Length > 0)
+        {
+            checks.Add($"DKIM {report.DkimResult}"
+                     + (report.DkimDomain.Length > 0 ? $" (d={report.DkimDomain})" : ""));
+        }
+
+        if (checks.Count > 0) { Console.WriteLine($"  The receiver's checks: {string.Join(", ", checks)}."); }
+
+        // The sentence worth reading. A forgery the receiver refused is the
+        // policy working; the same forgery delivered reached a person, and
+        // that is the argument for moving the domain off p=none.
+        Console.WriteLine();
+        if (report.WasDelivered)
+        {
+            Console.WriteLine("  It was DELIVERED anyway. At p=none that is exactly what the policy asks");
+            Console.WriteLine("  receivers to do, so somebody received this message. Moving the domain to");
+            Console.WriteLine("  quarantine or reject is what stops the next one.");
+        }
+        else
+        {
+            Console.WriteLine($"  The receiver refused it ({report.DeliveryResult}). The policy did its job.");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  Note: this file holds a real message's headers. Treat it as you would the");
+        Console.WriteLine("  message itself.");
+        Console.WriteLine();
+
+        return true;
     }
 
     private static bool ExplainTls(string json)

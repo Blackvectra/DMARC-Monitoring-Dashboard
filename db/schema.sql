@@ -465,12 +465,32 @@ CREATE TABLE forensic_reports (
     dkim_domain         TEXT,
     auth_failure_type   TEXT,                          -- dmarc / spf / dkim
 
-    raw_headers         TEXT,                          -- full rfc822 part, redactable
+    -- What the receiver did with it: reject / quarantine / delivered / none.
+    -- A report of a message that was DELIVERED anyway is a domain at p=none
+    -- watching a forgery reach somebody; the same report with 'reject' is the
+    -- policy working. Without this the two are indistinguishable.
+    delivery_result     TEXT,
+
+    -- Which receiver sent it, from the feedback part's User-Agent. So few
+    -- receivers send these that knowing which ones do is most of what an
+    -- operator needs to read the silence from the rest.
+    reported_by         TEXT,
+
+    -- The reported message's HEADERS, never its body. RFC 6591 allows a
+    -- receiver to attach the whole original mail; the parser stops at the
+    -- blank line that ends the headers, so a customer's correspondence is not
+    -- kept on an MSP's server because somebody published a ruf address.
+    raw_headers         TEXT,
     source_message_id   TEXT,
     received_at         TEXT NOT NULL,
-    ingested_at         TEXT NOT NULL
+    ingested_at         TEXT NOT NULL,
+
+    -- SHA-256 of the report as it arrived, so importing the same mailbox
+    -- twice is a no-op rather than a second copy of everybody's mail.
+    raw_hash            TEXT
 );
 
+CREATE UNIQUE INDEX ux_forensic_hash ON forensic_reports(raw_hash);
 CREATE INDEX ix_forensic_tenant_date ON forensic_reports(tenant_id, received_at DESC);
 CREATE INDEX ix_forensic_client_date ON forensic_reports(client_id, received_at DESC);
 CREATE INDEX ix_forensic_domain      ON forensic_reports(domain_id, received_at DESC);
@@ -1115,6 +1135,9 @@ VALUES ('0015', datetime('now'), 'source_names: what an address reverses to, so 
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0016', datetime('now'), 'mta_sts_mode on dns_snapshots: the mode of the policy really being served, which DNS cannot answer, so a chip can tell enforcement from a policy in testing that requires nothing');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0017', datetime('now'), 'forensic_reports gains delivery_result, reported_by and a unique raw_hash: the table had never been written to, and storing failure reports for the first time showed what it was missing');
 
 
 -- ============================================================================
