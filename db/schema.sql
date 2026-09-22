@@ -304,7 +304,15 @@ CREATE TABLE aggregate_reports (
     -- Provenance
     source_message_id   TEXT,                          -- Graph message id
     raw_hash            TEXT NOT NULL,                 -- SHA-256 of decompressed XML
-    received_at         TEXT NOT NULL,
+
+    -- When the message carrying this report actually arrived, or NULL when
+    -- nobody knows. Nullable on purpose: a report imported from a folder or a
+    -- zip has no arrival to record, and a file's timestamp is when it was
+    -- copied rather than when the mail came. This used to be NOT NULL and was
+    -- filled with date_end - the value already in the column beside it - so
+    -- "when we got this" was a second copy of "what period this covers", and
+    -- a tie-break that ordered by it separated nothing.
+    received_at         TEXT,
     ingested_at         TEXT NOT NULL,
 
     -- Dedup: a reporter resending the same report, or the same message being
@@ -496,7 +504,10 @@ CREATE TABLE tls_reports (
 
     source_message_id   TEXT,                          -- Graph message id, for provenance
     raw_hash            TEXT NOT NULL,
-    received_at         TEXT NOT NULL,
+
+    -- Nullable for the same reason as aggregate_reports: NULL means nobody
+    -- knows when this arrived, which is the truth for a file import.
+    received_at         TEXT,
     ingested_at         TEXT NOT NULL,
 
     UNIQUE(org_name, external_report_id, domain_id)
@@ -1053,6 +1064,9 @@ VALUES ('0011', datetime('now'), 'Roles within an organization, customer login g
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0012', datetime('now'), 'DNS freshness: when a domain was last read and whether that read worked, so a status chip can tell an old tick from a current one');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0013', datetime('now'), 'received_at nullable on aggregate_reports and tls_reports: it was being filled with the window end, which is a different fact and was already in the row');
 
 
 -- ============================================================================

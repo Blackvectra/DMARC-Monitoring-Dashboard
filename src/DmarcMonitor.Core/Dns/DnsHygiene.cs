@@ -83,6 +83,26 @@ public sealed record PublishedRecords
     /// </remarks>
     public int SpfLookups { get; init; }
 
+    /// <summary>
+    /// The policy file actually served at mta-sts.&lt;domain&gt;, or null when
+    /// nobody fetched it.
+    /// </summary>
+    /// <remarks>
+    /// Null and "could not be reached" are different answers here, exactly as
+    /// they are for a DNS lookup. Null means this run did not ask - an offline
+    /// caller, or a domain with no _mta-sts record worth asking about - and
+    /// nothing may be concluded from it. A <see cref="ServedPolicy"/> that is
+    /// not reachable is a real answer, and a serious one: the domain announces
+    /// a policy it is not serving.
+    /// </remarks>
+    public DmarcMonitor.Core.Remediation.ServedPolicy? ServedMtaSts { get; init; }
+
+    /// <summary>
+    /// The domain's mail servers, best preference first. Empty means the
+    /// lookup did not answer, never that there are none.
+    /// </summary>
+    public IReadOnlyList<string> MxHosts { get; init; } = [];
+
     /// <summary>True when the lookup itself failed, so absence proves nothing.</summary>
     public bool LookupFailed { get; init; }
 
@@ -472,17 +492,9 @@ public static class DnsHygiene
                 Reference = "RFC 8461; NIST SP 800-177 Rev. 1",
             });
         }
-        else if (string.Equals(observed.MtaStsMode, "Testing", StringComparison.OrdinalIgnoreCase))
+        else
         {
-            findings.Add(new HygieneFinding
-            {
-                Severity = HygieneSeverity.Weakness,
-                Record = "MTA-STS",
-                Problem = "The policy is in testing mode. A sending server reports a connection that does "
-                        + "not match it and delivers the mail anyway, so nothing is actually enforced.",
-                Fix = "Move the policy to enforce once the reports show no failures.",
-                Reference = "RFC 8461 §5",
-            });
+            MtaStsServed(findings, published, observed);
         }
 
         if (string.IsNullOrWhiteSpace(published.TlsRptRecord))
@@ -499,6 +511,223 @@ public static class DnsHygiene
                 Reference = "RFC 8460",
             });
         }
+    }
+
+    /// <summary>
+    /// Judges the policy a domain is serving, not the one senders remember.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This used to read the mode off the newest row in tls_reports, which is
+    /// what senders observed when they last wrote, and the two diverge the
+    /// moment anybody changes anything. Two domains were moved to enforce and
+    /// their files verified by fetch, and the check went on saying "the policy
+    /// is in testing mode, move it to enforce" for both, because the newest
+    /// stored report was two days old. An operator who had just done the work
+    /// was told to do it again.
+    /// </para>
+    /// <para>
+    /// The reverse is the one that matters. A policy reverted to testing, a
+    /// Pages site that went down, a custom domain that lost its binding - all
+    /// would have left this cheerfully reporting enforce off historical
+    /// reports. That is a memory presented as current state, which is the
+    /// exact error this file refuses to make about a DNS record.
+    /// </para>
+    /// <para>
+    /// The reported mode is kept as a second fact rather than dropped. The two
+    /// disagreeing is real and temporary after a change, and saying so is more
+    /// use than either half alone.
+    /// </para>
+    /// </remarks>
+    private static void MtaStsServed(
+        List<HygieneFinding> findings, PublishedRecords published, ObservedSending observed)
+    {
+        var served = published.ServedMtaSts;
+        var reported = observed.MtaStsMode;
+
+        // Nobody asked. Not the same as asking and failing, so the reports are
+        // all there is - and the finding says that is where it came from.
+        if (served is null)
+        {
+            if (string.Equals(reported, MtaStsMode.Testing, StringComparison.OrdinalIgnoreCase))
+            {
+                findings.Add(new HygieneFinding
+                {
+                    Severity = HygieneSeverity.Weakness,
+                    Record = "MTA-STS",
+                    Problem = "The last reports from senders saw this policy in testing mode, where a "
+                            + "connection that does not match is reported and the mail delivered anyway. "
+                            + "The policy file itself was not fetched on this run, so this describes what "
+                            + "senders saw rather than what is served now.",
+                    Fix = "Move the policy to enforce once the reports show no failures. Run this with a "
+                        + "resolver and outbound HTTPS available to judge the file that is actually served.",
+                    Reference = "RFC 8461 §5",
+                });
+            }
+
+            return;
+        }
+
+        // Announced and not served. Worse than never having announced it: a
+        // sender that cached the old file keeps honouring it until max_age
+        // expires, and nothing published afterwards reaches it.
+        if (!served.Reachable || served.Policy is null)
+        {
+            findings.Add(new HygieneFinding
+            {
+                Severity = HygieneSeverity.Breaking,
+                Record = "MTA-STS",
+                Problem = $"The _mta-sts record announces a policy and the file is not being served - "
+                        + $"{served.Problem ?? "it could not be read"}. Senders that have not cached one "
+                        + "get no policy at all, and any that cached the last good one keep honouring it "
+                        + "until it expires, whatever is changed in the meantime.",
+                Fix = "Serve the policy file again at the announced host, or remove the _mta-sts record "
+                    + "until it is served. Announcing a policy nobody can fetch protects nothing.",
+                Reference = "RFC 8461 §3.3",
+            });
+
+            return;
+        }
+
+        var policy = served.Policy;
+
+        if (string.Equals(policy.Mode, MtaStsMode.Testing, StringComparison.OrdinalIgnoreCase))
+        {
+            findings.Add(new HygieneFinding
+            {
+                Severity = HygieneSeverity.Weakness,
+                Record = "MTA-STS",
+                Problem = "The policy being served is in testing mode. A sending server reports a "
+                        + "connection that does not match it and delivers the mail anyway, so nothing is "
+                        + "actually enforced.",
+                Fix = "Move the policy to enforce once the reports show no failures.",
+                Reference = "RFC 8461 §5",
+            });
+        }
+        else if (string.Equals(policy.Mode, MtaStsMode.None, StringComparison.OrdinalIgnoreCase))
+        {
+            findings.Add(new HygieneFinding
+            {
+                Severity = HygieneSeverity.Weakness,
+                Record = "MTA-STS",
+                Problem = "The policy being served says mode: none, which switches MTA-STS off while the "
+                        + "_mta-sts record goes on announcing it. Nothing is enforced and nothing is "
+                        + "reported as not enforced.",
+                Fix = "Set the mode to testing or enforce, or remove the _mta-sts record. mode: none is "
+                    + "for retiring a policy safely, not for leaving one in place.",
+                Reference = "RFC 8461 §3.2",
+            });
+        }
+        else if (string.Equals(reported, MtaStsMode.Testing, StringComparison.OrdinalIgnoreCase))
+        {
+            // The state right after a change, and the one that used to produce
+            // a confident instruction to redo work already done.
+            findings.Add(new HygieneFinding
+            {
+                Severity = HygieneSeverity.Tidy,
+                Record = "MTA-STS",
+                Problem = "The policy being served is in enforce mode, and the last reports from senders "
+                        + "still describe testing. That is what a recent change looks like: senders act on "
+                        + "the file they cached until it expires.",
+                Fix = "Nothing. The reports catch up as senders re-fetch the policy.",
+                Reference = "RFC 8461 §5",
+            });
+        }
+
+        MtaStsCoversTheMailServers(findings, policy, published.MxHosts);
+        MtaStsLastsLongEnough(findings, policy);
+    }
+
+    /// <summary>
+    /// Whether the policy is cached long enough to be worth having.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// max_age is not a housekeeping value - it is the whole of the protection
+    /// between fetches. MTA-STS is trust on first use: a sender honours the
+    /// policy it holds, and an attacker who can interfere with the network can
+    /// also stop the next fetch succeeding. All they have to do then is wait
+    /// for the cached copy to expire, and the sender goes back to accepting
+    /// whatever certificate and whichever host it is offered.
+    /// </para>
+    /// <para>
+    /// So a one-day max_age means a one-day wait. RFC 8461 §3.2 asks for weeks
+    /// for exactly this reason. A domain in enforce mode with a short max_age
+    /// reads as fully protected everywhere in this product and in every other
+    /// one, and is a day of patience away from not being.
+    /// </para>
+    /// <para>
+    /// Only raised under enforce. In testing nothing is enforced whatever the
+    /// max_age is, and the testing finding above already says the thing worth
+    /// saying.
+    /// </para>
+    /// </remarks>
+    private static void MtaStsLastsLongEnough(List<HygieneFinding> findings, MtaStsPolicy policy)
+    {
+        const int week = 604800;
+
+        if (!string.Equals(policy.Mode, MtaStsMode.Enforce, StringComparison.OrdinalIgnoreCase)) { return; }
+        if (policy.MaxAgeSeconds >= week) { return; }
+
+        var days = Math.Max(1, policy.MaxAgeSeconds / 86400);
+
+        findings.Add(new HygieneFinding
+        {
+            Severity = HygieneSeverity.Weakness,
+            Record = "MTA-STS",
+            Problem = $"The policy is enforced but expires after {Plural(days, "day")}. A sender only "
+                    + "honours the copy it holds, so an attacker who can block the next fetch has to wait "
+                    + $"{Plural(days, "day")} for this domain to stop being protected at all.",
+            Fix = $"Raise max_age to at least 604800 (one week); 1209600 or more is the usual choice. "
+                + "Lower it deliberately and briefly before changing MX records, then put it back.",
+            Reference = "RFC 8461 §3.2",
+        });
+    }
+
+    private static string Plural(int count, string noun) =>
+        count == 1 ? $"1 {noun}" : $"{count} {noun}s";
+
+    /// <summary>
+    /// Whether the policy lists the mail servers the domain actually uses.
+    /// </summary>
+    /// <remarks>
+    /// The check with teeth, and one nothing in this product made before. A
+    /// sender that reaches a host the policy does not list, under enforce,
+    /// does not deliver and does not fall back - it defers and eventually
+    /// bounces. A domain whose MX moved after its policy was written is
+    /// refusing its own mail, and the only signal is a TLS report, which most
+    /// domains never collect.
+    /// </remarks>
+    private static void MtaStsCoversTheMailServers(
+        List<HygieneFinding> findings, MtaStsPolicy policy, IReadOnlyList<string> mxHosts)
+    {
+        // Empty means the MX lookup did not answer. A domain with no mail
+        // servers is not a thing, so concluding anything from an empty list
+        // would be building an instruction on a failed lookup.
+        if (mxHosts.Count == 0) { return; }
+
+        var uncovered = policy.Uncovered(mxHosts);
+        if (uncovered.Count == 0) { return; }
+
+        var enforcing = string.Equals(policy.Mode, MtaStsMode.Enforce, StringComparison.OrdinalIgnoreCase);
+        var hosts = string.Join(", ", uncovered);
+
+        findings.Add(new HygieneFinding
+        {
+            Severity = enforcing ? HygieneSeverity.Breaking : HygieneSeverity.Weakness,
+            Record = "MTA-STS",
+            Problem = enforcing
+                ? $"The policy is in enforce mode and does not list {hosts}, which is where this domain's "
+                  + "MX records point. A sender that reaches a host the policy does not name refuses to "
+                  + "deliver and does not fall back, so this is mail being bounced rather than a tidiness "
+                  + "problem."
+                : $"The policy does not list {hosts}, which is where this domain's MX records point. In "
+                  + "testing mode that is only reported, but moving to enforce with this unchanged would "
+                  + "start refusing the domain's own mail.",
+            Fix = $"Add {hosts} to the policy's mx: lines, or correct them if the MX records changed after "
+                + "the policy was written. Do it before advancing the mode, not after.",
+            Reference = "RFC 8461 §4.1",
+        });
     }
 
     // ---- helpers -------------------------------------------------------------

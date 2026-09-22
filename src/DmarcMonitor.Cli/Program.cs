@@ -50,6 +50,10 @@ public static class Program
                 "report" => await ReportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "check" => await CheckCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "audit" => await AuditCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "simulate" => await SimulateCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "reachability" => await ReachabilityCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "export" => await ExportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -151,8 +155,13 @@ public static class Program
               check              Read what a domain publishes in DNS and say what is wrong
                                  with it: SPF lookup limit, dead includes, a record that
                                  authorizes everybody, a policy applied to only part of the
-                                 mail, MTA-STS announced but not enforced. Needs no database,
-                                 so it works on a prospect's domain.
+                                 mail. Needs no database, so it works on a prospect's domain.
+                                 Where a domain announces MTA-STS the policy file is fetched
+                                 as a sender would, so the mode is the one being served
+                                 rather than the one the last reports remember, and the
+                                 policy's mx: lines are checked against the real MX - an
+                                 enforce policy naming the wrong host bounces the domain's
+                                 own mail.
                 --domain <d>     One domain.
                 --all            Every domain in the database.
                 --save           Store what was read, so the dashboard can show each domain's
@@ -177,7 +186,67 @@ public static class Program
                 --offline        Judge the file alone; ask neither DNS nor the reports.
                 --db <path>      Database file. Default: dmarc.db
 
-              fix                Fix what 'check' found, in the customer's DNS. A dry run
+              simulate           Replay the reports already held against a record you have
+                                 not published, and say what it would cost. Anything not
+                                 named keeps what the domain publishes today, so the answer
+                                 is the cost of the change rather than of the whole record.
+                --domain <d>     Domain to replay.
+                --policy <p>     none, quarantine or reject.
+                --adkim r|s      DKIM alignment to try.
+                --aspf r|s       SPF alignment to try.
+                --pct <n>        Percent of failing mail the policy would apply to.
+                --days <n>       Window to replay. Default: 30
+                --db <path>      Database file. Default: dmarc.db
+                                 Exits non-zero when the change would cost mail.
+
+              reachability       Which domains' reports can actually get back here. Both
+                                 ways this breaks are silent: a receiver that looks for the
+                                 RFC 7489 authorization record and does not find it declines
+                                 to send and tells nobody, and a domain whose rua points at
+                                 a mailbox nothing collects looks perfect in DNS and
+                                 produces nothing. Run it after onboarding a domain.
+                --domain <d>     One domain. Default: every domain in the book.
+                --quiet          Only the domains with something wrong.
+                --db <path>      Database file. Default: dmarc.db
+
+              prune              Remove report data past its retention window. A dry run
+                                 unless --apply. Nothing else in this product deletes a
+                                 customer's history, so it counts first, deletes in one
+                                 transaction, and records what it removed in the audit log.
+                                 Domains and clients are never touched - only the reports
+                                 age out.
+                --aggregate-days <n>  Aggregate and TLS reports to keep. Default: 400
+                                      (thirteen months, so this month still has last
+                                      year's same month to sit beside).
+                --forensic-days <n>   Forensic reports to keep. Default: 30. These hold
+                                      real message headers, so this is deliberately the
+                                      shortest window and may not exceed the one above.
+                --apply               Do it.
+                --by <name>           Who is doing this. Default: the signed-in user.
+                --db <path>           Database file. Default: dmarc.db
+
+              export             Write the stored records out for something else to query.
+                                 The screens here are opinionated, and that is also their
+                                 limit - "every address that hit these three domains,
+                                 aligned on SPF only, in a six-hour window" is a question
+                                 no fixed view answers. This hands the rows to jq, a
+                                 spreadsheet, OpenSearch or Splunk and lets those be the
+                                 query language. It is also how to keep retention here
+                                 short and let an index hold the long tail.
+                                 Rows go to stdout, so it pipes; everything it says about
+                                 itself goes to stderr.
+                --format <f>     ndjson (default) or csv. ndjson is what _bulk, jq and HEC
+                                 read, and a row at a time rather than one huge array.
+                --out <path>     Write to a file instead of stdout.
+                --org <slug>     One organization. --client <slug>, --domain <d> narrow it
+                                 further.
+                --days <n>       How far back. Default: everything held.
+                --failures-only  Only the rows that did not pass DMARC.
+                --after-id <n>   Start after this row id, for shipping only what is new.
+                                 Every run prints the number to use next time.
+                --db <path>      Database file. Default: dmarc.db
+
+              fix              Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
                                  client's report under "what we did".
@@ -232,7 +301,20 @@ public static class Program
                 --reporting-domain <d> Subdomain per-domain report addresses use.
                 --fallback <address>   Shared address, for domains not yet migrated.
                 --max <n>              Messages per run. Default: 500
-                --dry-run              Parse and report, write nothing, move nothing.
+                --delete <mode>        Delete a message once its reports are stored, rather
+                                     than filing it. A reporting mailbox grows without
+                                     limit, and the processed folder is the same quota.
+                                       soft       to Deleted Items: a person can get it
+                                                  back, and it still uses the quota until
+                                                  a retention policy clears that folder.
+                                       permanent  out of the mailbox, which is what gives
+                                                  the space back. Recoverable Items keeps
+                                                  it for the tenant's retention period.
+                                     Only stored mail is ever deleted. Reports that could
+                                     not be read, that were quarantined, or that were not
+                                     attributed are always kept. Try --dry-run first.
+                --dry-run              Parse and report, write nothing, move nothing,
+                                     delete nothing.
                                      Safe against a live mailbox. See
                                      docs/INGEST-SETUP.md for the app registration,
                                      and read the part about restricting it to one
@@ -247,6 +329,13 @@ public static class Program
               dmarc client assign --domain mortonnd.gov --client morton-nd
               dmarc check --domain example.com
               dmarc audit --zone example.com.txt
+              dmarc simulate --domain example.com --policy quarantine
+              dmarc reachability --quiet
+              dmarc prune                                    # what would go
+              dmarc prune --apply
+              dmarc export --days 7 --failures-only | jq -r .source_ip | sort | uniq -c
+              dmarc export --format csv --out book.csv
+              dmarc export --after-id 41232 | jq -c '{index:{_index:"dmarc",_id:.id}},.'
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"
               dmarc ingest --mailbox dmarc@example.com --dry-run

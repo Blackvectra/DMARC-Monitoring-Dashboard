@@ -47,7 +47,12 @@ public sealed class ZoneAuditUiService(DatabaseInfo database, DnsLookup lookup, 
                 + "probably not one.");
         }
 
-        var auditor = new ZoneAuditor(lookup, File.Exists(database.Path) ? database.Path : null);
+        // Scoped to the organization being looked at. Without it the audit
+        // cross-references the whole book: another organization's DKIM
+        // selectors appear in the findings, and its domains change which
+        // reporting authorizations are flagged as pointing at a stranger.
+        var auditor = new ZoneAuditor(
+            lookup, File.Exists(database.Path) ? database.Path : null, tenantId);
         var report = await auditor.RunAsync(text, domain, offline: false, ct).ConfigureAwait(false);
 
         // Worth a line in the log: it reaches outside the machine, up to fifty

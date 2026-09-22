@@ -272,6 +272,47 @@ public sealed class ZoneFileTests
     }
 
     [Fact]
+    public void AZonePastedWithEveryLineIndentedIsStillRead()
+    {
+        // The paste box exists so somebody can paste from anywhere, and text
+        // copied out of a document, a ticket or a chat arrives uniformly
+        // indented. In BIND a leading space means "same owner as the line
+        // before", so read literally every line inherits from nothing and the
+        // whole file produces no records at all - which reads as the tool
+        // being broken rather than as the paste being indented.
+        //
+        // Where no line is flush, the indentation cannot be carrying the
+        // meaning BIND gives it, because there is no line for the first one to
+        // inherit from. So it is a paste artifact and is ignored.
+        var zone = ZoneFile.Parse("""
+                $ORIGIN example.com.
+                @	3600	IN	TXT	"v=spf1 -all"
+                _dmarc	1800	IN	TXT	"v=DMARC1; p=reject"
+                www	3600	IN	CNAME	@
+            """);
+
+        Assert.Equal(3, zone.Records.Count);
+        Assert.Empty(zone.Problems);
+        Assert.Equal("example.com", zone.Origin);
+    }
+
+    [Fact]
+    public void AnIndentedContinuationStillMeansWhatBindSaysItMeans()
+    {
+        // The other half: where SOME lines are flush, indentation is doing its
+        // real job and must not be thrown away. A multi-line SOA and an
+        // owner-less record both depend on it.
+        var zone = ZoneFile.Parse("""
+            $ORIGIN example.com.
+            mail	3600	IN	A	192.0.2.1
+            	3600	IN	TXT	"second record, same owner"
+            """);
+
+        Assert.Equal(2, zone.Records.Count);
+        Assert.All(zone.Records, r => Assert.Equal("mail.example.com", r.Name));
+    }
+
+    [Fact]
     public void ARecordWithNoOwnerNameAndNothingAboveItIsReportedRatherThanGuessedAt()
     {
         var zone = ZoneFile.Parse("$ORIGIN example.com.\n\t3600\tIN\tA\t192.0.2.1\n");

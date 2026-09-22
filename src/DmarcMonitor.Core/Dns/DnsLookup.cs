@@ -45,9 +45,9 @@ public sealed class DnsLookup(ILookupClient? client = null)
                 return new PublishedRecords { Domain = name, DomainDoesNotExist = true };
             }
 
-            var dmarc = await TxtAsync($"_dmarc.{name}", ct).ConfigureAwait(false);
-            var mtaSts = await TxtAsync($"_mta-sts.{name}", ct).ConfigureAwait(false);
-            var tlsRpt = await TxtAsync($"_smtp._tls.{name}", ct).ConfigureAwait(false);
+            var dmarc = await TxtOrThrowAsync($"_dmarc.{name}", ct).ConfigureAwait(false);
+            var mtaSts = await TxtOrThrowAsync($"_mta-sts.{name}", ct).ConfigureAwait(false);
+            var tlsRpt = await TxtOrThrowAsync($"_smtp._tls.{name}", ct).ConfigureAwait(false);
 
             // Only TXT records that declare themselves SPF count. An apex
             // holds verification tokens for half a dozen services and none of
@@ -115,7 +115,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
 
             try
             {
-                var txt = await TxtAsync(term.Value, ct).ConfigureAwait(false);
+                var txt = await TxtOrThrowAsync(term.Value, ct).ConfigureAwait(false);
                 if (!txt.Any(t => t.TrimStart().StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase)))
                 {
                     dead.Add(term.Value);
@@ -162,7 +162,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
 
             try
             {
-                var txt = await TxtAsync(term.Value, ct).ConfigureAwait(false);
+                var txt = await TxtOrThrowAsync(term.Value, ct).ConfigureAwait(false);
                 var nested = txt.FirstOrDefault(t => t.TrimStart().StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase));
                 if (nested is not null)
                 {
@@ -209,7 +209,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
         string? record;
         try
         {
-            var txt = await TxtAsync(target, ct).ConfigureAwait(false);
+            var txt = await TxtOrThrowAsync(target, ct).ConfigureAwait(false);
             record = txt.FirstOrDefault(t => t.TrimStart().StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase));
         }
         catch (DnsResponseException)
@@ -312,7 +312,35 @@ public sealed class DnsLookup(ILookupClient? client = null)
 
         try
         {
-            return await TxtAsync(name, ct).ConfigureAwait(false);
+            return await TxtOrThrowAsync(name, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The TXT records at any name, or null when the lookup could not answer.
+    /// </summary>
+    /// <remarks>
+    /// The general form of what the specific readers here do, for callers that
+    /// need a name this class has no opinion about - an RFC 7489 §7.1
+    /// authorization record, say, whose name is built from two domains.
+    ///
+    /// Null against empty is the whole contract. An empty list means the name
+    /// resolves to nothing, which for an authorization record is a finding and
+    /// an instruction; null means no answer came back, from which nothing
+    /// follows at all.
+    /// </remarks>
+    public async Task<IReadOnlyList<string>?> TxtAsync(string name, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        try
+        {
+            return await TxtOrThrowAsync(name.Trim().TrimEnd('.').ToLowerInvariant(), ct)
+                .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
         {
@@ -411,7 +439,18 @@ public sealed class DnsLookup(ILookupClient? client = null)
         return ([.. response.Answers.TxtRecords().Select(r => string.Concat(r.Text))], true);
     }
 
-    private async Task<List<string>> TxtAsync(string name, CancellationToken ct)
+    /// <summary>
+    /// The TXT records at a name, letting a lookup failure escape.
+    /// </summary>
+    /// <remarks>
+    /// The internal form. Callers here sit inside a try that turns a failure
+    /// into LookupFailed on the whole reading, which is the right answer when
+    /// one query of several fails: the record set is incomplete and saying so
+    /// once beats reporting each absent piece as absent. The public
+    /// <see cref="TxtAsync(string, CancellationToken)"/> is the one that
+    /// returns null instead, for a caller asking about a single name.
+    /// </remarks>
+    private async Task<List<string>> TxtOrThrowAsync(string name, CancellationToken ct)
     {
         var response = await _client.QueryAsync(name, QueryType.TXT, cancellationToken: ct).ConfigureAwait(false);
 

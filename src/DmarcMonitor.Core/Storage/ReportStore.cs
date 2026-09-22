@@ -164,9 +164,17 @@ public sealed class ReportStore
     /// <summary>
     /// Saves an aggregate report and its records.
     /// </summary>
+    /// <param name="arrivedAt">
+    /// When the message carrying this report arrived, or null when that is not
+    /// known - which is the case for anything imported from a folder or a zip.
+    /// Null is stored as null rather than filled in with the window's end: the
+    /// two are different facts, and this column held the second one while
+    /// claiming to be the first for the whole life of the table.
+    /// </param>
     /// <returns>The stored report id, or null when it was already present.</returns>
     public async Task<string?> SaveAggregateAsync(
-        AggregateReport report, string rawContent, string? sourceMessageId = null, CancellationToken ct = default)
+        AggregateReport report, string rawContent, string? sourceMessageId = null,
+        DateTimeOffset? arrivedAt = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(report);
 
@@ -209,7 +217,8 @@ public sealed class ReportStore
                 command.Parameters.AddWithValue("$aspf", report.Policy.Aspf == AlignmentMode.Strict ? "s" : "r");
                 command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
                 command.Parameters.AddWithValue("$hash", Sha256(rawContent));
-                command.Parameters.AddWithValue("$received", Iso(report.Metadata.End));
+                command.Parameters.AddWithValue(
+                    "$received", arrivedAt is { } at ? Iso(at) : (object)DBNull.Value);
                 command.Parameters.AddWithValue("$ingested", now);
 
                 await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -294,8 +303,13 @@ public sealed class ReportStore
     }
 
     /// <summary>Saves a TLS report. Returns the id, or null when already present.</summary>
+    /// <param name="arrivedAt">
+    /// When the message carrying this report arrived, or null when unknown.
+    /// Same reasoning as the aggregate path: null rather than the window's end.
+    /// </param>
     public async Task<string?> SaveTlsAsync(
-        TlsReport report, string rawContent, string? sourceMessageId = null, CancellationToken ct = default)
+        TlsReport report, string rawContent, string? sourceMessageId = null,
+        DateTimeOffset? arrivedAt = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(report);
         if (report.Policies.Count == 0) { return null; }
@@ -341,7 +355,8 @@ public sealed class ReportStore
             command.Parameters.AddWithValue("$fail", report.FailedSessions);
             command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
             command.Parameters.AddWithValue("$hash", Sha256(rawContent));
-            command.Parameters.AddWithValue("$received", Iso(report.End));
+            command.Parameters.AddWithValue(
+                "$received", arrivedAt is { } at ? Iso(at) : (object)DBNull.Value);
             command.Parameters.AddWithValue("$ingested", Iso(DateTimeOffset.UtcNow));
 
             await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -789,22 +804,32 @@ public sealed class ReportStore
         var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
         var now = Iso(DateTimeOffset.UtcNow);
 
-        // An existing domain keeps whatever client - and organization - it
+        // The organization is resolved first, because the domain is looked up
+        // within it. This used to resolve the name across the whole install,
+        // which meant the first organization ever to see a domain owned it for
+        // ever: a second MSP importing their own customer's reports had them
+        // written into the first one's book, under the first one's client, and
+        // nothing said so. The schema has said UNIQUE(tenant_id, name) rather
+        // than UNIQUE(name) since it was written; this is the lookup finally
+        // agreeing with it.
+        var tenantId = await EnsureTenantAsync(connection, tx, organization, now, ct).ConfigureAwait(false);
+
+        // Within the organization, an existing domain keeps whatever client it
         // was assigned to, so onboarding is never undone by a later report
         // arriving, whichever mailbox it arrived in.
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = tx;
-            lookup.CommandText = "SELECT id, tenant_id, client_id FROM domains WHERE name = $name LIMIT 1";
+            lookup.CommandText =
+                "SELECT id, tenant_id, client_id FROM domains WHERE name = $name AND tenant_id = $tenant LIMIT 1";
             lookup.Parameters.AddWithValue("$name", name);
+            lookup.Parameters.AddWithValue("$tenant", tenantId);
             await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
                 return new DomainIds(reader.GetString(1), reader.GetString(2), reader.GetString(0));
             }
         }
-
-        var tenantId = await EnsureTenantAsync(connection, tx, organization, now, ct).ConfigureAwait(false);
 
         // Unassigned is per organization: NRG's unfiled domains are NRG's
         // worklist, not NextLayerSec's.

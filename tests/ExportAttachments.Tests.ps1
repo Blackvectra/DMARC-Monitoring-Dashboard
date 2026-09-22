@@ -249,6 +249,21 @@ Describe 'Export-DMARCAttachments' {
             # -List is the mode used to find out why nothing matched. It died
             # on a public-folder store before printing the mailbox that held
             # the reports.
+            $good = New-FakeStore 'DMARC Reports' -Children @(New-FakeFolder 'Quarantine')
+            $bad  = New-FakeStore 'Public Folders - someone' -FoldersThrow
+
+            # -Mailbox names one, so this walks into it rather than printing
+            # names only - which is what makes the throwing store beside it
+            # something this can still die on.
+            $r = Invoke-Export -Stores @($bad, $good) `
+                -Arguments @('-OutputPath', $script:Out, '-List', '-Mailbox', 'DMARC Reports')
+
+            $r.ExitCode | Should -Be 0
+            $r.Text | Should -Match 'DMARC Reports'
+            $r.Text | Should -Match 'Quarantine'
+        }
+
+        It 'survives a throwing store when listing names across all of them' {
             $good = New-FakeStore 'DMARC Reports' -Children @(New-FakeFolder 'DMARC')
             $bad  = New-FakeStore 'Public Folders - someone' -FoldersThrow
 
@@ -256,7 +271,7 @@ Describe 'Export-DMARCAttachments' {
 
             $r.ExitCode | Should -Be 0
             $r.Text | Should -Match 'DMARC Reports'
-            $r.Text | Should -Match 'DMARC'
+            $r.Text | Should -Match 'Public Folders - someone'
         }
 
         It 'still finds a named folder in the store beside it' {
@@ -270,6 +285,73 @@ Describe 'Export-DMARCAttachments' {
 
             $r.ExitCode | Should -Be 0
             Test-Path (Join-Path $script:Out 'a.xml') | Should -BeTrue
+        }
+    }
+
+    Context '-List with several mailboxes open' {
+        # A real run printed thirteen stores two levels deep: a university
+        # account's folder tree, a personal calendar, vendor and alert folders,
+        # public folders. None of it has anything to do with DMARC, all of it
+        # is somebody's real mail, and the whole lot then gets pasted into a
+        # ticket along with the bit that was wanted. The names alone are what
+        # -List is for.
+
+        It 'prints the mailbox names and does not walk into any of them' {
+            $mine = New-FakeStore 'me@example.com' -Children @(
+                New-FakeFolder 'Financial Aid'
+                New-FakeFolder 'Inbox')
+            $shared = New-FakeStore 'DMARC Reports' -Children @(New-FakeFolder 'DMARC')
+
+            $r = Invoke-Export -Stores @($mine, $shared) -Arguments @('-OutputPath', $script:Out, '-List')
+
+            $r.ExitCode | Should -Be 0
+            $r.Text | Should -Match 'me@example\.com'
+            $r.Text | Should -Match 'DMARC Reports'
+            $r.Text | Should -Not -Match 'Financial Aid'
+        }
+
+        It 'says how to look inside one' {
+            # A listing that shows less has to say how to get more, or it is
+            # just a worse listing.
+            $a = New-FakeStore 'me@example.com' -Children @(New-FakeFolder 'Inbox')
+            $b = New-FakeStore 'DMARC Reports' -Children @(New-FakeFolder 'Inbox')
+
+            $r = Invoke-Export -Stores @($a, $b) -Arguments @('-OutputPath', $script:Out, '-List')
+
+            $r.Text | Should -Match '-Mailbox'
+        }
+
+        It 'walks into the one named, and only that one' {
+            $mine = New-FakeStore 'me@example.com' -Children @(New-FakeFolder 'Financial Aid')
+            $shared = New-FakeStore 'DMARC Reports' -Children @(New-FakeFolder 'DMARC')
+
+            $r = Invoke-Export -Stores @($mine, $shared) `
+                -Arguments @('-OutputPath', $script:Out, '-List', '-Mailbox', 'DMARC Reports')
+
+            $r.ExitCode | Should -Be 0
+            $r.Text | Should -Match 'DMARC'
+            $r.Text | Should -Not -Match 'Financial Aid'
+        }
+
+        It 'shows the whole tree when only one mailbox is open' {
+            # Nothing to choose between, so nothing to withhold.
+            $only = New-FakeStore 'DMARC Reports' -Children @(New-FakeFolder 'DMARC')
+
+            $r = Invoke-Export -Stores @($only) -Arguments @('-OutputPath', $script:Out, '-List')
+
+            $r.ExitCode | Should -Be 0
+            $r.Text | Should -Match 'DMARC'
+        }
+
+        It 'exports nothing either way' {
+            $a = New-FakeStore 'me@example.com' -Children @(
+                New-FakeFolder 'Inbox' -Items @(New-FakeItem @(New-FakeAttachment 'private.xml')))
+            $b = New-FakeStore 'DMARC Reports' -Children @(New-FakeFolder 'Inbox')
+
+            $r = Invoke-Export -Stores @($a, $b) -Arguments @('-OutputPath', $script:Out, '-List')
+
+            $r.ExitCode | Should -Be 0
+            Test-Path (Join-Path $script:Out 'private.xml') | Should -BeFalse
         }
     }
 

@@ -10,6 +10,7 @@
 @inject OrgContext Org
 @inject DmarcMonitor.Core.Tenancy.OrganizationStore Organizations
 @inject DmarcMonitor.Core.Tenancy.AuditLog Audit
+@inject DmarcMonitor.Core.Storage.RetentionPolicy Retention
 @rendermode InteractiveServer
 
 <PageTitle>Settings — DMARC Monitor</PageTitle>
@@ -284,8 +285,42 @@
                 </td>
             </tr>
             <tr><td>Opened</td><td>read-only, except onboarding and import</td></tr>
+            @* What is kept, and for how long, said where somebody can read it
+               without opening a unit file. A product that deletes a
+               customer's history on a schedule has to be able to answer "for
+               how long" on a screen. *@
+            <tr>
+                <td>Aggregate reports kept</td>
+                <td>
+                    @Retention.AggregateDays days
+                    <span class="muted">— about @(Retention.AggregateDays / 30) months, so a monthly
+                          report still has last year's same month to sit beside</span>
+                </td>
+            </tr>
+            <tr>
+                <td>Forensic reports kept</td>
+                <td>
+                    @Retention.ForensicDays days
+                    <span class="muted">— these hold real message headers, so they are kept for the
+                          shortest time of anything here</span>
+                </td>
+            </tr>
+            <tr>
+                <td>Applied by</td>
+                <td>
+                    <code>dmarc prune</code>, weekly
+                    <span class="muted">— nothing is ever deleted silently: every run that removes
+                          anything is in the activity log above. Domains and clients are never
+                          removed, only the reports age out.</span>
+                </td>
+            </tr>
         </tbody>
     </table>
+    <p class="sub">
+        These are the defaults the shipped timer uses. To change them, edit the two numbers in
+        <code>dmarc-prune.service</code> — they are stated there rather than left to a default that
+        could move in a later release.
+    </p>
 </section>
 
 <section>

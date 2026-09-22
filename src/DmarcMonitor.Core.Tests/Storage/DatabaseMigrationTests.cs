@@ -99,10 +99,29 @@ public sealed class DatabaseMigrationTests : IDisposable
             .Select(m => m.Groups[1].Value);
 
     /// <summary>The columns a migration adds to tables that already existed.</summary>
-    private static IEnumerable<(string Table, string Column)> ColumnsAddedIn(string sql) =>
-        System.Text.RegularExpressions.Regex
+    /// <remarks>
+    /// Excludes a column the same migration also DROPS under the same name.
+    /// That pairing is not "add a new column" - it is how a column's type or
+    /// nullability is changed in place, since SQLite has no ALTER COLUMN.
+    /// 0013 does exactly this to loosen received_at to nullable. Taken as a
+    /// plain add, undoing it stripped the column entirely, which does not
+    /// describe any database that ever existed: received_at has been there,
+    /// NOT NULL, since the baseline. The migration then failed on replay,
+    /// trying to drop a column the undo had already removed.
+    /// </remarks>
+    private static IEnumerable<(string Table, string Column)> ColumnsAddedIn(string sql)
+    {
+        var reDefined = new HashSet<(string, string)>(
+            System.Text.RegularExpressions.Regex
+                .Matches(sql, @"ALTER\s+TABLE\s+(\w+)\s+DROP\s+COLUMN\s+(\w+)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                .Select(m => (m.Groups[1].Value, m.Groups[2].Value)));
+
+        return System.Text.RegularExpressions.Regex
             .Matches(sql, @"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            .Select(m => (m.Groups[1].Value, m.Groups[2].Value));
+            .Select(m => (m.Groups[1].Value, m.Groups[2].Value))
+            .Where(pair => !reDefined.Contains(pair));
+    }
 
     private async Task<bool> HasTableAsync(string name)
     {
@@ -225,6 +244,73 @@ public sealed class DatabaseMigrationTests : IDisposable
         await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
 
         Assert.Equal(DatabaseMigrations.BaselineVersion, await DatabaseMigrations.VersionAsync(_dbPath));
+    }
+
+    // ---- a migration must not touch the rows of a table it does not name ------
+    //
+    // Caught before it shipped, against a copy of a real 23,697-row database:
+    // a migration that renamed a table, rebuilt it, and dropped the renamed
+    // copy looked correct under the sqlite3 CLI, where PRAGMA foreign_keys
+    // defaults off. Microsoft.Data.Sqlite - what this product actually runs
+    // on - enables it by default. With enforcement on, dropping a renamed
+    // parent table CASCADE-deletes every child row pointing at it, silently,
+    // with no error: the DROP TABLE just succeeds. A rebuild-shaped migration
+    // is only safe against the connection settings this product actually
+    // uses, so that is what has to be tested, not the CLI.
+
+    [Fact]
+    public async Task MigratingNeverLosesRowsInATableItDoesNotName()
+    {
+        // Every table with data, counted before and after every migration
+        // this build ships runs. Generic on purpose: this is not a rule for
+        // one column change, it is the property any migration must hold, and
+        // the next one that gets this wrong should fail here rather than
+        // against somebody's real database.
+        await AnOlderDatabaseAsync("0001");
+
+        const string when = "2026-01-01 00:00:00";
+
+        await using (var db = Open())
+        {
+            async Task Run(string sql)
+            {
+                await using var command = db.CreateCommand();
+                command.CommandText = sql;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            await Run($"""
+                INSERT INTO tenants (id,slug,name,created_at,updated_at)
+                  VALUES ('t1','local','Local','{when}','{when}');
+                INSERT INTO clients (id,tenant_id,slug,name,created_at,updated_at)
+                  VALUES ('c1','t1','acme','Acme','{when}','{when}');
+                INSERT INTO domains (id,tenant_id,client_id,name,created_at,updated_at)
+                  VALUES ('d1','t1','c1','acme.com','{when}','{when}');
+                INSERT INTO aggregate_reports
+                  (id,tenant_id,client_id,domain_id,org_name,external_report_id,
+                   date_begin,date_end,raw_hash,received_at,ingested_at)
+                  VALUES ('r1','t1','c1','d1','google.com','rep-1',
+                          '{when}','{when}','hash','{when}','{when}');
+                INSERT INTO aggregate_records
+                  (report_id,tenant_id,client_id,domain_id,date_begin,source_ip,
+                   message_count,dmarc_result)
+                  VALUES ('r1','t1','c1','d1','{when}','192.0.2.1',10,'pass');
+                """);
+        }
+
+        long CountAggregateRecords()
+        {
+            using var db = Open();
+            using var command = db.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM aggregate_records";
+            return Convert.ToInt64(command.ExecuteScalar());
+        }
+
+        Assert.Equal(1, CountAggregateRecords());
+
+        await DatabaseMigrations.ApplyAsync(_dbPath);
+
+        Assert.Equal(1, CountAggregateRecords());
     }
 }
 

@@ -65,6 +65,31 @@ public sealed class ReportIngestorTests
     }
 
     [Fact]
+    public async Task CarriesTheMessagesRealArrivalTime()
+    {
+        // What the store needs to record a real received_at instead of
+        // inventing one from the report's own claimed window. The message is
+        // the only thing that actually knows when it arrived.
+        var arrived = DateTimeOffset.UtcNow.AddMinutes(-47);
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            new MailMessage
+            {
+                Id = "m1",
+                Subject = "Report Domain: nrgtechservices.com",
+                From = "noreply-dmarc-support@google.com",
+                ToAddresses = [$"{Token}@{ReportingDomain}"],
+                ReceivedAt = arrived,
+                HasAttachments = true,
+            },
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox).RunAsync();
+
+        Assert.Equal(arrived, Assert.Single(result.Reports).ArrivedAt);
+    }
+
+    [Fact]
     public async Task IngestsARealTlsReport()
     {
         var mailbox = new FakeMailboxClient();
@@ -665,5 +690,173 @@ public sealed class ReportIngestorTests
 
         Assert.Equal(1, result.MessagesMoved);
         Assert.Single(mailbox.Moved);
+    }
+
+    // ---- deleting stored mail ------------------------------------------------
+    //
+    // A reporting mailbox grows without limit, and filing into the processed
+    // folder moves the problem rather than solving it - same mailbox, same
+    // quota. So a run can be told to delete instead. Most of what follows
+    // asserts silence: what this must NOT delete is the whole safety of it,
+    // and a missing deletion is far easier to notice than a wrong one, because
+    // a wrong one is only noticed when somebody goes looking for the evidence
+    // and it is not there.
+
+    private static IngestOptions Deleting(DeleteProcessed mode) => new()
+    {
+        ReportingDomain = ReportingDomain,
+        DeleteProcessed = mode,
+    };
+
+    [Theory]
+    [InlineData(DeleteProcessed.Soft, false)]
+    [InlineData(DeleteProcessed.Permanent, true)]
+    public async Task DeletesAStoredReportRatherThanFilingIt(DeleteProcessed mode, bool permanent)
+    {
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox, Deleting(mode)).RunAsync();
+
+        Assert.Equal(1, result.MessagesDeleted);
+        Assert.Equal(0, result.MessagesMoved);
+        Assert.True(mailbox.Deleted.ContainsKey("m1"));
+        Assert.Equal(permanent, mailbox.Deleted["m1"]);
+        Assert.Empty(mailbox.Moved);
+    }
+
+    [Fact]
+    public async Task KeepsEverythingByDefault()
+    {
+        // The setting has to be asked for. A version that started deleting on
+        // upgrade would empty a mailbox nobody had decided to empty.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox).RunAsync();
+
+        Assert.Empty(mailbox.Deleted);
+        Assert.Equal(0, result.MessagesDeleted);
+        Assert.Equal("DMARC-Processed", mailbox.Moved["m1"]);
+    }
+
+    [Fact]
+    public async Task NeverDeletesAReportItCouldNotRead()
+    {
+        // A report this version cannot parse looks exactly like junk, and it
+        // is the only copy of the evidence needed to teach the parser to read
+        // it. Deleting it makes that fix impossible.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("notes.txt", "this is not a report"));
+
+        var result = await Ingestor(mailbox, Deleting(DeleteProcessed.Permanent)).RunAsync();
+
+        Assert.Empty(mailbox.Deleted);
+        Assert.Equal(0, result.MessagesDeleted);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
+    }
+
+    [Fact]
+    public async Task NeverDeletesAQuarantinedReport()
+    {
+        // The shape of an injected report: the address it arrived at and the
+        // domain inside it disagree. Somebody has to be able to look at it.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox, Deleting(DeleteProcessed.Permanent), resolve: _ => "someone-else.com")
+            .RunAsync();
+
+        Assert.Empty(mailbox.Deleted);
+        Assert.Equal(0, result.MessagesDeleted);
+        Assert.Equal("DMARC-Quarantine", mailbox.Moved["m1"]);
+    }
+
+    [Fact]
+    public async Task NeverDeletesAGenuineReportItCouldNotAttribute()
+    {
+        // A configuration mistake, not junk. It stays in the source folder so
+        // that correcting the shared address and running again collects it.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", "dmarc@somewhere-else.example"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox, Deleting(DeleteProcessed.Permanent)).RunAsync();
+
+        Assert.Equal(1, result.UnattributedCount);
+        Assert.Empty(mailbox.Deleted);
+        Assert.Empty(mailbox.Moved);
+    }
+
+    [Fact]
+    public async Task NeverDeletesAMessageWhoseReportsCouldNotBeStored()
+    {
+        // The ordering rule, and it matters more here than for a move. A
+        // message filed in Processed and never stored can be dragged back; a
+        // message deleted and never stored is gone.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var ingestor = new ReportIngestor(
+            mailbox, Deleting(DeleteProcessed.Permanent),
+            t => t == Token ? "nrgtechservices.com" : null,
+            _ => false,
+            (_, _) => Task.FromResult(false));
+
+        var result = await ingestor.RunAsync();
+
+        Assert.Empty(mailbox.Deleted);
+        Assert.Empty(mailbox.Moved);
+        Assert.Equal(0, result.MessagesDeleted);
+    }
+
+    [Fact]
+    public async Task DeletesAReportAlreadySeenBecauseItIsAlreadyStored()
+    {
+        // Re-sent reports are most of what fills a mailbox, and a duplicate is
+        // by definition already in the database.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+
+        var result = await Ingestor(mailbox, Deleting(DeleteProcessed.Soft), seen: _ => true).RunAsync();
+
+        Assert.Equal(1, result.DuplicateCount);
+        Assert.Equal(1, result.MessagesDeleted);
+        Assert.True(mailbox.Deleted.ContainsKey("m1"));
+    }
+
+    [Fact]
+    public async Task AFailedDeleteIsSurvivableAndLeavesTheMessageWhereItIs()
+    {
+        // The next run reads it again, the duplicate check catches it, and it
+        // is deleted then. One mailbox error must not take down a backlog.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(
+            Message("m1", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+        mailbox.Add(
+            Message("m2", $"{Token}@{ReportingDomain}"),
+            FakeMailboxClient.Attachment("google.xml", Fixture("google-aggregate.xml")));
+        mailbox.FailDeleteFor.Add("m1");
+
+        var result = await Ingestor(mailbox, Deleting(DeleteProcessed.Permanent)).RunAsync();
+
+        Assert.Equal(1, result.MessagesDeleted);
+        Assert.True(mailbox.Deleted.ContainsKey("m2"));
+        Assert.False(mailbox.Deleted.ContainsKey("m1"));
+        Assert.Contains(result.Errors, e => e.Contains("could not be deleted", StringComparison.Ordinal));
     }
 }

@@ -20,7 +20,7 @@ public static class IngestCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--mailbox", "--tenant", "--client-id", "--cert", "--cert-password", "--max", "--fallback", "--reporting-domain", "--org", "!--dry-run") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--mailbox", "--tenant", "--client-id", "--cert", "--cert-password", "--max", "--fallback", "--reporting-domain", "--org", "--delete", "!--dry-run") is var bad and not 0) { return bad; }
 
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var mailbox = Args.Value(args, "--mailbox");
@@ -35,6 +35,21 @@ public static class IngestCommand
         var fallback = NonBlank(Args.Value(args, "--fallback")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_FALLBACK_ADDRESS"));
         var maxMessages = Args.Int(args, "--max", 500);
         var dryRun = Args.Flag(args, "--dry-run");
+
+        // Spelled out rather than a bare flag. This throws a customer's mail
+        // away, the two modes differ in whether the space actually comes back,
+        // and neither is something to arrive at by typing four characters.
+        //
+        // Also from the environment, because the scheduled run is the one that
+        // matters here: the unit's ExecStart is fixed, and a collector that
+        // could only be told to delete by hand would never be the one keeping
+        // the mailbox down.
+        if (!TryReadDeleteMode(
+                NonBlank(Args.Value(args, "--delete")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_DELETE")),
+                out var deleteMode))
+        {
+            return 64;
+        }
 
         // Which organization a domain nobody has seen before belongs to. One
         // collector per organization's mailbox is the expected shape; a domain
@@ -136,6 +151,7 @@ public static class IngestCommand
                 ReportingDomain = reportingDomain,
                 FallbackAddress = fallback,
                 MaxMessages = maxMessages,
+                DeleteProcessed = deleteMode,
             };
 
             // Dry run reads and parses but writes nothing and moves nothing, so
@@ -163,6 +179,12 @@ public static class IngestCommand
 
             Console.WriteLine($"Reading {mailbox}{(dryRun ? " (dry run: nothing will be written or moved)" : "")}");
             Console.WriteLine($"Attributing reports by {attributedBy}");
+            if (deleteMode != DeleteProcessed.Keep && !dryRun)
+            {
+                Console.WriteLine(deleteMode == DeleteProcessed.Permanent
+                    ? "Stored reports will be deleted from the mailbox (recoverable from Recoverable Items only)"
+                    : "Stored reports will be moved to Deleted Items");
+            }
             if (organization != ReportStore.DefaultTenantSlug)
             {
                 Console.WriteLine($"Filing new domains under the organization '{organization}'");
@@ -255,9 +277,9 @@ public static class IngestCommand
                 var id = report.Kind switch
                 {
                     ReportKind.DmarcAggregate when report.Aggregate is not null =>
-                        await store.SaveAggregateAsync(report.Aggregate, report.FileName, report.MessageId, ct).ConfigureAwait(false),
+                        await store.SaveAggregateAsync(report.Aggregate, report.FileName, report.MessageId, report.ArrivedAt, ct).ConfigureAwait(false),
                     ReportKind.TlsRpt when report.Tls is not null =>
-                        await store.SaveTlsAsync(report.Tls, report.FileName, report.MessageId, ct).ConfigureAwait(false),
+                        await store.SaveTlsAsync(report.Tls, report.FileName, report.MessageId, report.ArrivedAt, ct).ConfigureAwait(false),
                     _ => null,
                 };
 
@@ -277,9 +299,56 @@ public static class IngestCommand
         return (written, failed);
     }
 
+    /// <summary>
+    /// Reads --delete, which must name which kind of delete is meant.
+    /// </summary>
+    /// <remarks>
+    /// The difference is not cosmetic. A soft delete empties the inbox and
+    /// gives no quota back, because Deleted Items is the same mailbox; a
+    /// permanent one is what returns the space. Somebody who typed --delete
+    /// expecting the second and got the first would find the mailbox just as
+    /// full a month later, with the mail no longer where they left it.
+    /// </remarks>
+    private static bool TryReadDeleteMode(string? value, out DeleteProcessed mode)
+    {
+        mode = DeleteProcessed.Keep;
+        if (value is null) { return true; }
+
+        switch (value.Trim().ToLowerInvariant())
+        {
+            case "soft":
+                mode = DeleteProcessed.Soft;
+                return true;
+
+            case "permanent":
+                mode = DeleteProcessed.Permanent;
+                return true;
+
+            default:
+                Console.Error.WriteLine($"--delete takes 'soft' or 'permanent', not '{value}'.");
+                Console.Error.WriteLine();
+                Console.Error.WriteLine("  soft       moves the message to Deleted Items. A person can get it back,");
+                Console.Error.WriteLine("             and it still counts against the mailbox quota until a retention");
+                Console.Error.WriteLine("             policy clears that folder.");
+                Console.Error.WriteLine("  permanent  removes it from the mailbox. In Exchange Online it goes to");
+                Console.Error.WriteLine("             Recoverable Items, which has its own quota - so this is the one");
+                Console.Error.WriteLine("             that gives the space back. Still recoverable for the tenant's");
+                Console.Error.WriteLine("             retention period.");
+                Console.Error.WriteLine();
+                Console.Error.WriteLine("Either way only mail whose reports are already stored is deleted. Reports");
+                Console.Error.WriteLine("that could not be read, that were quarantined, or that were not attributed");
+                Console.Error.WriteLine("are always kept. Run with --dry-run first.");
+                return false;
+        }
+    }
+
     private static void Report(IngestRunResult result, int stored, bool dryRun)
     {
         Console.WriteLine($"  messages read      {result.MessagesRead}");
+        if (result.MessagesDeleted > 0)
+        {
+            Console.WriteLine($"  deleted            {result.MessagesDeleted} (reports stored first)");
+        }
         Console.WriteLine($"  reports ingested   {result.IngestedCount}{(dryRun ? " (not written)" : $", {stored} stored")}");
         if (result.DuplicateCount > 0) { Console.WriteLine($"  already seen       {result.DuplicateCount}"); }
         if (result.UnrecognizedCount > 0)
@@ -384,6 +453,17 @@ internal sealed class ReadOnlyMailbox(IMailboxClient inner) : IMailboxClient
         _inner.GetAttachmentsAsync(messageId, cancellationToken);
 
     public Task MoveMessageAsync(string messageId, string destinationFolderId, CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+
+    /// <summary>
+    /// Does nothing, which is the whole reason this wrapper exists.
+    /// </summary>
+    /// <remarks>
+    /// A dry run that moved mail would be bad. A dry run that deleted it would
+    /// be unrecoverable, and it is exactly the run somebody uses to decide
+    /// whether deleting is safe.
+    /// </remarks>
+    public Task DeleteMessageAsync(string messageId, bool permanent, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 
     /// <summary>Returns the name unchanged rather than creating anything.</summary>

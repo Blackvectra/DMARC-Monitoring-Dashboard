@@ -210,6 +210,52 @@ resumes.
 
 ---
 
+## Keeping the mailbox from filling up
+
+Every receiver sends a report for every domain every day, and by default a
+processed message is filed into `DMARC-Processed` — the same mailbox, the same
+quota. On any real book of domains the mailbox fills.
+
+```
+dmarc ingest --mailbox dmarc@example.com --delete soft
+dmarc ingest --mailbox dmarc@example.com --delete permanent
+```
+
+or, for the scheduled run, put it in `/etc/dmarc-ingest.env` so the unit file
+needs no editing:
+
+```
+DMARC_DELETE=permanent
+```
+
+| mode | where the message goes | quota |
+|---|---|---|
+| `soft` | Deleted Items — a person can drag it back | **still used**, until a retention policy clears the folder |
+| `permanent` | Recoverable Items — recoverable for the tenant's deleted-item retention period | **freed**; Recoverable Items has its own quota |
+
+If the mailbox filling up is the problem you are solving, `permanent` is the
+one that solves it. `soft` empties the inbox and frees nothing.
+
+**Only mail whose reports are already in the database is ever deleted**, and
+that ordering is enforced in the same place as the move: a message is deleted
+after its reports are stored, never before. Three kinds of mail are always
+kept, whatever this is set to:
+
+- **not a report, or one this version cannot parse** — it is the only copy of
+  the evidence needed to teach the parser to read it, and a report nobody has
+  written a parser for looks exactly like junk;
+- **quarantined** — the delivery address and the report disagree about the
+  domain, which is the shape of an injected report;
+- **not attributed** — a genuine report delivered somewhere this deployment
+  does not recognize, which is a configuration mistake to correct and re-run.
+
+Duplicates *are* deleted: a re-sent report is by definition already stored, and
+re-sends are most of what fills a mailbox.
+
+`--dry-run` deletes nothing, so run it first.
+
+---
+
 ## Known untested
 
 Nothing in the Graph path has run against a real mailbox. The parts most

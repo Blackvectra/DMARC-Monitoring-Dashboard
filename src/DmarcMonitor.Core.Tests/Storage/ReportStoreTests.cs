@@ -278,4 +278,76 @@ public sealed class ReportStoreTests : IDisposable
     {
         Assert.Throws<ArgumentException>(() => new ReportStore("  "));
     }
+
+    // ---- when the report actually arrived, as distinct from what it covers ----
+    //
+    // received_at used to be filled with the report's own date_end - the
+    // value already sitting in the row beside it - so "when we got this" had
+    // never once held when anything was got. Fixed by making the column
+    // nullable and only ever writing to it what the caller explicitly knows.
+
+    [Fact]
+    public async Task WithNoArrivalTimeGivenNoneIsRecorded()
+    {
+        // The honest default. A report handed to the store without saying
+        // when it arrived - which is every import from a file - must not have
+        // one invented for it.
+        await _store.SaveAggregateAsync(Aggregate("google-aggregate.xml"), "raw", "msg-1");
+
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT received_at FROM aggregate_reports LIMIT 1";
+        Assert.Equal(DBNull.Value, await command.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task AGivenArrivalTimeIsStoredAsGiven()
+    {
+        // What the Graph collector has and a file import does not: a real
+        // receivedDateTime off the message, carried through rather than
+        // reconstructed from the report's own claimed window.
+        var arrived = new DateTimeOffset(2026, 9, 20, 14, 3, 0, TimeSpan.Zero);
+
+        await _store.SaveAggregateAsync(Aggregate("google-aggregate.xml"), "raw", "msg-1", arrivedAt: arrived);
+
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT received_at FROM aggregate_reports LIMIT 1";
+        var stored = (string)(await command.ExecuteScalarAsync())!;
+
+        Assert.Equal("2026-09-20 14:03:00", stored);
+    }
+
+    [Fact]
+    public async Task AnArrivalTimeIsNotSilentlyTheReportsOwnWindow()
+    {
+        // The specific regression. date_end for this fixture is not the
+        // arrival time given here, and the two must not be conflated again.
+        var arrived = new DateTimeOffset(2026, 9, 20, 14, 3, 0, TimeSpan.Zero);
+
+        await _store.SaveAggregateAsync(Aggregate("google-aggregate.xml"), "raw", "msg-1", arrivedAt: arrived);
+
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT received_at, date_end FROM aggregate_reports LIMIT 1";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+
+        Assert.NotEqual(reader.GetString(1), reader.GetString(0));
+    }
+
+    [Fact]
+    public async Task TheSameIsTrueForTlsReports()
+    {
+        await _store.SaveTlsAsync(Tls("microsoft-tlsrpt.json"), "raw", "msg-1");
+
+        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT received_at FROM tls_reports LIMIT 1";
+        Assert.Equal(DBNull.Value, await command.ExecuteScalarAsync());
+    }
 }

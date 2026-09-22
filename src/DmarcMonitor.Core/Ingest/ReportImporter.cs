@@ -176,14 +176,14 @@ public sealed class ReportImporter(ReportStore store)
             {
                 var parsed = AggregateReportParser.Parse(report.Content);
                 if (!parsed.Success) { throw new InvalidDataException(parsed.Error); }
-                return await _store.SaveAggregateAsync(parsed.Report!, report.Content, null, ct).ConfigureAwait(false);
+                return await _store.SaveAggregateAsync(parsed.Report!, report.Content, null, arrivedAt: null, ct).ConfigureAwait(false);
             }
 
             case ReportKind.TlsRpt:
             {
                 var parsed = TlsReportParser.Parse(report.Content);
                 if (!parsed.Success) { throw new InvalidDataException(parsed.Error); }
-                return await _store.SaveTlsAsync(parsed.Report!, report.Content, null, ct).ConfigureAwait(false);
+                return await _store.SaveTlsAsync(parsed.Report!, report.Content, null, arrivedAt: null, ct).ConfigureAwait(false);
             }
 
             default:

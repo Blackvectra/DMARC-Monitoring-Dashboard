@@ -123,7 +123,19 @@ else
             <span class="figure-n @(_detail.Messages > 0 && _detail.PassRate < 95 ? "bad" : "good")">
                 @(_detail.Messages > 0 ? $"{_detail.PassRate}%" : "—")
             </span>
-            <span class="figure-l">authenticated</span>
+            <span class="figure-l">
+                authenticated
+                @if (_detail.ForwardedFailures > 0)
+                {
+                    @* Both, never one instead of the other. Receivers act on
+                       the raw figure - mail a gateway broke still fails, and at
+                       p=reject is still refused - so that stays the headline.
+                       This is the number that says how much of it is fixable,
+                       and without it a domain whose own security gateway is
+                       rewriting half its mail reads as simply broken. *@
+                    <br /><span>@_detail.PassRateExcludingForwarders% excluding forwarded mail</span>
+                }
+            </span>
         </div>
         <div class="figure">
             <span class="figure-n">p=@_detail.Policy</span>
@@ -197,6 +209,10 @@ else
         {
             <a href="#unaligned" class="jump-alert">@_detail.SigningUnaligned.Count signing unaligned</a>
         }
+        @if (_detail.Forwarders.Count > 0)
+        {
+            <a href="#forwarded">@_detail.ForwardedFailures.ToString("N0") broken in transit</a>
+        }
         @if (_detail.Impersonating.Count > 0)
         {
             <a href="#impersonating">@_detail.Impersonating.Count unauthenticated</a>
@@ -223,12 +239,90 @@ else
         </a>
     </nav>
 
+    @if (_detail.Forwarders.Count > 0)
+    {
+        @* The largest bucket on real data, and the one nothing in DNS can fix.
+           Left among the unauthenticated sources it read as "sending as you
+           without authenticating" - the customer's own security product
+           described as an impersonator - and an operator who believes that
+           goes and weakens a record to make the number move. *@
+        <section id="forwarded">
+            <h2>Broken in transit by a gateway</h2>
+            <p class="sub">
+                @_detail.ForwardedFailures.ToString("N0") message(s) of this domain's own mail. A gateway
+                received them, added its banner and sent them on: the banner changes the message so the
+                signature no longer verifies, and the forwarding changes the envelope so SPF no longer
+                passes. <strong>No DNS record fixes this.</strong> At
+                <code>p=@_detail.Policy</code> @(_detail.Policy == "none" ? "it is only being reported"
+                    : "this mail is being lost") — the receiver cannot tell it from forgery either.
+            </p>
+            <div class="table-scroll"><table class="triage">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th>How it was identified</th>
+                        <th class="num">Sent</th>
+                        <th class="num">Broken</th>
+                        <th>Last seen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in _detail.Forwarders)
+                    {
+                        <tr class="warn">
+                            <td><code>@s.SourceIp</code></td>
+                            <td>
+                                @* Named where it can be, and otherwise the
+                                   evidence itself. A hosted gateway re-sends
+                                   with the customer's own envelope domain, so
+                                   most of them cannot be named - what gives
+                                   them away is this domain's own broken
+                                   signature on mail from a relay that carries
+                                   other customers too. Saying so beats a dash. *@
+                                @if (s.GatewayName is { Length: > 0 } named)
+                                {
+                                    <span>@named</span>
+                                }
+                                else
+                                {
+                                    <span class="muted">
+                                        unnamed relay — carries this domain's own broken signature, and
+                                        @s.OtherClients other client@(s.OtherClients == 1 ? "" : "s")
+                                    </span>
+                                }
+                            </td>
+                            <td class="num">@s.Messages.ToString("N0")</td>
+                            <td class="num">@s.Failing.ToString("N0")</td>
+                            <td class="muted">@Ago(s.LastSeen)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table></div>
+            <p class="sub">
+                What helps: have the gateway stop modifying the body, or deliver to the mailbox without a
+                re-send. Neither is a DNS change, and neither is urgent unless the mail is being lost. What
+                does not help is relaxing alignment or lowering the policy — the signature is broken, not
+                misaligned.
+            </p>
+        </section>
+    }
+
     @if (_detail.Impersonating.Count > 0)
     {
         <section id="impersonating">
             <h2>Sending as @Domain without authenticating</h2>
-            <p class="sub">Proved nothing when they failed. Either a service nobody recorded, or somebody
-               sending as this domain.</p>
+            <p class="sub">
+                Proved nothing when they failed@(_detail.ForwardedFailures > 0
+                    ? ", and not the gateway traffic above" : "").
+                @(_detail.Spoofing.Count switch
+                {
+                    0 => "Either a service nobody recorded, or somebody sending as this domain.",
+                    1 => "One of these is also sending as other clients, which is one actor working through a "
+                       + "book rather than a service nobody recorded.",
+                    var n => $"{n} of these are also sending as other clients, which is one actor working "
+                           + "through a book rather than services nobody recorded.",
+                })
+            </p>
             <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>

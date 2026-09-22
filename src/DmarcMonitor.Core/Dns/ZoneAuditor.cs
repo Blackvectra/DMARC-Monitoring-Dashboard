@@ -79,10 +79,21 @@ public sealed record ZoneAuditReport(
 /// appear. What never happens is a finding that claims evidence this did not
 /// collect.
 /// </summary>
-public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath = null)
+/// <param name="tenantId">
+/// The organization on whose behalf this runs, or null for every one.
+///
+/// Not optional in spirit. A domain name is unique per organization and not
+/// globally, so an audit that reads the book by name alone answers with
+/// another organization's DKIM selectors, report counts and domain list. Null
+/// is right for a command-line run by the operator and wrong for anything
+/// serving a signed-in person.
+/// </param>
+public sealed class ZoneAuditor(
+    DnsLookup? lookup = null, string? databasePath = null, string? tenantId = null)
 {
     private readonly DnsLookup _lookup = lookup ?? new DnsLookup();
     private readonly string? _databasePath = string.IsNullOrWhiteSpace(databasePath) ? null : databasePath;
+    private readonly string? _tenantId = string.IsNullOrWhiteSpace(tenantId) ? null : tenantId;
 
     /// <summary>
     /// How many selectors one run will resolve.
@@ -134,6 +145,7 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
         var delegation = await _lookup.NsAsync(zone.Origin, ct).ConfigureAwait(false);
 
         var (seen, windowDays, reportsRead) = await ReportsAsync(zone.Origin, ct).ConfigureAwait(false);
+        var monitored = await MonitoredAsync(ct).ConfigureAwait(false);
 
         var readings = new Dictionary<string, SelectorEvidence>(StringComparer.OrdinalIgnoreCase);
 
@@ -166,6 +178,7 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
             SeenSigning = seen,
             ReportsRead = reportsRead,
             ReportWindowDays = windowDays,
+            Monitored = monitored,
         };
 
         return new ZoneAuditReport(
@@ -190,7 +203,7 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
         try
         {
             var scanner = new DnsScanner(_databasePath, _lookup);
-            var signing = await scanner.SelectorsSeenSigningAsync(domain, ct).ConfigureAwait(false);
+            var signing = await scanner.SelectorsSeenSigningAsync(domain, _tenantId, ct).ConfigureAwait(false);
 
             return ([.. signing.Select(s => s.Selector)], await WindowAsync(domain, ct).ConfigureAwait(false), true);
         }
@@ -199,6 +212,48 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
             // A database that cannot be read is not a domain with no reports.
             // Everything that leans on the reports stays silent instead.
             return ([], 0, false);
+        }
+    }
+
+    /// <summary>
+    /// Every domain this install watches, for judging the reporting
+    /// authorizations a zone publishes on other domains' behalf.
+    /// </summary>
+    /// <remarks>
+    /// Empty when there is no database, which leaves the check silent rather
+    /// than reporting every authorization as pointing at a stranger.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> MonitoredAsync(CancellationToken ct)
+    {
+        if (_databasePath is null || !File.Exists(_databasePath)) { return []; }
+
+        try
+        {
+            var names = new List<string>();
+
+            await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = _databasePath,
+                Mode = SqliteOpenMode.ReadOnly,
+            }.ToString());
+
+            await db.OpenAsync(ct).ConfigureAwait(false);
+
+            await using var command = db.CreateCommand();
+            command.CommandText =
+                "SELECT LOWER(name) FROM domains "
+                + "WHERE is_active = 1 AND deleted_at IS NULL "
+                + "  AND ($tenant IS NULL OR tenant_id = $tenant)";
+            command.Parameters.AddWithValue("$tenant", (object?)_tenantId ?? DBNull.Value);
+
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false)) { names.Add(reader.GetString(0)); }
+
+            return names;
+        }
+        catch (SqliteException)
+        {
+            return [];
         }
     }
 
@@ -218,8 +273,10 @@ public sealed class ZoneAuditor(DnsLookup? lookup = null, string? databasePath =
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             WHERE LOWER(d.name) = $domain AND d.is_active = 1 AND d.deleted_at IS NULL
+              AND ($tenant IS NULL OR d.tenant_id = $tenant)
             """;
         command.Parameters.AddWithValue("$domain", domain.ToLowerInvariant());
+        command.Parameters.AddWithValue("$tenant", (object?)_tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false) || reader.IsDBNull(0)) { return 0; }

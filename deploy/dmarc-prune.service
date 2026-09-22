@@ -1,0 +1,54 @@
+# Removes report data past its retention window. Started by dmarc-prune.timer;
+# runnable by hand with
+#   sudo systemctl start dmarc-prune
+#
+# The one scheduled job in this product that deletes a customer's history, so
+# the window it runs with is stated here rather than left to a default that
+# could change under an operator in a later release. Edit these two numbers and
+# nothing else:
+#
+#   --aggregate-days 400   thirteen months of counts, so this month always has
+#                          last year's same month to sit beside on a report.
+#   --forensic-days 30     forensic reports hold real message headers - subject
+#                          lines, message ids, somebody's mail - so this is
+#                          deliberately the shortest window here, and the
+#                          command refuses a policy where it is the longest.
+#
+# Every run that removes anything writes a line to the audit log saying what it
+# removed and under which policy, attributed to this unit. Nothing here deletes
+# a domain, a client or an organization: a customer who sent no mail for a year
+# still exists, only the reports age out.
+#
+# The database file does not shrink on delete. SQLite reuses the freed pages,
+# so a steady state is reached rather than unbounded growth; reclaiming the
+# space needs a VACUUM, which rewrites the whole file and is not something a
+# scheduled job should do to somebody's disk unasked.
+#
+# Enabled by deploy/install.sh; by hand it is:
+#   sudo systemctl enable --now dmarc-prune.timer
+
+[Unit]
+Description=Remove DMARC report data past its retention window
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dmarc
+ExecStart=/usr/local/bin/dmarc prune --apply --by dmarc-prune.service \
+          --aggregate-days 400 --forensic-days 30 \
+          --db /opt/dmarc/data/dmarc.db
+
+# The same reason as the other units: the self-contained binary unpacks its
+# native SQLite library on first run and needs somewhere writable to do it.
+# Left unset it uses the home directory, which the sandbox below hides, and the
+# command dies with exit 159 before printing anything.
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net
+
+# It reads and writes one database and needs nothing else. No mailbox, no
+# certificate, no network credential - and unlike the collector it holds
+# nothing worth holding.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/dmarc/data

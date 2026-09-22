@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Intelligence;
 using DmarcMonitor.Core.Rollout;
 using Microsoft.Data.Sqlite;
@@ -68,10 +69,57 @@ public sealed record DomainSource
     /// </remarks>
     public IReadOnlyList<string> DkimOnPassingMail { get; init; } = [];
 
+    /// <summary>
+    /// Signing domains the FAILING mail named, whether or not they verified.
+    /// </summary>
+    /// <remarks>
+    /// Every other DKIM field here records what a source proved. This one
+    /// records what it attempted, and the two answer different questions. A
+    /// gateway that receives a customer's message and sends it on leaves the
+    /// signature header in place - so the report shows a signature naming the
+    /// customer's own domain that no longer verifies, which is exactly the
+    /// shape of mail that was signed correctly and then modified. Mail that was
+    /// never signed carries nothing here at all.
+    /// </remarks>
+    public IReadOnlyList<string> SignedAsOnFailure { get; init; } = [];
+
     public DateTimeOffset? LastSeen { get; init; }
 
     public bool IsClean => Failing == 0;
     public bool Authenticated => !string.IsNullOrEmpty(AuthenticatedFor);
+
+    /// <summary>
+    /// What this failing source most likely is: broken in transit by a gateway,
+    /// a vendor signing as itself, forging, or not enough to say.
+    /// </summary>
+    /// <remarks>
+    /// Computed here rather than stored so it follows the row wherever it goes,
+    /// and so the page and the client report cannot reach different verdicts
+    /// about the same address.
+    /// </remarks>
+    public FailureKind Kind => FailureClassifier.Classify(new FailingSourceFacts
+    {
+        SourceIp = SourceIp,
+        EnvelopeDomains = EnvelopeDomains,
+        Authenticated = Authenticated,
+        Passing = Passing,
+        OtherClients = OtherClients,
+        Domain = Domain,
+        SignedAsOnFailure = SignedAsOnFailure,
+    });
+
+    /// <summary>
+    /// The domain this row was read for.
+    /// </summary>
+    /// <remarks>
+    /// Carried on the row because the classifier has to know whose signature
+    /// "this domain's own signature" means, and a source read for one domain
+    /// must never be judged against another's.
+    /// </remarks>
+    public string Domain { get; init; } = "";
+
+    /// <summary>The gateway this source is, when it is one anybody can name.</summary>
+    public string? GatewayName => FailureClassifier.GatewayName(EnvelopeDomains);
 
     /// <summary>What this most likely is, in one word, for the badge.</summary>
     public SourceVerdict Verdict =>
@@ -188,8 +236,52 @@ public sealed record DomainDetail
     /// infrastructure of impersonating them.
     /// </remarks>
     public IReadOnlyList<DomainSource> Impersonating =>
-        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated)
+        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated
+                            && s.Kind != FailureKind.Forwarded)
                    .OrderByDescending(s => s.Failing)];
+
+    /// <summary>
+    /// Gateways that received this domain's mail and broke it sending it on.
+    /// </summary>
+    /// <remarks>
+    /// Its own bucket because it is the only one nothing in DNS can fix, and
+    /// because it was the largest: on the book this was first measured against,
+    /// one hosted gateway accounted for half of every failure across eleven
+    /// domains. Left in with the rest it reads as "sending as you without
+    /// authenticating", which is the customer's own security product being
+    /// described as an impersonator - and an operator who believes that goes
+    /// and weakens a record to make the number move.
+    /// </remarks>
+    public IReadOnlyList<DomainSource> Forwarders =>
+        [.. Sources.Where(s => !s.IsClean && s.Kind == FailureKind.Forwarded)
+                   .OrderByDescending(s => s.Failing)];
+
+    /// <summary>Unauthenticated sources that are also sending as other clients.</summary>
+    public IReadOnlyList<DomainSource> Spoofing =>
+        [.. Sources.Where(s => s.Kind == FailureKind.Spoofing).OrderByDescending(s => s.Failing)];
+
+    /// <summary>Messages a gateway broke in transit.</summary>
+    public long ForwardedFailures => Forwarders.Sum(s => s.Failing);
+
+    /// <summary>
+    /// The pass rate over mail that was not broken by a forwarder.
+    /// </summary>
+    /// <remarks>
+    /// The number to advance a policy on, and the reason both are shown rather
+    /// than this one replacing <see cref="PassRate"/>. Receivers act on the raw
+    /// figure: mail a gateway broke is still mail that fails DMARC, and at
+    /// p=reject it is still refused. So the raw rate is what is happening and
+    /// this is what is fixable, and quietly showing only the flattering one
+    /// would be the same kind of lie as folding them together.
+    /// </remarks>
+    public double PassRateExcludingForwarders
+    {
+        get
+        {
+            var judged = Messages - ForwardedFailures;
+            return judged <= 0 ? 0 : Math.Round(Passing * 100.0 / judged, 1);
+        }
+    }
 
     /// <summary>
     /// Sources whose DKIM signatures verified and were thrown away anyway.
@@ -305,7 +397,7 @@ public sealed class DomainDetailService(string databasePath)
         var policyRow = await PolicyAsync(db, domainId, ct).ConfigureAwait(false);
         var (policy, subPolicy, pct, lastReport) = (policyRow.Policy, policyRow.Sub, policyRow.Pct, policyRow.Last);
         var (messages, passing, overridden) = await TotalsAsync(db, domainId, since, ct).ConfigureAwait(false);
-        var sources = await SourcesAsync(db, domainId, since, ct).ConfigureAwait(false);
+        var sources = await SourcesAsync(db, domainId, name, since, ct).ConfigureAwait(false);
         var reporters = await ReportersAsync(db, domainId, since, ct).ConfigureAwait(false);
 
         sources = MarkTheUnaligned(sources, name, policyRow.StrictDkim);
@@ -361,18 +453,29 @@ public sealed class DomainDetailService(string databasePath)
         // may since have been changed, which is the thing an operator is most
         // often checking on this page.
         //
-        // received_at breaks the tie, because date_end alone does not:
+        // A tie-break is needed because date_end alone does not separate them:
         // receivers send several reports covering the same window, and during
-        // a rollout two of them can disagree about the policy. Without a
-        // tie-break SQLite picks whichever it likes, so the page can show a
-        // policy that was superseded hours ago and be right again on the next
-        // refresh, which is the hardest kind of wrong to notice.
+        // a rollout two of them can disagree about the policy. Without one
+        // SQLite picks whichever it likes, so the page can show a policy that
+        // was superseded hours ago and be right again on the next refresh,
+        // which is the hardest kind of wrong to notice.
+        //
+        // This used to order by received_at, and did not work. That column was
+        // written as a copy of date_end, so the second key equalled the first
+        // on every row and separated nothing - the bug this comment describes
+        // was never actually fixed, and it looked fixed, which is worse.
+        //
+        // ingested_at instead. Storage order is not a fact about the mail, and
+        // it is deliberately not received_at even now that the real arrival
+        // time is recorded: that is null for anything imported from a file, and
+        // a tie-break has to be total. What ingested_at is is a strict order
+        // that always exists, which is the whole job.
         command.CommandText = """
             SELECT policy_p, COALESCE(policy_sp, ''), COALESCE(policy_pct, 100), date_end,
                    COALESCE(policy_adkim, 'r'), COALESCE(policy_aspf, 'r')
             FROM aggregate_reports
             WHERE domain_id = $domain
-            ORDER BY date_end DESC, received_at DESC
+            ORDER BY date_end DESC, ingested_at DESC
             LIMIT 1
             """;
         command.Parameters.AddWithValue("$domain", domainId);
@@ -429,7 +532,7 @@ public sealed class DomainDetailService(string databasePath)
     }
 
     private static async Task<List<DomainSource>> SourcesAsync(
-        SqliteConnection db, string domainId, string since, CancellationToken ct)
+        SqliteConnection db, string domainId, string domain, string since, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -461,6 +564,18 @@ public sealed class DomainDetailService(string databasePath)
                    -- somebody else entirely.
                    COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
                      CASE WHEN r.dmarc_result = 'pass' AND r.dkim_auth_result = 'pass'
+                          THEN r.dkim_domain END), ''), ''),
+                   -- Signatures the FAILING mail claimed, whether or not they
+                   -- verified. Every other DKIM column here asks what was
+                   -- proved; this one asks what was attempted, and that is the
+                   -- difference between mail that was signed and then broken
+                   -- and mail that was never signed at all. A gateway that
+                   -- re-sends a customer's message leaves the signature header
+                   -- in place naming the customer, so it shows up here even
+                   -- though it no longer verifies.
+                   COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
+                     CASE WHEN r.dmarc_result <> 'pass'
+                               AND r.dkim_domain IS NOT NULL AND TRIM(r.dkim_domain) <> ''
                           THEN r.dkim_domain END), ''), '')
             FROM aggregate_records r
             WHERE r.domain_id = $domain AND r.date_begin >= $since
@@ -486,6 +601,7 @@ public sealed class DomainDetailService(string databasePath)
 
             results.Add(new DomainSource
             {
+                Domain = domain,
                 SourceIp = reader.GetString(0),
                 Messages = messages,
                 Passing = passing,
@@ -499,6 +615,7 @@ public sealed class DomainDetailService(string databasePath)
                 UnalignedDkim = [.. Split(reader.IsDBNull(6) ? "" : reader.GetString(6))
                     .Select(d => new UnalignedSignature(d, AlignmentVerdict.Exact, false))],
                 EnvelopeDomains = [.. Split(reader.IsDBNull(7) ? "" : reader.GetString(7))],
+                SignedAsOnFailure = [.. Split(reader.IsDBNull(9) ? "" : reader.GetString(9))],
                 DkimOnPassingMail = [.. Split(reader.IsDBNull(8) ? "" : reader.GetString(8))],
             });
         }

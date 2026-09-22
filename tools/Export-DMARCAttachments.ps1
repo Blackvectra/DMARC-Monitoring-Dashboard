@@ -31,8 +31,15 @@
     Inbox holds nothing you want.
 
 .PARAMETER List
-    Show the folder tree and exit, without exporting anything. Use this when
-    a name does not match and you want to see what is actually there.
+    Show what is there and exit, without exporting anything. Use this when a
+    name does not match and you want to see what is actually available.
+
+    With several mailboxes open and no -Mailbox, it prints their NAMES only.
+    Add -Mailbox to look inside one. The stores Outlook keeps open beside a
+    reporting mailbox are somebody's real mail - a personal account, an
+    archive, public folders - and printing all of their folders is both more
+    than anyone needs to pick one and more than belongs in the ticket this
+    output gets pasted into.
 
 .PARAMETER OutputPath
     Where to write. Created if it does not exist.
@@ -291,6 +298,30 @@ function Show-Stores {
 }
 
 if ($List) {
+    # With several mailboxes open and none named, print only their NAMES.
+    #
+    # Walking into every store was the old behaviour and it was too much in
+    # both directions. Too much to read: thirteen stores, two levels deep, to
+    # find one folder. And too much to hand out - the stores Outlook keeps open
+    # beside a reporting mailbox are somebody's real mail. A real run printed a
+    # university account's folder tree, a personal calendar and a set of vendor
+    # and alert folders, none of which have anything to do with DMARC, and all
+    # of which then get pasted into a ticket or a chat window along with the
+    # bit that was wanted.
+    #
+    # The names alone are all that is needed to pick one, which is what -List
+    # is for.
+    if ($stores.Count -gt 1 -and -not $Mailbox) {
+        Write-Host ""
+        Write-Host "$($stores.Count) mailboxes are open in Outlook:" -ForegroundColor Cyan
+        foreach ($s in $stores) { Write-Host "    $($s.Name)" }
+        Write-Host ""
+        Write-Host "Add -Mailbox <name> to look inside one. Matching is on any part of the name," -ForegroundColor DarkGray
+        Write-Host "so -Mailbox DMARC is usually enough." -ForegroundColor DarkGray
+        Write-Host ""
+        exit 0
+    }
+
     Show-Stores
     Write-Host ""
     exit 0

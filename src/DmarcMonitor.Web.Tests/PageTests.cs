@@ -408,6 +408,34 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
+    public async Task TheDomainPageTellsGatewayTrafficApartFromImpersonation()
+    {
+        // Half of every failure on the real book was one hosted gateway
+        // rewriting the customers' own mail. Listed as "sending as you without
+        // authenticating" that is the customer's own security product being
+        // described as an impersonator, and an operator who believes it goes
+        // and weakens a record to make the number move.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("id=\"forwarded\"", html, StringComparison.Ordinal);
+        Assert.Contains("Broken in transit by a gateway", html, StringComparison.Ordinal);
+        Assert.Contains("INKY Phish Fence", html, StringComparison.Ordinal);
+
+        // And the sentence that stops the wrong fix being attempted.
+        Assert.Contains("No DNS record fixes this", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheDomainPageShowsThePassRateWithoutForwardedMailBesideTheRawOne()
+    {
+        // Both, never one instead of the other: receivers act on the raw
+        // figure, and this one says how much of the gap is fixable.
+        var html = await Client().GetStringAsync("/domains/signed.example");
+
+        Assert.Contains("excluding forwarded mail", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TheDomainPageOffersSomewhereToPasteAZoneFile()
     {
         // The one input this application cannot fetch for itself: DNS will not
@@ -713,6 +741,21 @@ public sealed class SeededApp : WebApplicationFactory<Program>
                 <auth_results>
                   <dkim><domain>training.vendor.example</domain><selector>s2</selector><result>pass</result></dkim>
                   <spf><domain>psm.vendor.example</domain><result>pass</result></spf>
+                </auth_results>
+              </record>
+              <!-- A security gateway: it received this domain's mail, added
+                   its banner and sent it on, so the domain's own signature is
+                   still named on the message and no longer verifies. The
+                   envelope is the gateway's, which is what names it. -->
+              <record>
+                <row>
+                  <source_ip>198.51.100.77</source_ip><count>9</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf></policy_evaluated>
+                </row>
+                <identifiers><header_from>signed.example</header_from></identifiers>
+                <auth_results>
+                  <dkim><domain>signed.example</domain><result>fail</result></dkim>
+                  <spf><domain>ipw.inkyphishfence.com</domain><result>fail</result></spf>
                 </auth_results>
               </record>
               <!-- A forwarder, so the estate has all three of the dial's

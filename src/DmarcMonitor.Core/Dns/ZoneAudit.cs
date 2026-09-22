@@ -112,6 +112,18 @@ public sealed record ZoneEvidence
     /// <summary>Selectors the reports have seen signing for this domain, inside the window.</summary>
     public IReadOnlyList<string> SeenSigning { get; init; } = [];
 
+    /// <summary>
+    /// Every domain in the book, for judging the reporting authorizations this
+    /// zone publishes for other people.
+    /// </summary>
+    /// <remarks>
+    /// Empty means the book was not consulted, so nothing is said about them.
+    /// The list is the whole point of the check that uses it: a record
+    /// authorizing a domain nobody is monitoring is either a customer who left
+    /// or a name typed wrongly, and neither is visible from the record alone.
+    /// </remarks>
+    public IReadOnlyList<string> Monitored { get; init; } = [];
+
     /// <summary>True when the reports were consulted at all.</summary>
     public bool ReportsRead { get; init; }
 
@@ -278,7 +290,7 @@ public static class ZoneAudit
 
         Spf(findings, zone, evidence);
         Dkim(findings, zone, evidence);
-        ReportAuthorizations(findings, zone);
+        ReportAuthorizations(findings, zone, evidence);
         Delegation(findings, zone, evidence);
         Cnames(findings, zone);
         Disagreements(findings, zone, evidence);
@@ -686,7 +698,8 @@ public static class ZoneAudit
     /// all. This checks the ones that are in the file; whether every domain
     /// has one is a question about the whole book rather than about this zone.
     /// </remarks>
-    private static void ReportAuthorizations(List<ZoneFinding> findings, ParsedZone zone)
+    private static void ReportAuthorizations(
+        List<ZoneFinding> findings, ParsedZone zone, ZoneEvidence evidence)
     {
         var marker = $"._report._dmarc.{zone.Origin}";
 
@@ -717,6 +730,33 @@ public static class ZoneAudit
                           + "nothing and the reports are never sent.",
                     Fix = $"Publish \"v=DMARC1\" at {record.Name}.",
                     Source = FindingSource.Zone,
+                    Reference = "RFC 7489 §7.1",
+                });
+            }
+
+            // Authorizing a domain nobody here watches. Either a customer
+            // who left, in which case the record is simply stale, or a name
+            // typed wrongly - and a transposed one is invisible in a panel
+            // that shows a column of near-identical rows. Only ever said when
+            // the book was actually consulted.
+            if (evidence.Monitored.Count > 0
+                && authorized.Length > 0
+                && authorized.Contains('.', StringComparison.Ordinal)
+                && !evidence.Monitored.Contains(authorized, StringComparer.OrdinalIgnoreCase))
+            {
+                findings.Add(new ZoneFinding
+                {
+                    Severity = HygieneSeverity.Tidy,
+                    Record = "DMARC",
+                    Name = record.Name,
+                    Line = record.Line,
+                    Problem = $"This authorizes reports for {authorized}, which is not a domain this "
+                            + "install monitors. Either it has left, or the name is not quite the one "
+                            + "that was meant - a transposed domain reads correctly in a column of "
+                            + "near-identical rows, and the domain it was meant for gets no reports.",
+                    Fix = $"Confirm {authorized} is spelled the way the domain actually is. If it is, and "
+                        + "nobody monitors it any more, the record can go.",
+                    Source = FindingSource.ZoneAndReports,
                     Reference = "RFC 7489 §7.1",
                 });
             }

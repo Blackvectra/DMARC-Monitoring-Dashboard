@@ -214,6 +214,190 @@ Exit code is 1 when anything breaking was found, so it can gate a pipeline.
 
 ---
 
+## Retention: what is kept, and for how long
+
+The schema has assumed a retention window since it was written and nothing
+enforced one, so both report tables grew without bound.
+
+    dmarc prune                      # what would go
+    dmarc prune --apply
+    dmarc prune --aggregate-days 400 --forensic-days 30 --apply
+
+`deploy/install.sh` enables `dmarc-prune.timer` from the first day, weekly. The
+window is written into `dmarc-prune.service` where you can read and change it,
+rather than left to a default that could move in a later release.
+
+| class | default | why |
+|---|---|---|
+| aggregate + TLS | **400 days** | thirteen months, so a monthly report always has last year's same month to sit beside; twelve exactly loses it the day it is wanted |
+| forensic | **30 days** | these hold **real message headers** — subject lines, message ids, somebody's mail. Deliberately the shortest window here, and the command refuses a policy where it is the longest |
+
+The floor is 7 days for either: receivers report a day or two late, so anything
+shorter deletes reports about mail that is still arriving and the domain reads
+as quiet.
+
+It is the only thing in this product that deletes a customer's history, so it
+counts before it deletes, deletes inside one transaction, and writes what it
+removed and under which policy to the audit log. **Domains, clients and
+organizations are never touched** — a customer who sent no mail for a year still
+exists, only the reports age out.
+
+SQLite does not hand space back to the filesystem on delete; it reuses the
+pages, so you reach a steady state rather than unbounded growth. To actually
+shrink the file, when there is room for a second copy of it and nothing else is
+using it: `sqlite3 dmarc.db VACUUM`.
+
+Turn it on **before** the collector, not after. A window switched on later
+deletes a year of history in one run, which is a much bigger thing to approve
+than a weekly job that has been quietly ageing reports out all along.
+
+---
+
+## Getting the rows out
+
+    dmarc export --days 7 --failures-only
+    dmarc export --format csv --out book.csv
+    dmarc export --org acme --domain example.com --days 30
+
+The screens here are opinionated, and that is also their limit. "Every address
+that hit these three domains, aligned on SPF only, in a six-hour window" is a
+question no fixed view answers, and it should not need a code change to ask. So
+rather than grow a query language, this hands the rows over in a shape every
+other tool already reads and lets **jq, a spreadsheet, OpenSearch or Splunk be
+the query language**.
+
+Rows go to stdout, so it pipes. Everything it says about itself goes to stderr,
+so that still works when it does:
+
+    dmarc export --days 7 --failures-only | jq -r .source_ip | sort | uniq -c | sort -rn
+
+`--format csv` for a spreadsheet. Fields beginning `=`, `+`, `-` or `@` are
+prefixed with a quote on the way out: these rows carry strings off other
+people's mail, and a header that begins `=cmd` is a real thing to hand somebody
+as a file they will double-click.
+
+### The columns
+
+One row per `aggregate_records` row, with the reporter and the policy that was
+published at the time joined on. Two pairs matter:
+
+| | |
+|---|---|
+| `dkim_aligned` / `spf_aligned` | what the receiver's DMARC evaluation concluded |
+| `dkim_auth` / `spf_auth` | whether the mechanism authenticated at all |
+
+They are separate because a valid signature over the wrong domain is a **pass**
+at authentication and a **fail** at alignment. Collapsing them is what makes
+DMARC data read as a self-contradiction, and an export that did it would carry
+the confusion into whatever you query with.
+
+### Shipping to an index
+
+`--after-id` starts after a row id, and every run prints the one to use next
+time. Rows are never rewritten once stored — a reporter resending a report is
+refused by the dedup key rather than merged — so "everything above the last id I
+shipped" is exactly the new mail:
+
+    dmarc export --after-id "$(cat .watermark)" --out new.ndjson
+    # ...ship new.ndjson, then store the id the run printed
+
+For OpenSearch, `_bulk` wants an action line before each document, and giving it
+`_id` from the row makes a re-run idempotent rather than doubling the data:
+
+    dmarc export --after-id 41232 \
+      | jq -c '{index:{_index:"dmarc",_id:.id}},.' \
+      | curl -s -H 'Content-Type: application/x-ndjson' \
+             --data-binary @- https://opensearch.example/_bulk
+
+That is the supported way to **run both**: keep the retention window here short
+enough that one SQLite file stays quick, and let an index hold the long tail.
+See [COMPARISON.md](COMPARISON.md) for what each side is actually better at.
+
+It opens the database read-only, so it is safe to run while the collector has
+it.
+
+**`--org` is not optional if it matters.** With no organization named it
+exports every one, which is what an operator running it by hand wants and is
+the wrong thing to hand a customer. Two organizations on one install can each
+manage a domain of the same name.
+
+---
+
+## Can each domain's reports actually reach you?
+
+    dmarc reachability
+    dmarc reachability --quiet            # only the domains with something wrong
+    dmarc reachability --domain example.com
+
+Both ways this breaks are silent, which is why it needs a standing check rather
+than a glance at the DNS.
+
+**The authorization record.** When a client's `rua` points at a mailbox in your
+domain, RFC 7489 §7.1 requires *your* domain to publish
+`<client>._report._dmarc.<your-domain>` containing `v=DMARC1`. A receiver that
+checks and finds nothing **declines to send and tells nobody** — so a broken
+customer is indistinguishable from a quiet one. The version is case-sensitive:
+`v=dmarc1` authorizes nothing.
+
+**A mailbox nothing collects.** A domain can publish a perfect DMARC record
+pointing `rua` at an address the collector does not read. Its DNS looks right,
+it produces nothing here, and at `p=reject` it is refusing mail with the
+evidence going somewhere nobody looks.
+
+Run it after onboarding a domain — that is when this breaks. The other half of
+the check lives in `dmarc audit`: given a zone file and the database, it flags
+`_report._dmarc` records authorizing domains you do **not** monitor, which is
+how a transposed name is found. `ndgaa.com` beside `ndgga.com` reads correctly
+in a column of near-identical rows.
+
+---
+
+## Before changing a policy
+
+`dmarc simulate` replays the reports already held against a record you have not
+published, and says what it would cost.
+
+    dmarc simulate --domain example.com --policy quarantine
+    dmarc simulate --domain example.com --adkim r --aspf r      # what relaxing alignment recovers
+    dmarc simulate --domain example.com --days 90
+
+Anything not named keeps what the domain publishes today, so the answer is the
+cost of *the change* rather than of the whole record. It exits non-zero when
+the change would cost mail, so it can gate a script.
+
+```
+  ndaco.org
+    929 message(s) across 24 day(s) of reports, asked for the last 30;
+    9 of them carried a signature the store did not keep, so they are left out
+    now      p=quarantine; adkim=r; aspf=r
+    proposed p=reject; adkim=r; aspf=r
+
+    costs nothing: no message in the reports held would stop passing
+    at p=reject 101 of the 101 failing message(s) would be refused outright
+    of the 819 that pass: 124 on DKIM alone, 2 on SPF alone, 693 on both.
+```
+
+That last line is what answers "can this domain move to `-all`": mail resting
+on DKIM does not care what the SPF all-mechanism says.
+
+Three things it is careful about, because each is a way to produce a confident
+wrong answer:
+
+- **Alignment only counts when the mechanism authenticated.** A signature that
+  names the domain exactly and did not verify is not rescued by relaxing
+  `adkim`. Matching domains by shape instead produced a claim that relaxing
+  alignment on one real domain would recover 17 messages; the true answer was
+  zero.
+- **The baseline is the record in force, not the receivers' verdicts.** `p=`
+  decides what happens to failing mail, never whether it fails, so changing it
+  alone must cost nothing — and measured the other way it appeared to cost 9.
+- **A message the stored row cannot account for is set aside, not counted.** A
+  message can carry several DKIM signatures and the store keeps one. Where
+  replaying the row disagrees with what the receiver did, the receiver is
+  right, the row is excluded from every figure, and the count is stated.
+
+---
+
 ## Fixing what it finds
 
 `dmarc check` says what is wrong with a domain's DNS. `dmarc fix` changes it,

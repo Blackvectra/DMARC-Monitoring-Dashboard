@@ -224,6 +224,8 @@ render_unit dmarc-ingest.service
 render_unit dmarc-ingest.timer
 render_unit dmarc-dns.service
 render_unit dmarc-dns.timer
+render_unit dmarc-prune.service
+render_unit dmarc-prune.timer
 
 systemctl daemon-reload
 echo "  starting dmarc-web"
@@ -236,6 +238,15 @@ systemctl enable --now dmarc-web >/dev/null
 # would be a feature nobody switched on, showing dashes forever.
 echo "  enabling the nightly DNS scan"
 systemctl enable --now dmarc-dns.timer >/dev/null
+
+# Enabled from the first day on purpose. A retention window is easy to start
+# with and painful to retrofit: switched on later it deletes a year of a
+# customer's history in one run, which is a far bigger thing to approve than a
+# weekly job that has been quietly ageing reports out all along. The window it
+# uses is written in dmarc-prune.service, where an operator can read and change
+# it, rather than left to a default that might move in a later release.
+echo "  enabling the weekly retention prune (aggregate 400 days, forensic 30)"
+systemctl enable --now dmarc-prune.timer >/dev/null
 
 ok=false
 for _ in $(seq 1 30); do
