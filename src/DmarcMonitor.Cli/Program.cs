@@ -253,13 +253,22 @@ public static class Program
                                  BINARY back, and years of a customer's history had nothing.
                                  Safe while the collector is running: the copy comes from
                                  SQLite, not the filesystem, so it is a consistent snapshot
-                                 rather than whatever the bytes were mid-write. Every copy
-                                 is opened and integrity-checked before it is trusted, and
-                                 one that fails is deleted rather than left looking good.
+                                 rather than whatever the bytes were mid-write.
+                                 The LIVE database is integrity-checked first, before
+                                 anything is written or removed: a database that has begun
+                                 to corrupt still copies, and the copy verifies, so checking
+                                 only the copy would quietly replace every good backup you
+                                 hold with a copy of the damage. A source that fails stops
+                                 the run - nothing written, nothing pruned, exit 74.
                 --to <dir>       Where to write. Put it on a different disk from --db.
                 --keep <n>       Backups to keep, newest first. Default: 14. Older ones go
                                  only after a new copy has verified, so a failed run never
                                  costs you yesterday's.
+                --quick          Use PRAGMA quick_check on the live database instead of
+                                 integrity_check: ~9x faster, and skips the one part worth
+                                 having - whether each index still agrees with its table.
+                                 The full check is 100ms on 17 MB and 3.8s on 313 MB, so
+                                 this is for much later than you think.
                 --db <path>      Database file. Default: dmarc.db
 
               health             Whether this install is still doing its job. Everything it

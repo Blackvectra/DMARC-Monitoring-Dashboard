@@ -482,10 +482,47 @@ than from the filesystem, so it is a transactionally consistent snapshot — not
 whatever the bytes happened to be mid-write. `cp dmarc.db` is not equivalent:
 in WAL mode it can catch a torn page and a `-wal` file that does not match it.
 
-Every copy is **opened, integrity-checked and counted** before it is trusted,
-and one that fails verification is deleted rather than left looking like a good
-backup. The counts are printed, because "0 reports" in a log has taught you
-something that a silent success would have hidden until a restore.
+### What it checks, and when
+
+**The live database is checked first — before anything is written or removed.**
+
+That ordering is the point. A database that has begun to corrupt still copies,
+and the copy verifies, because it is a faithful copy of damaged pages. Fourteen
+nights later every backup you hold is a copy of the damage and the last good one
+has been pruned away, on schedule, by this very command.
+
+So a source that fails stops the run dead: no copy is written, **nothing is
+pruned**, and it exits 74 so the alert fires the same night. Every backup you
+already had is still there — which is exactly what you restore from.
+
+Three checks, all on the source:
+
+| | Catches | 17 MB | 313 MB |
+|---|---|---|---|
+| `integrity_check` | damaged pages, indexes that disagree with their table | 100 ms | 3.8 s |
+| `foreign_key_check` | records pointing at reports that are gone — not corruption, data that lost its meaning | 14 ms | 6 ms |
+| the copy, re-opened | a copy that did not land correctly | included | included |
+
+`--quick` swaps `integrity_check` for `quick_check` — about nine times faster
+(424 ms vs 3.8 s at 313 MB), and it skips precisely the part worth having:
+whether each index still agrees with its table. On the numbers above you will
+not need it for a very long time.
+
+The counts are printed, because "0 reports" in a log has taught you something
+that a silent success would have hidden until a restore.
+
+### How fast
+
+Measured, not estimated. 313 MB is roughly **thirty years** of a
+seventeen-domain book at its current rate of 177 records a day:
+
+| | 17 MB (today) | 313 MB |
+|---|---|---|
+| whole `dmarc backup` run | **56 ms** | **~5 s** |
+
+The nightly job is not something you will notice. It takes a read lock, so a
+collector writing at the same moment waits rather than fails — the same retry
+that makes two collectors safe.
 
 Retention keeps the newest `--keep` (default 14) and runs **only after a new
 copy has verified**, so a failed run never costs you yesterday's. It matches

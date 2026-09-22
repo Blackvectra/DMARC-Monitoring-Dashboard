@@ -76,8 +76,17 @@ public sealed class BackupService(string databasePath)
     /// How many backups to leave behind, newest first. Must be at least one:
     /// a retention policy that can empty the directory is not one.
     /// </param>
+    /// <param name="quick">
+    /// Use PRAGMA quick_check on the source instead of integrity_check.
+    /// Roughly nine times faster - measured at 424ms against 3.8s on a 313 MB
+    /// database - and it skips exactly the part worth having: whether each
+    /// index still agrees with the table it indexes. Worth reaching for only
+    /// when the full check has actually become too slow to run nightly, which
+    /// on the numbers above is a long way off.
+    /// </param>
     public async Task<BackupResult> RunAsync(
-        string directory, int keep = 14, DateTimeOffset? now = null, CancellationToken ct = default)
+        string directory, int keep = 14, bool quick = false,
+        DateTimeOffset? now = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentOutOfRangeException.ThrowIfLessThan(keep, 1);
@@ -86,6 +95,21 @@ public sealed class BackupService(string databasePath)
         {
             throw new FileNotFoundException($"No database at {_databasePath}.", _databasePath);
         }
+
+        // BEFORE anything is written or removed.
+        //
+        // Checking only the copy - which is what this did at first - leaves the
+        // worse failure uncovered. A database that has begun to corrupt still
+        // copies, and the copy verifies, because it is a faithful copy of
+        // damaged pages. Fourteen nights later every backup held is a copy of
+        // the damage and the last good one has been pruned away, on schedule,
+        // by this service.
+        //
+        // So the source is checked first and a failure stops the run dead:
+        // nothing is written, and - the point - nothing is PRUNED. Whatever
+        // good backups exist stay exactly where they are, and the non-zero
+        // exit puts it in front of somebody the same night.
+        await CheckSourceAsync(quick, ct).ConfigureAwait(false);
 
         Directory.CreateDirectory(directory);
 
@@ -120,6 +144,88 @@ public sealed class BackupService(string databasePath)
 
         return new BackupResult(target, new FileInfo(target).Length, reports, records, removed);
     }
+
+    /// <summary>
+    /// Satisfies itself that the LIVE database is sound before copying it.
+    /// </summary>
+    /// <remarks>
+    /// Read-only, and cheap enough to do every night: 100ms on a 17 MB
+    /// database and 3.8s on a 313 MB one, which is about thirty years of a
+    /// seventeen-domain book. It takes a read lock, so a collector writing at
+    /// the same time waits rather than fails - the same retry that makes two
+    /// collectors safe.
+    /// </remarks>
+    private async Task CheckSourceAsync(bool quick, CancellationToken ct)
+    {
+        try
+        {
+            await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = _databasePath,
+                Mode = SqliteOpenMode.ReadOnly,
+            }.ToString());
+
+            await db.OpenAsync(ct).ConfigureAwait(false);
+
+            await using (var check = db.CreateCommand())
+            {
+                check.CommandText = quick ? "PRAGMA quick_check" : "PRAGMA integrity_check";
+                var answer = (await check.ExecuteScalarAsync(ct).ConfigureAwait(false)) as string;
+
+                if (!string.Equals(answer, "ok", StringComparison.Ordinal))
+                {
+                    throw Corrupt(answer ?? "it gave no answer");
+                }
+            }
+
+            // Cheap - 14ms on the real database, 6ms on a 313 MB one - and it
+            // catches something integrity_check does not look for at all: a
+            // record pointing at a report that is no longer there. That is not
+            // page corruption, it is data that has lost its meaning, and it is
+            // worth knowing before it is copied forward another fourteen nights.
+            await using (var keys = db.CreateCommand())
+            {
+                keys.CommandText = "PRAGMA foreign_key_check";
+                await using var reader = await keys.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+                if (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    var table = reader.IsDBNull(0) ? "a table" : reader.GetString(0);
+                    throw Corrupt($"rows in {table} point at parents that are no longer there");
+                }
+            }
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is Corrupted or NotADatabase)
+        {
+            // SQLite does not always ANSWER an integrity check - damage bad
+            // enough and the check itself fails with SQLITE_CORRUPT. Both mean
+            // the same thing here, and the difference must not leak: unhandled,
+            // this reaches Program.cs's catch-all and is printed under a banner
+            // reading "This is a bug" with a stack trace, when it is a finding
+            // about somebody's disk and has a real answer - restore from the
+            // newest backup, which this run has deliberately not touched.
+            throw Corrupt(ex.Message);
+        }
+    }
+
+    /// <summary>SQLITE_CORRUPT: the file is a database and is damaged.</summary>
+    private const int Corrupted = 11;
+
+    /// <summary>SQLITE_NOTADB: the file is not a database at all.</summary>
+    private const int NotADatabase = 26;
+
+    /// <summary>
+    /// The one message, however the damage announced itself.
+    /// </summary>
+    /// <remarks>
+    /// Read at 03:20 by somebody who has just been paged, so it says what is
+    /// safe before it says what is wrong. The backups already held are the
+    /// whole reason this check runs before the copy rather than after it.
+    /// </remarks>
+    private InvalidDataException Corrupt(string because) =>
+        new($"The database at {_databasePath} did not pass an integrity check: {because}. "
+            + "No backup was taken and nothing was removed, so every backup already held is still "
+            + "there - restore from the newest one rather than letting tonight's run replace it.");
 
     /// <summary>
     /// The copy itself.

@@ -202,6 +202,143 @@ public sealed class BackupServiceTests : IDisposable
         Assert.Single(Directory.GetFiles(_dir, $"{BackupService.Prefix}*{BackupService.Extension}"));
     }
 
+    // ---- the live database is checked BEFORE anything is written or removed ----
+    //
+    // Checking only the copy leaves the worse failure uncovered. A database
+    // that has begun to corrupt still copies, and the copy verifies, because
+    // it is a faithful copy of damaged pages. Fourteen nights later every
+    // backup held is a copy of the damage and the last good one has been
+    // pruned away, on schedule, by this service.
+
+    /// <summary>Corrupts the source the way a bad disk would: by rewriting pages under it.</summary>
+    /// <remarks>
+    /// Two details are load-bearing, and both were found by getting them
+    /// wrong. The WAL is checkpointed first, because rows written and not yet
+    /// checkpointed live in the -wal file and leave the main database small -
+    /// so an offset chosen in advance lands past its last real page, extends
+    /// the file with zeroes, and is ignored. And the offset is computed from
+    /// the file's actual size rather than fixed, so this damages a page that
+    /// is genuinely in use whatever the seed happens to produce.
+    /// </remarks>
+    private async Task CorruptTheSourceAsync()
+    {
+        await using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+
+            // Enough rows to span many pages, so there is a b-tree to damage
+            // rather than only a header. A broken header fails to open at all,
+            // which is a different and much louder failure than this is about.
+            command.CommandText =
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 8000) "
+                + "INSERT INTO aggregate_records "
+                + "(report_id,tenant_id,client_id,domain_id,date_begin,source_ip,message_count,dmarc_result,header_from) "
+                + "SELECT 'r1','t1','c1','d1','2026-09-20 00:00:00','192.0.2.1',1,'pass',"
+                + "'padding-to-make-the-rows-wide-enough-to-span-pages' FROM n;"
+                + "PRAGMA wal_checkpoint(TRUNCATE);";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        SqliteConnection.ClearAllPools();
+
+        var size = new FileInfo(_dbPath).Length;
+        Assert.True(size > 65536, $"the seed did not grow the database enough to damage ({size} bytes)");
+
+        // Two thirds of the way in: past the header and the schema, inside
+        // pages holding rows.
+        await using var file = new FileStream(_dbPath, FileMode.Open, FileAccess.Write);
+        file.Seek(size / 3 * 2, SeekOrigin.Begin);
+        await file.WriteAsync(new byte[16384]);
+        await file.FlushAsync();
+    }
+
+    [Fact]
+    public async Task ACorruptDatabaseIsRefusedAndTheBackupsAlreadyHeldSurvive()
+    {
+        // The whole point. The good copy from before must still be there
+        // afterwards, because it is the one somebody restores from.
+        var good = await Service().RunAsync(_dir, keep: 1, now: new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.Zero));
+        Assert.True(File.Exists(good.Path));
+
+        await CorruptTheSourceAsync();
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => Service().RunAsync(_dir, keep: 1, now: new DateTimeOffset(2026, 9, 2, 0, 0, 0, TimeSpan.Zero)));
+
+        // keep: 1 would have pruned it had the run got that far.
+        Assert.True(File.Exists(good.Path));
+        Assert.Single(Directory.GetFiles(_dir, $"{BackupService.Prefix}*{BackupService.Extension}"));
+    }
+
+    [Fact]
+    public async Task ACorruptDatabaseWritesNoCopyAtAll()
+    {
+        // A copy of a corrupt database is not evidence worth the risk of
+        // somebody later mistaking it for a backup.
+        await CorruptTheSourceAsync();
+
+        var when = new DateTimeOffset(2026, 9, 2, 0, 0, 0, TimeSpan.Zero);
+        await Assert.ThrowsAsync<InvalidDataException>(() => Service().RunAsync(_dir, now: when));
+
+        Assert.False(File.Exists(Path.Combine(_dir, BackupService.NameFor(when))));
+    }
+
+    [Fact]
+    public async Task TheRefusalSaysTheBackupsAreUntouched()
+    {
+        // Read at 03:20 by somebody who has just been paged. It has to say
+        // what is safe, not only what is wrong.
+        await CorruptTheSourceAsync();
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(() => Service().RunAsync(_dir));
+
+        Assert.Contains("nothing was removed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task AHealthyDatabasePassesBothChecks()
+    {
+        // The boundary from the quiet side: the ordinary nightly run must not
+        // start refusing because a check was added.
+        var result = await Service().RunAsync(_dir);
+
+        Assert.NotNull(result.Path);
+        Assert.Equal(2, result.Records);
+    }
+
+    [Fact]
+    public async Task TheQuickCheckAlsoRefusesACorruptDatabase()
+    {
+        await CorruptTheSourceAsync();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => Service().RunAsync(_dir, quick: true));
+    }
+
+    [Fact]
+    public async Task AnOrphanedRecordIsRefusedEvenThoughThePagesAreFine()
+    {
+        // Not page corruption - data that has lost its meaning. A record
+        // pointing at a report that is no longer there passes integrity_check
+        // completely, and is worth knowing before it is copied forward another
+        // fourteen nights.
+        await using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            await db.OpenAsync();
+
+            // Foreign keys off, so the delete leaves the child behind rather
+            // than cascading - which is exactly the state a partial restore or
+            // a hand-edited database arrives in.
+            await using var command = db.CreateCommand();
+            command.CommandText = "PRAGMA foreign_keys=OFF; DELETE FROM aggregate_reports WHERE id = 'r1';";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(() => Service().RunAsync(_dir));
+
+        Assert.Contains("aggregate_records", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task KeepingNoneIsRefused()
     {

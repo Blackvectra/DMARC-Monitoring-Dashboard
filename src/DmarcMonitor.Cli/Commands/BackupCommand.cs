@@ -19,15 +19,16 @@ public static class BackupCommand
 
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
-        if (Args.Reject(args, "--db", "--to", "--keep") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--to", "--keep", "!--quick") is var bad and not 0) { return bad; }
 
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var to = Args.Value(args, "--to");
         var keep = Args.Int(args, "--keep", DefaultKeep);
+        var quick = Args.Flag(args, "--quick");
 
         if (string.IsNullOrWhiteSpace(to))
         {
-            Console.Error.WriteLine("dmarc backup --to <directory> [--keep <n>] [--db <path>]");
+            Console.Error.WriteLine("dmarc backup --to <directory> [--keep <n>] [--quick] [--db <path>]");
             Console.Error.WriteLine();
             Console.Error.WriteLine($"  Writes a verified copy and keeps the newest {DefaultKeep} by default.");
             Console.Error.WriteLine("  Put --to on a different disk from --db, or it protects against");
@@ -44,7 +45,7 @@ public static class BackupCommand
 
         try
         {
-            var result = await new BackupService(dbPath).RunAsync(to, keep, null, ct).ConfigureAwait(false);
+            var result = await new BackupService(dbPath).RunAsync(to, keep, quick, null, ct).ConfigureAwait(false);
 
             Console.WriteLine();
             Console.WriteLine($"  {result.Describe()}");
@@ -64,11 +65,15 @@ public static class BackupCommand
         }
         catch (InvalidDataException ex)
         {
-            // The copy was written and did not verify, so it has been removed.
-            // Non-zero matters: this is what systemd's OnFailure hangs off.
+            // Either the live database failed its check before anything was
+            // written, or the copy failed afterwards and has been deleted.
+            // Both leave the backups already held untouched, and both are
+            // worth waking somebody for - this exit code is what systemd's
+            // OnFailure= hangs off.
             Console.Error.WriteLine();
-            Console.Error.WriteLine($"  Backup failed verification and was deleted: {ex.Message}");
-            Console.Error.WriteLine("  Older backups were left alone.");
+            Console.Error.WriteLine($"  {ex.Message}");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("  Nothing was pruned, so every backup already held is still there.");
             return 74;   // EX_IOERR
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
