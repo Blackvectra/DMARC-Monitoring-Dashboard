@@ -97,3 +97,61 @@ public sealed class PolicyModeLagTests
         Assert.False(domain.IsProtected);
     }
 }
+
+/// <summary>
+/// A mode nobody has verified is not a finding.
+///
+/// The earlier fix made the served policy win where one had been read. It
+/// left the ordinary case alone: on an install that has not scanned DNS -
+/// which is every install until the nightly job first runs, and every copy of
+/// the trial download - there is no served mode, so the page fell back to
+/// what senders had cached and stated it as fact.
+///
+/// That put a domain serving enforce with a seven-day max_age under "in
+/// testing mode, which protects nothing".
+/// </summary>
+public sealed class UnverifiedModeTests
+{
+    private static TlsDomainSummary Domain(string reported, string served = "") =>
+        new()
+        {
+            Domain = "nrgtechservices.com",
+            ClientName = "NRG Tech Services",
+            ClientSlug = "nrg-tech-services",
+            ReportedMode = reported,
+            ServedMode = served,
+        };
+
+    [Fact]
+    public void AModeFromReportsAloneIsNotVerified()
+    {
+        var cached = Domain(reported: "testing");
+
+        Assert.False(cached.ModeVerified);
+
+        // Still shown - it is the only reading there is - but as what it is.
+        Assert.Equal("testing", cached.PolicyMode);
+    }
+
+    [Fact]
+    public void AModeFromTheServedPolicyIsVerified()
+    {
+        var read = Domain(reported: "testing", served: "enforce");
+
+        Assert.True(read.ModeVerified);
+        Assert.Equal("enforce", read.PolicyMode);
+        Assert.True(read.ModeChangedSinceReports);
+    }
+
+    [Fact]
+    public void ReadingItAndFindingTestingIsStillVerified()
+    {
+        var read = Domain(reported: "testing", served: "testing");
+
+        Assert.True(read.ModeVerified);
+        Assert.Equal("testing", read.PolicyMode);
+
+        // Nothing changed, so there is nothing to explain away.
+        Assert.False(read.ModeChangedSinceReports);
+    }
+}

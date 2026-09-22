@@ -16,6 +16,7 @@
 @inject ReportStoreConnection Db
 @inject OrgContext Org
 @inject OnboardingService Onboarding
+@inject DnsStatusService Dns
 @inject NavigationManager Nav
 @rendermode InteractiveServer
 
@@ -94,15 +95,80 @@ else
         across the top rather than four cards down the page, so the shape of
         the estate is one glance rather than a scroll.
     *@
-    <section class="overview">
-        <div class="panel">
-            <h2 class="panel-h">Volume summary, last @_days days</h2>
-            @if (_breakdown is { Total: > 0 })
+    @* Three figures, then the checks, then where the mail came from. The
+       order is the order somebody asks the questions in: how are we doing,
+       why, and who is doing it. *@
+    <section class="scorecards">
+        <div class="score-card">
+            <p class="score-label">Security score</p>
+            <p class="score-n @ScoreClass">@(_score.Known ? _score.Score.ToString(System.Globalization.CultureInfo.InvariantCulture) : "—")<span class="score-unit">@(_score.Known ? "/100" : "")</span></p>
+            <p class="score-band @ScoreClass">@(_score.Known ? _score.Band : "Not scored")</p>
+            @* Never a bare number. Every product in this market puts a score
+               at the top of a dashboard and none of them says what it is
+               made of, which makes it worth nothing to the person reading. *@
+            <p class="score-sub">@_score.Weakest</p>
+            @if (_score.Unassessed.Length > 0)
             {
-                @* What a pass rate cannot say: how much of the mail broke for
-                   a reason the receiver itself called expected, and how much
-                   proved nothing. Only the second is worth an afternoon. *@
-                <Gauge Slices="@Volume()" Bare="true" />
+                @* Said out loud rather than scored as a failure. The two are
+                   not the same thing and the page must not blame a customer
+                   for a reading nobody took. *@
+                <p class="score-sub">@_score.Unassessed <a href="/domains">Read DNS</a></p>
+            }
+        </div>
+
+        <div class="score-card">
+            <p class="score-label">Total email volume</p>
+            <p class="score-n">@_rates.Messages.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)</p>
+            <p class="score-sub">messages reported in the last @_days days@(_breakdown is { Total: > 0 } ? $", across {_active} sending domain(s)" : "")</p>
+        </div>
+
+        <div class="score-card">
+            <p class="score-label">DMARC compliance rate</p>
+            <p class="score-n @RateClass(_rates.DmarcRate)">@Pct(_rates.DmarcRate)</p>
+            <p class="score-sub">
+                @if (_rates.HasMail)
+                {
+                    @($"{_rates.DmarcPass:N0} of {_rates.Messages:N0} messages authenticated and aligned")
+                }
+                else
+                {
+                    @("No mail reported in this window.")
+                }
+            </p>
+        </div>
+    </section>
+
+    <section class="overview two">
+        <div class="panel">
+            <h2 class="panel-h">Authentication results, last @_days days</h2>
+            @if (_rates.HasMail)
+            {
+                @* SPF and DKIM are what the checks said; DMARC is what the
+                   checks said AND whether they were about the domain in the
+                   From line a person reads. The gap between them is the
+                   finding, which is why they are one panel and not three. *@
+                <div class="authrow">
+                    @foreach (var (label, rate, note) in Checks())
+                    {
+                        <div class="auth">
+                            <div class="auth-top">
+                                <span class="auth-label">@label</span>
+                                <span class="auth-pct @RateClass(rate)">@Pct(rate)</span>
+                            </div>
+                            <div class="auth-bar"><span class="@RateClass(rate)" style="width:@Chart.Percent(rate)"></span></div>
+                            <p class="auth-note">@note</p>
+                        </div>
+                    }
+                </div>
+
+                @if (_rates.DmarcRate < Math.Max(_rates.SpfRate, _rates.DkimRate) - 20)
+                {
+                    <p class="auth-gap">
+                        Mail is passing its checks and failing DMARC, which means the checks are
+                        about a different domain from the one recipients see.
+                        <a href="/sources">Which senders</a>
+                    </p>
+                }
             }
             else
             {
@@ -110,9 +176,116 @@ else
             }
         </div>
 
-        @* Stacked into one narrow column so the whole overview stays a single
-           row. Two bare counts side by side would take the width the tables
-           either side of them need. *@
+        <div class="panel">
+            <h2 class="panel-h">Outbound email overview</h2>
+            @if (_breakdown is { Total: > 0 })
+            {
+                <Gauge Slices="@Volume()" Bare="true" />
+                <ul class="outbound">
+                    <li><span class="dot fine"></span> <b>DMARC capable</b> — authenticated and aligned, delivered as you intended</li>
+                    <li><span class="dot watch"></span> <b>Forwarded</b> — the receiver broke the signature itself and said so</li>
+                    <li><span class="dot urgent"></span> <b>Threats / unknown</b> — proved nothing, and nothing explains it</li>
+                </ul>
+            }
+            else
+            {
+                <p class="muted">No mail reported in this window.</p>
+            }
+        </div>
+    </section>
+
+    <section class="overview two">
+        <div class="panel">
+            <h2 class="panel-h">Top sending sources</h2>
+            @if (_hosts.Count > 0)
+            {
+                <table class="mini">
+                    <thead>
+                        <tr><th>Source</th><th class="num">Volume</th><th class="num">DMARC</th><th class="num">SPF</th><th class="num">DKIM</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var h in _hosts)
+                        {
+                            <tr>
+                                <td>
+                                    @* The name if there is one. Nobody
+                                       recognises an address. *@
+                                    @if (h.IsNamed)
+                                    {
+                                        <a href="/sources/@h.SourceIp"><span class="src-name">@h.ReverseName</span></a>
+                                        <span class="src-ip">@h.SourceIp</span>
+                                    }
+                                    else
+                                    {
+                                        <a href="/sources/@h.SourceIp"><code>@h.SourceIp</code></a>
+                                    }
+                                </td>
+                                <td class="num">@h.Messages.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)</td>
+                                <td class="num @RateClass(h.DmarcRate)">@Pct(h.DmarcRate)</td>
+                                <td class="num">@Pct(h.SpfRate)</td>
+                                <td class="num">@Pct(h.DkimRate)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+            else
+            {
+                <p class="muted">No sending sources in this window.</p>
+            }
+        </div>
+
+        <div class="panel">
+            <h2 class="panel-h">Top threat / unknown / unaligned sources</h2>
+            @if (_threats.Count > 0)
+            {
+                <table class="mini">
+                    <thead>
+                        <tr><th>Source</th><th>Sent as</th><th class="num">Messages</th><th>Also seen</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var t in _threats)
+                        {
+                            <tr>
+                                <td>
+                                    @if (t.IsNamed)
+                                    {
+                                        <a href="/sources/@t.SourceIp"><span class="src-name">@t.ReverseName</span></a>
+                                        <span class="src-ip">@t.SourceIp</span>
+                                    }
+                                    else
+                                    {
+                                        <a href="/sources/@t.SourceIp"><code>@t.SourceIp</code></a>
+                                    }
+                                </td>
+                                <td><code>@t.Domain</code></td>
+                                <td class="num">@t.Messages.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)</td>
+                                @* One customer's nuisance against several is
+                                   a campaign, and that is worth telling the
+                                   rest of the book about. *@
+                                <td>@(t.OtherClients > 0 ? $"{t.OtherClients} other client(s)" : "—")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+                <p class="panel-sub">
+                    Never authenticated for the domain in this window. A source that passes even
+                    once is your own mail path and is not listed here.
+                </p>
+            }
+            else
+            {
+                <p class="muted">Nothing sent as these domains without authenticating. That is the good answer.</p>
+            }
+        </div>
+    </section>
+
+    <section class="overview two">
+        <div class="panel">
+            <h2 class="panel-h">Sending services, by the domain they authenticate for</h2>
+            <SourceRates Sources="_sources" NotShown="@Math.Max(0, _sourceCount - _sources.Count)" />
+        </div>
+
         <div class="panel-stack">
             <div class="panel panel-figure">
                 <h2 class="panel-h">Active domains</h2>
@@ -127,11 +300,6 @@ else
                    DMARC record nobody is watching. *@
                 <p class="panel-sub">no mail seen — still worth a policy</p>
             </div>
-        </div>
-
-        <div class="panel">
-            <h2 class="panel-h">Source compliance rates</h2>
-            <SourceRates Sources="_sources" NotShown="@Math.Max(0, _sourceCount - _sources.Count)" />
         </div>
     </section>
 
@@ -279,6 +447,10 @@ else
     private VolumeBreakdown? _breakdown;
     private IReadOnlyList<SourceCompliance> _sources = [];
     private int _sourceCount;
+    private AuthenticationRates _rates = new();
+    private IReadOnlyList<SendingHost> _hosts = [];
+    private IReadOnlyList<ThreatSource> _threats = [];
+    private PostureScore _score = new();
     private int _active;
     private int _inactive;
     private IReadOnlyDictionary<string, IReadOnlyList<DayPoint>> _sparks =
@@ -383,6 +555,55 @@ else
                 new Slice("forwarded or overridden", _breakdown.Overridden, "watch"),
                 new Slice("unauthenticated", _breakdown.Unauthenticated, "urgent"),
             ];
+
+    /// <summary>
+    /// The three checks, in the order they are worth reading.
+    /// </summary>
+    /// <remarks>
+    /// DMARC last and not first, although it is the one that matters, because
+    /// the note under it only makes sense once the two above have been read.
+    /// </remarks>
+    private IReadOnlyList<(string Label, double Rate, string Note)> Checks() =>
+    [
+        ("SPF", _rates.SpfRate, "the sending server was authorised by the envelope domain"),
+        ("DKIM", _rates.DkimRate, "the signature verified"),
+        ("DMARC", _rates.DmarcRate, "one of those passed AND matched the domain recipients see"),
+    ];
+
+    /// <summary>
+    /// A percentage written the same way everywhere, and invariantly.
+    /// </summary>
+    /// <remarks>
+    /// Invariant because a machine whose locale uses a comma would print
+    /// "98,4%", which is not wrong so much as it is a different number to a
+    /// reader who does not know the locale. See Chart.Percent for the same
+    /// rule applied to CSS widths, where the consequence is worse.
+    /// </remarks>
+    private static string Pct(double rate) =>
+        rate.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+    /// <summary>
+    /// The colour of a rate, on the same thresholds the report uses.
+    /// </summary>
+    /// <remarks>
+    /// 95 is where a client report stops calling a domain healthy, so a
+    /// dashboard that turned green at 90 would be disagreeing with the
+    /// document sent to the customer.
+    /// </remarks>
+    private static string RateClass(double rate) => rate switch
+    {
+        >= ClientReport.HealthyPassRate => "fine",
+        >= 80 => "watch",
+        _ => "urgent",
+    };
+
+    private string ScoreClass => !_score.Known ? "" : _score.Score switch
+    {
+        >= 90 => "fine",
+        >= 70 => "ontrack",
+        >= 45 => "watch",
+        _ => "urgent",
+    };
 
     /// <summary>The estate split by how much attention each domain needs.</summary>
     /// <remarks>
@@ -494,6 +715,32 @@ else
             _sources = [.. sources.Take(shown)];
 
             (_active, _inactive) = await Series.DomainActivityAsync(_days, tenant, client);
+
+            _rates = await Series.RatesAsync(days: _days, tenantId: tenant, clientSlug: client);
+            _hosts = await Series.HostsAsync(days: _days, top: 8, tenantId: tenant, clientSlug: client);
+            _threats = await Series.ThreatsAsync(days: _days, top: 8, tenantId: tenant, clientSlug: client);
+
+            // The transport half of the score comes from what each domain
+            // actually serves, which is a DNS reading rather than anything in
+            // the reports. Where nothing has read DNS yet it counts as zero -
+            // not knowing is not the same as enforcing, and scoring it as
+            // enforcing would be the dashboard flattering an install that has
+            // never looked.
+            var dns = await Dns.GetAsync(tenant, client);
+
+            // Scored from what is already on the page rather than from a
+            // second pass over the data, so the number at the top and the
+            // panels under it cannot disagree.
+            var scoped = Scoped;
+            _score = PostureScore.For(
+                enforcing: scoped.Count(r => r.Policy is "reject" or "quarantine"),
+                domains: scoped.Count,
+                reporting: _active,
+                tlsEnforcing: scoped.Count(r =>
+                    dns.TryGetValue(r.Domain, out var read)
+                    && read.MtaStsMode.Equals("enforce", StringComparison.OrdinalIgnoreCase)),
+                rates: _rates,
+                dnsRead: scoped.Count(r => dns.ContainsKey(r.Domain)));
         }
         catch (Exception)
         {

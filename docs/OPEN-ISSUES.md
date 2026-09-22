@@ -10,6 +10,28 @@ says, not in whether it runs, and only real mail flows expose them.**
 
 ---
 
+## Fixed since this was written
+
+Six, all found by looking at real screens with real data rather than by the
+test suite — every one of them the product stating something it had not
+established.
+
+| | what it did | what it does now |
+|---|---|---|
+| **10c** | a new release opened empty, and a database carried across failed page by page | migrates itself in local trial mode, says what to run everywhere else |
+| **Security score** | "10 of the 10 points lost to domains not requiring TLS" on an install that had never read DNS, while two of those domains served `enforce` | transport is scored only where DNS has been read, and the score says when it is not counting it |
+| **TLS reports** | printed the mode senders had CACHED as the mode in force, so a domain serving `enforce` appeared under "in testing mode, which protects nothing" | an unverified mode is labelled as what senders had, drawn in no colour, and never counted into the warning |
+| **Fix page** | offered a CNAME pointing a domain's MTA-STS at this app, under "No policy has been created yet", for a domain already serving `enforce` — following it would have replaced a working policy with a testing one | a domain serving its own reachable policy is recognised as such; nothing is offered and the page says what is already there |
+| **Client report** | the failure causes double-counted a message that passed both checks without aligning: 9 + 6 + 94 where the truth was 4 + 1 + 5 + 94 | the four causes are mutually exclusive, and "both checks passed, neither aligned" is its own row |
+| **Any mistyped URL** | 404 with a zero-byte body: a white page with no layout and no way back | the not-found page, with the layout around it |
+
+The last one had middleware in place that did nothing: with no explicit
+`UseRouting()` the framework inserts routing at the top of the pipeline, so by
+the time a 404 came back up, routing had already happened and re-executing only
+changed the path. Nothing routed it again.
+
+---
+
 ## 1. Ingest has never been run against a real mailbox
 
 **Area** `src/DmarcMonitor.Core/Graph/`, `src/DmarcMonitor.Cli/Commands/IngestCommand.cs`
@@ -436,7 +458,7 @@ protection.
 
 ---
 
-## 10c. Upgrading the Windows download looks like it lost your data
+## 10c. Upgrading the Windows download looks like it lost your data — FIXED
 
 **Area** `src/DmarcMonitor.Web/FirstRun.cs`, `deploy/windows-trial/README.txt`
 **Severity** High for the trial, which is the copy people form an opinion from.
@@ -471,15 +493,15 @@ The whole procedure today, none of which is written down:
 3. run `dmarc.exe init-db` there once,
 4. start it.
 
-**How to fix.** Have the application recognise on startup a database that is
-ours but behind the schema this build expects, and in local trial mode bring it
-up to date itself, logging each migration the way `init-db` prints them. Not on
-a server: migrating somebody's production database because a service restarted
-is a decision an operator makes, and `update.sh` already makes it explicitly.
-Where it will not migrate, it should say what to run rather than leave the
-pages to fail one by one. The README should also tell somebody upgrading to
-bring the database with them, since a folder per version is otherwise a
-reasonable thing to assume is disposable.
+**Fixed.** The application now recognises a database that is ours but behind
+the schema this build expects. In local trial mode it applies the migrations
+itself and logs each one; anywhere else it does not, and says which command
+will, because migrating a production database because a service restarted is a
+decision an operator makes and `update.sh` already makes it explicitly. A
+database from a NEWER build is named rather than touched, and one whose schema
+cannot be read is left alone. Proved against the NRG database at schema `0008`,
+nine migrations behind, carried to `0017` with its 1,652 reports intact. The
+trial README carries the three steps for bringing a database to a new version.
 
 ## 11. The apply path has never written to a real zone
 
@@ -530,6 +552,56 @@ Not built, and known: SPF flattening, DKIM publication, MTA-STS and TLS-RPT
 records, and BIMI. The `dns_change_plans` CHECK constraint already admits
 them. Removing an include on the strength of "no mail seen from it" is
 deliberately not plannable and should stay that way.
+
+## 12. Nothing tells anybody what it found
+
+**Area** the whole product
+**Severity** High for a managed service, and the largest single gap in it.
+
+Every finding on every page is computed when somebody opens the page. There is
+no findings table, so nothing has an owner, a status, a due date or a history,
+and nothing can be acknowledged, assigned, suppressed or closed. A sender
+awaiting the customer's confirmation, a DNS drift event, a remediation item and
+an alert are the same row with different types, and that row does not exist.
+
+The consequences, in the order they will be felt:
+
+- **No alerting.** Email, Slack and webhooks are all absent; the only
+  notification anywhere is a systemd unit that fires when the collector stops.
+  A real finding is learned about by opening the app.
+- **No DNS drift detection.** `dns_snapshots` is content-addressed, so a
+  change is already a new row, and `dns_drift_events` is a table nothing
+  writes to. The data for the product's best differentiator is being collected
+  and not read.
+- **Sender classification is not remembered.** It is good, and it is computed
+  per report: nothing can be confirmed as approved, given a business owner, or
+  marked as an exception with a review date.
+
+See `docs/MSP-PLATFORM.md` for how this sits against what an MSP platform is
+expected to be. It is one table and the workflow on top of it, and four of the
+brief's ten Phase 1 items collapse into it.
+
+## 13. The client report is one document, and it is HTML
+
+**Area** `src/DmarcMonitor.Core/Reporting/ClientReportRenderer.cs`
+**Severity** Medium. It is the monthly deliverable.
+
+The report now carries a posture summary, a classified sender inventory, the
+failure causes, per-domain enforcement readiness and a remediation register
+with an owner and a definition of done for each item. What it does not have:
+
+- **PDF.** It prints, and the browser owns its header and footer — the date,
+  the tab title and `localhost:5000` across the bottom of a document sent to a
+  paying customer. No stylesheet can suppress them. Rendering server-side is
+  what removes the need to tell somebody to turn headers off in the print
+  dialog.
+- **One report, not three.** The brief asks for an executive report, a
+  technical report and a QBR; this is one document that sits between the first
+  two.
+- **No CSV appendix.** `dmarc export` writes the raw data, which is not the
+  same as a workbook of the report's own tables.
+- **Nothing schedules or keeps it.** Generated on demand, never stored, so
+  there is no history of what was sent to whom.
 
 ## 8. Smaller things
 

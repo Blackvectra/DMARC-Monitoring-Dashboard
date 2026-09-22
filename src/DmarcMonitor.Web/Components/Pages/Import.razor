@@ -1,5 +1,6 @@
 @page "/import"
 @using DmarcMonitor.Core.Ingest
+@using DmarcMonitor.Core.Storage
 @using DmarcMonitor.Core.Tenancy
 @using DmarcMonitor.Web.Auth
 @using DmarcMonitor.Web.Data
@@ -79,6 +80,23 @@ else
             </div>
         </div>
 
+        @* Offered rather than assumed, and explained, because one half of it
+           is permanent. Ticked by default: an import of a real mailbox
+           arrives with seventeen domains in it, and leaving all seventeen in
+           Unassigned means creating seventeen clients by hand to reach the
+           grouping the import already knew. *@
+        <label class="check">
+            <input type="checkbox" @bind="_fileNewDomains" disabled="@_running" />
+            <span>
+                <strong>File each new domain under a client of its own</strong>
+                <span class="check-note">
+                    Named after the domain, which you can change afterwards. A subdomain joins its
+                    parent's client rather than starting another. The slug goes into report filenames
+                    and cannot be changed later.
+                </span>
+            </span>
+        </label>
+
         @if (_running)
         {
             <div class="form-row">
@@ -148,6 +166,43 @@ else
             </section>
         }
 
+        @if (_filed is { DidAnything: true })
+        {
+            <section class="callout fine">
+                <h2>@_filed.NewClients client(s) created, @_filed.Filed.Count domain(s) filed</h2>
+                <ul class="filed">
+                    @foreach (var item in _filed.Filed.Take(20))
+                    {
+                        <li>
+                            <code>@item.Domain</code> &rarr; @item.Name
+                            @if (item.Existing)
+                            {
+                                <span class="muted">(joined an existing client)</span>
+                            }
+                        </li>
+                    }
+                </ul>
+                @if (_filed.Filed.Count > 20)
+                {
+                    <p class="sub">and @(_filed.Filed.Count - 20) more.</p>
+                }
+                <p class="sub">Rename any of them on the <a href="clients">Clients</a> page.</p>
+            </section>
+        }
+
+        @if (_filed is { Skipped.Count: > 0 })
+        {
+            <section class="callout watch">
+                <h2>@_filed.Skipped.Count domain(s) were left for you to file</h2>
+                <ul class="filed">
+                    @foreach (var item in _filed.Skipped.Take(10))
+                    {
+                        <li><code>@item.Domain</code> — @item.Skipped</li>
+                    }
+                </ul>
+            </section>
+        }
+
         @if (_unassigned.Count > 0)
         {
             <section class="callout act">
@@ -182,6 +237,8 @@ else
     private ImportResult? _result;
     private string? _problem;
     private IReadOnlyList<string> _unassigned = [];
+    private bool _fileNewDomains = true;
+    private FilingResult? _filed;
     private CancellationTokenSource? _cts;
     private OrganizationAccess? _access;
 
@@ -255,6 +312,19 @@ else
             });
 
             _result = await import(progress, _cts.Token);
+
+            // After the reports are stored, so the domains it files are the
+            // ones this import just discovered.
+            _filed = _fileNewDomains && _result.Stored > 0
+                ? await Importer.FileNewDomainsAsync(Organization, _access?.TenantId, _cts.Token)
+                : null;
+
+            if (_filed is { DidAnything: true })
+            {
+                await Audit.RecordAsync(_access?.Current?.Id, _access?.User ?? "", "clients.filed",
+                    $"{_filed.NewClients} client(s) created for {_filed.Filed.Count} domain(s) on import");
+            }
+
             _unassigned = await Importer.GetUnassignedDomainsAsync(_access?.TenantId);
             if (_result.Stored > 0)
             {

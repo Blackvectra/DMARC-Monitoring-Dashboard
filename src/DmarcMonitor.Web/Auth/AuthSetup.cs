@@ -40,6 +40,20 @@ public static class AuthSetup
     public static bool LocalModeAllowedRemotely(IConfiguration configuration) =>
         configuration.GetValue("Auth:AllowLocalModeRemotely", false);
 
+    /// <summary>
+    /// The copy somebody downloaded and double-clicked: no sign-in configured,
+    /// and not permitted beyond loopback.
+    /// </summary>
+    /// <remarks>
+    /// Neither question on its own is enough, and the pair keeps being needed
+    /// by things that are not authentication - whether to redirect to HTTPS,
+    /// whether to open a browser, whether the database in this folder may be
+    /// brought up to date without asking. It lives here because this is where
+    /// both halves are defined; everything else asks rather than re-deciding.
+    /// </remarks>
+    public static bool IsLocalTrial(IConfiguration configuration) =>
+        !IsEntraConfigured(configuration) && !LocalModeAllowedRemotely(configuration);
+
     public static void AddAppAuthentication(this WebApplicationBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);

@@ -44,12 +44,22 @@ public static class ClientReportRenderer
 
         Header(html, report);
         Summary(html, summary);
+        Posture(html, report);
         Trend(html, report);
         Domains(html, report);
+
+        // The classified overview, then the three tables it summarises. A
+        // reader who wants the answer stops at the first; one who disbelieves
+        // it reads the rest, and that is the order those two arrive in.
+        Inventory(html, report);
         Impersonation(html, report);
         Misconfigured(html, report);
         Legitimate(html, report);
+        Retired(html, report);
+
+        WhyFailed(html, report);
         Changes(html, report);
+        Register(html, report);
         Overridden(html, report);
         Footer(html, report);
 
@@ -205,7 +215,7 @@ public static class ClientReportRenderer
               <p class="note">A domain is <strong>protected</strong> once mail that fails the checks is
               refused or sent to junk by the receiving provider. Until then it is only being watched.</p>
               <table>
-                <thead><tr><th>Domain</th><th>Status</th><th class="n">Messages</th><th class="n">Not yours</th><th class="n">Genuinely yours</th></tr></thead>
+                <thead><tr><th>Domain</th><th>Status</th><th class="n">Messages</th><th class="n">Not yours</th><th class="n">Genuinely yours</th><th>Ready to protect?</th></tr></thead>
                 <tbody>
 
             """);
@@ -242,6 +252,7 @@ public static class ClientReportRenderer
                       <td class="n">{N(d.Messages)}</td>
                       <td class="n">{E(failing)}</td>
                       <td class="n">{E(rate)}</td>
+                      <td>{E(d.Readiness)}<br><span class="note">{E(d.ReadinessReason)}</span></td>
                     </tr>
 
                 """);
@@ -280,6 +291,255 @@ public static class ClientReportRenderer
 
             """);
     }
+
+    /// <summary>
+    /// The figures a decision gets made on, before any table.
+    /// </summary>
+    /// <remarks>
+    /// Written for somebody who will read this page and nothing else. Every
+    /// one of them is a number they could be asked about in a meeting: how
+    /// much of our mail is provably ours, how much of the estate is actually
+    /// protected, how much we cannot account for, and whether that is better
+    /// or worse than last month.
+    /// </remarks>
+    private static void Posture(StringBuilder html, ClientReport report)
+    {
+        if (report.Messages == 0) { return; }
+
+        var enforcing = report.Domains.Count(d => d.IsEnforcing);
+        var ready = report.Domains.Count(d => d.Readiness is "Ready");
+        var unproven = report.ImpersonatingSources.Sum(s => s.Failing);
+
+        // Stated as a direction rather than a delta where there is nothing to
+        // compare against: "+0.0 points" on a first report is a claim about a
+        // month nobody measured.
+        var change = report.HasComparison
+            ? $"{(report.PassRate >= report.PreviousPassRate ? "+" : "")}{N(report.PassRate - report.PreviousPassRate)} points against {E(report.Period.PreviousLabel)}"
+            : "First report for this client, so there is nothing to compare against yet.";
+
+        html.Append(CultureInfo.InvariantCulture, $"""
+            <section>
+              <h2>Where you stand</h2>
+              <div class="posture">
+                <div class="fig">
+                  <span class="fig-n {(report.PassRate >= ClientReport.HealthyPassRate ? "ok" : "bad")}">{N(report.PassRate)}%</span>
+                  <span class="fig-l">of your mail is provably yours</span>
+                  <span class="fig-s">{N(report.Passing)} of {N(report.Messages)} message(s)</span>
+                </div>
+                <div class="fig">
+                  <span class="fig-n">{N(enforcing)} of {N(report.Domains.Count)}</span>
+                  <span class="fig-l">domain(s) protected</span>
+                  <span class="fig-s">{(enforcing == report.Domains.Count
+                      ? "Every domain asks receivers to act on mail that fails."
+                      : $"The rest are being watched only. {N(ready)} could be raised now.")}</span>
+                </div>
+                <div class="fig">
+                  <span class="fig-n {(unproven > 0 ? "bad" : "ok")}">{N(unproven)}</span>
+                  <span class="fig-l">message(s) nobody can account for</span>
+                  <span class="fig-s">{(unproven > 0
+                      ? "Sent using your domain name with no proof of entitlement."
+                      : "Nothing sent as you without proving it.")}</span>
+                </div>
+                <div class="fig">
+                  <span class="fig-n">{(report.HasComparison ? N(report.PreviousPassRate) + "%" : "&mdash;")}</span>
+                  <span class="fig-l">last month</span>
+                  <span class="fig-s">{E(change)}</span>
+                </div>
+              </div>
+            </section>
+
+            """);
+    }
+
+    /// <summary>
+    /// Every sender under the heading it belongs to, counted.
+    /// </summary>
+    /// <remarks>
+    /// The part of this document that is worth the most and takes the least
+    /// reading. A list of addresses and percentages is data; "four of these
+    /// are yours and correct, one is yours and broken, two nobody can account
+    /// for" is a thing a person can answer, and the answer is what the tables
+    /// under it are for.
+    /// </remarks>
+    private static void Inventory(StringBuilder html, ClientReport report)
+    {
+        if (report.Sources.Count == 0) { return; }
+
+        html.Append("""
+            <section>
+              <h2>Everything sending as you, grouped</h2>
+              <p class="note">Each row is a group of senders. The tables after this one name them.</p>
+              <table>
+                <thead><tr><th>Group</th><th class="n">Senders</th><th class="n">Messages</th><th>What it means</th></tr></thead>
+                <tbody>
+
+            """);
+
+        foreach (var (which, meaning, css) in Groups())
+        {
+            var rows = report.InventoryOf(which);
+            if (rows.Count == 0) { continue; }
+
+            html.Append(CultureInfo.InvariantCulture, $"""
+                    <tr class="{css}">
+                      <td>{E(Label(which))}</td>
+                      <td class="n">{N(rows.Count)}</td>
+                      <td class="n">{N(rows.Sum(r => r.Messages))}</td>
+                      <td>{E(meaning)}</td>
+                    </tr>
+
+                """);
+        }
+
+        html.Append("    </tbody>\n  </table>\n</section>\n\n");
+    }
+
+    private static string Label(SenderClass which) => which switch
+    {
+        SenderClass.Approved => "Yours, and correct",
+        SenderClass.Misconfigured => "Yours, and needs correcting",
+        SenderClass.Unidentified => "Unrecognised, at a known provider",
+        SenderClass.Suspicious => "Unrecognised entirely",
+        _ => "Stopped sending",
+    };
+
+    private static (SenderClass Which, string Meaning, string Css)[] Groups() =>
+    [
+        (SenderClass.Approved, "Authenticating correctly. Nothing to do.", "ok"),
+        (SenderClass.Misconfigured, "Real mail of yours, set up in a way that does not prove it. This is the mail most likely to go missing.", "warn"),
+        (SenderClass.Unidentified, "Never proved entitled, but run by a service provider we recognise. Usually a tool somebody signed up for. Worth confirming.", "warn"),
+        (SenderClass.Suspicious, "Never proved entitled, and nothing identifies the operator.", "bad"),
+        (SenderClass.Retired, "Sent last month and not this one. Either retired, or it stopped working quietly.", "rest"),
+    ];
+
+    /// <summary>
+    /// Senders that stopped, which no report listing what sent mail can show.
+    /// </summary>
+    private static void Retired(StringBuilder html, ClientReport report)
+    {
+        var gone = report.InventoryOf(SenderClass.Retired);
+        if (gone.Count == 0) { return; }
+
+        html.Append("""
+            <section>
+              <h2>Stopped sending since last month</h2>
+              <p class="note">Not a fault, and worth a look. Either one of these was retired and is still
+              authorised to send as you, or it stopped working and nothing failed loudly enough to notice.</p>
+              <table>
+                <thead><tr><th>Sender</th><th>Was sending as</th></tr></thead>
+                <tbody>
+
+            """);
+
+        foreach (var s in gone.Take(10))
+        {
+            html.Append(CultureInfo.InvariantCulture, $"""
+                    <tr class="rest">
+                      <td>{Source(s)}</td>
+                      <td class="mono">{E(string.Join(", ", s.Domains))}</td>
+                    </tr>
+
+                """);
+        }
+
+        html.Append("    </tbody>\n  </table>\n</section>\n\n");
+    }
+
+    /// <summary>
+    /// The failures split by cause.
+    /// </summary>
+    /// <remarks>
+    /// One red total is a number to worry about and nothing else. Split, it is
+    /// three different afternoons - and two of them usually belong to somebody
+    /// other than the reader.
+    /// </remarks>
+    private static void WhyFailed(StringBuilder html, ClientReport report)
+    {
+        var causes = report.FailureCauses;
+        if (causes.Count == 0) { return; }
+
+        html.Append("""
+            <section>
+              <h2>Why mail failed</h2>
+              <table>
+                <thead><tr><th>Cause</th><th class="n">Messages</th><th>What it is</th></tr></thead>
+                <tbody>
+
+            """);
+
+        foreach (var (cause, messages, meaning) in causes)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"""
+                    <tr>
+                      <td>{E(cause)}</td>
+                      <td class="n">{N(messages)}</td>
+                      <td>{E(meaning)}</td>
+                    </tr>
+
+                """);
+        }
+
+        html.Append("    </tbody>\n  </table>\n</section>\n\n");
+    }
+
+    /// <summary>
+    /// What to do, who it belongs to, and what finishing it looks like.
+    /// </summary>
+    /// <remarks>
+    /// A report that ends in "consider moving to p=reject" ends in nothing.
+    /// Ordered so that mail which is not arriving comes before mail that might
+    /// not arrive, and raising a policy comes last: told first, an MSP breaks
+    /// a customer's invoicing and stops trusting the document.
+    /// </remarks>
+    private static void Register(StringBuilder html, ClientReport report)
+    {
+        var items = report.Remediation;
+        if (items.Count == 0)
+        {
+            html.Append("""
+                <section>
+                  <h2>What to do next</h2>
+                  <p class="good">Nothing. Every domain is enforcing, its own mail is arriving, and no
+                  sender needs correcting.</p>
+                </section>
+
+                """);
+            return;
+        }
+
+        html.Append("""
+            <section>
+              <h2>What to do next</h2>
+              <table class="register">
+                <thead><tr><th>Priority</th><th>Finding</th><th>Why it matters</th><th>What to do</th><th>Who</th><th>Done when</th></tr></thead>
+                <tbody>
+
+            """);
+
+        foreach (var item in items)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"""
+                    <tr class="{Priority(item.Priority)}">
+                      <td>{E(item.Priority)}</td>
+                      <td>{E(item.Finding)}</td>
+                      <td>{E(item.Impact)}</td>
+                      <td>{E(item.Action)}</td>
+                      <td>{E(item.Owner)}</td>
+                      <td>{E(item.Validation)}</td>
+                    </tr>
+
+                """);
+        }
+
+        html.Append("    </tbody>\n  </table>\n</section>\n\n");
+    }
+
+    private static string Priority(string priority) => priority switch
+    {
+        "Critical" => "bad",
+        "High" => "warn",
+        _ => "",
+    };
 
     private static void Impersonation(StringBuilder html, ClientReport report)
     {
@@ -621,12 +881,34 @@ public static class ClientReportRenderer
         tr.warn td:first-child { border-left:3px solid var(--warn); }
         tr.bad td:first-child { border-left:3px solid var(--bad); }
         tr.rest td { color:var(--muted); font-style:italic; }
+        /* The figures a decision gets made on. Four across on a screen, two
+           on paper, because a printed report is narrower than it looks. */
+        .posture { display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin-top:6px; }
+        .fig {
+            border:1px solid var(--line); border-radius:8px; padding:14px 16px; min-width:0;
+        }
+        .fig-n { display:block; font-size:26px; font-weight:650; letter-spacing:-.02em; line-height:1.1; }
+        .fig-n.ok { color:var(--ok); }
+        .fig-n.bad { color:var(--bad); }
+        .fig-l { display:block; font-size:13px; margin-top:4px; }
+        .fig-s { display:block; font-size:12px; color:var(--muted); margin-top:5px; line-height:1.45; }
+
+        /* Six columns of sentences. Smaller, and left alone to wrap. */
+        table.register { font-size:12.5px; }
+        table.register td { vertical-align:top; line-height:1.45; }
+        table.register td:first-child { white-space:nowrap; font-weight:600; }
+
+        @media (max-width:720px) {
+          .posture { grid-template-columns:repeat(2, 1fr); }
+        }
+
         .explainer { background:#f6f7f9; padding:20px 24px; border-radius:8px; font-size:14px; }
         .explainer h2 { font-size:16px; }
         .explainer p { margin:0; }
         footer { border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:13px; }
 
         @media print {
+          .posture { grid-template-columns:repeat(2, 1fr); }
           body { background:#fff; padding:0; }
           main { border:0; padding:0; max-width:none; }
           section, tr { break-inside:avoid; }

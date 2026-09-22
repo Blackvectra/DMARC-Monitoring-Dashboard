@@ -104,7 +104,11 @@
 
         <details class="nav-fold" open="@In("reports", "tls", "failures", "import")">
             <summary class="nav-group"><NavIcon Name="reporting" />Reporting</summary>
-            <NavLink class="nav-item" href="reports">Client reports</NavLink>
+            @* The raw reports first, then what gets sent to a customer. An
+               analyst opens this group to answer a question about the data;
+               the document is the thing produced afterwards. *@
+            <NavLink class="nav-item" href="reports/views">Aggregate reports</NavLink>
+            <NavLink class="nav-item" href="reports" Match="NavLinkMatch.All">Client reports</NavLink>
             <NavLink class="nav-item" href="tls">TLS reports</NavLink>
             <NavLink class="nav-item" href="failures">Failure reports</NavLink>
             @if (_access is not { RestrictedClient: not null })

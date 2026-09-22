@@ -105,23 +105,16 @@ public static class ProxySetup
     /// Strict-Transport-Security on a plain-HTTP response, but it is a header
     /// that means something and it was being sent by mistake.
     /// </remarks>
-    public static bool ShouldRedirectToHttps(IConfiguration configuration) =>
-        !IsBehindProxy(configuration) && !IsLocalTrial(configuration);
-
-    /// <summary>
-    /// The copy somebody downloaded and double-clicked: no sign-in, and not
-    /// permitted beyond loopback.
-    /// </summary>
     /// <remarks>
-    /// Deliberately the same pair of questions <see cref="AuthSetup"/> asks to
-    /// decide whether to put the loopback guard in front of every request. An
-    /// install that has either - Entra configured, or local mode explicitly
-    /// allowed remotely - is a deployment somebody set up, and gets the
-    /// redirect it had before.
+    /// An install that has Entra configured, or local mode explicitly allowed
+    /// remotely, is a deployment somebody set up, and gets the redirect it had
+    /// before. <see cref="AuthSetup.IsLocalTrial"/> asks exactly the pair of
+    /// questions that decides whether the loopback guard goes in front of
+    /// every request, and this used to ask them separately here - two copies
+    /// of one definition that a third caller then had to choose between.
     /// </remarks>
-    private static bool IsLocalTrial(IConfiguration configuration) =>
-        !AuthSetup.IsEntraConfigured(configuration)
-        && !AuthSetup.LocalModeAllowedRemotely(configuration);
+    public static bool ShouldRedirectToHttps(IConfiguration configuration) =>
+        !IsBehindProxy(configuration) && !AuthSetup.IsLocalTrial(configuration);
 
     private static bool TryNetwork(string cidr, out Microsoft.AspNetCore.HttpOverrides.IPNetwork network)
     {

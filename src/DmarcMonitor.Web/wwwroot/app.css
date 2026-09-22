@@ -1407,3 +1407,238 @@ tr.act    .needs-doing { color: var(--act); }
 .nav-fold > summary { display: flex; align-items: center; gap: 9px; padding: 6px 10px; }
 .nav-fold > summary::after { margin-left: auto; float: none; }
 .nav-fold .nav-item { padding-left: 34px; }
+
+/* ---- the dashboard's top half -------------------------------------------
+   Three figures, the three checks, and where the mail came from. Shaped like
+   the platforms this gets compared against, because an MSP showing it to a
+   customer is showing it beside one of them. */
+
+.scorecards {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.score-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px 18px;
+    min-width: 0;
+}
+
+.score-label {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+}
+
+.score-n {
+    font-size: 40px;
+    font-weight: 650;
+    letter-spacing: -.035em;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Tied to the number rather than sized on its own, so it stays put when the
+   number goes from two digits to three. */
+.score-unit { font-size: 17px; font-weight: 500; color: var(--dim); margin-left: 2px; }
+
+.score-band { font-size: 13px; font-weight: 600; margin-top: 2px; }
+.score-sub { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+
+.score-n.fine, .score-band.fine { color: var(--fine); }
+.score-n.ontrack, .score-band.ontrack { color: var(--ontrack); }
+.score-n.watch, .score-band.watch { color: var(--watch); }
+.score-n.urgent, .score-band.urgent { color: var(--urgent); }
+
+/* Two equal panels, for the rows under the scorecards. */
+.overview.two { grid-template-columns: repeat(2, minmax(320px, 1fr)); }
+
+.authrow { display: grid; gap: 14px; }
+
+.auth-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.auth-label { font-size: 13px; font-weight: 600; }
+.auth-pct { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.auth-pct.fine { color: var(--fine); }
+.auth-pct.watch { color: var(--watch); }
+.auth-pct.urgent { color: var(--urgent); }
+
+.auth-bar {
+    height: 8px;
+    border-radius: 99px;
+    background: var(--sunken);
+    overflow: hidden;
+    margin-top: 5px;
+}
+.auth-bar span { display: block; height: 100%; border-radius: 99px; background: var(--dim); }
+.auth-bar span.fine { background: var(--fine); }
+.auth-bar span.watch { background: var(--watch); }
+.auth-bar span.urgent { background: var(--urgent); }
+
+.auth-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* The sentence that only appears when the checks and DMARC disagree, which is
+   the single most misread situation in this subject. */
+.auth-gap {
+    margin-top: 12px;
+    padding: 9px 11px;
+    border-radius: var(--radius);
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.outbound { list-style: none; margin-top: 10px; display: grid; gap: 6px; }
+.outbound li { font-size: 12.5px; color: var(--muted); }
+.outbound b { color: var(--text); font-weight: 600; }
+
+.dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 99px;
+    margin-right: 5px;
+    background: var(--dim);
+}
+.dot.fine { background: var(--fine); }
+.dot.watch { background: var(--watch); }
+.dot.urgent { background: var(--urgent); }
+
+/* A table inside a panel: quieter than the page's main tables, which carry
+   their own borders and padding. */
+table.mini { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.mini th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--muted);
+    font-size: 11.5px;
+    padding: 0 8px 6px 0;
+    border-bottom: 1px solid var(--line-soft);
+}
+table.mini td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line-soft); }
+/* A right-aligned column drops its right padding, which leaves it touching
+   the next heading - "MessagesAlso seen" was one cell in the reading of it.
+   The gap goes on the left of whatever follows instead. */
+table.mini th + th, table.mini td + td { padding-left: 12px; }
+table.mini tr:last-child td { border-bottom: 0; }
+table.mini .num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 0; }
+table.mini th.num { text-align: right; padding-right: 0; }
+table.mini .num.fine { color: var(--fine); }
+table.mini .num.watch { color: var(--watch); }
+table.mini .num.urgent { color: var(--urgent); }
+table.mini code { font-size: 11.5px; }
+
+@media (max-width: 1100px) {
+    .scorecards { grid-template-columns: 1fr; }
+    .overview.two { grid-template-columns: 1fr; }
+}
+
+/* ---- the report views ---------------------------------------------------
+   One window read several ways. Tabs rather than five pages, because the
+   thing being switched is the grouping, not the subject. */
+
+.tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 10px;
+}
+
+.tab {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    /* The bottom border sits on the container's, rather than under it. */
+    margin-bottom: -1px;
+    border-radius: 4px 4px 0 0;
+}
+.tab:hover { background: var(--hover); color: var(--text); }
+.tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tab:focus-visible { outline: none; box-shadow: var(--ring); }
+
+.view-total { font-size: 12px; margin-bottom: 12px; }
+
+.panel + .panel { margin-top: 12px; }
+
+.bucket-blurb {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin: -4px 0 10px;
+    max-width: 82ch;
+}
+
+table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.grid th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 11.5px;
+    color: var(--muted);
+    padding: 0 10px 7px 0;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+}
+table.grid td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+table.grid tr:last-child td { border-bottom: 0; }
+table.grid .num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 0; }
+table.grid th.num { text-align: right; padding-right: 0; }
+table.grid th + th, table.grid td + td { padding-left: 14px; }
+table.grid .num.fine { color: var(--fine); }
+table.grid .num.watch { color: var(--watch); }
+table.grid .num.urgent { color: var(--urgent); }
+
+/* A sentence about the row above it, not a row of its own data. */
+.note-row td {
+    font-size: 12px;
+    color: var(--watch);
+    padding-top: 0;
+    border-bottom: 1px solid var(--line-soft);
+}
+
+.chip-none { background: var(--dim-bg); color: var(--muted); border-color: var(--line); }
+.chip-quarantine { background: var(--watch-bg); color: var(--watch); border-color: var(--watch-bg); }
+/* Rejected mail is the policy doing its job, so it is not painted as a fault. */
+.chip-reject { background: var(--accent-bg); color: var(--accent); border-color: var(--accent-bg); }
+
+.detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.detail-head .panel-h { margin-bottom: 0; }
+
+/* A named source: the name on its line, the address under it.
+   Both classes existed in the client report's own stylesheet and nowhere
+   here, so in the application the two spans ran together and a row read
+   "a3i117.smtp2go.com203.31.36.117". Defined once, for every table that
+   names a source. */
+.src-name { display: block; font-weight: 500; }
+.src-ip {
+    display: block;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    color: var(--dim);
+}
+
+/* An option with its consequences under it, for a choice that is half
+   permanent. */
+.check { display: flex; gap: 10px; align-items: flex-start; margin-top: 12px; max-width: 78ch; }
+.check input { margin-top: 3px; }
+.check strong { display: block; font-size: 13px; font-weight: 600; }
+.check-note { display: block; font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+
+.filed { list-style: none; margin-top: 8px; display: grid; gap: 4px; font-size: 13px; }
+.filed .muted { font-size: 12px; }

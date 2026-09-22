@@ -87,6 +87,116 @@ public sealed record ReportSource
 
     public bool Authenticated => !string.IsNullOrEmpty(AuthenticatedFor);
     public bool IsClean => Failing == 0;
+
+    /// <summary>Messages whose SPF check passed, for whatever domain.</summary>
+    public long SpfPass { get; init; }
+
+    /// <summary>Messages whose DKIM signature verified, for whatever domain.</summary>
+    public long DkimPass { get; init; }
+
+    /// <summary>
+    /// Failing messages where SPF alone passed, for the wrong domain.
+    /// </summary>
+    /// <remarks>
+    /// Exclusive of <see cref="FailedBothNotAligned"/>, and it has to be. A
+    /// message that passed both checks without aligning belongs to exactly one
+    /// row of a table whose rows are added up - counted in both, the report
+    /// says more mail failed than was ever sent, which is the one arithmetic
+    /// error a client will find.
+    /// </remarks>
+    public long FailedSpfNotAligned { get; init; }
+
+    /// <summary>Failing messages where DKIM alone verified, for the wrong domain.</summary>
+    public long FailedDkimNotAligned { get; init; }
+
+    /// <summary>
+    /// Failing messages where SPF and DKIM both passed, and neither was about
+    /// the domain in the From line.
+    /// </summary>
+    /// <remarks>
+    /// Its own row rather than folded into either of the others, because it
+    /// says something neither of them does: the sender is fully configured,
+    /// correctly, entirely as itself. There is nothing broken at their end to
+    /// find - the work is to make them sign as the customer.
+    /// </remarks>
+    public long FailedBothNotAligned { get; init; }
+
+    /// <summary>Failing messages where neither check passed at all.</summary>
+    public long FailedBoth { get; init; }
+
+    /// <summary>
+    /// True when this source was seen in the previous period and not in this
+    /// one.
+    /// </summary>
+    /// <remarks>
+    /// A sender that has stopped is not a finding, but it is an inventory
+    /// question: either a vendor was retired and nobody removed it from SPF,
+    /// or something broke quietly. Both are worth a line.
+    /// </remarks>
+    public bool Retired { get; init; }
+}
+
+/// <summary>
+/// What a source is, for the inventory a client is asked to confirm.
+/// </summary>
+/// <remarks>
+/// The classification is the product. A list of addresses and percentages is
+/// data; "these four are yours and correct, this one is yours and broken,
+/// these two nobody can account for" is the thing somebody can act on, and it
+/// is what separates this from a report parser.
+///
+/// Every boundary here is drawn to avoid one specific wrong accusation:
+/// passing even once for the domain means the source is the client's own mail
+/// path, because that is the thing a forger cannot do.
+/// </remarks>
+public enum SenderClass
+{
+    /// <summary>Known, authenticating, aligned. Nothing to do.</summary>
+    Approved,
+
+    /// <summary>The client's own path, or a recognised service, losing some of its mail.</summary>
+    Misconfigured,
+
+    /// <summary>Never authenticated, but operated by somebody the catalog recognises.</summary>
+    Unidentified,
+
+    /// <summary>Never authenticated, and nothing recognises the operator.</summary>
+    Suspicious,
+
+    /// <summary>Sent in the previous period and not in this one.</summary>
+    Retired,
+}
+
+/// <summary>
+/// One thing to do, with who it is for and what finishing it looks like.
+/// </summary>
+/// <remarks>
+/// A report that ends in "consider moving to p=reject" ends in nothing. Each
+/// of these names the finding, what it costs the business, the exact change,
+/// and the evidence that would close it - which is what turns a document into
+/// a ticket.
+/// </remarks>
+public sealed record RemediationItem
+{
+    public required string Priority { get; init; }
+    public required string Finding { get; init; }
+    public required string Impact { get; init; }
+    public required string Action { get; init; }
+
+    /// <summary>Who this belongs to: the provider, the customer, or a named vendor.</summary>
+    public required string Owner { get; init; }
+
+    /// <summary>What proves it is done.</summary>
+    public required string Validation { get; init; }
+
+    /// <summary>Sorts Critical first, and keeps two items of one priority in the order found.</summary>
+    public int Rank => Priority switch
+    {
+        "Critical" => 0,
+        "High" => 1,
+        "Medium" => 2,
+        _ => 3,
+    };
 }
 
 /// <summary>
@@ -173,6 +283,39 @@ public sealed record ReportDomainHealth
     /// whole point. See <see cref="ClientReport.StrugglingDomains"/>.
     /// </remarks>
     public bool IsStruggling => Messages > 0 && PassRate < ClientReport.HealthyPassRate;
+
+    /// <summary>
+    /// Whether this domain's policy could safely be raised.
+    /// </summary>
+    /// <remarks>
+    /// The question every one of these reports is really asked, and the one
+    /// most tools answer with a percentage and leave to the reader. Three
+    /// states, because "ready" and "not ready" hides the common case: a domain
+    /// whose own mail is fine and which is already enforcing has nothing left
+    /// to decide, a domain at 99% is a decision about a known remainder, and a
+    /// domain losing real mail must not be raised at all.
+    ///
+    /// Read against this domain's own mail, never the estate's. See
+    /// <see cref="ClientReport.StrugglingDomains"/>.
+    /// </remarks>
+    public string Readiness =>
+        Messages == 0 ? "No mail seen"
+        : IsStruggling ? "Not ready"
+        : IsEnforcing ? "Enforcing"
+        : PassRate >= 99 ? "Ready"
+        : "Conditional";
+
+    /// <summary>The sentence under the readiness word, naming what decides it.</summary>
+    public string ReadinessReason =>
+        Messages == 0
+            ? "Nothing was reported for this domain, so nothing can be judged."
+        : IsStruggling
+            ? $"{Failing:N0} of this domain's own message(s) are failing. Raising the policy would stop them."
+        : IsEnforcing
+            ? "Already enforcing, and its own mail is arriving."
+        : PassRate >= 99
+            ? "Its own mail authenticates. The policy can be raised."
+            : $"{Failing:N0} message(s) would be affected by enforcement. Worth naming them before the change.";
 }
 
 /// <summary>
@@ -298,7 +441,8 @@ public sealed record ClientReport
     /// message counts reads as a contradiction rather than as nuance.
     /// </remarks>
     public IReadOnlyList<ReportSource> LegitimateSources =>
-        [.. Sources.Where(s => s.IsClean).OrderByDescending(s => s.Messages)];
+        [.. Sources.Where(s => s is { IsClean: true, Retired: false, Messages: > 0 })
+                   .OrderByDescending(s => s.Messages)];
 
     /// <summary>
     /// The same sources, gathered under the service they belong to.
@@ -390,4 +534,209 @@ public sealed record ClientReport
 
     /// <summary>The client's own messages that failed, across the domains that are struggling.</summary>
     public long StrugglingMessages => StrugglingDomains.Sum(d => d.Failing);
+
+    // ---- the inventory ------------------------------------------------------
+
+    /// <summary>
+    /// What a source is, for the table a client is asked to confirm.
+    /// </summary>
+    /// <remarks>
+    /// The order of the tests is the whole argument. Passing even once for the
+    /// domain settles it as the client's own path before anything else is
+    /// asked, because that is the thing a forger cannot do - and judging the
+    /// failing rows first is exactly how a gateway carrying a customer's own
+    /// outbound ended up printed under "who tried to send mail as you".
+    ///
+    /// Only then does the catalog separate the two unproven cases, and it is
+    /// separating "ask the customer whether they signed up for this" from
+    /// "nobody can account for this at all". A recognised operator is not
+    /// innocence: a shared ESP is where an unauthorised sender hides most
+    /// comfortably. It is the difference between a question and an alarm.
+    /// </remarks>
+    public static SenderClass ClassOf(ReportSource source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        if (source.Retired) { return SenderClass.Retired; }
+        if (source.Messages == 0) { return SenderClass.Retired; }
+        if (source.IsClean) { return SenderClass.Approved; }
+        if (source.Passing > 0 || source.Authenticated) { return SenderClass.Misconfigured; }
+
+        // Never authenticated. A name the catalog knows makes it a question
+        // for the customer; anything else is a finding.
+        return SenderCatalog.Identify(source.SourceIp) is not null
+               || Intelligence.SourceCatalog.Identify(source.SourceIp) is not null
+            ? SenderClass.Unidentified
+            : SenderClass.Suspicious;
+    }
+
+    /// <summary>Every source in the period, under the heading it belongs to.</summary>
+    public IReadOnlyList<IGrouping<SenderClass, ReportSource>> Inventory =>
+        [.. Sources
+            .GroupBy(ClassOf)
+            .OrderBy(g => (int)g.Key)];
+
+    /// <summary>Sources under one heading, busiest first.</summary>
+    public IReadOnlyList<ReportSource> InventoryOf(SenderClass which) =>
+        [.. Sources.Where(s => ClassOf(s) == which).OrderByDescending(s => s.Messages)];
+
+    // ---- why mail failed ----------------------------------------------------
+
+    /// <summary>
+    /// The failures split by cause rather than counted as one red total.
+    /// </summary>
+    /// <remarks>
+    /// "1,204 messages failed" is a number to worry about. "1,100 of them are
+    /// a service signing as itself, 90 are forwarding, 14 are nobody we can
+    /// account for" is three different afternoons, two of which are somebody
+    /// else's. This is the split that decides which.
+    /// </remarks>
+    public IReadOnlyList<(string Cause, long Messages, string Meaning)> FailureCauses
+    {
+        get
+        {
+            var spf = Sources.Sum(s => s.FailedSpfNotAligned);
+            var dkim = Sources.Sum(s => s.FailedDkimNotAligned);
+            var neither = Sources.Sum(s => s.FailedBoth);
+            var bothUnaligned = Sources.Sum(s => s.FailedBothNotAligned);
+
+            return
+            [
+                .. new (string, long, string)[]
+                {
+                    ("SPF passed, did not align", spf,
+                     "The sending server was authorised by its own domain rather than yours. A service sending on "
+                     + "your behalf without being set up to sign as you."),
+                    ("DKIM verified, did not align", dkim,
+                     "The signature was valid and belonged to the sender rather than to you. Usually the same "
+                     + "cause, and usually fixed by turning on custom DKIM at the vendor."),
+                    ("Both checks passed, neither aligned", bothUnaligned,
+                     "SPF and DKIM both verified, and both were about the sender's own domain rather than "
+                     + "yours. Nothing is broken at their end: the work is to have them sign as you."),
+                    ("Neither check passed", neither,
+                     "Nothing verified. Forwarding and mailing lists land here legitimately; so does anybody "
+                     + "sending as you."),
+                    ("Handled by the receiver", OverriddenMessages,
+                     "The receiver broke the signature itself - forwarding, or a mailing list - recorded why, and "
+                     + "declined to apply your policy. Expected, and not worth chasing."),
+                }.Where(row => row.Item2 > 0),
+            ];
+        }
+    }
+
+    // ---- what to do ---------------------------------------------------------
+
+    /// <summary>
+    /// The register the report ends on: every finding with an owner and a
+    /// definition of done.
+    /// </summary>
+    /// <remarks>
+    /// Derived rather than stored, so it cannot drift from the figures above
+    /// it, and ordered by what would cost the client most. A report ending in
+    /// "consider moving to p=reject" ends in nothing; these end in something
+    /// somebody can put a date against.
+    /// </remarks>
+    public IReadOnlyList<RemediationItem> Remediation
+    {
+        get
+        {
+            var items = new List<RemediationItem>();
+
+            // Worst first: mail that is not arriving, because that is the one
+            // with a cost the client can already feel.
+            foreach (var domain in StrugglingDomains)
+            {
+                items.Add(new RemediationItem
+                {
+                    Priority = "Critical",
+                    Finding = $"{domain.Domain} is losing {domain.Failing:N0} of its own message(s) "
+                            + $"({domain.PassRate:0.#}% arriving).",
+                    Impact = domain.IsEnforcing
+                        ? "Real mail is being refused or filed as junk by the receiving provider right now."
+                        : "Real mail would be refused the moment this domain's policy is raised.",
+                    Action = "Name every sender in the inventory below, then correct the ones marked as needing it "
+                           + "before touching the policy.",
+                    Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
+                    Validation = $"{domain.Domain} above {HealthyPassRate:0}% for seven consecutive days.",
+                });
+            }
+
+            foreach (var source in InventoryOf(SenderClass.Misconfigured).Take(5))
+            {
+                items.Add(new RemediationItem
+                {
+                    Priority = "High",
+                    Finding = $"{source.Display} is sending as you and {source.Failing:N0} message(s) are not "
+                            + "provably yours.",
+                    Impact = "These are your own messages. They are at risk of being refused under an enforcing "
+                           + "policy, and some are already being filed as junk.",
+                    Action = source.Authenticated
+                        ? $"This service signs as {source.AuthenticatedFor} rather than as you. Turn on custom "
+                        + "DKIM for your domain at the vendor, or authorise it in SPF."
+                        : "Confirm which system this is, then authorise it properly rather than leaving it "
+                        + "half-configured.",
+                    Owner = "Whoever runs this service, with your IT provider",
+                    Validation = "Seven consecutive days of aligned mail from this source.",
+                });
+            }
+
+            foreach (var source in InventoryOf(SenderClass.Suspicious).Take(3))
+            {
+                items.Add(new RemediationItem
+                {
+                    Priority = source.OtherClientsAffected > 0 ? "High" : "Medium",
+                    Finding = $"{source.Display} sent {source.Failing:N0} message(s) as you and never "
+                            + "authenticated once"
+                            + (source.OtherClientsAffected > 0
+                                ? $", and was seen against {source.OtherClientsAffected} unrelated organisation(s)."
+                                : "."),
+                    Impact = EveryDomainEnforcing
+                        ? "Already refused or filed as junk by the receiving provider, because your policy is "
+                        + "enforcing. This is the protection working."
+                        : "Not currently stopped: your policy asks receivers to do nothing about it.",
+                    Action = EveryDomainEnforcing
+                        ? "No action needed. Recorded so the pattern is visible if it grows."
+                        : "Raise the policy so receivers are asked to refuse it.",
+                    Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
+                    Validation = "The volume stops, or the policy is enforcing and it is being refused.",
+                });
+            }
+
+            // Only after the mail is right. Told to raise a policy first, an
+            // MSP breaks a customer's invoicing and learns not to trust the
+            // report.
+            foreach (var domain in Domains.Where(d => d is { IsEnforcing: false, IsStruggling: false, Messages: > 0 }))
+            {
+                items.Add(new RemediationItem
+                {
+                    Priority = "Medium",
+                    Finding = $"{domain.Domain} is at p={domain.Policy}, so receivers are asked to do nothing "
+                            + "about mail that fails.",
+                    Impact = "Anybody can send mail as this domain today and have it delivered.",
+                    Action = domain.Readiness == "Ready"
+                        ? "Its own mail authenticates. Move to p=quarantine, then to p=reject."
+                        : $"Account for the {domain.Failing:N0} failing message(s) first, then move to "
+                        + "p=quarantine.",
+                    Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
+                    Validation = "The policy is published and the domain's own mail keeps arriving.",
+                });
+            }
+
+            foreach (var source in InventoryOf(SenderClass.Retired).Take(3))
+            {
+                items.Add(new RemediationItem
+                {
+                    Priority = "Low",
+                    Finding = $"{source.Display} sent as you last period and not at all this one.",
+                    Impact = "Either a service was retired and is still authorised to send as you, or something "
+                           + "stopped working quietly.",
+                    Action = "Confirm which. If it is retired, remove it from SPF so the authorisation goes with it.",
+                    Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
+                    Validation = "Either mail resumes, or the authorisation is removed.",
+                });
+            }
+
+            return [.. items.OrderBy(i => i.Rank)];
+        }
+    }
 }

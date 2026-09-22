@@ -181,6 +181,15 @@ app.UseWhen(
     context => !context.Request.Path.StartsWithSegments("/.well-known"),
     branch => branch.UseStatusCodePagesWithReExecute("/not-found"));
 
+// Explicit, and it has to be HERE: below the re-execute and above the
+// endpoints. Without it the framework inserts routing at the TOP of the
+// pipeline, so by the time a 404 comes back up, routing has already happened
+// and re-executing only changes the path - nothing routes it again, no
+// endpoint matches, and the answer is a 404 with an empty body. Which is
+// precisely what the middleware above exists to prevent, and what it was
+// quietly doing.
+app.UseRouting();
+
 app.UseStaticFiles();
 app.UseAntiforgery();
 
@@ -311,7 +320,17 @@ try
     // has already run `dmarc init-db` by this point and this does nothing; a
     // copy somebody downloaded and double-clicked has not, and without this
     // every page reports a table that does not exist.
-    await FirstRun.EnsureDatabaseAsync(dbPath, logger).ConfigureAwait(false);
+    //
+    // The same is true a second time over on the upgrade. A new release is
+    // extracted to a new folder, so somebody carrying their database across
+    // brings one built by an older schema - and the only thing that used to
+    // bring it up to date was a command named nowhere they would look. In the
+    // trial this now happens by itself; on a server it does not, because
+    // migrating a production database is a decision an operator makes and
+    // deploy/update.sh already makes it out loud.
+    await FirstRun
+        .EnsureDatabaseAsync(dbPath, logger, mayUpgrade: AuthSetup.IsLocalTrial(app.Configuration))
+        .ConfigureAwait(false);
 
     // Only ever for the Windows trial download - see TrialBrowser for the four
     // cases this is deliberately not. Hooked to ApplicationStarted so the
