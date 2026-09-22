@@ -1,4 +1,5 @@
 using DmarcMonitor.Cli.Commands;
+using DmarcMonitor.Core.Platform;
 
 namespace DmarcMonitor.Cli;
 
@@ -12,6 +13,29 @@ namespace DmarcMonitor.Cli;
 public static class Program
 {
     public static async Task<int> Main(string[] args)
+    {
+        // Somebody double-clicked this in Explorer. It is a reasonable thing
+        // to try - it is called dmarc.exe and it is sitting next to the
+        // application - and until now what it got was the help text in a
+        // window that Windows destroyed on the same tick it was written to.
+        //
+        // The report that produced this was "the app appears like it opens
+        // then just closes with a shadow", which is a perfect description of
+        // a console application working exactly as designed. So: say which
+        // program this is before saying what it does, and hold the window
+        // afterwards so that either can be read.
+        if (args.Length == 0 && ConsoleWindow.BelongsToThisProcess())
+        {
+            NotTheApplication();
+        }
+
+        var exitCode = await RunAsync(args).ConfigureAwait(false);
+
+        ConsoleWindow.HoldOpen();
+        return exitCode;
+    }
+
+    private static async Task<int> RunAsync(string[] args)
     {
         using var cts = new CancellationTokenSource();
 
@@ -95,6 +119,43 @@ public static class Program
 
         Console.WriteLine($"Database schema this build expects: {DmarcMonitor.Core.Storage.DatabaseMigrations.BaselineVersion}");
         return 0;
+    }
+
+    /// <summary>
+    /// Printed above the help when this was double-clicked rather than typed.
+    /// </summary>
+    /// <remarks>
+    /// What it says depends on whether the application is actually here. In
+    /// the Windows trial bundle it is in the same folder, so it can be named
+    /// exactly; a dmarc.exe downloaded on its own has no sibling to point at,
+    /// and sending somebody to look for a file that is not there is worse
+    /// than sending them back to the releases page.
+    /// </remarks>
+    internal static void NotTheApplication()
+    {
+        var beside = Path.Combine(AppContext.BaseDirectory, "DmarcMonitor.Web.exe");
+
+        Console.WriteLine();
+        Console.WriteLine("This is the command-line tool, not the dashboard.");
+        Console.WriteLine();
+
+        if (File.Exists(beside))
+        {
+            Console.WriteLine("To open the dashboard, close this window and double-click:");
+            Console.WriteLine();
+            Console.WriteLine("    DmarcMonitor.Web.exe");
+            Console.WriteLine();
+            Console.WriteLine("It is in this same folder. A browser opens by itself.");
+        }
+        else
+        {
+            Console.WriteLine("The dashboard is a separate download. On the releases page it is");
+            Console.WriteLine("the file whose name says Windows - unzip it and double-click");
+            Console.WriteLine("DmarcMonitor.Web.exe. This file is only useful from a terminal.");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("What this tool can do, if a terminal is what you wanted:");
     }
 
     private static int Help()

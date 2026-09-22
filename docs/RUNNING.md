@@ -14,9 +14,15 @@ shows an empty state until something has been collected.
 
 ## Quickest possible start: the Windows trial download
 
-Nothing installed at all. `dmarc-windows-trial.zip` from the latest release,
-unzipped, and `DmarcMonitor.Web.exe` double-clicked. A browser opens on the
+Nothing installed at all. `DMARC-Monitor-Windows.zip` from the latest release,
+unzipped, and `Start DMARC Monitor.cmd` double-clicked. A browser opens on the
 dashboard.
+
+Unblock the .zip before extracting it (right-click → Properties → Unblock),
+and expect SmartScreen to object the first time: these binaries are not
+signed, and [docs/SIGNING.md](SIGNING.md) covers what that would take. The
+`dmarc.exe` in the same folder is the command-line tool — it sorts directly
+above the application in Explorer and is not it.
 
 There is no .NET runtime to install, no administrator prompt, no service and
 no server. The application creates its own database in the folder it was run

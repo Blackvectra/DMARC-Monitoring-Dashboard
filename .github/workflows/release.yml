@@ -140,6 +140,50 @@ jobs:
           test "$size" -gt 20000000 \
             || { echo "only $size bytes: too small to be self-contained"; exit 1; }
 
+      # The same Authenticode signing as the trial bundle, for the one asset
+      # somebody downloads on its own. Inert without the secrets, and skipped
+      # outright on the Linux rows - Authenticode is a Windows format and
+      # there is no equivalent to apply to an ELF binary here.
+      - name: Is signing configured?
+        id: signing
+        if: matrix.rid == 'win-x64'
+        shell: bash
+        env:
+          ENDPOINT: ${{ secrets.SIGNING_ENDPOINT }}
+        run: |
+          if [ -n "$ENDPOINT" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Unsigned build::dmarc.exe is not signed; see docs/SIGNING.md."
+          fi
+
+      - name: Sign
+        if: steps.signing.outputs.enabled == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\publish\win-x64
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Check the signature is one Windows will accept
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sig = Get-AuthenticodeSignature "publish/win-x64/dmarc.exe"
+          "dmarc.exe: {0} ({1})" -f $sig.Status, $sig.SignerCertificate.Subject
+          if ($sig.Status -ne 'Valid') { throw "dmarc.exe signature is $($sig.Status)" }
+          if (-not $sig.TimeStamperCertificate) { throw 'dmarc.exe was signed without a timestamp' }
+
       - uses: actions/upload-artifact@v4
         with:
           name: dmarc-${{ matrix.rid }}
@@ -207,41 +251,76 @@ jobs:
             --output publish/cli
           Copy-Item publish/cli/dmarc.exe "bundle/DMARC Monitor/dmarc.exe"
 
-      - name: Write the note that goes in the folder
+      - name: Add the launcher and the note
         shell: pwsh
         run: |
-          @"
-          DMARC Monitor — trial copy
-          ==========================
+          # Both of these are files in the repository rather than a heredoc in
+          # this workflow, because the last version of them was neither
+          # reviewable in a diff nor checkable by the job below - and what the
+          # note tells somebody to double-click turned out to matter a great
+          # deal. See deploy/windows-trial/.
+          Copy-Item "deploy/windows-trial/*" "bundle/DMARC Monitor/" -Force
 
-          Double-click DmarcMonitor.Web.exe. A browser opens at
-          http://localhost:5000 and the dashboard is there.
+      # Authenticode. Without it Windows shows "Windows protected your PC" on
+      # the first run of every download, and the way past it - More info, then
+      # Run anyway - is indistinguishable from the advice somebody would be
+      # given by malware. It is the single largest thing standing between this
+      # and looking like software you bought.
+      #
+      # Deliberately inert until a certificate exists: no secret, no signing,
+      # a notice in the log, and a release that still builds. See
+      # docs/SIGNING.md for what to buy and what each option costs. When the
+      # secrets are set this starts signing on the next tag with no code
+      # change.
+      - name: Is signing configured?
+        id: signing
+        shell: bash
+        env:
+          ENDPOINT: ${{ secrets.SIGNING_ENDPOINT }}
+        run: |
+          if [ -n "$ENDPOINT" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Unsigned build::No signing certificate is configured, so this download will show a SmartScreen warning. See docs/SIGNING.md."
+          fi
 
-          Nothing is installed. No .NET runtime, no administrator rights, no
-          service, no server. Everything it writes stays in this folder:
+      - name: Sign
+        if: steps.signing.outputs.enabled == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\bundle\DMARC Monitor
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
-            dmarc.db     the database, created the first time you run it
-            keys\        the keys that sign your session cookie
+      - name: Check the signature is one Windows will accept
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
 
-          Delete the folder and it is gone.
+          # Signing that reports success and produces a signature the machine
+          # does not trust is the failure worth catching here, because its
+          # symptom downstream is identical to not signing at all.
+          foreach ($exe in @('DmarcMonitor.Web.exe', 'dmarc.exe')) {
+            $path = Join-Path "bundle/DMARC Monitor" $exe
+            $sig = Get-AuthenticodeSignature $path
+            "{0}: {1} ({2})" -f $exe, $sig.Status, $sig.SignerCertificate.Subject
+            if ($sig.Status -ne 'Valid') { throw "$exe is signed but the signature is $($sig.Status)" }
 
-          ONLY THIS MACHINE CAN REACH IT
-          The application refuses any request that did not come from this
-          computer, and says so at the top of every page. There is no sign-in
-          because there is nothing to sign in to - which is also why this copy
-          should not be put on a server. For that, see docs/DEPLOYING.md.
-
-          PUTTING YOUR OWN DATA IN
-          Reports arrive as .xml.gz or .zip attachments on DMARC mail. Either:
-
-            - drag them onto the Import page in the application, or
-            - dmarc.exe import --from "C:\path\to\a\folder\of\reports"
-
-          The second one is better for more than a handful.
-
-          Or look at it with nothing in it first: the pages explain what they
-          would be showing you.
-          "@ | Set-Content -Path "bundle/DMARC Monitor/README.txt" -Encoding UTF8
+            # A signature with no countersignature expires with the
+            # certificate, and every copy already downloaded starts warning
+            # again on that date.
+            if (-not $sig.TimeStamperCertificate) { throw "$exe was signed without a timestamp" }
+          }
 
       - name: The bundle carries what it needs
         shell: pwsh
@@ -254,9 +333,24 @@ jobs:
           # thing this bundle exists to avoid - and it would only be found by
           # whoever downloaded it.
           foreach ($f in @('DmarcMonitor.Web.exe', 'dmarc.exe', 'README.txt',
+                           'Start DMARC Monitor.cmd',
                            'hostfxr.dll', 'hostpolicy.dll', 'coreclr.dll',
                            'wwwroot/app.css')) {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "$f is missing from the bundle" }
+          }
+
+          # The launcher decides what to run by name. A rename of the
+          # executable that did not reach the .cmd would ship a bundle whose
+          # one advertised action reports that the application is not there -
+          # the exact failure it was written to explain.
+          $launcher = Get-Content (Join-Path $dir 'Start DMARC Monitor.cmd') -Raw
+          if ($launcher -notmatch [regex]::Escape('"DmarcMonitor.Web.exe" %*')) {
+            throw 'the launcher does not start DmarcMonitor.Web.exe'
+          }
+
+          # And the note has to name the launcher, for the same reason.
+          if ((Get-Content (Join-Path $dir 'README.txt') -Raw) -notmatch [regex]::Escape('Start DMARC Monitor.cmd')) {
+            throw 'README.txt does not tell anybody what to double-click'
           }
 
           # And that nobody has to find the executable among five hundred DLLs
@@ -271,12 +365,12 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path "bundle/DMARC Monitor" -DestinationPath dmarc-windows-trial.zip
+        run: Compress-Archive -Path "bundle/DMARC Monitor" -DestinationPath DMARC-Monitor-Windows.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: dmarc-windows-trial
-          path: dmarc-windows-trial.zip
+          path: DMARC-Monitor-Windows.zip
           if-no-files-found: error
 
   web:
@@ -318,10 +412,21 @@ jobs:
             -p:Version=${{ steps.version.outputs.number }} \
             --output publish/web
 
+      - name: Say what this bundle is, inside the bundle
+        run: |
+          # This one has no .exe in it at all - it is framework-dependent and
+          # was published without a runtime identifier, so its only apphost is
+          # a Linux ELF binary. Downloaded on Windows by somebody looking for
+          # the application, it is a folder of five hundred DLLs with nothing
+          # to run, and that is exactly what happened. The name alone did not
+          # carry it, so the bundle now says so from the inside.
+          cp deploy/server-bundle/READ-ME-FIRST.txt publish/web/
+
       - name: Check the bundle carries what it needs
         run: |
           test -f publish/web/DmarcMonitor.Web.dll || { echo "no web assembly"; exit 1; }
           test -f publish/web/wwwroot/app.css     || { echo "no stylesheet: pages render unstyled"; exit 1; }
+          test -f publish/web/READ-ME-FIRST.txt   || { echo "the bundle does not say what it is"; exit 1; }
 
           # A bundle that does not know its own version cannot tell a deployed
           # instance whether it is behind, which is the whole update story.
@@ -359,36 +464,79 @@ jobs:
           mv dmarc-win-x64/dmarc.exe      ../dmarc.exe
           mv dmarc-linux-x64/dmarc        ../dmarc-linux-x64
           mv dmarc-linux-arm64/dmarc      ../dmarc-linux-arm64
-          mv dmarc-windows-trial/dmarc-windows-trial.zip ../dmarc-windows-trial.zip
+          # Named for the person who needs it rather than for the build that
+          # produced it, and capitalised so it sorts above the six lowercase
+          # names it used to be lost among. The previous name was
+          # dmarc-windows-trial.zip, sitting fifth in an alphabetical list
+          # between dmarc-web.zip and dmarc.exe - and both of those were
+          # downloaded first by somebody on Windows looking for the
+          # application. One of them contains no Windows executable at all.
+          mv dmarc-windows-trial/DMARC-Monitor-Windows.zip ../DMARC-Monitor-Windows.zip
+
+      - name: Checksums
+        run: |
+          # Published so that "is this file what you built?" has an answer
+          # that does not depend on a signature. Until the binaries are signed
+          # this is the only thing somebody cautious can check, and it stays
+          # useful afterwards.
+          sha256sum \
+            DMARC-Monitor-Windows.zip \
+            dmarc.exe \
+            dmarc-linux-x64 \
+            dmarc-linux-arm64 \
+            dmarc-web.zip \
+            dmarc-deploy.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
+            DMARC-Monitor-Windows.zip
             dmarc.exe
             dmarc-linux-x64
             dmarc-linux-arm64
             dmarc-web.zip
             dmarc-deploy.tar.gz
-            dmarc-windows-trial.zip
+            SHA256SUMS.txt
           body: |
-            **Just want to look at it?** `dmarc-windows-trial.zip` — unzip,
-            double-click `DmarcMonitor.Web.exe`, and the dashboard opens in
-            your browser. No .NET install, no administrator, no service, no
-            server. It creates its own database in the folder, serves only
-            that machine, and deleting the folder removes every trace. Drag
-            report files onto the Import page, or use the `dmarc.exe` beside
-            it. It is the same application a deployment runs, in the local
-            trial mode it already had.
+            ## Want to look at it? Download `DMARC-Monitor-Windows.zip`
+
+            That one, and none of the others. Right-click the .zip →
+            Properties → tick **Unblock** → OK, *then* extract it, then
+            double-click **`Start DMARC Monitor.cmd`**. A browser opens at
+            `http://localhost:5000` and the dashboard is there.
+
+            Nothing is installed: no .NET runtime, no administrator, no
+            service, no server. It makes its own database in the folder,
+            answers only that machine, and deleting the folder removes every
+            trace. It is the same application a deployment runs, in local
+            trial mode.
+
+            Windows will say **"Windows protected your PC"** — click *More
+            info*, then *Run anyway*. These binaries are not signed yet, and
+            SmartScreen says that about every unsigned download. `SHA256SUMS.txt`
+            is there if you would rather verify the file than trust it.
+
+            ### The other files, and who they are for
+
+            | file | for |
+            |---|---|
+            | `DMARC-Monitor-Windows.zip` | **trying it.** Self-contained, needs nothing installed |
+            | `dmarc.exe` | the command-line tool, on its own. **Not the dashboard** — double-clicked it prints its help and exits |
+            | `dmarc-linux-x64`, `dmarc-linux-arm64` | the same tool for a Linux server |
+            | `dmarc-web.zip` | the **server** bundle. Needs the ASP.NET Core 8 runtime. **Contains no Windows executable** |
+            | `dmarc-deploy.tar.gz` | install, update and rollback scripts, and the systemd units |
 
             `dmarc.exe` runs on its own: no .NET install, no checkout, no
             schema file beside it. Every build is checked by creating a
             database in an empty directory before it is published, on the
             architecture it targets.
 
-            The web bundle needs the ASP.NET Core 8 runtime on the host.
-            `dmarc-deploy.tar.gz` holds the install, update and rollback
-            scripts and the systemd units; on a Linux server, unpack it beside
-            the other two files and run `sudo ./deploy/install.sh`. See
-            `docs/DEPLOYING.md` for the whole path, `docs/INGEST-SETUP.md`
-            for the app registration and `docs/OPEN-ISSUES.md` for what is
-            known to be unfinished.
+            ### Installing on a server
+
+            On a Linux server, unpack `dmarc-deploy.tar.gz` beside
+            `dmarc-web.zip` and the Linux binary, and run
+            `sudo ./deploy/install.sh` — or use the one-line bootstrap, which
+            fetches all of it for you. See `docs/DEPLOYING.md` for the whole
+            path, `docs/INGEST-SETUP.md` for the app registration and
+            `docs/OPEN-ISSUES.md` for what is known to be unfinished.

@@ -743,6 +743,67 @@ jobs:
             -p:EnableCompressionInSingleFile=true -p:DebugType=none `
             --output publish/cli
           Copy-Item publish/cli/dmarc.exe "bundle/DMARC Monitor/dmarc.exe"
+          Copy-Item "deploy/windows-trial/*" "bundle/DMARC Monitor/" -Force
+
+      # The mistake that costs the most time, and the only branch of the
+      # launcher that a working bundle never exercises: running the
+      # application from inside the .zip. Windows copies out the one file that
+      # was clicked and none of the several hundred beside it, so the
+      # executable is simply not there.
+      #
+      # Tested by reproducing exactly that - the launcher alone in an empty
+      # folder - because this branch only ever runs for somebody who is
+      # already confused, and shipping a broken explanation to them is worse
+      # than shipping none.
+      - name: The launcher explains a bundle that was never extracted
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $sandbox = Join-Path $PWD 'as-if-run-from-the-zip'
+          New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
+          Copy-Item "deploy/windows-trial/Start DMARC Monitor.cmd" $sandbox
+          $launcher = Join-Path $sandbox 'Start DMARC Monitor.cmd'
+
+          # Piping an empty string gives `pause` its keystroke. Without it
+          # this step would hang for six hours rather than fail.
+          $out = '' | & cmd.exe /c "`"$launcher`"" 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          $out
+
+          if ($code -ne 1) { throw "the not-extracted branch exited $code, expected 1" }
+          if ($out -notmatch 'inside the \.zip') { throw 'it did not name the cause' }
+          if ($out -notmatch 'Extract All')      { throw 'it did not say how to fix it' }
+
+      - name: The launcher and the note agree with the bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = "bundle/DMARC Monitor"
+
+          # What the note tells somebody to double-click has to exist, and the
+          # launcher has to start the executable that is actually there. Both
+          # were wrong in the shape that produced this job: a download whose
+          # obvious-looking file was the command-line tool.
+          $launcher = Get-Content (Join-Path $dir 'Start DMARC Monitor.cmd') -Raw
+          if ($launcher -notmatch [regex]::Escape('"DmarcMonitor.Web.exe" %*')) {
+            throw 'the launcher does not start DmarcMonitor.Web.exe'
+          }
+          if (-not (Test-Path (Join-Path $dir 'DmarcMonitor.Web.exe'))) {
+            throw 'the launcher starts an executable that is not in the bundle'
+          }
+
+          $readme = Get-Content (Join-Path $dir 'README.txt') -Raw
+          if ($readme -notmatch [regex]::Escape('Start DMARC Monitor.cmd')) {
+            throw 'README.txt does not tell anybody what to double-click'
+          }
+
+          # dmarc.exe is the decoy: it sorts directly above the real
+          # executable in Explorer and is the one that was opened. The note
+          # has to say what it is.
+          if ($readme -notmatch 'not the application') {
+            throw 'README.txt does not warn that dmarc.exe is not the dashboard'
+          }
 
       - name: Double-click it
         shell: pwsh
