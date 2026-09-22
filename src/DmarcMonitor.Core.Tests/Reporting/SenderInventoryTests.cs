@@ -347,12 +347,90 @@ public sealed class EnforcementReadinessTests
         };
 
         var register = report.Remediation.ToList();
-        var broken = register.FindIndex(i => i.Finding.Contains("203.0.113.10", StringComparison.Ordinal));
+        var broken = register.FindIndex(i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
         var policy = register.FindIndex(i => i.Finding.Contains("p=none", StringComparison.Ordinal));
 
         Assert.True(broken >= 0 && policy >= 0, "both findings should be in the register");
         Assert.True(broken < policy, "the broken sender must come before raising the policy");
     }
+
+    /// <summary>
+    /// One finding, not one row per host.
+    /// </summary>
+    /// <remarks>
+    /// A security gateway is five hostnames and a bulk sender is a dozen. The
+    /// register printed a row for each, so a real client report carried five
+    /// High rows repeating one sentence about smtp003, smtp005 and
+    /// cloud-sec-av, with the same action on every one. A reader gets through
+    /// two of those and stops, which loses whatever was underneath.
+    /// </remarks>
+    [Fact]
+    public void BrokenSendersAreOneFindingThatNamesThem()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "reject", messages: 1000, passing: 1000)],
+            Sources =
+            [
+                Broken("smtp003.vendor.example", 20),
+                Broken("smtp005.vendor.example", 12),
+                Broken("smtp007.vendor.example", 3),
+                Broken("smtp009.vendor.example", 2),
+                Broken("smtp011.vendor.example", 1),
+            ],
+        };
+
+        var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+
+        Assert.Contains("5 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("38 message(s) affected", item.Finding, StringComparison.Ordinal);
+
+        // Busiest first, and the tail counted rather than listed.
+        Assert.Contains("smtp003.vendor.example", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("and 1 more", item.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("smtp011.vendor.example", item.Finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Volume decides urgency, not the class on its own.
+    /// </summary>
+    /// <remarks>
+    /// A finding worth one message ranked High beside one worth twenty-three,
+    /// because the category set the priority and the size set nothing. Four
+    /// High rows worth a single message each teach a reader to skip the
+    /// column.
+    /// </remarks>
+    [Fact]
+    public void ASingleMessageIsNotUrgent()
+    {
+        var small = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "reject", messages: 1000, passing: 1000)],
+            Sources = [Broken("smtp003.vendor.example", 1)],
+        };
+
+        Assert.Equal("Medium", Assert.Single(small.Remediation).Priority);
+
+        var real = small with { Sources = [Broken("smtp003.vendor.example", 40)] };
+        Assert.Equal("High", Assert.Single(real.Remediation).Priority);
+    }
+
+    private static ReportSource Broken(string name, long failing) =>
+        new()
+        {
+            SourceIp = "203.0.113." + Math.Abs(name.GetHashCode() % 200 + 1),
+            ReverseName = name,
+            Messages = failing,
+            Passing = 0,
+            Failing = failing,
+            AuthenticatedFor = "vendor.example",
+        };
 
     [Fact]
     public void AnEstateWithNothingWrongHasAnEmptyRegister()

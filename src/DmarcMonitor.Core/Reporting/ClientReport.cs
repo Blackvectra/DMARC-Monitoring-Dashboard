@@ -535,6 +535,36 @@ public sealed record ClientReport
     /// <summary>The client's own messages that failed, across the domains that are struggling.</summary>
     public long StrugglingMessages => StrugglingDomains.Sum(d => d.Failing);
 
+    /// <summary>
+    /// Below this, a finding is real and not urgent.
+    /// </summary>
+    /// <remarks>
+    /// The register ranked a one-message finding as High beside a
+    /// twenty-three-message one, because the class decided the priority and
+    /// the volume decided nothing. A client reading five High rows, four of
+    /// them worth a single message, learns to skip the column.
+    /// </remarks>
+    public const int MaterialMessages = 10;
+
+    /// <summary>
+    /// Names the sources in a finding: the first few, then a count.
+    /// </summary>
+    /// <remarks>
+    /// The names are what somebody has to quote to a vendor, so they belong in
+    /// the sentence rather than in a table the reader has to go and find. Busiest
+    /// first, because that is the one to start with, and four because a fifth
+    /// makes the cell taller than the row beside it.
+    /// </remarks>
+    private static string Name(IReadOnlyList<ReportSource> sources)
+    {
+        const int shown = 4;
+
+        var ordered = sources.OrderByDescending(s => s.Failing).ThenByDescending(s => s.Messages).ToList();
+        var names = string.Join(", ", ordered.Take(shown).Select(s => s.Display));
+
+        return ordered.Count > shown ? $"{names} and {ordered.Count - shown} more" : names;
+    }
+
     // ---- the inventory ------------------------------------------------------
 
     /// <summary>
@@ -661,34 +691,68 @@ public sealed record ClientReport
                 });
             }
 
-            foreach (var source in InventoryOf(SenderClass.Misconfigured).Take(5))
+            // One finding, not one per host.
+            //
+            // A security gateway is five hostnames, a bulk sender is twelve,
+            // and the register printed a row for each: five High rows saying
+            // the same sentence about smtp003, smtp005 and cloud-sec-av, all
+            // with the same action. A client reads two of those and stops,
+            // which loses the ones underneath that were different.
+            //
+            // Grouped, named, and counted. The names are what somebody has to
+            // quote to a vendor, so they are in the finding rather than left
+            // to the table above.
+            if (InventoryOf(SenderClass.Misconfigured) is { Count: > 0 } broken)
             {
+                var atRisk = broken.Sum(s => s.Failing);
+
                 items.Add(new RemediationItem
                 {
-                    Priority = "High",
-                    Finding = $"{source.Display} is sending as you and {source.Failing:N0} message(s) are not "
-                            + "provably yours.",
+                    Priority = atRisk >= MaterialMessages ? "High" : "Medium",
+                    Finding = $"{broken.Count} service(s) sending on your behalf are not set up to prove the mail "
+                            + $"is yours: {Name(broken)}. {atRisk:N0} message(s) affected.",
                     Impact = "These are your own messages. They are at risk of being refused under an enforcing "
                            + "policy, and some are already being filed as junk.",
-                    Action = source.Authenticated
-                        ? $"This service signs as {source.AuthenticatedFor} rather than as you. Turn on custom "
-                        + "DKIM for your domain at the vendor, or authorise it in SPF."
-                        : "Confirm which system this is, then authorise it properly rather than leaving it "
+                    Action = broken.Any(s => s.Authenticated)
+                        ? "Each signs as its own domain rather than as yours. Turn on custom DKIM for your domain "
+                        + "at the vendor, or authorise it in SPF."
+                        : "Confirm which systems these are, then authorise them properly rather than leaving them "
                         + "half-configured.",
-                    Owner = "Whoever runs this service, with your IT provider",
-                    Validation = "Seven consecutive days of aligned mail from this source.",
+                    Owner = $"The vendors named, with {(ProviderIsUnnamed ? "your IT provider" : ProviderName)}",
+                    Validation = "Seven consecutive days of aligned mail from each.",
                 });
             }
 
-            foreach (var source in InventoryOf(SenderClass.Suspicious).Take(3))
+            if (InventoryOf(SenderClass.Unidentified) is { Count: > 0 } unknown)
             {
                 items.Add(new RemediationItem
                 {
-                    Priority = source.OtherClientsAffected > 0 ? "High" : "Medium",
-                    Finding = $"{source.Display} sent {source.Failing:N0} message(s) as you and never "
-                            + "authenticated once"
-                            + (source.OtherClientsAffected > 0
-                                ? $", and was seen against {source.OtherClientsAffected} unrelated organisation(s)."
+                    Priority = "Medium",
+                    Finding = $"{unknown.Count} source(s) at providers we recognise sent as you without proving "
+                            + $"entitlement: {Name(unknown)}. {unknown.Sum(s => s.Failing):N0} message(s).",
+                    Impact = "Usually a tool somebody signed up for and nobody recorded. Until it is confirmed it "
+                           + "cannot be told apart from somebody using the same provider to send as you.",
+                    Action = "Confirm whether these are yours. If they are, authorise them; if not, they belong in "
+                           + "the list below.",
+                    Owner = "You, with whoever manages the tools your teams buy",
+                    Validation = "Each one is either authorised and aligning, or gone.",
+                });
+            }
+
+            if (InventoryOf(SenderClass.Suspicious) is { Count: > 0 } strangers)
+            {
+                var volume = strangers.Sum(s => s.Failing);
+                var spread = strangers.Max(s => s.OtherClientsAffected);
+
+                items.Add(new RemediationItem
+                {
+                    Priority = EveryDomainEnforcing ? "Low"
+                             : volume >= MaterialMessages ? "High" : "Medium",
+                    Finding = $"{strangers.Count} source(s) sent {volume:N0} message(s) as you and never "
+                            + $"authenticated once: {Name(strangers)}"
+                            + (spread > 0
+                                ? $". The busiest was seen against {spread} unrelated organisation(s), so this is "
+                                + "broad activity rather than somebody targeting you."
                                 : "."),
                     Impact = EveryDomainEnforcing
                         ? "Already refused or filed as junk by the receiving provider, because your policy is "
@@ -698,7 +762,9 @@ public sealed record ClientReport
                         ? "No action needed. Recorded so the pattern is visible if it grows."
                         : "Raise the policy so receivers are asked to refuse it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
-                    Validation = "The volume stops, or the policy is enforcing and it is being refused.",
+                    Validation = EveryDomainEnforcing
+                        ? "The volume stops, or stays refused."
+                        : "The policy is enforcing and this mail is being refused.",
                 });
             }
 
@@ -722,21 +788,23 @@ public sealed record ClientReport
                 });
             }
 
-            foreach (var source in InventoryOf(SenderClass.Retired).Take(3))
+            if (InventoryOf(SenderClass.Retired) is { Count: > 0 } gone)
             {
                 items.Add(new RemediationItem
                 {
                     Priority = "Low",
-                    Finding = $"{source.Display} sent as you last period and not at all this one.",
+                    Finding = $"{gone.Count} sender(s) sent as you last period and not at all this one: "
+                            + $"{Name(gone)}.",
                     Impact = "Either a service was retired and is still authorised to send as you, or something "
                            + "stopped working quietly.",
-                    Action = "Confirm which. If it is retired, remove it from SPF so the authorisation goes with it.",
+                    Action = "Confirm which. If retired, remove it from SPF so the authorisation goes with it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
                     Validation = "Either mail resumes, or the authorisation is removed.",
                 });
             }
 
             return [.. items.OrderBy(i => i.Rank)];
+
         }
     }
 }

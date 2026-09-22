@@ -511,6 +511,14 @@ public static class ClientReportRenderer
             <section>
               <h2>What to do next</h2>
               <table class="register">
+                <!-- Fixed, because six columns of prose left to themselves give
+                     the last two about forty pixels each and break words down
+                     the middle: "consecu tive", "authoris ed". A reader takes
+                     that as a broken document rather than a narrow column. -->
+                <colgroup>
+                  <col style="width:10%"><col style="width:26%"><col style="width:19%">
+                  <col style="width:19%"><col style="width:13%"><col style="width:13%">
+                </colgroup>
                 <thead><tr><th>Priority</th><th>Finding</th><th>Why it matters</th><th>What to do</th><th>Who</th><th>Done when</th></tr></thead>
                 <tbody>
 
@@ -868,6 +876,8 @@ public static class ClientReportRenderer
            allows"; the first column then takes whatever is left. */
         td.n, th.n { text-align:right; white-space:nowrap; width:1%; }
         .mono { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; }
+        /* A domain is one word. Wrapped, "bmcedc" over ".com" reads as two. */
+        td.mono { white-space:nowrap; }
 
         /* A named source: the name is what a person reads, the address is what
            they have to quote to a hosting provider. Both, one above the other,
@@ -894,9 +904,14 @@ public static class ClientReportRenderer
         .fig-s { display:block; font-size:12px; color:var(--muted); margin-top:5px; line-height:1.45; }
 
         /* Six columns of sentences. Smaller, and left alone to wrap. */
-        table.register { font-size:12.5px; }
+        table.register { font-size:12.5px; table-layout:fixed; }
+        /* Wrap between words only. A hostname longer than its column is the
+           one thing allowed to break, because the alternative is a column
+           wider than the page. */
+        table.register td { word-break:normal; overflow-wrap:anywhere; hyphens:none; }
         table.register td { vertical-align:top; line-height:1.45; }
-        table.register td:first-child { white-space:nowrap; font-weight:600; }
+        table.register td:first-child, table.register th:first-child { white-space:nowrap; }
+        table.register td:first-child { font-weight:600; }
 
         @media (max-width:720px) {
           .posture { grid-template-columns:repeat(2, 1fr); }
