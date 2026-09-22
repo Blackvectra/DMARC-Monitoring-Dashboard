@@ -1407,3 +1407,132 @@ tr.act    .needs-doing { color: var(--act); }
 .nav-fold > summary { display: flex; align-items: center; gap: 9px; padding: 6px 10px; }
 .nav-fold > summary::after { margin-left: auto; float: none; }
 .nav-fold .nav-item { padding-left: 34px; }
+
+/* ---- the dashboard's top half -------------------------------------------
+   Three figures, the three checks, and where the mail came from. Shaped like
+   the platforms this gets compared against, because an MSP showing it to a
+   customer is showing it beside one of them. */
+
+.scorecards {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.score-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px 18px;
+    min-width: 0;
+}
+
+.score-label {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+}
+
+.score-n {
+    font-size: 40px;
+    font-weight: 650;
+    letter-spacing: -.035em;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Tied to the number rather than sized on its own, so it stays put when the
+   number goes from two digits to three. */
+.score-unit { font-size: 17px; font-weight: 500; color: var(--dim); margin-left: 2px; }
+
+.score-band { font-size: 13px; font-weight: 600; margin-top: 2px; }
+.score-sub { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+
+.score-n.fine, .score-band.fine { color: var(--fine); }
+.score-n.ontrack, .score-band.ontrack { color: var(--ontrack); }
+.score-n.watch, .score-band.watch { color: var(--watch); }
+.score-n.urgent, .score-band.urgent { color: var(--urgent); }
+
+/* Two equal panels, for the rows under the scorecards. */
+.overview.two { grid-template-columns: repeat(2, minmax(320px, 1fr)); }
+
+.authrow { display: grid; gap: 14px; }
+
+.auth-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.auth-label { font-size: 13px; font-weight: 600; }
+.auth-pct { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.auth-pct.fine { color: var(--fine); }
+.auth-pct.watch { color: var(--watch); }
+.auth-pct.urgent { color: var(--urgent); }
+
+.auth-bar {
+    height: 8px;
+    border-radius: 99px;
+    background: var(--sunken);
+    overflow: hidden;
+    margin-top: 5px;
+}
+.auth-bar span { display: block; height: 100%; border-radius: 99px; background: var(--dim); }
+.auth-bar span.fine { background: var(--fine); }
+.auth-bar span.watch { background: var(--watch); }
+.auth-bar span.urgent { background: var(--urgent); }
+
+.auth-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* The sentence that only appears when the checks and DMARC disagree, which is
+   the single most misread situation in this subject. */
+.auth-gap {
+    margin-top: 12px;
+    padding: 9px 11px;
+    border-radius: var(--radius);
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.outbound { list-style: none; margin-top: 10px; display: grid; gap: 6px; }
+.outbound li { font-size: 12.5px; color: var(--muted); }
+.outbound b { color: var(--text); font-weight: 600; }
+
+.dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 99px;
+    margin-right: 5px;
+    background: var(--dim);
+}
+.dot.fine { background: var(--fine); }
+.dot.watch { background: var(--watch); }
+.dot.urgent { background: var(--urgent); }
+
+/* A table inside a panel: quieter than the page's main tables, which carry
+   their own borders and padding. */
+table.mini { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.mini th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--muted);
+    font-size: 11.5px;
+    padding: 0 8px 6px 0;
+    border-bottom: 1px solid var(--line-soft);
+}
+table.mini td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line-soft); }
+/* A right-aligned column drops its right padding, which leaves it touching
+   the next heading - "MessagesAlso seen" was one cell in the reading of it.
+   The gap goes on the left of whatever follows instead. */
+table.mini th + th, table.mini td + td { padding-left: 12px; }
+table.mini tr:last-child td { border-bottom: 0; }
+table.mini .num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 0; }
+table.mini th.num { text-align: right; padding-right: 0; }
+table.mini .num.fine { color: var(--fine); }
+table.mini .num.watch { color: var(--watch); }
+table.mini .num.urgent { color: var(--urgent); }
+table.mini code { font-size: 11.5px; }
+
+@media (max-width: 1100px) {
+    .scorecards { grid-template-columns: 1fr; }
+    .overview.two { grid-template-columns: 1fr; }
+}

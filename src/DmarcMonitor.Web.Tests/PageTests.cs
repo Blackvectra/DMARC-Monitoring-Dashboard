@@ -165,33 +165,64 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("proportion-bar", html, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The dashboard opens on the three figures somebody asks for first, then
+    /// the checks, then where the mail came from.
+    /// </summary>
+    /// <remarks>
+    /// Shaped like the platforms this gets compared against, because an MSP
+    /// showing it to a customer is showing it beside one of them. The order is
+    /// the order the questions get asked in: how are we doing, why, and who is
+    /// doing it.
+    /// </remarks>
     [Fact]
-    public async Task TheOverviewLeadsWithVolumeDomainActivityAndSourceRates()
+    public async Task TheDashboardOpensOnAScoreAVolumeAndAComplianceRate()
     {
-        // Four panels across the top rather than four cards down the page, so
-        // the shape of the estate is one glance rather than a scroll.
         var html = await Client().GetStringAsync("/");
 
-        Assert.Contains("class=\"overview\"", html, StringComparison.Ordinal);
-        Assert.Contains("Volume summary", html, StringComparison.Ordinal);
-        Assert.Contains("Active domains", html, StringComparison.Ordinal);
-        Assert.Contains("Inactive domains", html, StringComparison.Ordinal);
-        Assert.Contains("Source compliance rates", html, StringComparison.Ordinal);
+        Assert.Contains("class=\"scorecards\"", html, StringComparison.Ordinal);
+        Assert.Contains("Security score", html, StringComparison.Ordinal);
+        Assert.Contains("Total email volume", html, StringComparison.Ordinal);
+        Assert.Contains("DMARC compliance rate", html, StringComparison.Ordinal);
+
+        // A score with nothing under it saying what it is made of is worth
+        // nothing to the person reading it, which is the state of every
+        // competing dashboard's number.
+        Assert.Contains("points lost to", html, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task SourceRatesGiveAllThreeChecksBecauseTheyAreThreeQuestions()
+    public async Task TheDashboardCarriesTheCheckResultsAndWhereTheMailCameFrom()
     {
-        // SPF and DKIM are the raw checks; DMARC is those plus alignment. A
-        // row reading SPF 100, DKIM 100, DMARC 2 is not a contradiction.
         var html = await Client().GetStringAsync("/");
 
-        var table = html[html.IndexOf("Source compliance rates", StringComparison.Ordinal)..];
-        var panel = table[..Math.Min(2500, table.Length)];
+        Assert.Contains("Authentication results", html, StringComparison.Ordinal);
+        Assert.Contains("Outbound email overview", html, StringComparison.Ordinal);
+        Assert.Contains("Top sending sources", html, StringComparison.Ordinal);
+        Assert.Contains("Top threat / unknown / unaligned sources", html, StringComparison.Ordinal);
 
-        Assert.Contains(">DMARC<", panel, StringComparison.Ordinal);
-        Assert.Contains(">SPF<", panel, StringComparison.Ordinal);
-        Assert.Contains(">DKIM<", panel, StringComparison.Ordinal);
+        // The counts that were the whole overview before, kept rather than
+        // dropped: a domain nobody sends as is not a domain that is safe.
+        Assert.Contains("Active domains", html, StringComparison.Ordinal);
+        Assert.Contains("Inactive domains", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheThreeChecksAreShownSeparatelyBecauseTheyAreThreeQuestions()
+    {
+        // SPF and DKIM are the raw checks; DMARC is those plus alignment. A
+        // reading of SPF 100, DKIM 100, DMARC 2 is not a contradiction - it is
+        // a service authenticating perfectly for its own domain and counting
+        // for nothing.
+        var html = await Client().GetStringAsync("/");
+
+        var start = html.IndexOf("Authentication results", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the authentication panel is missing");
+        var panel = html[start..Math.Min(start + 2500, html.Length)];
+
+        Assert.Contains("the sending server was authorised by the envelope domain", panel, StringComparison.Ordinal);
+        Assert.Contains("the signature verified", panel, StringComparison.Ordinal);
+        Assert.Contains("matched the domain recipients see", panel, StringComparison.Ordinal);
     }
 
     [Fact]

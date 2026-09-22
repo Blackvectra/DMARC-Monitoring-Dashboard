@@ -280,6 +280,282 @@ public sealed class TimeSeriesService(string databasePath)
     }
 
     /// <summary>
+    /// The window's mail counted against all three checks at once.
+    /// </summary>
+    /// <remarks>
+    /// Three totals over the same rows rather than three queries, so the
+    /// denominators cannot disagree - which is exactly the way a dashboard
+    /// ends up claiming SPF passed on more messages than it saw.
+    /// </remarks>
+    public async Task<AuthenticationRates> RatesAsync(
+        string? domain = null, int days = 30,
+        string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+
+        var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var client = Slug(clientSlug);
+        var since = Since(days);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = $"""
+            SELECT COALESCE(SUM(r.message_count), 0),
+                   COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.spf_auth_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count END), 0)
+            FROM aggregate_records r
+            {Joins(name, client, "r")}
+            WHERE r.date_begin >= $since {Filter(name, client, tenantId, "r")}
+            """;
+        Bind(command, name, client, since, tenantId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return new AuthenticationRates(); }
+
+        return new AuthenticationRates
+        {
+            Messages = reader.GetInt64(0),
+            DmarcPass = reader.GetInt64(1),
+            SpfPass = reader.GetInt64(2),
+            DkimPass = reader.GetInt64(3),
+        };
+    }
+
+    /// <summary>
+    /// Addresses that sent as a domain in this window and never once aligned.
+    /// </summary>
+    /// <remarks>
+    /// The test is the one the client report uses and it is deliberately the
+    /// strict one: an address that passed EVEN ONCE for the domain is the
+    /// customer's own mail path, whatever a particular failing row looks like.
+    /// A gateway that breaks a share of its own signatures in transit is not a
+    /// forger, and listing it here put a customer's own relay under "who tried
+    /// to send mail as you" - the product accusing the client's own servers.
+    ///
+    /// Rows the receiver itself overrode are left out for the same reason:
+    /// forwarding breaks DKIM as a matter of course and a mailing list is not
+    /// an attacker.
+    /// </remarks>
+    public async Task<IReadOnlyList<ThreatSource>> ThreatsAsync(
+        string? domain = null, int days = 30, int top = 8,
+        string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+        if (top < 1) { throw new ArgumentOutOfRangeException(nameof(top), top, "Asking for no rows returns an empty panel with nothing to explain it."); }
+
+        var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var client = Slug(clientSlug);
+        var since = Since(days);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        var named = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false);
+
+        // The correlation column counts OTHER clients the same address failed
+        // against, which is what turns one customer's nuisance into something
+        // worth telling the rest of the book about.
+        await using var command = db.CreateCommand();
+        command.CommandText = $"""
+            SELECT r.source_ip,
+                   {(named ? "COALESCE((SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip), '')" : "''")},
+                   SUM(r.message_count),
+                   MIN(d.name),
+                   (SELECT COUNT(DISTINCT o.client_id) FROM aggregate_records o
+                     WHERE o.source_ip = r.source_ip AND o.dmarc_result <> 'pass'
+                       AND o.date_begin >= $since AND o.client_id <> r.client_id)
+            FROM aggregate_records r
+            JOIN domains d ON d.id = r.domain_id
+            {(client is not null ? "JOIN clients c ON c.id = d.client_id" : "")}
+            WHERE r.date_begin >= $since
+              AND r.dmarc_result <> 'pass'
+              AND (r.override_reason IS NULL OR r.override_reason = '')
+              {(name is not null ? "AND d.name = $domain" : "")}
+              {(client is not null ? "AND c.slug = $slug" : "")}
+              {(tenantId is not null ? "AND r.tenant_id = $tenant" : "")}
+              AND NOT EXISTS (
+                  SELECT 1 FROM aggregate_records p
+                   WHERE p.source_ip = r.source_ip
+                     AND p.domain_id = r.domain_id
+                     AND p.dmarc_result = 'pass'
+                     AND p.date_begin >= $since)
+            GROUP BY r.source_ip
+            ORDER BY SUM(r.message_count) DESC
+            LIMIT $top
+            """;
+        Bind(command, name, client, since, tenantId);
+        command.Parameters.AddWithValue("$top", top);
+
+        var rows = new List<ThreatSource>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            rows.Add(new ThreatSource
+            {
+                SourceIp = reader.GetString(0),
+                ReverseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                Messages = reader.GetInt64(2),
+                Domain = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                OtherClients = reader.GetInt32(4),
+            });
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The machines sending this mail, busiest first, named where a reverse
+    /// lookup found a name.
+    /// </summary>
+    /// <remarks>
+    /// Grouped by address, which is a different question from
+    /// <see cref="SourcesAsync"/>: that one answers "which services", keyed on
+    /// the domain each authenticates for. Both are worth a panel and neither
+    /// substitutes for the other - a service with two hundred addresses is one
+    /// row there and two hundred here, and the second view is the one that
+    /// finds the single broken relay inside a healthy service.
+    /// </remarks>
+    public async Task<IReadOnlyList<SendingHost>> HostsAsync(
+        string? domain = null, int days = 30, int top = 8, bool failingOnly = false,
+        string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+        if (top < 1) { throw new ArgumentOutOfRangeException(nameof(top), top, "Asking for no rows returns an empty panel with nothing to explain it."); }
+
+        var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var client = Slug(clientSlug);
+        var since = Since(days);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        var named = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = $"""
+            SELECT r.source_ip,
+                   {(named ? "COALESCE((SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip), '')" : "''")},
+                   COALESCE(SUM(r.message_count), 0),
+                   COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.spf_auth_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count END), 0)
+            FROM aggregate_records r
+            {Joins(name, client, "r")}
+            WHERE r.date_begin >= $since {Filter(name, client, tenantId, "r")}
+            GROUP BY r.source_ip
+            HAVING SUM(r.message_count) > 0
+               {(failingOnly ? "AND SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END) IS NOT SUM(r.message_count)" : "")}
+            ORDER BY SUM(r.message_count) DESC
+            LIMIT $top
+            """;
+        Bind(command, name, client, since, tenantId);
+        command.Parameters.AddWithValue("$top", top);
+
+        var rows = new List<SendingHost>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            rows.Add(new SendingHost
+            {
+                SourceIp = reader.GetString(0),
+                ReverseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                Messages = reader.GetInt64(2),
+                DmarcPass = reader.GetInt64(3),
+                SpfPass = reader.GetInt64(4),
+                DkimPass = reader.GetInt64(5),
+            });
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The receivers that sent us these reports, and what each of them saw.
+    /// </summary>
+    /// <remarks>
+    /// Worth its own view because receivers disagree, and the disagreement is
+    /// information. Google accepting what Microsoft quarantines usually means
+    /// a signature that survives one path and not the other.
+    /// </remarks>
+    public async Task<IReadOnlyList<ReportingOrg>> ReportersAsync(
+        string? domain = null, int days = 30, int top = 20,
+        string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
+    {
+        if (days < 1) { throw new ArgumentOutOfRangeException(nameof(days), days, "A window needs at least one day."); }
+        if (top < 1) { throw new ArgumentOutOfRangeException(nameof(top), top, "Asking for no rows returns an empty panel with nothing to explain it."); }
+
+        var name = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().TrimEnd('.').ToLowerInvariant();
+        var client = Slug(clientSlug);
+        var since = Since(days);
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = $"""
+            SELECT COALESCE(NULLIF(a.org_name, ''), '(not stated)'),
+                   COALESCE(SUM(r.message_count), 0),
+                   COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.spf_auth_result = 'pass' THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count END), 0),
+                   COUNT(DISTINCT a.id)
+            FROM aggregate_records r
+            JOIN aggregate_reports a ON a.id = r.report_id
+            {Joins(name, client, "r")}
+            WHERE r.date_begin >= $since {Filter(name, client, tenantId, "r")}
+            GROUP BY 1
+            HAVING SUM(r.message_count) > 0
+            ORDER BY SUM(r.message_count) DESC
+            LIMIT $top
+            """;
+        Bind(command, name, client, since, tenantId);
+        command.Parameters.AddWithValue("$top", top);
+
+        var rows = new List<ReportingOrg>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            rows.Add(new ReportingOrg
+            {
+                Name = reader.GetString(0),
+                Messages = reader.GetInt64(1),
+                DmarcPass = reader.GetInt64(2),
+                SpfPass = reader.GetInt64(3),
+                DkimPass = reader.GetInt64(4),
+                Reports = reader.GetInt32(5),
+            });
+        }
+
+        return rows;
+    }
+
+    private static string Since(int days) =>
+        DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
+            .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Whether a table this query is optional about exists.
+    /// </summary>
+    /// <remarks>
+    /// source_names arrived in 0015, and a database that has not been upgraded
+    /// must still draw the dashboard - without a name column rather than with
+    /// an error. See FirstRun for what now brings one up to date.
+    /// </remarks>
+    private static async Task<bool> TableExistsAsync(SqliteConnection db, string table, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $name";
+        command.Parameters.AddWithValue("$name", table);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) > 0;
+    }
+
+    /// <summary>
     /// How many domains sent mail in the window, and how many did not.
     /// </summary>
     /// <remarks>

@@ -513,4 +513,113 @@ public sealed class TimeSeriesServiceTests : IDisposable
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => Service().DomainAsync("acme.com", days: 0));
     }
+
+    // ---- what the dashboard's top half reads --------------------------------
+
+    [Fact]
+    public async Task TheThreeChecksAreCountedOverTheSameMessages()
+    {
+        await StoreAsync("acme.example", daysAgo: 1, passing: 80, failing: 20);
+
+        var rates = await Service().RatesAsync(days: 7);
+
+        // One denominator, three numerators. Three separate queries is how a
+        // dashboard ends up claiming SPF passed on more messages than it saw.
+        Assert.Equal(100, rates.Messages);
+        Assert.Equal(80, rates.DmarcPass);
+        Assert.Equal(80, rates.SpfPass);
+        Assert.Equal(80, rates.DkimPass);
+        Assert.Equal(80, rates.DmarcRate);
+    }
+
+    /// <summary>
+    /// The strict test, and the reason the threat table is trustworthy.
+    /// </summary>
+    /// <remarks>
+    /// An address that passed even once for the domain is the customer's own
+    /// mail path, whatever a particular failing row looks like. Judging rows
+    /// individually put a customer's own relay under "who tried to send mail
+    /// as you" with 177 messages against it.
+    /// </remarks>
+    [Fact]
+    public async Task ASourceThatEverAuthenticatedIsNotAThreat()
+    {
+        // 192.0.2.25 passes and fails; 203.0.113.9 only ever fails. Both are
+        // written by the same helper, so the only difference between them is
+        // the one being tested.
+        await StoreAsync("acme.example", daysAgo: 1, passing: 50, failing: 10);
+        await StoreAsync("acme.example", daysAgo: 2, passing: 0, failing: 40);
+
+        var threats = await Service().ThreatsAsync(days: 7);
+
+        var listed = threats.Select(t => t.SourceIp).ToList();
+        Assert.Contains("203.0.113.9", listed);
+        Assert.DoesNotContain("192.0.2.25", listed);
+    }
+
+    [Fact]
+    public async Task HostsAreCountedByAddressAndCarryTheirOwnRates()
+    {
+        await StoreAsync("acme.example", daysAgo: 1, passing: 90, failing: 10);
+
+        var hosts = await Service().HostsAsync(days: 7);
+
+        var passing = Assert.Single(hosts, h => h.SourceIp == "192.0.2.25");
+        Assert.Equal(90, passing.Messages);
+        Assert.Equal(100, passing.DmarcRate);
+
+        var failing = Assert.Single(hosts, h => h.SourceIp == "203.0.113.9");
+        Assert.Equal(0, failing.DmarcRate);
+    }
+
+    [Fact]
+    public async Task ReceiversAreListedWithWhatEachOfThemSaw()
+    {
+        await StoreAsync("acme.example", daysAgo: 1, passing: 70, failing: 30);
+
+        var reporters = await Service().ReportersAsync(days: 7);
+
+        var google = Assert.Single(reporters);
+        Assert.Equal("google.com", google.Name);
+        Assert.Equal(100, google.Messages);
+        Assert.Equal(70, google.DmarcRate);
+        Assert.Equal(1, google.Reports);
+    }
+
+    /// <summary>
+    /// A database that predates 0015 has no source_names table, and the
+    /// dashboard must draw without a name column rather than with an error.
+    /// </summary>
+    [Fact]
+    public async Task NamesAreOptionalRatherThanRequired()
+    {
+        await StoreAsync("acme.example", daysAgo: 1, passing: 5, failing: 5);
+
+        await using (var db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString()))
+        {
+            await db.OpenAsync();
+            await using var drop = db.CreateCommand();
+            drop.CommandText = "DROP TABLE IF EXISTS source_names";
+            await drop.ExecuteNonQueryAsync();
+        }
+
+        var hosts = await Service().HostsAsync(days: 7);
+
+        Assert.NotEmpty(hosts);
+        Assert.All(hosts, h => Assert.Equal("", h.ReverseName));
+        Assert.All(hosts, h => Assert.Equal(h.SourceIp, h.Display));
+    }
+
+    [Fact]
+    public async Task EveryDashboardQueryRefusesAWindowOfNothing()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Service().RatesAsync(days: 0));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Service().ThreatsAsync(days: 0));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Service().HostsAsync(days: 0));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Service().ReportersAsync(days: 0));
+
+        // And a panel with no rows in it, which renders as an unexplained
+        // blank rather than as an empty state.
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Service().HostsAsync(top: 0));
+    }
 }
