@@ -28,7 +28,7 @@ public enum RecordState
 }
 
 /// <summary>One record indicator: what it is, how it is, and why.</summary>
-/// <param name="Label">SPF, DKIM or DMARC.</param>
+/// <param name="Label">SPF, DKIM, DMARC, MTA-STS or TLS-RPT.</param>
 /// <param name="State">What to draw.</param>
 /// <param name="Detail">A full sentence, for the title attribute and for anybody asking why.</param>
 /// <param name="AsOf">When the reading behind this was taken, or null when there is none.</param>
@@ -81,7 +81,7 @@ public sealed record RecordChip(
 }
 
 /// <summary>
-/// Turns a stored DNS reading into the three indicators on the domains table.
+/// Turns a stored DNS reading into the indicators on the domains table.
 ///
 /// Pure, and separate from the reading for the same reason DnsHygiene is
 /// separate from DnsLookup: every combination can then be tested without a
@@ -111,10 +111,26 @@ public static class RecordStatus
     /// </remarks>
     public const int StaleAfterDays = 7;
 
-    /// <summary>All three indicators for one domain, in reading order.</summary>
+    /// <summary>
+    /// Every indicator for one domain, in reading order.
+    /// </summary>
+    /// <remarks>
+    /// Authentication first - SPF, DKIM, DMARC, which between them say whether
+    /// a message was really from the domain - then transport, MTA-STS and
+    /// TLS-RPT, which say whether it crossed the internet where nobody could
+    /// read it. They are different questions and a domain can be perfect at
+    /// one and absent at the other: p=reject with flawless alignment still
+    /// hands every message to a receiver in plaintext if nothing requires TLS.
+    /// </remarks>
     public static IReadOnlyList<RecordChip> For(
         DomainDns dns, int staleAfterDays = StaleAfterDays) =>
-        [Spf(dns, staleAfterDays), Dkim(dns, staleAfterDays), Dmarc(dns, staleAfterDays)];
+    [
+        Spf(dns, staleAfterDays),
+        Dkim(dns, staleAfterDays),
+        Dmarc(dns, staleAfterDays),
+        MtaSts(dns, staleAfterDays),
+        TlsRpt(dns, staleAfterDays),
+    ];
 
     public static RecordChip Dmarc(DomainDns dns, int staleAfterDays = StaleAfterDays)
     {
@@ -303,6 +319,163 @@ public static class RecordStatus
             $"{Selectors(usable.Count)} resolving to a key ({Names(usable)})"
             + (bits > 0 ? $", smallest {bits} bits" : "") + ".",
             dns.CheckedAt, stale);
+    }
+
+    /// <summary>
+    /// The MTA-STS indicator, which is about a file rather than a record.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The only one of these where DNS does not hold the answer. The TXT
+    /// record at _mta-sts announces a policy id and nothing else; the mode -
+    /// the part that decides whether anything is required of senders - lives
+    /// in a file served over HTTPS at mta-sts.&lt;domain&gt;. So there are two
+    /// halves and both can be wrong independently, which is why a record
+    /// present and a policy served are drawn as different states.
+    /// </para>
+    /// <para>
+    /// A policy in <c>testing</c> is the trap this chip exists to catch. Its
+    /// failures are reported and its mail is delivered over plaintext anyway,
+    /// so a domain can sit in it for years producing perfectly clean reports
+    /// while being no better protected than one with no policy at all. Drawing
+    /// a tick for that would be the product telling somebody they were safe.
+    /// </para>
+    /// </remarks>
+    public static RecordChip MtaSts(DomainDns dns, int staleAfterDays = StaleAfterDays)
+    {
+        ArgumentNullException.ThrowIfNull(dns);
+
+        if (Unresolved(dns, "MTA-STS", staleAfterDays) is { } answer) { return answer; }
+
+        var stale = IsStale(dns, staleAfterDays);
+
+        if (string.IsNullOrWhiteSpace(dns.MtaStsRecord))
+        {
+            return new RecordChip("MTA-STS", RecordState.Missing,
+                $"No TXT record at _mta-sts.{dns.Domain}. Nothing requires a sender to use TLS, so a "
+                + "network in the middle can strip encryption and read the mail in plain text.",
+                dns.CheckedAt, stale);
+        }
+
+        // The record is there and nobody has fetched the file. That is not a
+        // fault and must not be drawn as one: the mode is simply not in DNS,
+        // and a reading taken by something that does not make HTTPS requests
+        // never knew it.
+        if (dns.MtaStsMode.Length == 0)
+        {
+            return new RecordChip("MTA-STS", RecordState.Unknown,
+                $"A policy is announced at _mta-sts.{dns.Domain}, but the file at mta-sts.{dns.Domain} has "
+                + "not been fetched, so what mode it is in is unknown. Run: dmarc check "
+                + $"{dns.Domain} --save",
+                dns.CheckedAt, stale);
+        }
+
+        return dns.MtaStsMode.ToLowerInvariant() switch
+        {
+            MtaStsMode.Enforce => new RecordChip("MTA-STS", RecordState.Ok,
+                "The policy being served is in enforce: a sender that supports MTA-STS will refuse to "
+                + "deliver rather than hand the mail over a connection it cannot trust.",
+                dns.CheckedAt, stale),
+
+            MtaStsMode.Testing => new RecordChip("MTA-STS", RecordState.Weak,
+                "The policy being served is in testing, which enforces nothing. Failures are reported "
+                + "and the mail is delivered over plain text anyway, so clean reports here are the "
+                + "signal to move to enforce rather than evidence of being protected.",
+                dns.CheckedAt, stale),
+
+            MtaStsMode.None => new RecordChip("MTA-STS", RecordState.Weak,
+                "The policy being served is mode=none, which is a policy switched off - the way one is "
+                + "retired without stranding senders that cached it. Nothing is required of anybody.",
+                dns.CheckedAt, stale),
+
+            // Announced and not served. Worse than not announcing at all, in
+            // the sense that it is a job somebody started and stopped: the
+            // record says a policy exists and no sender can fetch it, so none
+            // of them applies it.
+            _ => new RecordChip("MTA-STS", RecordState.Weak,
+                $"A policy is announced at _mta-sts.{dns.Domain} and the file could not be fetched from "
+                + $"mta-sts.{dns.Domain}. Senders ignore a policy they cannot fetch, so this protects "
+                + "nothing. Run: dmarc mta-sts check " + dns.Domain,
+                dns.CheckedAt, stale),
+        };
+    }
+
+    /// <summary>
+    /// The TLS-RPT indicator: whether anybody is being asked to report how
+    /// delivery to this domain went.
+    /// </summary>
+    /// <remarks>
+    /// The cheapest record on this list and the one to publish first. It
+    /// changes nothing about delivery - it only asks receivers to say what
+    /// happened - and without it MTA-STS is enforcement with the lights off:
+    /// a policy that starts refusing mail, and no way to find out that it has.
+    /// </remarks>
+    public static RecordChip TlsRpt(DomainDns dns, int staleAfterDays = StaleAfterDays)
+    {
+        ArgumentNullException.ThrowIfNull(dns);
+
+        if (Unresolved(dns, "TLS-RPT", staleAfterDays) is { } answer) { return answer; }
+
+        var stale = IsStale(dns, staleAfterDays);
+
+        if (string.IsNullOrWhiteSpace(dns.TlsRptRecord))
+        {
+            return new RecordChip("TLS-RPT", RecordState.Missing,
+                $"No TXT record at _smtp._tls.{dns.Domain}. Nobody is asked to report how delivery went, "
+                + "so mail failing to connect securely is invisible.",
+                dns.CheckedAt, stale);
+        }
+
+        var rua = Rua(dns.TlsRptRecord);
+
+        if (rua.Length == 0)
+        {
+            return new RecordChip("TLS-RPT", RecordState.Weak,
+                $"There is a record at _smtp._tls.{dns.Domain} with no rua= address, so it names nowhere "
+                + "to send the reports to and no receiver will send any.",
+                dns.CheckedAt, stale);
+        }
+
+        // Where the reports go is stated rather than judged. An address
+        // belonging to another provider is a perfectly deliberate arrangement,
+        // and it does mean this product will never see those reports - which
+        // is worth reading off the row rather than discovering after a week of
+        // wondering why the TLS reports page is empty.
+        return new RecordChip("TLS-RPT", RecordState.Ok,
+            $"Receivers are asked to report delivery failures to {rua}.",
+            dns.CheckedAt, stale);
+    }
+
+    /// <summary>
+    /// The rua= value of a TLS-RPT record, or empty when it names none.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately small. RFC 8460 §3 allows a comma-separated list of
+    /// mailto: and https: endpoints, and reproducing the whole grammar here to
+    /// fill a tooltip would be a second parser free to disagree with the one
+    /// that matters. What is needed is whether an address is named and what it
+    /// is, so the first value is taken and the rest counted.
+    /// </remarks>
+    private static string Rua(string record)
+    {
+        foreach (var field in record.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!field.StartsWith("rua=", StringComparison.OrdinalIgnoreCase)) { continue; }
+
+            var endpoints = field[4..]
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+            if (endpoints.Length == 0) { return ""; }
+
+            var first = endpoints[0];
+            if (first.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase)) { first = first[7..]; }
+
+            return endpoints.Length > 1
+                ? $"{first} and {(endpoints.Length - 1).ToString(CultureInfo.InvariantCulture)} more"
+                : first;
+        }
+
+        return "";
     }
 
     /// <summary>

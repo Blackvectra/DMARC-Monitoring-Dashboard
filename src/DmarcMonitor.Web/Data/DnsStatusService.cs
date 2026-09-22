@@ -19,7 +19,7 @@ namespace DmarcMonitor.Web.Data;
 /// rest, and it is bounded: one organization, or one client inside it, never
 /// the whole install.
 /// </summary>
-public sealed class DnsStatusService(DatabaseInfo database, AuditLog audit)
+public sealed class DnsStatusService(DatabaseInfo database, AuditLog audit, MtaStsFetcher mtaSts)
 {
     private readonly DnsSnapshotStore _snapshots = new(database.Path);
     private readonly string _databasePath = database.Path;
@@ -58,7 +58,11 @@ public sealed class DnsStatusService(DatabaseInfo database, AuditLog audit)
     {
         if (!File.Exists(_databasePath)) { return null; }
 
-        var scanner = new DnsScanner(_databasePath);
+        // The application's own fetcher, rather than one per press of the
+        // button: it is a singleton holding a connection pool with a bounded
+        // DNS lifetime, and a fresh one each time would open a pool, use it
+        // once and leave its sockets in TIME_WAIT.
+        var scanner = new DnsScanner(_databasePath, lookup: null, mtaSts);
         var summary = await scanner
             .RunAsync(tenantId, clientSlug, domain: null, progress: null, limit: RefreshLimit, ct: ct)
             .ConfigureAwait(false);

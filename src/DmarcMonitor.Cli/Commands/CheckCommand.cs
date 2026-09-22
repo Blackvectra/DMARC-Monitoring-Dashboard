@@ -43,6 +43,15 @@ public static class CheckCommand
             return 66;
         }
 
+        // --save writes, so it is asked the same question import and ingest
+        // are. It was not, and got away with it only because the columns a
+        // reading fills happened to exist in every schema this had shipped
+        // with. The first one that did not would have run the whole book of
+        // DNS lookups, stored some of them, and failed part way through with
+        // a missing column - which is a worse way to learn the database needs
+        // upgrading than one sentence before anything starts.
+        if (save && !await SchemaGuard.IsCurrentAsync(dbPath, ct).ConfigureAwait(false)) { return 69; }
+
         List<string> domains;
         var observed = new Dictionary<string, ObservedSending>(StringComparer.OrdinalIgnoreCase);
 

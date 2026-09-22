@@ -1,0 +1,43 @@
+-- Remember what mode the served MTA-STS policy was in, so a chip can say it.
+--
+-- The domains table renders from dns_snapshots, because resolving eighty
+-- domains while a page draws is not a thing that can be done. That worked for
+-- SPF, DKIM and DMARC, all of which are DNS records and all of which are
+-- already in the row. MTA-STS is not: the TXT record at _mta-sts announces an
+-- id and nothing else, and the only place the MODE exists is a file served
+-- over HTTPS at mta-sts.<domain>. So the snapshot could say a domain
+-- announces a policy and could not say whether that policy required anything.
+--
+-- The distinction is the whole value of the column. A policy in testing has
+-- its failures reported and its mail delivered over plaintext anyway: a domain
+-- can sit there for years producing perfectly clean reports and be no better
+-- protected than one with no policy at all. Drawing a tick for it would be the
+-- product telling somebody they were safe.
+ALTER TABLE dns_snapshots ADD COLUMN mta_sts_mode TEXT;
+
+-- WHY THIS IS NOT PART OF content_hash
+--
+-- dns_snapshots rows are deduplicated by a hash of the record values, and that
+-- hash is what decides whether a domain's DNS "changed" - which is a thing
+-- somebody gets told about. The policy file is not a DNS record. It is fetched
+-- over HTTPS from a host that can time out on its own schedule, and folding it
+-- into the content hash would have a flaky minute of network insert a snapshot
+-- row and announce that the zone had been edited.
+--
+-- So this is written onto whichever row is current at the time it is observed,
+-- and left alone when it is not observed. Which gives the values below:
+--
+--   'enforce'      the served file said enforce: senders that support MTA-STS
+--                  refuse to deliver over a connection they cannot trust
+--   'testing'      the served file said testing: failures reported, mail
+--                  delivered in plaintext regardless
+--   'none'         the served file said none, which is a policy switched off -
+--                  how one is retired without stranding senders that cached it
+--   'unreachable'  the domain announces a policy and the file could not be
+--                  fetched or did not parse. Senders ignore a policy they
+--                  cannot fetch, so this protects nothing, and it is the state
+--                  a half-finished deployment sits in
+--   NULL           nobody asked. Either the domain publishes no _mta-sts
+--                  record worth asking about, or the reading was taken by
+--                  something that does not fetch. Nothing may be concluded
+--                  from it, and in particular it is never drawn as a cross.

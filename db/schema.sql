@@ -594,6 +594,22 @@ CREATE TABLE dns_snapshots (
     dmarc_rua           TEXT,
     dmarc_ruf           TEXT,
 
+    -- The mode of the MTA-STS policy really being served, which is the one
+    -- thing about MTA-STS that DNS cannot answer: mta_sts_record above carries
+    -- an id and nothing else, and the mode lives in a file fetched over HTTPS
+    -- from mta-sts.<domain>. Without this a snapshot can say a domain
+    -- announces a policy and cannot say whether that policy requires anything,
+    -- and a policy in testing requires nothing at all.
+    --
+    -- One of 'enforce', 'testing', 'none', 'unreachable' (announced, and the
+    -- file could not be fetched or did not parse), or NULL for nobody asked.
+    -- Deliberately outside content_hash: the file is not a DNS record, it is
+    -- an HTTPS fetch that can time out on its own schedule, and hashing it
+    -- would let a flaky minute of network announce that the zone was edited.
+    -- It is written onto whichever row is current when it is observed, and
+    -- left alone when it is not.
+    mta_sts_mode        TEXT,
+
     content_hash        TEXT NOT NULL                  -- SHA-256 of all record values
 );
 
@@ -1096,6 +1112,9 @@ VALUES ('0014', datetime('now'), 'engineer_group_id on tenants: splits the worki
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0015', datetime('now'), 'source_names: what an address reverses to, so a report can name its senders instead of printing digits at an operator');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0016', datetime('now'), 'mta_sts_mode on dns_snapshots: the mode of the policy really being served, which DNS cannot answer, so a chip can tell enforcement from a policy in testing that requires nothing');
 
 
 -- ============================================================================

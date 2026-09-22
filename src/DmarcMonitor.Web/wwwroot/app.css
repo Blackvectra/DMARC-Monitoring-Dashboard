@@ -800,7 +800,13 @@ section[id] { scroll-margin-top: 16px; }
     means the resolver answered and there was no record, and it has to keep
     meaning only that.
 */
-.records { white-space: nowrap; }
+/* Five chips, not three, since MTA-STS and TLS-RPT joined them - and two of
+   the five have long names. Wrapping rather than widening: this column sits
+   between the domain and the policy, and letting it grow to fit
+   "MTA-STS ✓ TLS-RPT ✓" on one line pushes everything worth reading off the
+   right of the table. Authentication ends up on the first line and transport
+   on the second, which is the order they are built in anyway. */
+.records { display: flex; flex-wrap: wrap; row-gap: 3px; max-width: 15rem; }
 
 .chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -809,6 +815,7 @@ section[id] { scroll-margin-top: 16px; }
     font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
     border: 1px solid transparent;
     vertical-align: middle;
+    white-space: nowrap;
 }
 .chip:last-child { margin-right: 0; }
 .chip-name { font-weight: 500; }
