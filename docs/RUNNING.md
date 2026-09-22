@@ -12,7 +12,30 @@ shows an empty state until something has been collected.
 
 ---
 
-## Quickest possible start
+## Quickest possible start: the Windows trial download
+
+Nothing installed at all. `dmarc-windows-trial.zip` from the latest release,
+unzipped, and `DmarcMonitor.Web.exe` double-clicked. A browser opens on the
+dashboard.
+
+There is no .NET runtime to install, no administrator prompt, no service and
+no server. The application creates its own database in the folder it was run
+from — that is the only state it has, along with the `keys\` directory beside
+it that signs your session cookie — so deleting the folder removes every
+trace. Put data in by dropping report files onto the Import page, or with the
+`dmarc.exe` in the same folder:
+
+```
+dmarc.exe import --from "C:\some-folder-of-reports"
+```
+
+It is the same build a server runs, in **local trial mode**: it serves
+requests from that machine and refuses anything that arrived through a proxy,
+and says so in a banner on every page. That makes it safe on a laptop and
+wrong on a server — for a server, see [`DEPLOYING.md`](DEPLOYING.md), which
+starts from the same application with sign-in configured.
+
+## Quickest possible start from the command line
 
 No mailbox, no app registration, no configuration. Enough to see whether the
 product is worth the rest of the setup.

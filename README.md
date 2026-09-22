@@ -17,8 +17,29 @@ Two pieces, sharing a SQLite file and nothing else:
 
 Neither needs the other running.
 
-**Start here: [docs/RUNNING.md](docs/RUNNING.md).** It gets you from nothing to
-a client report without a mailbox or an app registration.
+## Just want to look at it?
+
+Download **`dmarc-windows-trial.zip`** from the latest release, unzip it, and
+double-click `DmarcMonitor.Web.exe`. The dashboard opens in your browser.
+
+No .NET install, no administrator, no service, no reverse proxy, no Entra app
+registration, no server. It creates its own database in the folder it is run
+from, serves that machine and nothing else, and deleting the folder removes
+every trace. Drop report files onto the Import page — or point the `dmarc.exe`
+beside it at a directory of them:
+
+```
+dmarc.exe import --from "C:\reports"
+```
+
+It is the same application a deployment runs, in the local trial mode it
+already had, so what you are looking at is the product rather than a demo of
+it. CI publishes that zip, runs the executable in an empty folder with the
+.NET toolchain removed from `PATH`, and checks the dashboard renders — on
+every push.
+
+**Then: [docs/RUNNING.md](docs/RUNNING.md).** It gets you from nothing to a
+client report without a mailbox or an app registration.
 
 ---
 
@@ -81,8 +102,15 @@ dotnet build src/DmarcMonitor.sln
 dotnet test  src/DmarcMonitor.sln
 ```
 
-Releases publish the CLI for `win-x64`, `linux-x64` and `linux-arm64`, plus the
-web bundle. See `.github/workflows/release.yml`.
+Releases publish the CLI for `win-x64`, `linux-x64` and `linux-arm64` — each
+built and executed on the architecture it targets — plus the web bundle for a
+server and the self-contained Windows trial zip. See
+`.github/workflows/release.yml`.
+
+Releases fire on a **tag**, not on a merge: `git tag v1.2.3 && git push origin
+v1.2.3`. Merging to `main` builds nothing installable, and `bootstrap.sh`
+downloads the latest release, so an install run straight after a merge quietly
+gets the previous tag's build.
 
 ---
 

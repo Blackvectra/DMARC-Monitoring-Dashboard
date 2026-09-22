@@ -249,6 +249,24 @@ else
 }
 StartupLog.Database(logger, dbPath);
 
+// Before the first request, not on the first request. A managed install has
+// already run `dmarc init-db` by this point and this does nothing; a copy
+// somebody downloaded and double-clicked has not, and without this every page
+// reports a table that does not exist.
+await FirstRun.EnsureDatabaseAsync(dbPath, logger).ConfigureAwait(false);
+
+// Only ever for the Windows trial download - see TrialBrowser for the four
+// cases this is deliberately not. Hooked to ApplicationStarted so the address
+// is the one Kestrel actually bound, and so nothing opens if startup fails.
+if (TrialBrowser.ShouldOpen(app.Configuration))
+{
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        var address = app.Urls.FirstOrDefault() ?? "http://localhost:5000";
+        TrialBrowser.Open(address.Replace("0.0.0.0", "localhost", StringComparison.Ordinal), logger);
+    });
+}
+
 await app.RunAsync();
 
 /// <summary>

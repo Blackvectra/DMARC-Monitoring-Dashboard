@@ -138,6 +138,139 @@ jobs:
           path: publish/${{ matrix.rid }}/${{ matrix.exe }}
           if-no-files-found: error
 
+  # One download, nothing to install, no server. The web bundle below is the
+  # one a deployment uses and it needs the ASP.NET Core 8 runtime on the host;
+  # that is the right trade for a server and the wrong one for somebody who
+  # just wants to see whether this is worth deploying. Self-contained costs
+  # about 100 MB of release asset and removes every prerequisite: no runtime,
+  # no administrator, no service, no reverse proxy, no Entra.
+  #
+  # It is the same application, in local trial mode - the mode that serves
+  # loopback only and refuses anything arriving through a proxy - so what
+  # somebody tries is the product rather than a demo of it.
+  trial:
+    name: Windows trial bundle
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          ref="${{ github.ref_name }}"
+          if [[ "$ref" == v* || "$ref" == V* ]]; then
+            number="${ref#[vV]}"
+            if [[ ! "$number" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Tag '$ref' is not a version. Expected v1.2.3, so the build can be stamped with 1.2.3." >&2
+              exit 64
+            fi
+            echo "number=$number" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=0.0.0-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish, self-contained
+        shell: pwsh
+        run: |
+          # Not PublishSingleFile. A Blazor Server app carries static web
+          # assets that do not go inside the bundle, so a "single file" here
+          # would be one exe that still needs the folder around it - which
+          # looks like one file and is not. A folder with one obvious
+          # executable in it is honest and works.
+          dotnet publish src/DmarcMonitor.Web/DmarcMonitor.Web.csproj `
+            --configuration Release --runtime win-x64 --self-contained true `
+            -p:Version=${{ steps.version.outputs.number }} `
+            --output "bundle/DMARC Monitor"
+
+          # The command-line tool travels with it: importing a folder of
+          # reports is `dmarc import`, and the Import page in the app covers
+          # drag-and-drop but not a directory of thousands.
+          dotnet publish src/DmarcMonitor.Cli/DmarcMonitor.Cli.csproj `
+            --configuration Release --runtime win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true -p:DebugType=none `
+            -p:Version=${{ steps.version.outputs.number }} `
+            --output publish/cli
+          Copy-Item publish/cli/dmarc.exe "bundle/DMARC Monitor/dmarc.exe"
+
+      - name: Write the note that goes in the folder
+        shell: pwsh
+        run: |
+          @"
+          DMARC Monitor — trial copy
+          ==========================
+
+          Double-click DmarcMonitor.Web.exe. A browser opens at
+          http://localhost:5000 and the dashboard is there.
+
+          Nothing is installed. No .NET runtime, no administrator rights, no
+          service, no server. Everything it writes stays in this folder:
+
+            dmarc.db     the database, created the first time you run it
+            keys\        the keys that sign your session cookie
+
+          Delete the folder and it is gone.
+
+          ONLY THIS MACHINE CAN REACH IT
+          The application refuses any request that did not come from this
+          computer, and says so at the top of every page. There is no sign-in
+          because there is nothing to sign in to - which is also why this copy
+          should not be put on a server. For that, see docs/DEPLOYING.md.
+
+          PUTTING YOUR OWN DATA IN
+          Reports arrive as .xml.gz or .zip attachments on DMARC mail. Either:
+
+            - drag them onto the Import page in the application, or
+            - dmarc.exe import --from "C:\path\to\a\folder\of\reports"
+
+          The second one is better for more than a handful.
+
+          Or look at it with nothing in it first: the pages explain what they
+          would be showing you.
+          "@ | Set-Content -Path "bundle/DMARC Monitor/README.txt" -Encoding UTF8
+
+      - name: The bundle carries what it needs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = "bundle/DMARC Monitor"
+
+          # Self-contained means the runtime is in the folder. If these are
+          # missing the zip needs a .NET install after all, which is the one
+          # thing this bundle exists to avoid - and it would only be found by
+          # whoever downloaded it.
+          foreach ($f in @('DmarcMonitor.Web.exe', 'dmarc.exe', 'README.txt',
+                           'hostfxr.dll', 'hostpolicy.dll', 'coreclr.dll',
+                           'wwwroot/app.css')) {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "$f is missing from the bundle" }
+          }
+
+          # And that nobody has to find the executable among five hundred DLLs
+          # with the same icon: the one to double-click sorts to the top by
+          # size and is the only .exe besides the command-line tool.
+          (Get-ChildItem $dir -Filter *.exe).Name
+          '{0:N0} files, {1:N0} MB' -f (Get-ChildItem $dir -Recurse -File).Count,
+            ((Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+
+          # That it starts and serves is asserted on every push, not only at
+          # release time - see the "Windows trial download" job in tests.yml.
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path "bundle/DMARC Monitor" -DestinationPath dmarc-windows-trial.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmarc-windows-trial
+          path: dmarc-windows-trial.zip
+          if-no-files-found: error
+
   web:
     name: Web app bundle
     runs-on: ubuntu-latest
@@ -195,7 +328,7 @@ jobs:
 
   release:
     name: Attach to the release
-    needs: [cli, web]
+    needs: [cli, web, trial]
     if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
     runs-on: ubuntu-latest
 
@@ -218,6 +351,7 @@ jobs:
           mv dmarc-win-x64/dmarc.exe      ../dmarc.exe
           mv dmarc-linux-x64/dmarc        ../dmarc-linux-x64
           mv dmarc-linux-arm64/dmarc      ../dmarc-linux-arm64
+          mv dmarc-windows-trial/dmarc-windows-trial.zip ../dmarc-windows-trial.zip
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -227,10 +361,21 @@ jobs:
             dmarc-linux-arm64
             dmarc-web.zip
             dmarc-deploy.tar.gz
+            dmarc-windows-trial.zip
           body: |
+            **Just want to look at it?** `dmarc-windows-trial.zip` — unzip,
+            double-click `DmarcMonitor.Web.exe`, and the dashboard opens in
+            your browser. No .NET install, no administrator, no service, no
+            server. It creates its own database in the folder, serves only
+            that machine, and deleting the folder removes every trace. Drag
+            report files onto the Import page, or use the `dmarc.exe` beside
+            it. It is the same application a deployment runs, in the local
+            trial mode it already had.
+
             `dmarc.exe` runs on its own: no .NET install, no checkout, no
             schema file beside it. Every build is checked by creating a
-            database in an empty directory before it is published.
+            database in an empty directory before it is published, on the
+            architecture it targets.
 
             The web bundle needs the ASP.NET Core 8 runtime on the host.
             `dmarc-deploy.tar.gz` holds the install, update and rollback

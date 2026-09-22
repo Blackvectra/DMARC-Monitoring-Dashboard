@@ -705,6 +705,135 @@ jobs:
           Get-Content C:\dmarc\bin\caddy-service.out.log -Tail 30 -ErrorAction SilentlyContinue
           Get-Content C:\dmarc\bin\caddy-service.err.log -Tail 30 -ErrorAction SilentlyContinue
 
+  # The download somebody tries the product with, run the way they will run
+  # it: a published executable, in an empty folder, with nothing installed.
+  #
+  # This is here rather than only in release.yml because of what it found.
+  # Every other path starts the web app AFTER deploy/install.sh has run
+  # `dmarc init-db`, so the application's own behaviour on a missing database
+  # was never exercised - and it was to leave a zero-byte dmarc.db behind and
+  # render "Could not read the database: no such table: tenants" on every
+  # screen. Invisible on a server, and the entire experience of a trial copy.
+  windows-trial:
+    name: Windows trial download
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish it self-contained
+        shell: pwsh
+        run: |
+          dotnet publish src/DmarcMonitor.Web/DmarcMonitor.Web.csproj `
+            --configuration Release --runtime win-x64 --self-contained true `
+            --output "bundle/DMARC Monitor"
+          dotnet publish src/DmarcMonitor.Cli/DmarcMonitor.Cli.csproj `
+            --configuration Release --runtime win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true -p:DebugType=none `
+            --output publish/cli
+          Copy-Item publish/cli/dmarc.exe "bundle/DMARC Monitor/dmarc.exe"
+
+      - name: Double-click it in an empty folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path run | Out-Null
+          $exe = (Resolve-Path "bundle/DMARC Monitor/DmarcMonitor.Web.exe").Path
+          $work = (Resolve-Path run).Path
+          $out  = Join-Path $PWD 'trial.out'
+          $err  = Join-Path $PWD 'trial.err'
+
+          # Every dotnet directory stripped from PATH and DOTNET_ROOT cleared,
+          # so nothing this runner happens to have installed can stand in for
+          # what somebody downloading the zip does not. The child process
+          # inherits these.
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'dotnet' }) -join ';'
+          $env:DOTNET_ROOT = ''
+          $env:ASPNETCORE_URLS = 'http://127.0.0.1:5000'
+          $env:DMARC_NO_BROWSER = '1'      # there is no desktop on a runner
+
+          $p = Start-Process -FilePath $exe -WorkingDirectory $work -PassThru -NoNewWindow `
+                 -RedirectStandardOutput $out -RedirectStandardError $err
+          try {
+            # No -MaximumRedirection 0 here. /local-signin answers 302, and
+            # PowerShell raises "the maximum redirection count has been
+            # exceeded" for a redirect it is told not to follow - which
+            # -SkipHttpErrorCheck does NOT suppress, because it is not an HTTP
+            # error status. The catch below would have swallowed that on every
+            # attempt and the loop would have timed out against a server that
+            # was answering perfectly.
+            $session = $null
+            foreach ($i in 1..60) {
+              Start-Sleep -Seconds 2
+              try {
+                Invoke-WebRequest -Uri 'http://127.0.0.1:5000/local-signin' `
+                  -SessionVariable session -SkipHttpErrorCheck -ErrorAction Stop | Out-Null
+                break
+              } catch { $session = $null }
+            }
+            Get-Content $out -ErrorAction SilentlyContinue
+            Get-Content $err -ErrorAction SilentlyContinue
+            if (-not $session) { throw 'the published executable never answered on 127.0.0.1:5000' }
+
+            # It made its own database, in the folder it was run from.
+            if (-not (Test-Path run/dmarc.db))        { throw 'no database was created' }
+            if ((Get-Item run/dmarc.db).Length -le 0) { throw 'the database it created is empty' }
+            if (-not (Test-Path run/keys))            { throw 'no key directory beside the database' }
+
+            # And the dashboard reads it. "No domains yet" is the empty state;
+            # "Could not read the database" is the bug this job exists for, and
+            # asserting the absence of it alone would pass on a blank page.
+            $page = (Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -WebSession $session -SkipHttpErrorCheck).Content
+            if ($page -match 'Could not read the database') { throw 'the dashboard cannot read the database it just created' }
+            if ($page -notmatch 'Triage')        { throw 'the dashboard did not render' }
+            if ($page -notmatch 'No domains yet') { throw 'the empty state did not render' }
+            if ($page -notmatch 'Local trial mode') { throw 'the trial-mode banner is missing' }
+
+            # Local trial mode still refuses anything arriving through a proxy.
+            # A copy on somebody's desktop must not become a way in if they
+            # ever port-forward to it.
+            $proxied = Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -WebSession $session `
+                         -Headers @{ 'X-Forwarded-For' = '203.0.113.9' } -SkipHttpErrorCheck
+            "proxied: $($proxied.StatusCode)"
+            if ($proxied.StatusCode -ne 403) { throw "a proxied request got $($proxied.StatusCode), not 403" }
+
+            'the published exe created a database and served the dashboard with no runtime installed'
+          }
+          finally { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
+
+      - name: A second run adopts the database rather than remaking it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Resolve-Path "bundle/DMARC Monitor/DmarcMonitor.Web.exe").Path
+          $work = (Resolve-Path run).Path
+          $before = (Get-FileHash run/dmarc.db).Hash
+
+          $env:ASPNETCORE_URLS = 'http://127.0.0.1:5000'
+          $env:DMARC_NO_BROWSER = '1'
+          $p = Start-Process -FilePath $exe -WorkingDirectory $work -PassThru -NoNewWindow `
+                 -RedirectStandardOutput (Join-Path $PWD 'second.out') `
+                 -RedirectStandardError  (Join-Path $PWD 'second.err')
+          try {
+            foreach ($i in 1..60) {
+              Start-Sleep -Seconds 2
+              try { Invoke-WebRequest -Uri 'http://127.0.0.1:5000/' -SkipHttpErrorCheck -ErrorAction Stop | Out-Null; break } catch { }
+            }
+            $log = (Get-Content (Join-Path $PWD 'second.out') -Raw -ErrorAction SilentlyContinue)
+            $log
+            if ($log -match 'Created a new database') { throw 'it created a second database over the first' }
+          }
+          finally { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
+
+          if ((Get-FileHash run/dmarc.db).Hash -ne $before) {
+            throw 'the database changed on a start that should have left it alone'
+          }
+          'second run left the database exactly as it was'
+
   schema:
     name: SQLite schema
     runs-on: ubuntu-latest

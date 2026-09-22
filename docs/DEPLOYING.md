@@ -203,6 +203,12 @@ From the release page, three files: `dmarc-web.zip`, `dmarc-linux-x64` (or
 and the systemd units. The server has no checkout; that is why they travel
 with the release.
 
+Not `dmarc-windows-trial.zip`. That one is a self-contained copy for looking
+at the product on a laptop - no runtime, no service, no sign-in, serving
+loopback only. It is the right way to decide whether to do any of this, and
+the wrong thing to put on a server: it has no authentication because it has
+no way to be reached by anybody but the person running it.
+
 ```bash
 tar xzf dmarc-deploy.tar.gz
 sudo ./deploy/install.sh
@@ -617,9 +623,14 @@ Tagging is the decision. Until you tag, you can change whatever you like on
 git tag v1.3.0 && git push origin v1.3.0
 ```
 
-That builds `dmarc.exe`, `dmarc-linux-x64`, `dmarc-linux-arm64` and
-`dmarc-web.zip`, stamps each with `1.3.0`, and attaches them to a GitHub
-release.
+That builds `dmarc.exe`, `dmarc-linux-x64`, `dmarc-linux-arm64`,
+`dmarc-web.zip`, `dmarc-deploy.tar.gz` and `dmarc-windows-trial.zip`, stamps
+each with `1.3.0`, and attaches them to a GitHub release.
+
+**Merging is not releasing.** Nothing on `main` is installable until a tag
+builds it, and `bootstrap.sh` fetches the *latest release* - so an install run
+straight after a merge gets the previous tag's binaries, with the same version
+number it always had and no error to explain the missing work.
 
 **The server can tell you when it is behind.** Set `Updates:Repository` in
 `appsettings.Production.json` and the Settings page reports what it is running
