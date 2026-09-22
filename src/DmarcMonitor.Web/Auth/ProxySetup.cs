@@ -90,9 +90,38 @@ public static class ProxySetup
     /// Not behind a proxy: yes. Behind one: no, the proxy already did it, and
     /// redirecting again on a request the proxy forwarded as HTTP is how a
     /// deployment ends up in a loop that looks like the app is down.
+    ///
+    /// And never in local trial mode, which is the third case and was missing.
+    /// That copy serves loopback over plain HTTP by design and has no
+    /// certificate to redirect to, so registering the middleware achieved
+    /// nothing except a warning on every single start:
+    ///
+    ///     warn: Microsoft.AspNetCore.HttpsPolicy.HttpsRedirectionMiddleware[3]
+    ///           Failed to determine the https port for redirect.
+    ///
+    /// which is the last line somebody sees before deciding whether the thing
+    /// they just downloaded works. It also registered HSTS on an application
+    /// answering http://localhost - harmless, because browsers ignore
+    /// Strict-Transport-Security on a plain-HTTP response, but it is a header
+    /// that means something and it was being sent by mistake.
     /// </remarks>
     public static bool ShouldRedirectToHttps(IConfiguration configuration) =>
-        !IsBehindProxy(configuration);
+        !IsBehindProxy(configuration) && !IsLocalTrial(configuration);
+
+    /// <summary>
+    /// The copy somebody downloaded and double-clicked: no sign-in, and not
+    /// permitted beyond loopback.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the same pair of questions <see cref="AuthSetup"/> asks to
+    /// decide whether to put the loopback guard in front of every request. An
+    /// install that has either - Entra configured, or local mode explicitly
+    /// allowed remotely - is a deployment somebody set up, and gets the
+    /// redirect it had before.
+    /// </remarks>
+    private static bool IsLocalTrial(IConfiguration configuration) =>
+        !AuthSetup.IsEntraConfigured(configuration)
+        && !AuthSetup.LocalModeAllowedRemotely(configuration);
 
     private static bool TryNetwork(string cidr, out Microsoft.AspNetCore.HttpOverrides.IPNetwork network)
     {
