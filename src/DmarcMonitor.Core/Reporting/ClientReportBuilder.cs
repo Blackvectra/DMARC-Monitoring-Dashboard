@@ -404,9 +404,18 @@ public sealed class ClientReportBuilder(string databasePath)
                    -- else.
                    SUM(CASE WHEN r.spf_auth_result  = 'pass' THEN r.message_count ELSE 0 END),
                    SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count ELSE 0 END),
-                   SUM(CASE WHEN r.dmarc_result <> 'pass' AND r.spf_auth_result  = 'pass'
+                   -- Mutually exclusive, deliberately. A message that passed
+                   -- both checks without aligning counted in both rows, so the
+                   -- causes added up to more mail than failed: 9 + 6 where the
+                   -- truth was 4 + 1 + 5. A client adds up a column.
+                   SUM(CASE WHEN r.dmarc_result <> 'pass' AND r.spf_auth_result = 'pass'
+                             AND COALESCE(r.dkim_auth_result, '') <> 'pass'
                             THEN r.message_count ELSE 0 END),
                    SUM(CASE WHEN r.dmarc_result <> 'pass' AND r.dkim_auth_result = 'pass'
+                             AND COALESCE(r.spf_auth_result, '') <> 'pass'
+                            THEN r.message_count ELSE 0 END),
+                   SUM(CASE WHEN r.dmarc_result <> 'pass' AND r.spf_auth_result = 'pass'
+                             AND r.dkim_auth_result = 'pass'
                             THEN r.message_count ELSE 0 END),
                    SUM(CASE WHEN r.dmarc_result <> 'pass'
                              AND COALESCE(r.spf_auth_result, '')  <> 'pass'
@@ -449,7 +458,8 @@ public sealed class ClientReportBuilder(string databasePath)
                 DkimPass = reader.GetInt64(8),
                 FailedSpfNotAligned = reader.GetInt64(9),
                 FailedDkimNotAligned = reader.GetInt64(10),
-                FailedBoth = reader.GetInt64(11),
+                FailedBothNotAligned = reader.GetInt64(11),
+                FailedBoth = reader.GetInt64(12),
             });
         }
         return results;

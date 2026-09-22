@@ -154,15 +154,49 @@ public sealed class SenderInventoryTests
             Failing = 300,
             FailedSpfNotAligned = 200,
             FailedDkimNotAligned = 80,
-            FailedBoth = 20,
+            FailedBothNotAligned = 10,
+            FailedBoth = 10,
         }) with { OverriddenMessages = 15 };
 
         var causes = report.FailureCauses.ToDictionary(c => c.Cause, c => c.Messages, StringComparer.Ordinal);
 
         Assert.Equal(200, causes["SPF passed, did not align"]);
         Assert.Equal(80, causes["DKIM verified, did not align"]);
-        Assert.Equal(20, causes["Neither check passed"]);
+        Assert.Equal(10, causes["Both checks passed, neither aligned"]);
+        Assert.Equal(10, causes["Neither check passed"]);
         Assert.Equal(15, causes["Handled by the receiver"]);
+    }
+
+    /// <summary>
+    /// The causes are a column somebody adds up, so they must not overlap.
+    /// </summary>
+    /// <remarks>
+    /// They did. A message that passed both checks without aligning was
+    /// counted under SPF and again under DKIM, so a real client report showed
+    /// 9 + 6 + 94 where the truth was 4 + 1 + 5 + 94 - more failures than
+    /// there was failing mail. Found by adding up the rendered report against
+    /// the database rather than by reading the query.
+    /// </remarks>
+    [Fact]
+    public void TheCausesSumToTheMailThatFailedAndNoMore()
+    {
+        var report = Report(new ReportSource
+        {
+            SourceIp = "203.0.113.9",
+            Messages = 100,
+            Passing = 0,
+            Failing = 100,
+            FailedSpfNotAligned = 4,
+            FailedDkimNotAligned = 1,
+            FailedBothNotAligned = 5,
+            FailedBoth = 90,
+        });
+
+        var counted = report.FailureCauses
+            .Where(c => c.Cause != "Handled by the receiver")
+            .Sum(c => c.Messages);
+
+        Assert.Equal(100, counted);
     }
 
     [Fact]

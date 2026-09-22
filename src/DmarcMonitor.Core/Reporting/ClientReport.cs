@@ -94,11 +94,32 @@ public sealed record ReportSource
     /// <summary>Messages whose DKIM signature verified, for whatever domain.</summary>
     public long DkimPass { get; init; }
 
-    /// <summary>Failing messages where SPF passed but for the wrong domain.</summary>
+    /// <summary>
+    /// Failing messages where SPF alone passed, for the wrong domain.
+    /// </summary>
+    /// <remarks>
+    /// Exclusive of <see cref="FailedBothNotAligned"/>, and it has to be. A
+    /// message that passed both checks without aligning belongs to exactly one
+    /// row of a table whose rows are added up - counted in both, the report
+    /// says more mail failed than was ever sent, which is the one arithmetic
+    /// error a client will find.
+    /// </remarks>
     public long FailedSpfNotAligned { get; init; }
 
-    /// <summary>Failing messages where DKIM verified but for the wrong domain.</summary>
+    /// <summary>Failing messages where DKIM alone verified, for the wrong domain.</summary>
     public long FailedDkimNotAligned { get; init; }
+
+    /// <summary>
+    /// Failing messages where SPF and DKIM both passed, and neither was about
+    /// the domain in the From line.
+    /// </summary>
+    /// <remarks>
+    /// Its own row rather than folded into either of the others, because it
+    /// says something neither of them does: the sender is fully configured,
+    /// correctly, entirely as itself. There is nothing broken at their end to
+    /// find - the work is to make them sign as the customer.
+    /// </remarks>
+    public long FailedBothNotAligned { get; init; }
 
     /// <summary>Failing messages where neither check passed at all.</summary>
     public long FailedBoth { get; init; }
@@ -576,7 +597,8 @@ public sealed record ClientReport
         {
             var spf = Sources.Sum(s => s.FailedSpfNotAligned);
             var dkim = Sources.Sum(s => s.FailedDkimNotAligned);
-            var both = Sources.Sum(s => s.FailedBoth);
+            var neither = Sources.Sum(s => s.FailedBoth);
+            var bothUnaligned = Sources.Sum(s => s.FailedBothNotAligned);
 
             return
             [
@@ -588,7 +610,10 @@ public sealed record ClientReport
                     ("DKIM verified, did not align", dkim,
                      "The signature was valid and belonged to the sender rather than to you. Usually the same "
                      + "cause, and usually fixed by turning on custom DKIM at the vendor."),
-                    ("Neither check passed", both,
+                    ("Both checks passed, neither aligned", bothUnaligned,
+                     "SPF and DKIM both verified, and both were about the sender's own domain rather than "
+                     + "yours. Nothing is broken at their end: the work is to have them sign as you."),
+                    ("Neither check passed", neither,
                      "Nothing verified. Forwarding and mailing lists land here legitimately; so does anybody "
                      + "sending as you."),
                     ("Handled by the receiver", OverriddenMessages,
