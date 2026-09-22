@@ -581,20 +581,18 @@ See `docs/MSP-PLATFORM.md` for how this sits against what an MSP platform is
 expected to be. It is one table and the workflow on top of it, and four of the
 brief's ten Phase 1 items collapse into it.
 
-## 13. The client report is one document, and it is HTML
+## 13. The client report is one document, and nothing sends it
 
-**Area** `src/DmarcMonitor.Core/Reporting/ClientReportRenderer.cs`
+**Area** `src/DmarcMonitor.Core/Reporting/ClientReportRenderer.cs`,
+`ClientReportPdf.cs`
 **Severity** Medium. It is the monthly deliverable.
 
 The report now carries a posture summary, a classified sender inventory, the
 failure causes, per-domain enforcement readiness and a remediation register
-with an owner and a definition of done for each item. What it does not have:
+with an owner and a definition of done for each item, and `dmarc report --pdf`
+renders it server-side with the product's own header, footer and page numbers.
+What it does not have:
 
-- **PDF.** It prints, and the browser owns its header and footer — the date,
-  the tab title and `localhost:5000` across the bottom of a document sent to a
-  paying customer. No stylesheet can suppress them. Rendering server-side is
-  what removes the need to tell somebody to turn headers off in the print
-  dialog.
 - **One report, not three.** The brief asks for an executive report, a
   technical report and a QBR; this is one document that sits between the first
   two.

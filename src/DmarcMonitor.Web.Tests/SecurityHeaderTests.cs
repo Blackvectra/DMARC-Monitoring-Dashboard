@@ -78,7 +78,7 @@ public sealed class SecurityHeaderTests : IClassFixture<SeededApp>
         // a report to a customer's rua address - and it needs no script at
         // all, which is already a test of its own. So it gets the policy the
         // app cannot have.
-        var response = await Client().GetAsync("/reports/download/acme-corp/2026-08");
+        var response = await Client().GetAsync("/reports/download/acme-corp/2026-08?format=html");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
         var csp = response.Headers.GetValues("Content-Security-Policy").Single();
@@ -91,5 +91,28 @@ public sealed class SecurityHeaderTests : IClassFixture<SeededApp>
         // either. That is what makes it safe to mail and to open from a
         // folder, which is where it ends up.
         Assert.DoesNotContain("'self'", csp, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The PDF answers to a policy of its own.
+    /// </summary>
+    /// <remarks>
+    /// Identical to the HTML report's but for <c>object-src</c>, which is
+    /// what a browser's built-in PDF viewer is instantiated under. Nothing is
+    /// given up by allowing it: these bytes are drawn by this product from its
+    /// own database, where the HTML is markup assembled around fields that
+    /// arrived from strangers.
+    /// </remarks>
+    [Fact]
+    public async Task ThePdfIsStillLockedDown()
+    {
+        var response = await Client().GetAsync("/reports/download/acme-corp/2026-08");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var csp = response.Headers.GetValues("Content-Security-Policy").Single();
+
+        Assert.Contains("default-src 'none'", csp, StringComparison.Ordinal);
+        Assert.Contains("frame-ancestors 'none'", csp, StringComparison.Ordinal);
+        Assert.DoesNotContain("script-src 'self'", csp, StringComparison.Ordinal);
     }
 }

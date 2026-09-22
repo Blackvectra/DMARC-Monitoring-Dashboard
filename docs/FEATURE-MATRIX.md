@@ -53,7 +53,7 @@ Every "have it" below was checked against the code rather than remembered.
 | gap | state | worth it? |
 |---|---|---|
 | **Alerting** — email, Slack, webhook | nothing | **Yes, and first.** Real findings with no way to learn about them except by opening the app. For an MSP that is the difference between a product and a report. |
-| **Emailed client reports** | `dmarc report` writes the HTML; nothing sends it | **Yes.** It is the monthly deliverable and the last manual step in it. |
+| **Emailed client reports** | `dmarc report` writes the PDF, branded by the organization; nothing sends it | **Yes.** It is the monthly deliverable, and attaching it by hand is the last manual step in it. |
 | **RUF / forensic ingestion** | parsed, stored and shown on its own page | Headers only - the body is dropped at the parser. Kept 30 days, subjects and headers gated at the Tech role, and every reveal is audit-logged. Volume stays low whatever you publish: Google, Microsoft and Yahoo do not send failure reports at all. |
 | **Public API** | none | Only when something needs to integrate. |
 | **SPF flattening** | a `spf_flatten_state` table name and some comments — **no implementation** | Situational. Flattening trades a lookup-limit problem for a staleness problem: the addresses change and the record does not. |

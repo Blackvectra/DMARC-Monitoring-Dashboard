@@ -347,12 +347,90 @@ public sealed class EnforcementReadinessTests
         };
 
         var register = report.Remediation.ToList();
-        var broken = register.FindIndex(i => i.Finding.Contains("203.0.113.10", StringComparison.Ordinal));
+        var broken = register.FindIndex(i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
         var policy = register.FindIndex(i => i.Finding.Contains("p=none", StringComparison.Ordinal));
 
         Assert.True(broken >= 0 && policy >= 0, "both findings should be in the register");
         Assert.True(broken < policy, "the broken sender must come before raising the policy");
     }
+
+    /// <summary>
+    /// One finding, not one row per host.
+    /// </summary>
+    /// <remarks>
+    /// A security gateway is five hostnames and a bulk sender is a dozen. The
+    /// register printed a row for each, so a real client report carried five
+    /// High rows repeating one sentence about smtp003, smtp005 and
+    /// cloud-sec-av, with the same action on every one. A reader gets through
+    /// two of those and stops, which loses whatever was underneath.
+    /// </remarks>
+    [Fact]
+    public void BrokenSendersAreOneFindingThatNamesThem()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "reject", messages: 1000, passing: 1000)],
+            Sources =
+            [
+                Broken("smtp003.vendor.example", 20),
+                Broken("smtp005.vendor.example", 12),
+                Broken("smtp007.vendor.example", 3),
+                Broken("smtp009.vendor.example", 2),
+                Broken("smtp011.vendor.example", 1),
+            ],
+        };
+
+        var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+
+        Assert.Contains("5 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("38 message(s) affected", item.Finding, StringComparison.Ordinal);
+
+        // Busiest first, and the tail counted rather than listed.
+        Assert.Contains("smtp003.vendor.example", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("and 1 more", item.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("smtp011.vendor.example", item.Finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Volume decides urgency, not the class on its own.
+    /// </summary>
+    /// <remarks>
+    /// A finding worth one message ranked High beside one worth twenty-three,
+    /// because the category set the priority and the size set nothing. Four
+    /// High rows worth a single message each teach a reader to skip the
+    /// column.
+    /// </remarks>
+    [Fact]
+    public void ASingleMessageIsNotUrgent()
+    {
+        var small = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "reject", messages: 1000, passing: 1000)],
+            Sources = [Broken("smtp003.vendor.example", 1)],
+        };
+
+        Assert.Equal("Medium", Assert.Single(small.Remediation).Priority);
+
+        var real = small with { Sources = [Broken("smtp003.vendor.example", 40)] };
+        Assert.Equal("High", Assert.Single(real.Remediation).Priority);
+    }
+
+    private static ReportSource Broken(string name, long failing) =>
+        new()
+        {
+            SourceIp = "203.0.113." + Math.Abs(name.GetHashCode() % 200 + 1),
+            ReverseName = name,
+            Messages = failing,
+            Passing = 0,
+            Failing = failing,
+            AuthenticatedFor = "vendor.example",
+        };
 
     [Fact]
     public void AnEstateWithNothingWrongHasAnEmptyRegister()
@@ -366,5 +444,274 @@ public sealed class EnforcementReadinessTests
         };
 
         Assert.Empty(report.Remediation);
+    }
+}
+
+/// <summary>
+/// The sentence an executive reads and repeats, and the columns under it.
+///
+/// "DMARC passed 98% of messages" is a fact nobody can act on. A state, the
+/// number behind it, and what it means for a decision about enforcement is
+/// one somebody can take to a meeting.
+/// </summary>
+public sealed class VerdictTests
+{
+    private static ReportDomainHealth Domain(
+        string name = "acme.example", string policy = "reject",
+        long messages = 1000, long passing = 1000, long spfAligned = 900, long dkimAligned = 950) =>
+        new()
+        {
+            Domain = name,
+            Policy = policy,
+            Messages = messages,
+            Passing = passing,
+            SpfAligned = spfAligned,
+            DkimAligned = dkimAligned,
+        };
+
+    private static ClientReport Report(
+        IReadOnlyList<ReportDomainHealth>? domains = null, IReadOnlyList<ReportSource>? sources = null) =>
+        new()
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = domains ?? [Domain()],
+            Sources = sources ?? [],
+            Messages = (domains ?? [Domain()]).Sum(d => d.Messages),
+            Passing = (domains ?? [Domain()]).Sum(d => d.Passing),
+        };
+
+    /// <summary>
+    /// A domain losing mail outranks a good average, because an average across
+    /// an estate is how a broken domain stays invisible.
+    /// </summary>
+    [Fact]
+    public void ADomainLosingMailIsTheVerdictWhateverTheAverageSays()
+    {
+        var report = Report(
+        [
+            Domain("fine.example", messages: 1000, passing: 1000),
+            Domain("broken.example", "quarantine", messages: 100, passing: 40),
+        ]);
+
+        Assert.StartsWith("Not ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+        Assert.Contains("broken.example", report.Verdict, StringComparison.Ordinal);
+        Assert.Contains("60", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMonitoringDomainWithBrokenSendersIsConditional()
+    {
+        var report = Report(
+            [Domain("watched.example", "none", messages: 1000, passing: 1000)],
+            [new ReportSource { SourceIp = "203.0.113.9", Messages = 50, Passing = 10, Failing = 40 }]);
+
+        Assert.StartsWith("Conditional readiness.", report.Verdict, StringComparison.Ordinal);
+        Assert.Contains("before", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMonitoringDomainWithNothingBrokenIsReady()
+    {
+        var report = Report([Domain("watched.example", "none", messages: 1000, passing: 1000)]);
+
+        Assert.StartsWith("Ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoMailIsSaidRatherThanScored()
+    {
+        var report = Report([Domain(messages: 0, passing: 0, spfAligned: 0, dkimAligned: 0)]);
+
+        Assert.Contains("No mail was reported", report.Verdict, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Aligned is not the same as passed, and the report must not print one
+    /// for the other.
+    /// </summary>
+    /// <remarks>
+    /// A vendor passes SPF for its own envelope domain on every message it
+    /// sends. Printed as the domain's SPF figure, a client is shown 100%
+    /// beside mail nobody can prove is theirs. DMARC can be higher than either
+    /// aligned figure, because it needs only one of them.
+    /// </remarks>
+    [Fact]
+    public void AlignedRatesAreTheirOwnFigures()
+    {
+        var domain = Domain(messages: 1000, passing: 964, spfAligned: 896, dkimAligned: 891);
+
+        Assert.Equal(96.4, domain.PassRate);
+        Assert.Equal(89.6, domain.SpfAlignedRate);
+        Assert.Equal(89.1, domain.DkimAlignedRate);
+    }
+
+    [Fact]
+    public void TheRecordIsTheOneThatWasInForce()
+    {
+        var domain = new ReportDomainHealth
+        {
+            Domain = "acme.example", Policy = "quarantine", SubdomainPolicy = "none", Pct = 50,
+            Messages = 10, Passing = 10,
+        };
+
+        Assert.Equal("v=DMARC1; p=quarantine; sp=none; pct=50", domain.Record);
+
+        // And where no report reached us, it says so rather than inventing one.
+        var unknown = new ReportDomainHealth { Domain = "quiet.example", PolicyKnown = false };
+        Assert.Contains("not known", unknown.Record, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryRegisterItemCarriesATarget()
+    {
+        var report = Report([Domain("watched.example", "none", messages: 100, passing: 40)]);
+
+        Assert.All(report.Remediation, item => Assert.NotEmpty(item.Target));
+        Assert.Equal("7 days", Assert.Single(report.Remediation, i => i.Priority == "Critical").Target);
+    }
+}
+
+/// <summary>
+/// A month nobody reported on, which is not a clean month.
+/// </summary>
+/// <remarks>
+/// Four of ten real clients had no data for September, and each of their
+/// reports printed, under "What to do next": "Nothing. Every domain is
+/// enforcing, its own mail is arriving, and no sender needs correcting."
+/// The same page showed mortonnd.gov at p=none, no messages at all, and
+/// "confirm whether this domain sends mail" - three claims contradicted by
+/// the table above them. An empty register is not an all-clear.
+/// </remarks>
+public sealed class QuietMonthTests
+{
+    private static ClientReport Report(string policy = "none") =>
+        new()
+        {
+            ClientName = "Morton ND",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [new ReportDomainHealth { Domain = "mortonnd.gov", Policy = policy }],
+        };
+
+    [Fact]
+    public void AMonthWithNoReportsIsAFindingRatherThanAnAllClear()
+    {
+        var item = Assert.Single(Report().Remediation);
+
+        Assert.Contains("No receiver reported", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("mortonnd.gov", item.Finding, StringComparison.Ordinal);
+
+        // With something to actually do, and a way to know it is finished.
+        Assert.Contains("rua", item.Action, StringComparison.Ordinal);
+        Assert.NotEmpty(item.Target);
+        Assert.NotEmpty(item.Validation);
+    }
+
+    /// <summary>
+    /// Silence over an unenforcing domain is worse than silence over an
+    /// enforcing one: nothing is watching and nothing is stopping anybody.
+    /// </summary>
+    [Fact]
+    public void SilenceOverAnUnprotectedDomainRanksHigher()
+    {
+        Assert.Equal("High", Assert.Single(Report().Remediation).Priority);
+        Assert.Equal("Medium", Assert.Single(Report("reject").Remediation).Priority);
+    }
+
+    [Fact]
+    public void TheQuietMonthSaysSoWhereItSaysWhatWasCovered()
+    {
+        var report = Report() with
+        {
+            Daily = [.. Enumerable.Range(1, 30).Select(d => new DayPoint
+            {
+                Day = new DateOnly(2026, 9, d),
+                Reported = false,
+            })],
+        };
+
+        var days = Assert.Single(report.Covered, f => f.Label == "Days covered");
+
+        Assert.Equal("0 of 30", days.Value);
+        Assert.Contains("No receiver reported on any day", days.Note, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// What the month's work was, for the client with nothing wrong.
+/// </summary>
+/// <remarks>
+/// The healthy estate's report said "Protected" and "Nothing to do" over
+/// half a page of white space - sent monthly to the client happiest with the
+/// service, and reading as an invoice with no work attached.
+/// </remarks>
+public sealed class CoveredTests
+{
+    private static ClientReport Report(long stopped = 0, long overridden = 0) =>
+        new()
+        {
+            ClientName = "ND United",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Messages = 318,
+            Passing = 318,
+            OverriddenMessages = overridden,
+            Domains = [new ReportDomainHealth
+            {
+                Domain = "ndunited.org", Policy = "quarantine", Messages = 318, Passing = 318,
+            }],
+            Daily = [.. Enumerable.Range(1, 30).Select(d => new DayPoint
+            {
+                Day = new DateOnly(2026, 9, d),
+                Reported = true,
+                Messages = 10,
+                Passing = 10,
+                Rejected = stopped / 30,
+            })],
+        };
+
+    [Fact]
+    public void AHealthyMonthStillSaysWhatWasDone()
+    {
+        var covered = Report().Covered;
+
+        Assert.Contains(covered, f => f.Label == "Days covered" && f.Value == "30 of 30");
+        Assert.Contains(covered, f => f.Label == "Messages examined" && f.Value == "318");
+        Assert.Contains(covered, f => f.Label == "Domains watched" && f.Value == "1");
+        Assert.All(covered, f => Assert.NotEmpty(f.Note));
+    }
+
+    /// <summary>
+    /// Protection as delivered, taken from what the receivers did rather than
+    /// from the failure count.
+    /// </summary>
+    /// <remarks>
+    /// A message that failed under p=none was delivered. Counted as stopped,
+    /// it would tell a client they were protected by a policy that asked for
+    /// nothing - which is the single most consequential thing a report of
+    /// this kind can get wrong.
+    /// </remarks>
+    [Fact]
+    public void WhatTheReceiversActuallyDidIsWhatIsClaimed()
+    {
+        Assert.DoesNotContain(Report().Covered, f => f.Label.StartsWith("Turned away", StringComparison.Ordinal));
+
+        var busy = Report(stopped: 600);
+
+        Assert.Equal(600, busy.Stopped);
+        Assert.Contains(busy.Covered, f => f.Label.StartsWith("Turned away", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ForwardedMailIsNamedAsForwardedRatherThanAsFailure()
+    {
+        var forwarded = Assert.Single(
+            Report(overridden: 40).Covered,
+            f => f.Label.StartsWith("Forwarded", StringComparison.Ordinal));
+
+        Assert.Equal("40", forwarded.Value);
+        Assert.Contains("Mailing lists", forwarded.Note, StringComparison.Ordinal);
     }
 }

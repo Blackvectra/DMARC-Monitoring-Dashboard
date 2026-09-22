@@ -311,7 +311,22 @@ public sealed class ClientReportBuilder(string databasePath)
                    (SELECT ar.policy_sp   FROM aggregate_reports ar WHERE ar.domain_id = d.id AND ar.date_end <= $to ORDER BY ar.date_end DESC LIMIT 1),
                    (SELECT ar.policy_pct  FROM aggregate_reports ar WHERE ar.domain_id = d.id AND ar.date_end <= $to ORDER BY ar.date_end DESC LIMIT 1),
                    (SELECT ar.policy_adkim FROM aggregate_reports ar WHERE ar.domain_id = d.id AND ar.date_end <= $to ORDER BY ar.date_end DESC LIMIT 1),
-                   (SELECT t.policy_mode  FROM tls_reports t WHERE t.domain_id = d.id AND t.date_end <= $to ORDER BY t.date_end DESC LIMIT 1)
+                   (SELECT t.policy_mode  FROM tls_reports t WHERE t.domain_id = d.id AND t.date_end <= $to ORDER BY t.date_end DESC LIMIT 1),
+                   -- ALIGNED, which is a different number from "SPF passed".
+                   -- A vendor passes SPF for its own envelope domain on every
+                   -- message; that is the vendor proving it is the vendor. The
+                   -- domain here is the customer's, so this counts only the
+                   -- mail where the check was about them - exactly the
+                   -- distinction a client is never shown and needs.
+                   COALESCE(SUM(CASE WHEN r.spf_auth_result = 'pass'
+                                      AND (LOWER(r.spf_domain) = LOWER(d.name)
+                                           OR LOWER(r.spf_domain) LIKE '%.' || LOWER(d.name))
+                                     THEN r.message_count END), 0),
+                   COALESCE(SUM(CASE WHEN r.dkim_auth_result = 'pass'
+                                      AND (LOWER(r.dkim_domain) = LOWER(d.name)
+                                           OR LOWER(r.dkim_domain) LIKE '%.' || LOWER(d.name))
+                                     THEN r.message_count END), 0),
+                   COUNT(DISTINCT CASE WHEN r.dmarc_result <> 'pass' THEN r.source_ip END)
             FROM domains d
             LEFT JOIN aggregate_records r
                    ON r.domain_id = d.id AND r.date_begin >= $from AND r.date_begin <= $to
@@ -343,6 +358,9 @@ public sealed class ClientReportBuilder(string databasePath)
                 Pct = reader.IsDBNull(5) ? 100 : reader.GetInt32(5),
                 StrictAlignment = !reader.IsDBNull(6) && reader.GetString(6) == "s",
                 MtaStsMode = reader.IsDBNull(7) ? "" : reader.GetString(7),
+                SpfAligned = reader.GetInt64(8),
+                DkimAligned = reader.GetInt64(9),
+                FailingSources = reader.GetInt32(10),
             });
         }
         return results;

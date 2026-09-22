@@ -18,7 +18,7 @@ public static class ReportCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--out", "--provider", "--client", "--month", "!--all") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--out", "--provider", "--client", "--month", "!--all", "!--pdf", "!--html") is var bad and not 0) { return bad; }
 
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var outPath = Args.Value(args, "--out") ?? "reports";
@@ -78,6 +78,17 @@ public static class ReportCommand
 
         Directory.CreateDirectory(outPath);
 
+        // PDF is what a client receives, so PDF is what this writes. An .html
+        // attachment is the one thing a mail gateway is most likely to strip
+        // or warn about, and a customer warned about the document their
+        // security provider just sent them has learned the wrong lesson.
+        //
+        // --html still writes the long on-screen version, which carries the
+        // full evidence tables; --pdf is accepted and does nothing, so a
+        // script written against the flag keeps working.
+        var wantsHtml = Args.Flag(args, "--html");
+        var wantsPdf = !wantsHtml || Args.Flag(args, "--pdf");
+
         var written = 0;
         var empty = 0;
 
@@ -97,10 +108,20 @@ public static class ReportCommand
             // provider is indistinguishable from a provider that stopped.
             if (report.Messages == 0) { empty++; }
 
-            var file = Path.Combine(outPath, $"{each}-{period.Start:yyyy-MM}.html");
-            await File.WriteAllTextAsync(file, ClientReportRenderer.ToHtml(report), ct).ConfigureAwait(false);
+            var stem = Path.Combine(outPath, $"{each}-{period.Start:yyyy-MM}");
 
-            Console.WriteLine($"  {file}  ({report.Messages:N0} message(s), {report.PassRate}% passing)");
+            if (wantsHtml)
+            {
+                await File.WriteAllTextAsync($"{stem}.html", ClientReportRenderer.ToHtml(report), ct).ConfigureAwait(false);
+                Console.WriteLine($"  {stem}.html  ({report.Messages:N0} message(s), {report.PassRate}% passing)");
+            }
+
+            if (wantsPdf)
+            {
+                await File.WriteAllBytesAsync($"{stem}.pdf", ClientReportPdf.Render(report), ct).ConfigureAwait(false);
+                Console.WriteLine($"  {stem}.pdf   ({report.Messages:N0} message(s), {report.PassRate}% passing)");
+            }
+
             written++;
         }
 

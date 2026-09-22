@@ -179,6 +179,23 @@ public enum SenderClass
 public sealed record RemediationItem
 {
     public required string Priority { get; init; }
+
+    /// <summary>
+    /// How long this should take, from the date on the report.
+    /// </summary>
+    /// <remarks>
+    /// A register without dates is a list of opinions. These are the spans an
+    /// MSP can commit to without asking anybody: a week for mail that is not
+    /// arriving, a fortnight for a vendor to turn something on, a month for a
+    /// policy change, six weeks for tidying an inventory.
+    /// </remarks>
+    public string Target => Priority switch
+    {
+        "Critical" => "7 days",
+        "High" => "14 days",
+        "Medium" => "30 days",
+        _ => "45 days",
+    };
     public required string Finding { get; init; }
     public required string Impact { get; init; }
     public required string Action { get; init; }
@@ -209,6 +226,23 @@ public sealed record RemediationItem
 /// address, so the report can say "17 addresses" for the one and nothing for
 /// the other.
 /// </param>
+/// <summary>
+/// One line of what the month's monitoring covered.
+/// </summary>
+/// <remarks>
+/// A client whose estate is healthy gets a report that says, correctly, that
+/// there is nothing to do - and a page of white space under it. That is the
+/// report the client who is happiest with you receives, and it reads as an
+/// invoice with no work attached. These are the facts that say what was
+/// watched and what it stopped, which is the thing being paid for.
+/// </remarks>
+public sealed record ReportFact
+{
+    public required string Label { get; init; }
+    public required string Value { get; init; }
+    public required string Note { get; init; }
+}
+
 public sealed record ReportSender
 {
     public required string Name { get; init; }
@@ -268,6 +302,59 @@ public sealed record ReportDomainHealth
     public string MtaStsMode { get; init; } = "";
     public long Messages { get; init; }
     public long Passing { get; init; }
+
+    /// <summary>
+    /// Messages whose SPF check passed AND was about this domain.
+    /// </summary>
+    /// <remarks>
+    /// Not the same as "SPF passed", and the difference is the whole subject.
+    /// A service sending on the client's behalf passes SPF for its own
+    /// envelope domain every time; that is the sender proving it is itself,
+    /// which DMARC does not accept as the client proving it is them. Printed
+    /// as one number they read as a domain that is fine.
+    /// </remarks>
+    public long SpfAligned { get; init; }
+
+    /// <summary>Messages whose DKIM signature verified AND was signed as this domain.</summary>
+    public long DkimAligned { get; init; }
+
+    /// <summary>Distinct addresses that sent mail for this domain which failed.</summary>
+    public int FailingSources { get; init; }
+
+    public double SpfAlignedRate => Messages == 0 ? 0 : Math.Round(SpfAligned * 100.0 / Messages, 1);
+    public double DkimAlignedRate => Messages == 0 ? 0 : Math.Round(DkimAligned * 100.0 / Messages, 1);
+
+    /// <summary>
+    /// The policy receivers were applying during the period, written as the
+    /// record it came from.
+    /// </summary>
+    /// <remarks>
+    /// Rebuilt from what the reports carried rather than read from DNS today,
+    /// because a report describes a period: the record may have changed since,
+    /// and printing today's beside last month's figures is the same mistake as
+    /// dating the figures wrongly.
+    /// </remarks>
+    public string Record
+    {
+        get
+        {
+            if (!PolicyKnown) { return "not known for this period"; }
+
+            var record = $"v=DMARC1; p={Policy}";
+            if (SubdomainPolicy.Length > 0) { record += $"; sp={SubdomainPolicy}"; }
+            if (Pct != 100) { record += $"; pct={Pct}"; }
+            if (StrictAlignment) { record += "; adkim=s"; }
+            return record;
+        }
+    }
+
+    /// <summary>What to do about this domain, in one line.</summary>
+    public string Recommended =>
+        Messages == 0 ? "Confirm whether this domain sends mail at all."
+        : IsStruggling ? "Correct the senders below before the policy is raised."
+        : IsEnforcing ? "Nothing. Keep watching."
+        : PassRate >= 99 ? $"Move from p={Policy} to p=quarantine."
+        : $"Account for the {Failing:N0} failing message(s), then move to p=quarantine.";
 
     public double PassRate => Messages == 0 ? 0 : Math.Round(Passing * 100.0 / Messages, 1);
     public bool IsEnforcing => Policy is "reject" or "quarantine";
@@ -432,6 +519,126 @@ public sealed record ClientReport
     public bool HasComparison => PreviousMessages > 0;
 
     /// <summary>
+    /// Messages a receiver refused or filed as junk because the policy told
+    /// it to. The protection, as delivered, rather than as configured.
+    /// </summary>
+    /// <remarks>
+    /// Taken from the dispositions the receivers reported, not from the
+    /// failure count: a message that failed under p=none was delivered, and
+    /// counting it here would tell a client they were protected by a policy
+    /// that asked for nothing.
+    /// </remarks>
+    public long Stopped => Daily.Sum(d => d.Rejected + d.Quarantined);
+
+    /// <summary>
+    /// True when no receiver said anything about this client in this period.
+    /// </summary>
+    /// <remarks>
+    /// Asked of the domains and the sources as well as the total, not of the
+    /// total alone. They are filled by the same query and cannot disagree in
+    /// practice, but "nothing at all was observed" is the premise the register
+    /// uses to refuse to give an all-clear, and a premise that strong should
+    /// not rest on one field being right.
+    /// </remarks>
+    public bool NothingWasReported =>
+        Messages == 0 && !Domains.Any(d => d.Messages > 0) && !Sources.Any(s => s.Messages > 0);
+
+    /// <summary>
+    /// What the month's monitoring covered, for the client paying for it.
+    /// </summary>
+    /// <remarks>
+    /// The report for a healthy estate correctly says there is nothing to do,
+    /// and then stops - half a page, sent monthly, to the client who is
+    /// happiest with the service. Nothing on it says what was watched, how
+    /// much was read, or what the policy turned away, so the one client with
+    /// no problems is the one with no evidence of the work.
+    /// </remarks>
+    public IReadOnlyList<ReportFact> Covered
+    {
+        get
+        {
+            var facts = new List<ReportFact>();
+
+            var days = Daily.Count;
+            var reported = Daily.Count(d => d.Reported);
+            if (days > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Days covered",
+                    Value = $"{reported} of {days}",
+
+                    // Said plainly, because it qualifies everything above it.
+                    // A month with four days of reports in it can show a
+                    // perfect pass rate, and a client reading "100%" is
+                    // entitled to know it describes four days.
+                    Note = reported switch
+                    {
+                        0 => "No receiver reported on any day of this period, so the figures above describe "
+                           + "nothing that was observed.",
+                        _ when reported == days =>
+                            "Every day of the period was reported on by at least one receiver.",
+                        _ => $"The figures above describe the {reported} day(s) that were reported on. A day with "
+                           + "no report is not a day with no mail: receivers miss runs.",
+                    },
+                });
+            }
+
+            facts.Add(new ReportFact
+            {
+                Label = "Messages examined",
+                Value = Messages.ToString("N0", CultureInfo.InvariantCulture),
+                Note = "Every message that claimed to come from your domains, as the receiving providers "
+                     + "described it.",
+            });
+
+            facts.Add(new ReportFact
+            {
+                Label = "Domains watched",
+                Value = Domains.Count.ToString("N0", CultureInfo.InvariantCulture),
+                Note = "Their DMARC, SPF and DKIM records were read and checked over the period, not taken on "
+                     + "trust from a previous month.",
+            });
+
+            var senders = LegitimateSenders.Count + InventoryOf(SenderClass.Misconfigured).Count;
+            if (senders > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Sending services identified",
+                    Value = senders.ToString("N0", CultureInfo.InvariantCulture),
+                    Note = "Named rather than left as addresses, so an unfamiliar one is something you can "
+                         + "recognise or query.",
+                });
+            }
+
+            if (Stopped > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Turned away on your behalf",
+                    Value = Stopped.ToString("N0", CultureInfo.InvariantCulture),
+                    Note = "Refused or filed as junk by the receiving provider because your policy said to. This "
+                         + "is the protection doing its job.",
+                });
+            }
+
+            if (OverriddenMessages > 0)
+            {
+                facts.Add(new ReportFact
+                {
+                    Label = "Forwarded, and allowed for",
+                    Value = OverriddenMessages.ToString("N0", CultureInfo.InvariantCulture),
+                    Note = "Mailing lists and forwarders break authentication as a matter of course. These are "
+                         + "counted apart from the failures so they do not read as a problem.",
+                });
+            }
+
+            return facts;
+        }
+    }
+
+    /// <summary>
     /// Sources with nothing failing at all.
     /// </summary>
     /// <remarks>
@@ -534,6 +741,86 @@ public sealed record ClientReport
 
     /// <summary>The client's own messages that failed, across the domains that are struggling.</summary>
     public long StrugglingMessages => StrugglingDomains.Sum(d => d.Failing);
+
+    /// <summary>
+    /// Below this, a finding is real and not urgent.
+    /// </summary>
+    /// <remarks>
+    /// The register ranked a one-message finding as High beside a
+    /// twenty-three-message one, because the class decided the priority and
+    /// the volume decided nothing. A client reading five High rows, four of
+    /// them worth a single message, learns to skip the column.
+    /// </remarks>
+    public const int MaterialMessages = 10;
+
+    /// <summary>
+    /// Names the sources in a finding: the first few, then a count.
+    /// </summary>
+    /// <remarks>
+    /// The names are what somebody has to quote to a vendor, so they belong in
+    /// the sentence rather than in a table the reader has to go and find. Busiest
+    /// first, because that is the one to start with, and four because a fifth
+    /// makes the cell taller than the row beside it.
+    /// </remarks>
+    private static string Name(IReadOnlyList<ReportSource> sources)
+    {
+        const int shown = 4;
+
+        var ordered = sources.OrderByDescending(s => s.Failing).ThenByDescending(s => s.Messages).ToList();
+        var names = string.Join(", ", ordered.Take(shown).Select(s => s.Display));
+
+        return ordered.Count > shown ? $"{names} and {ordered.Count - shown} more" : names;
+    }
+
+    /// <summary>
+    /// The one-line verdict an executive reads and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// Written to be quotable in a meeting: a state, the number behind it, and
+    /// what it means for a decision about enforcement. "DMARC passed 98% of
+    /// messages" is a fact nobody can act on; "ready to enforce once two
+    /// senders are corrected" is a decision.
+    ///
+    /// Never flatters. A domain losing mail outranks a good average, because
+    /// an average across an estate is how a broken domain stays invisible.
+    /// </remarks>
+    public string Verdict
+    {
+        get
+        {
+            if (Messages == 0) { return "No mail was reported for this client in this period."; }
+
+            if (StrugglingDomains.Count > 0)
+            {
+                var worst = StrugglingDomains[0];
+                return $"Not ready for enforcement. {worst.Domain} is losing {worst.Failing:N0} of its own "
+                     + $"message(s) ({worst.PassRate:0.#}% arriving), and raising a policy now would stop them.";
+            }
+
+            var broken = InventoryOf(SenderClass.Misconfigured).Count;
+            var watching = Domains.Count(d => d is { IsEnforcing: false, Messages: > 0 });
+
+            if (watching > 0 && broken > 0)
+            {
+                return $"Conditional readiness. {PassRate:0.#}% of your mail is provably yours, and {broken} "
+                     + $"service(s) still need correcting before {(watching == 1 ? "the domain that is" : $"the {watching} domains")} "
+                     + "only being watched can be protected.";
+            }
+
+            if (watching > 0)
+            {
+                return $"Ready for enforcement. {PassRate:0.#}% of your mail is provably yours and no sender "
+                     + $"needs correcting, so {(watching == 1 ? "the domain" : $"the {watching} domains")} "
+                     + "only being watched can be moved to quarantine.";
+            }
+
+            return broken > 0
+                ? $"Protected, with work outstanding. Every domain is enforcing and {PassRate:0.#}% of your mail "
+                + $"is provably yours; {broken} service(s) still send mail that is not."
+                : $"Protected. Every domain is enforcing, {PassRate:0.#}% of your mail is provably yours, and no "
+                + "sender needs correcting.";
+        }
+    }
 
     // ---- the inventory ------------------------------------------------------
 
@@ -642,6 +929,44 @@ public sealed record ClientReport
         {
             var items = new List<RemediationItem>();
 
+            // A month with nothing in it is not a clean month.
+            //
+            // The register was empty for a client no receiver reported on,
+            // and an empty register printed "Nothing. Every domain is
+            // enforcing, its own mail is arriving, and no sender needs
+            // correcting." Every one of those three claims was false for a
+            // domain sitting at p=none that nobody had confirmed sends mail
+            // at all - and it went out under the heading that tells a client
+            // what to do next.
+            if (NothingWasReported)
+            {
+                var watched = Domains.Where(d => !d.IsEnforcing).Select(d => d.Domain).ToList();
+
+                items.Add(new RemediationItem
+                {
+                    // Nothing can be seen, and on an unenforcing domain that
+                    // means nothing is stopping anybody either.
+                    Priority = watched.Count > 0 ? "High" : "Medium",
+                    Finding = "No receiver reported on "
+                            + (Domains.Count == 1 ? Domains[0].Domain : $"{Domains.Count} domain(s)")
+                            + $" in {Period.Label}, so nothing about this period can be confirmed.",
+                    Impact = "Either these domains sent no mail, or the reports are not reaching us. The two are "
+                           + "indistinguishable from here, and only one of them is fine"
+                           + (watched.Count > 0
+                               ? $". {string.Join(", ", watched)} also asks receivers to do nothing about mail "
+                               + "that fails, so anybody can send as it today."
+                               : "."),
+                    Action = "Check that each domain's DMARC record names this service in its rua address, and that "
+                           + "a report has arrived since. If a domain genuinely sends no mail, say so: it can be "
+                           + "set to reject and left alone.",
+                    Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
+                    Validation = "A report arrives for each domain, or the domain is recorded as non-sending and "
+                               + "moved to p=reject.",
+                });
+
+                return items;
+            }
+
             // Worst first: mail that is not arriving, because that is the one
             // with a cost the client can already feel.
             foreach (var domain in StrugglingDomains)
@@ -661,34 +986,68 @@ public sealed record ClientReport
                 });
             }
 
-            foreach (var source in InventoryOf(SenderClass.Misconfigured).Take(5))
+            // One finding, not one per host.
+            //
+            // A security gateway is five hostnames, a bulk sender is twelve,
+            // and the register printed a row for each: five High rows saying
+            // the same sentence about smtp003, smtp005 and cloud-sec-av, all
+            // with the same action. A client reads two of those and stops,
+            // which loses the ones underneath that were different.
+            //
+            // Grouped, named, and counted. The names are what somebody has to
+            // quote to a vendor, so they are in the finding rather than left
+            // to the table above.
+            if (InventoryOf(SenderClass.Misconfigured) is { Count: > 0 } broken)
             {
+                var atRisk = broken.Sum(s => s.Failing);
+
                 items.Add(new RemediationItem
                 {
-                    Priority = "High",
-                    Finding = $"{source.Display} is sending as you and {source.Failing:N0} message(s) are not "
-                            + "provably yours.",
+                    Priority = atRisk >= MaterialMessages ? "High" : "Medium",
+                    Finding = $"{broken.Count} service(s) sending on your behalf are not set up to prove the mail "
+                            + $"is yours: {Name(broken)}. {atRisk:N0} message(s) affected.",
                     Impact = "These are your own messages. They are at risk of being refused under an enforcing "
                            + "policy, and some are already being filed as junk.",
-                    Action = source.Authenticated
-                        ? $"This service signs as {source.AuthenticatedFor} rather than as you. Turn on custom "
-                        + "DKIM for your domain at the vendor, or authorise it in SPF."
-                        : "Confirm which system this is, then authorise it properly rather than leaving it "
+                    Action = broken.Any(s => s.Authenticated)
+                        ? "Each signs as its own domain rather than as yours. Turn on custom DKIM for your domain "
+                        + "at the vendor, or authorise it in SPF."
+                        : "Confirm which systems these are, then authorise them properly rather than leaving them "
                         + "half-configured.",
-                    Owner = "Whoever runs this service, with your IT provider",
-                    Validation = "Seven consecutive days of aligned mail from this source.",
+                    Owner = $"The vendors named, with {(ProviderIsUnnamed ? "your IT provider" : ProviderName)}",
+                    Validation = "Seven consecutive days of aligned mail from each.",
                 });
             }
 
-            foreach (var source in InventoryOf(SenderClass.Suspicious).Take(3))
+            if (InventoryOf(SenderClass.Unidentified) is { Count: > 0 } unknown)
             {
                 items.Add(new RemediationItem
                 {
-                    Priority = source.OtherClientsAffected > 0 ? "High" : "Medium",
-                    Finding = $"{source.Display} sent {source.Failing:N0} message(s) as you and never "
-                            + "authenticated once"
-                            + (source.OtherClientsAffected > 0
-                                ? $", and was seen against {source.OtherClientsAffected} unrelated organisation(s)."
+                    Priority = "Medium",
+                    Finding = $"{unknown.Count} source(s) at providers we recognise sent as you without proving "
+                            + $"entitlement: {Name(unknown)}. {unknown.Sum(s => s.Failing):N0} message(s).",
+                    Impact = "Usually a tool somebody signed up for and nobody recorded. Until it is confirmed it "
+                           + "cannot be told apart from somebody using the same provider to send as you.",
+                    Action = "Confirm whether these are yours. If they are, authorise them; if not, they belong in "
+                           + "the list below.",
+                    Owner = "You, with whoever manages the tools your teams buy",
+                    Validation = "Each one is either authorised and aligning, or gone.",
+                });
+            }
+
+            if (InventoryOf(SenderClass.Suspicious) is { Count: > 0 } strangers)
+            {
+                var volume = strangers.Sum(s => s.Failing);
+                var spread = strangers.Max(s => s.OtherClientsAffected);
+
+                items.Add(new RemediationItem
+                {
+                    Priority = EveryDomainEnforcing ? "Low"
+                             : volume >= MaterialMessages ? "High" : "Medium",
+                    Finding = $"{strangers.Count} source(s) sent {volume:N0} message(s) as you and never "
+                            + $"authenticated once: {Name(strangers)}"
+                            + (spread > 0
+                                ? $". The busiest was seen against {spread} unrelated organisation(s), so this is "
+                                + "broad activity rather than somebody targeting you."
                                 : "."),
                     Impact = EveryDomainEnforcing
                         ? "Already refused or filed as junk by the receiving provider, because your policy is "
@@ -698,7 +1057,9 @@ public sealed record ClientReport
                         ? "No action needed. Recorded so the pattern is visible if it grows."
                         : "Raise the policy so receivers are asked to refuse it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
-                    Validation = "The volume stops, or the policy is enforcing and it is being refused.",
+                    Validation = EveryDomainEnforcing
+                        ? "The volume stops, or stays refused."
+                        : "The policy is enforcing and this mail is being refused.",
                 });
             }
 
@@ -722,21 +1083,23 @@ public sealed record ClientReport
                 });
             }
 
-            foreach (var source in InventoryOf(SenderClass.Retired).Take(3))
+            if (InventoryOf(SenderClass.Retired) is { Count: > 0 } gone)
             {
                 items.Add(new RemediationItem
                 {
                     Priority = "Low",
-                    Finding = $"{source.Display} sent as you last period and not at all this one.",
+                    Finding = $"{gone.Count} sender(s) sent as you last period and not at all this one: "
+                            + $"{Name(gone)}.",
                     Impact = "Either a service was retired and is still authorised to send as you, or something "
                            + "stopped working quietly.",
-                    Action = "Confirm which. If it is retired, remove it from SPF so the authorisation goes with it.",
+                    Action = "Confirm which. If retired, remove it from SPF so the authorisation goes with it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
                     Validation = "Either mail resumes, or the authorisation is removed.",
                 });
             }
 
             return [.. items.OrderBy(i => i.Rank)];
+
         }
     }
 }
