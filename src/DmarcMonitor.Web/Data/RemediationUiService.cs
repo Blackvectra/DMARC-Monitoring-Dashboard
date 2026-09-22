@@ -32,6 +32,30 @@ public sealed record DomainFixes(
     /// <summary>True when nobody has said where this instance is reachable.</summary>
     public bool PolicyHostUnknown { get; init; }
 
+    /// <summary>
+    /// The mode of a working policy this domain serves from somewhere other
+    /// than here, or empty when there is none.
+    /// </summary>
+    /// <remarks>
+    /// The page offered nrgtechservices.com - serving enforce, with a
+    /// seven-day max_age, fetched successfully by this product minutes
+    /// earlier - a CNAME pointing mta-sts.nrgtechservices.com at this app,
+    /// under the heading "No policy has been created for this domain yet",
+    /// with a button to create one in TESTING.
+    ///
+    /// Every part of that is wrong, and following it would have replaced a
+    /// working enforcing policy with a testing one. The cause is the same
+    /// confusion as the score and the TLS page: "this product does not host
+    /// it" was rendered as "it does not exist".
+    ///
+    /// A domain that serves its own policy is not a domain to take over, so
+    /// nothing is offered for it and the page says what is already there.
+    /// </remarks>
+    public string PolicyServedElsewhere { get; init; } = "";
+
+    /// <summary>True when this domain already has transport security somebody else hosts.</summary>
+    public bool HostedElsewhere => PolicyServedElsewhere.Length > 0;
+
     /// <summary>The policy the reports say the domain is ready for, or null.</summary>
     public string? ReadyFor
     {
@@ -103,6 +127,7 @@ public sealed class RemediationUiService(
         IReadOnlyList<RecordToPublish> transportRecords = [];
         var policyFile = "";
         var policyHostUnknown = false;
+        var servedElsewhere = "";
 
         // Nothing is planned from a failed read: "no record" and "could not
         // read" would plan opposite things.
@@ -163,7 +188,15 @@ public sealed class RemediationUiService(
             var policyHost = configuration["MtaSts:PolicyHost"];
             policyHostUnknown = string.IsNullOrWhiteSpace(policyHost);
 
-            if (known is not null)
+            // Already serving a policy this product does not host: there is
+            // nothing to publish and nothing to take over. Offering the CNAME
+            // here is not advice, it is a change that would point the domain's
+            // policy at an app that serves a different one.
+            if (known is null && served is { Reachable: true, Policy: { } theirs })
+            {
+                servedElsewhere = theirs.Mode;
+            }
+            else if (known is not null)
             {
                 transportRecords = [.. TransportSetup.MtaSts(domain, policyHost, known)];
                 policyFile = TransportSetup.PolicyFile(known);
@@ -186,7 +219,13 @@ public sealed class RemediationUiService(
             {
                 transportRecords = [.. transportRecords, TransportSetup.TlsReporting(domain, tlsAddress)];
             }
-            if (!string.IsNullOrWhiteSpace(published.MtaStsRecord) || served.Reachable)
+            // Not for a policy somebody else serves. The id lives in the TXT
+            // record and never in the policy file, so a policy this product
+            // did not create has no id here - and the planner correctly
+            // refuses, with "Run: dmarc mta-sts set", which reads as an
+            // instruction to take the domain over.
+            if (servedElsewhere.Length == 0
+                && (!string.IsNullOrWhiteSpace(published.MtaStsRecord) || served.Reachable))
             {
                 var mx = await lookup.MxAsync(domain, ct);
 
@@ -227,6 +266,7 @@ public sealed class RemediationUiService(
             TransportRecords = transportRecords,
             PolicyFile = policyFile,
             PolicyHostUnknown = policyHostUnknown,
+            PolicyServedElsewhere = servedElsewhere,
         };
     }
 

@@ -197,7 +197,11 @@ else
                     </div>
                 }
 
-                @if (d.Plans.Count == 0 && d.TransportRecords.Count == 0)
+                @* Not where the domain already has a policy somebody else
+                   hosts: "Nothing to fix" directly above "testing enforces
+                   nothing, so moving it to enforce is the next step" is the
+                   page arguing with itself. *@
+                @if (d.Plans.Count == 0 && d.TransportRecords.Count == 0 && !d.HostedElsewhere)
                 {
                     <p class="muted">Nothing to fix.</p>
                 }
@@ -258,6 +262,25 @@ else
                    planner above says nothing about it - which left an
                    operator told "no MTA-STS policy" with no way to find out
                    what to publish. These are the records themselves. *@
+                @* Already protected by somebody else's hosting. Said before
+                   anything is offered, because the offer was the bug: this
+                   page proposed pointing a working enforcing policy at itself. *@
+                @if (d.HostedElsewhere)
+                {
+                    <p class="note">
+                        This domain already serves its own MTA-STS policy, in
+                        <strong>@d.PolicyServedElsewhere</strong> mode, hosted somewhere other than here.
+                        Nothing to publish, and nothing for this product to take over.
+                        @if (d.PolicyServedElsewhere.Equals("testing", StringComparison.OrdinalIgnoreCase))
+                        {
+                            <text>
+                                Testing enforces nothing, so moving it to <code>enforce</code> is the next step —
+                                wherever it is hosted.
+                            </text>
+                        }
+                    </p>
+                }
+
                 @if (d.TransportRecords.Count > 0)
                 {
                     <details class="plan">
@@ -457,7 +480,21 @@ else
         d.Plans.Any(p => p.IsSafe && !p.IsNoop);
 
     /// <summary>Records only a person can publish - no API, or nothing to automate.</summary>
-    private static bool HasManualWork(DomainFixes d) => d.TransportRecords.Count > 0;
+    /// <summary>
+    /// Work somebody has to do by hand, wherever the doing happens.
+    /// </summary>
+    /// <remarks>
+    /// A policy somebody else hosts leaves this product no records to publish,
+    /// which is not the same as leaving nothing to do: a policy in testing
+    /// enforces nothing, and filing it under "nothing to do" hides the one
+    /// sentence that says so behind a filter that is ticked by default.
+    ///
+    /// Enforce hosted elsewhere is genuinely nothing to do, and stays hidden.
+    /// </remarks>
+    private static bool HasManualWork(DomainFixes d) =>
+        d.TransportRecords.Count > 0
+        || d.PolicyServedElsewhere.Equals("testing", StringComparison.OrdinalIgnoreCase)
+        || d.PolicyServedElsewhere.Equals("none", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Something is wrong that the page cannot get past on its own.
