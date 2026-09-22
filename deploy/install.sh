@@ -14,6 +14,12 @@
 #      templates IF they do not exist - it never overwrites either.
 #   4. Installs the systemd units, rewritten for DMARC_ROOT and DMARC_USER,
 #      starts the web app, and checks it answers on loopback.
+#   5. Enables four timers that need nothing configured: the nightly DNS scan
+#      and database backup, the twice-daily health check, and the weekly
+#      retention prune. NOT the collector, which cannot run until somebody
+#      supplies a certificate and a mailbox.
+#   6. Takes the first backup - a full copy of the database into
+#      ${DMARC_ROOT}/backups - rather than leaving it until 03:20 tomorrow.
 #
 # It refuses to run over an existing install: that is update.sh's job, and it
 # keeps a copy of what it replaces, which this does not.
@@ -311,11 +317,20 @@ systemctl enable --now dmarc-backup.timer >/dev/null
 # Never fatal. Everything above is installed and running by this point, and
 # aborting over a backup would leave a working install looking like a failed
 # one. It says what went wrong and carries on.
+#
+# BACKUP_NOTE carries the outcome to the closing message, because that message
+# used to say "One was taken just now" whatever happened. Both failure paths
+# here print to stderr and carry on by design, so an operator could read the
+# error and then, ten lines later, a flat claim that a backup existed - about
+# the one thing it is worst to be wrong about, since dmarc-health.timer is
+# enabled right after this and will page them that evening for the very thing
+# the install just told them was done.
 echo "  taking the first backup"
+FIRST_BACKUP=""
 if backup_output="$(systemctl start dmarc-backup 2>&1)"; then
-    first_backup="$(ls -1t "${ROOT}/backups"/dmarc-*.bak 2>/dev/null | head -1 || true)"
-    if [[ -n "$first_backup" ]]; then
-        echo "    $(basename "$first_backup") ($(du -h "$first_backup" | cut -f1))"
+    FIRST_BACKUP="$(ls -1t "${ROOT}/backups"/dmarc-*.bak 2>/dev/null | head -1 || true)"
+    if [[ -n "$FIRST_BACKUP" ]]; then
+        echo "    $(basename "$FIRST_BACKUP") ($(du -h "$FIRST_BACKUP" | cut -f1))"
     else
         echo "    dmarc-backup reported success but wrote nothing to ${ROOT}/backups" >&2
     fi
@@ -323,6 +338,15 @@ else
     echo "    the first backup failed; the install is fine, this is not:" >&2
     [[ -n "$backup_output" ]] && echo "      ${backup_output}" >&2
     echo "      see why: journalctl -u dmarc-backup -n 30" >&2
+fi
+
+if [[ -n "$FIRST_BACKUP" ]]; then
+    BACKUP_NOTE="One was taken just now: $(basename "$FIRST_BACKUP")"
+else
+    BACKUP_NOTE="THE FIRST ONE FAILED - see above. Nothing protects the reports
+                       until one is taken, and the health check will say so
+                       this evening. Take one with:
+                         sudo systemctl start dmarc-backup"
 fi
 
 # The check that notices this install has stopped working. Enabled because
@@ -373,10 +397,11 @@ Until step 2 is done, see it from your own machine through an SSH tunnel:
   ssh -L 5000:127.0.0.1:5000 <this server>   then open http://127.0.0.1:5000
 
 Running on their own from now on:
-  dmarc-backup.timer   nightly 03:20, ${ROOT}/backups, 14 kept. One was taken
-                       just now. A copy on this disk survives a bad change and
-                       not a dead machine - set DMARC_BACKUP_S3 in
-                       /etc/dmarc-backup.env to sync it off the box.
+  dmarc-backup.timer   nightly 03:20, ${ROOT}/backups, 14 kept.
+                       ${BACKUP_NOTE}
+                       A copy on this disk survives a bad change and not a dead
+                       machine - set DMARC_BACKUP_S3 in /etc/dmarc-backup.env
+                       to sync it off the box.
   dmarc-health.timer   09:10 and 21:10. Notices a collector that has quietly
                        stopped, which nothing else here will tell you. It
                        fails its unit; /etc/systemd/system/dmarc-alert@.service

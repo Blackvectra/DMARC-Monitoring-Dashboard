@@ -432,13 +432,28 @@ integrity-checks the live database, writes a consistent copy (`0600`, in a
 the one that survives a bad change, and the only one that tells you the
 database has started to corrupt.
 
-**`dmarc health`, twice a day.** Also enabled by `install.sh`. It is the
-thing that notices a backup has stopped happening — and a collector that has
-quietly stopped, which is the failure this product is worst at showing you on
-its own, because every screen goes on displaying the figures from before it
-stopped and those look fine. It writes to the journal and fails its unit;
-`/etc/systemd/system/dmarc-alert@.service` is where you turn a failed unit
-into mail, Slack or SNS, and until you do, nothing is sent anywhere.
+**`dmarc health`, twice a day.** Also enabled by `install.sh`. It notices a
+collector that has quietly stopped — the failure this product is worst at
+showing you on its own, because every screen goes on displaying the figures
+from before it stopped and those look fine — and it notices backups stopping.
+
+**It is deliberate about which of those fails the unit**, because that is what
+turns into an alert. Something *broken* exits 1, the oneshot unit fails, and
+`OnFailure=` starts `dmarc-alert@`. Something merely *worth knowing* prints and
+exits 0, so nothing is sent: a check that pages every night over one late job
+is a check somebody mutes, and then the real one arrives into a muted channel.
+
+| what it finds | unit fails? |
+|---|---|
+| Nothing stored for an organization in 36 hours | **yes** |
+| No backups at all | **yes** |
+| Newest backup older than 7 days — the timer has stopped | **yes** |
+| Newest backup 2–7 days old — a late job | no, prints only |
+| Domains gone quiet for a week while others kept arriving | no, prints only |
+| A domain name held by two organizations | no, prints only |
+
+`/etc/systemd/system/dmarc-alert@.service` is where a failed unit becomes mail,
+Slack or SNS, and until you edit it nothing is sent anywhere.
 
 **EBS snapshots, daily.** *EC2 → Lifecycle Manager → Create lifecycle policy*,
 target by tag, daily, keep 7. Pennies. This is the one that survives losing the

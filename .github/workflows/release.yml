@@ -124,6 +124,14 @@ jobs:
           binary=publish/${{ matrix.rid }}/${{ matrix.exe }}
           test -f "$binary" || { echo "nothing was published"; exit 1; }
 
+          # `file` is present on both Linux images today - this step has run
+          # green on ubuntu-24.04-arm - but tests.yml installs it explicitly
+          # on that same runner, on the grounds that the arm64 image is a
+          # smaller build and a tool that happens to be on one image is not a
+          # thing to rely on being on the other. Both cannot be right, and a
+          # missing tool here fails a RELEASE rather than a pull request.
+          command -v file >/dev/null || sudo apt-get install -y -qq file
+
           file "$binary"
           file "$binary" | grep -q '${{ matrix.machine }}' \
             || { echo "published binary is not a ${{ matrix.machine }} executable"; exit 1; }

@@ -356,11 +356,17 @@ stopped being true: GitHub's `ubuntu-24.04-arm` runners are free for public
 repositories. `linux-arm64` is now built on an arm64 machine and started
 there, and `tests.yml` runs the whole of `install.sh` on arm64 on every pull
 request: the service answering, the four timers enabled, a backup taken and a
-health check passed. The architecture check stayed, applied to every build
-rather than only the ARM one, because it catches a different failure - a
-runner label that changes under the matrix and publishes an x64 binary named
-`dmarc-linux-arm64`, which would pass every other check and die on the
-instance.
+health check passed.
+
+The architecture check stayed, and now applies to both Linux builds rather
+than only the ARM one - not to Windows, where `file` is not a thing to rely
+on. What it catches is narrow and worth stating accurately: that the RID
+produced the ELF header it claims. It does **not** catch a runner label
+changing under the matrix, because the RID rather than the runner decides the
+architecture - a cross-compile produces a correct ARM header on an x64
+machine, and this check passes. The thing that catches that is the "Prove the
+single file actually runs on its own" step, which is now unconditional
+precisely because it cannot execute a foreign-architecture binary.
 
 This mattered more than "Low" suggested: `docs/AWS.md` recommended
 `t4g.small`, so the instance the runbook told somebody to buy was the one

@@ -508,11 +508,18 @@ jobs:
             test "$(systemctl is-active "$t")"  = active
           done
 
-          # The install took a backup; the health check is green because of
-          # it. Both run as the service account inside ProtectSystem=strict,
-          # and both unpack the single-file binary's native libraries first -
-          # which is the step that fails on an architecture nobody ran.
+          # The install took a backup, and this asserts it rather than saying
+          # so: a bare `ls` exits 0 on an empty directory, and install.sh's
+          # first-backup block is deliberately non-fatal, so both of its
+          # failure paths print to stderr and let the install finish. Without
+          # a check here the health check below would be green because of the
+          # backup THIS step takes, not the install's.
           sudo sh -c 'ls -la /opt/dmarc/backups'
+          test "$(sudo sh -c 'ls -1 /opt/dmarc/backups/dmarc-*.bak' | wc -l)" -ge 1
+
+          # Both run as the service account inside ProtectSystem=strict, and
+          # both unpack the single-file binary's native libraries first -
+          # which is the step that fails on an architecture nobody ran.
           sudo systemctl start dmarc-backup
           sudo systemctl start dmarc-health
           sudo journalctl -u dmarc-backup -u dmarc-health -n 40 --no-pager
