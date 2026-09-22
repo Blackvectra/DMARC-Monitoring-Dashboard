@@ -1031,6 +1031,24 @@ CREATE INDEX ix_indicators_class ON threat_indicators(tenant_id, classification)
 
 
 -- ============================================================================
+--  WHAT AN ADDRESS REVERSES TO
+-- ============================================================================
+
+-- The Sources page listed addresses, and every line of it was research
+-- somebody had to go and do, with the same answer every time for the same
+-- address. See db/migrations/0015-source-names.sql for why this is a cache
+-- rather than a column, and for what a PTR is and is not evidence of.
+CREATE TABLE source_names (
+    ip            TEXT PRIMARY KEY,
+    reverse_name  TEXT,                              -- NULL: asked, there is none
+    checked_at    TEXT NOT NULL,
+    answered      INTEGER NOT NULL DEFAULT 1         -- 0: the reverse zone did not answer
+);
+
+CREATE INDEX ix_source_names_checked ON source_names(checked_at);
+
+
+-- ============================================================================
 --  SCHEMA VERSIONING
 -- ============================================================================
 
@@ -1075,6 +1093,9 @@ VALUES ('0013', datetime('now'), 'received_at nullable on aggregate_reports and 
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0014', datetime('now'), 'engineer_group_id on tenants: splits the working role in two, so the person who repairs SPF and DKIM and the person who decides a domain may start rejecting mail can be different people');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0015', datetime('now'), 'source_names: what an address reverses to, so a report can name its senders instead of printing digits at an operator');
 
 
 -- ============================================================================
