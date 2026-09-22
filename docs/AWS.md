@@ -111,8 +111,18 @@ and it works from a car park.
 | Key pair | **Proceed without a key pair.** You are using SSM |
 | Network | Default VPC, a public subnet, **auto-assign public IP enabled** |
 | Security group | the `dmarc-monitor` one from 1.3 |
-| Storage | **20 GB gp3** |
+| Storage | **20 GB gp3**, and **tick Encrypted** |
 | Advanced → IAM instance profile | **`dmarc-monitor-ssm`** |
+
+**Tick Encrypted.** It is one checkbox at launch and a snapshot-restore-detach-
+reattach exercise afterwards, so decide now. It costs nothing, it is invisible
+in use, and without it every client's data sits in plaintext on a volume whose
+physical life you do not control. If you ever answer a security questionnaire,
+this is question one.
+
+Set it as the default while you are there so you cannot forget on the next
+instance: *EC2 → Account attributes → EBS encryption → Always encrypt new EBS
+volumes.*
 
 **On storage:** the database is small and now stays small — retention is
 enforced weekly (`dmarc prune`, 400 days of aggregate data, 30 of forensic).
@@ -379,14 +389,83 @@ filling up.
 
 ## Backups
 
-[`DEPLOYING.md` §8](DEPLOYING.md#8-backups) covers the database side. The AWS
-part is **EBS snapshots**: *EC2 → Lifecycle Manager → Create lifecycle policy*,
-target the instance by tag, daily, keep 7. It costs pennies and it is the
-difference between a bad afternoon and a bad month.
+Two layers, and they fail differently — which is why both.
 
-Snapshots are crash-consistent, which is fine for SQLite in WAL mode but not
-perfect. For a clean copy, `sqlite3 /opt/dmarc/data/dmarc.db ".backup /tmp/x.db"`
-first, then snapshot.
+**`dmarc backup`, nightly.** Enabled by `install.sh`. It integrity-checks the
+live database, writes a consistent copy (`0600`, in a `0700` directory) and
+keeps 14. See [`RUNNING.md`](RUNNING.md#backups). This is the one that survives
+a bad change, and the only one that tells you the database has started to
+corrupt.
+
+**EBS snapshots, daily.** *EC2 → Lifecycle Manager → Create lifecycle policy*,
+target by tag, daily, keep 7. Pennies. This is the one that survives losing the
+instance. Snapshots are crash-consistent, which is acceptable for SQLite in WAL
+mode — and the `dmarc backup` copy sitting on the volume is the clean one, so
+the snapshot carries both.
+
+### Offsite, to S3
+
+A backup on the same instance protects against a bad change, not against losing
+the instance. Set `DMARC_BACKUP_S3` in `/etc/dmarc-backup.env` and the unit
+syncs after each run.
+
+Four things make that bucket safe rather than just remote:
+
+**Block Public Access — all four settings, at the bucket.** The default is on
+for new buckets; confirm it rather than assume it.
+
+**Default encryption: SSE-KMS** with a customer-managed key. SSE-S3 is fine and
+simpler; KMS gives you an audit trail of every decrypt in CloudTrail and a key
+you can revoke, which is the difference when somebody asks how you would
+contain a breach.
+
+**Versioning on, plus a lifecycle rule** to expire noncurrent versions after
+(say) 90 days. Without versioning, one bad sync or one `rm` replicates the
+mistake offsite at 03:20.
+
+**Do not grant the instance `s3:DeleteObject`.** This is the one people miss.
+An instance role that can delete is an instance role that a compromise can use
+to wipe every offsite backup you have. `aws s3 sync` without `--delete` never
+needs it:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["s3:PutObject", "s3:ListBucket", "s3:GetObject"],
+  "Resource": [
+    "arn:aws:s3:::your-bucket",
+    "arn:aws:s3:::your-bucket/dmarc/*"
+  ]
+}
+```
+
+For backups you genuinely cannot afford to lose, **S3 Object Lock in
+governance mode** makes them undeletable for a retention period even by you.
+That is the control that survives ransomware.
+
+### Encrypting the file itself
+
+SSE-KMS protects the object in S3. It does not protect it from anybody who can
+read it *through* S3 with your credentials, and it means AWS holds the
+plaintext path. If your threat model or a client contract needs the file
+encrypted before it leaves the box:
+
+```bash
+# /etc/dmarc-backup.env
+DMARC_BACKUP_S3=s3://your-bucket/dmarc
+```
+
+then add an encrypt step ahead of the sync in
+`/etc/systemd/system/dmarc-backup.service`:
+
+```
+ExecStartPost=-/bin/sh -c 'for f in "$DMARC_BACKUP_DIR"/*.bak; do [ -f "$f.age" ] || age -r "$AGE_RECIPIENT" -o "$f.age" "$f"; done'
+```
+
+and sync only `*.age`. **Keep the private key off the instance.** A decryption
+key stored next to the ciphertext protects against a stolen disk and nothing
+else — and a backup you cannot decrypt is not a backup, so test a restore
+before you rely on it.
 
 ## What it costs
 
