@@ -446,3 +446,129 @@ public sealed class EnforcementReadinessTests
         Assert.Empty(report.Remediation);
     }
 }
+
+/// <summary>
+/// The sentence an executive reads and repeats, and the columns under it.
+///
+/// "DMARC passed 98% of messages" is a fact nobody can act on. A state, the
+/// number behind it, and what it means for a decision about enforcement is
+/// one somebody can take to a meeting.
+/// </summary>
+public sealed class VerdictTests
+{
+    private static ReportDomainHealth Domain(
+        string name = "acme.example", string policy = "reject",
+        long messages = 1000, long passing = 1000, long spfAligned = 900, long dkimAligned = 950) =>
+        new()
+        {
+            Domain = name,
+            Policy = policy,
+            Messages = messages,
+            Passing = passing,
+            SpfAligned = spfAligned,
+            DkimAligned = dkimAligned,
+        };
+
+    private static ClientReport Report(
+        IReadOnlyList<ReportDomainHealth>? domains = null, IReadOnlyList<ReportSource>? sources = null) =>
+        new()
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = domains ?? [Domain()],
+            Sources = sources ?? [],
+            Messages = (domains ?? [Domain()]).Sum(d => d.Messages),
+            Passing = (domains ?? [Domain()]).Sum(d => d.Passing),
+        };
+
+    /// <summary>
+    /// A domain losing mail outranks a good average, because an average across
+    /// an estate is how a broken domain stays invisible.
+    /// </summary>
+    [Fact]
+    public void ADomainLosingMailIsTheVerdictWhateverTheAverageSays()
+    {
+        var report = Report(
+        [
+            Domain("fine.example", messages: 1000, passing: 1000),
+            Domain("broken.example", "quarantine", messages: 100, passing: 40),
+        ]);
+
+        Assert.StartsWith("Not ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+        Assert.Contains("broken.example", report.Verdict, StringComparison.Ordinal);
+        Assert.Contains("60", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMonitoringDomainWithBrokenSendersIsConditional()
+    {
+        var report = Report(
+            [Domain("watched.example", "none", messages: 1000, passing: 1000)],
+            [new ReportSource { SourceIp = "203.0.113.9", Messages = 50, Passing = 10, Failing = 40 }]);
+
+        Assert.StartsWith("Conditional readiness.", report.Verdict, StringComparison.Ordinal);
+        Assert.Contains("before", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMonitoringDomainWithNothingBrokenIsReady()
+    {
+        var report = Report([Domain("watched.example", "none", messages: 1000, passing: 1000)]);
+
+        Assert.StartsWith("Ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoMailIsSaidRatherThanScored()
+    {
+        var report = Report([Domain(messages: 0, passing: 0, spfAligned: 0, dkimAligned: 0)]);
+
+        Assert.Contains("No mail was reported", report.Verdict, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Aligned is not the same as passed, and the report must not print one
+    /// for the other.
+    /// </summary>
+    /// <remarks>
+    /// A vendor passes SPF for its own envelope domain on every message it
+    /// sends. Printed as the domain's SPF figure, a client is shown 100%
+    /// beside mail nobody can prove is theirs. DMARC can be higher than either
+    /// aligned figure, because it needs only one of them.
+    /// </remarks>
+    [Fact]
+    public void AlignedRatesAreTheirOwnFigures()
+    {
+        var domain = Domain(messages: 1000, passing: 964, spfAligned: 896, dkimAligned: 891);
+
+        Assert.Equal(96.4, domain.PassRate);
+        Assert.Equal(89.6, domain.SpfAlignedRate);
+        Assert.Equal(89.1, domain.DkimAlignedRate);
+    }
+
+    [Fact]
+    public void TheRecordIsTheOneThatWasInForce()
+    {
+        var domain = new ReportDomainHealth
+        {
+            Domain = "acme.example", Policy = "quarantine", SubdomainPolicy = "none", Pct = 50,
+            Messages = 10, Passing = 10,
+        };
+
+        Assert.Equal("v=DMARC1; p=quarantine; sp=none; pct=50", domain.Record);
+
+        // And where no report reached us, it says so rather than inventing one.
+        var unknown = new ReportDomainHealth { Domain = "quiet.example", PolicyKnown = false };
+        Assert.Contains("not known", unknown.Record, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryRegisterItemCarriesATarget()
+    {
+        var report = Report([Domain("watched.example", "none", messages: 100, passing: 40)]);
+
+        Assert.All(report.Remediation, item => Assert.NotEmpty(item.Target));
+        Assert.Equal("7 days", Assert.Single(report.Remediation, i => i.Priority == "Critical").Target);
+    }
+}

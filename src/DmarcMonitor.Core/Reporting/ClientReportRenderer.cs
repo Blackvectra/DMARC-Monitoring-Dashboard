@@ -43,6 +43,7 @@ public static class ClientReportRenderer
             """);
 
         Header(html, report);
+        Verdict(html, report);
         Summary(html, summary);
         Posture(html, report);
         Trend(html, report);
@@ -215,7 +216,7 @@ public static class ClientReportRenderer
               <p class="note">A domain is <strong>protected</strong> once mail that fails the checks is
               refused or sent to junk by the receiving provider. Until then it is only being watched.</p>
               <table>
-                <thead><tr><th>Domain</th><th>Status</th><th class="n">Messages</th><th class="n">Not yours</th><th class="n">Genuinely yours</th><th>Ready to protect?</th></tr></thead>
+                <thead><tr><th>Domain</th><th>Status</th><th class="n">Messages</th><th class="n">Yours</th><th class="n">SPF aligned</th><th class="n">DKIM aligned</th><th class="n">Not yours</th><th class="n">Sources failing</th><th>What to do</th></tr></thead>
                 <tbody>
 
             """);
@@ -245,14 +246,24 @@ public static class ClientReportRenderer
             // says. It is the row a client needs to find.
             var css = d.IsStruggling ? "bad" : d.IsEnforcing ? "ok" : "warn";
 
+            // ALIGNED, not raw. A vendor passes SPF for its own envelope
+            // domain on every message it sends; printing that as the domain's
+            // SPF figure is how a client is shown 100% beside a domain whose
+            // mail nobody can prove is theirs.
+            var spf = d.Messages == 0 ? "-" : $"{d.SpfAlignedRate:0.#}%";
+            var dkim = d.Messages == 0 ? "-" : $"{d.DkimAlignedRate:0.#}%";
+
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="{css}">
-                      <td class="mono">{E(d.Domain)}</td>
+                      <td class="mono">{E(d.Domain)}<br><span class="note">{E(d.Record)}</span></td>
                       <td>{E(status)}</td>
                       <td class="n">{N(d.Messages)}</td>
-                      <td class="n">{E(failing)}</td>
                       <td class="n">{E(rate)}</td>
-                      <td>{E(d.Readiness)}<br><span class="note">{E(d.ReadinessReason)}</span></td>
+                      <td class="n">{E(spf)}</td>
+                      <td class="n">{E(dkim)}</td>
+                      <td class="n">{E(failing)}</td>
+                      <td class="n">{(d.Messages == 0 ? "-" : N(d.FailingSources))}</td>
+                      <td>{E(d.Recommended)}<br><span class="note">{E(d.Readiness)}</span></td>
                     </tr>
 
                 """);
@@ -291,6 +302,24 @@ public static class ClientReportRenderer
 
             """);
     }
+
+    /// <summary>
+    /// The one line an executive reads, before the summary and long before a
+    /// table.
+    /// </summary>
+    /// <remarks>
+    /// A state, the number behind it, and what it means for a decision about
+    /// enforcement. It is the sentence somebody repeats in a meeting, so it
+    /// sits on its own rather than as the first bullet of something else.
+    /// </remarks>
+    private static void Verdict(StringBuilder html, ClientReport report) =>
+        html.Append(CultureInfo.InvariantCulture, $"""
+            <section class="verdict">
+              <p class="verdict-label">Where this stands</p>
+              <p class="verdict-line">{E(report.Verdict)}</p>
+            </section>
+
+            """);
 
     /// <summary>
     /// The figures a decision gets made on, before any table.
@@ -516,10 +545,11 @@ public static class ClientReportRenderer
                      the middle: "consecu tive", "authoris ed". A reader takes
                      that as a broken document rather than a narrow column. -->
                 <colgroup>
-                  <col style="width:10%"><col style="width:26%"><col style="width:19%">
-                  <col style="width:19%"><col style="width:13%"><col style="width:13%">
+                  <col style="width:9%"><col style="width:25%"><col style="width:18%">
+                  <col style="width:17%"><col style="width:12%"><col style="width:7%">
+                  <col style="width:12%">
                 </colgroup>
-                <thead><tr><th>Priority</th><th>Finding</th><th>Why it matters</th><th>What to do</th><th>Who</th><th>Done when</th></tr></thead>
+                <thead><tr><th>Priority</th><th>Finding</th><th>Why it matters</th><th>What to do</th><th>Who</th><th>By</th><th>Done when</th></tr></thead>
                 <tbody>
 
             """);
@@ -533,6 +563,7 @@ public static class ClientReportRenderer
                       <td>{E(item.Impact)}</td>
                       <td>{E(item.Action)}</td>
                       <td>{E(item.Owner)}</td>
+                      <td>{E(item.Target)}</td>
                       <td>{E(item.Validation)}</td>
                     </tr>
 
@@ -916,6 +947,13 @@ public static class ClientReportRenderer
         @media (max-width:720px) {
           .posture { grid-template-columns:repeat(2, 1fr); }
         }
+
+        .verdict { border-left:4px solid var(--ok); padding:2px 0 2px 16px; margin-bottom:22px; }
+        .verdict-label {
+            font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+            color:var(--muted); margin-bottom:4px;
+        }
+        .verdict-line { font-size:17px; line-height:1.45; font-weight:500; margin:0; }
 
         .explainer { background:#f6f7f9; padding:20px 24px; border-radius:8px; font-size:14px; }
         .explainer h2 { font-size:16px; }

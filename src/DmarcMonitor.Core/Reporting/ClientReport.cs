@@ -179,6 +179,23 @@ public enum SenderClass
 public sealed record RemediationItem
 {
     public required string Priority { get; init; }
+
+    /// <summary>
+    /// How long this should take, from the date on the report.
+    /// </summary>
+    /// <remarks>
+    /// A register without dates is a list of opinions. These are the spans an
+    /// MSP can commit to without asking anybody: a week for mail that is not
+    /// arriving, a fortnight for a vendor to turn something on, a month for a
+    /// policy change, six weeks for tidying an inventory.
+    /// </remarks>
+    public string Target => Priority switch
+    {
+        "Critical" => "7 days",
+        "High" => "14 days",
+        "Medium" => "30 days",
+        _ => "45 days",
+    };
     public required string Finding { get; init; }
     public required string Impact { get; init; }
     public required string Action { get; init; }
@@ -268,6 +285,59 @@ public sealed record ReportDomainHealth
     public string MtaStsMode { get; init; } = "";
     public long Messages { get; init; }
     public long Passing { get; init; }
+
+    /// <summary>
+    /// Messages whose SPF check passed AND was about this domain.
+    /// </summary>
+    /// <remarks>
+    /// Not the same as "SPF passed", and the difference is the whole subject.
+    /// A service sending on the client's behalf passes SPF for its own
+    /// envelope domain every time; that is the sender proving it is itself,
+    /// which DMARC does not accept as the client proving it is them. Printed
+    /// as one number they read as a domain that is fine.
+    /// </remarks>
+    public long SpfAligned { get; init; }
+
+    /// <summary>Messages whose DKIM signature verified AND was signed as this domain.</summary>
+    public long DkimAligned { get; init; }
+
+    /// <summary>Distinct addresses that sent mail for this domain which failed.</summary>
+    public int FailingSources { get; init; }
+
+    public double SpfAlignedRate => Messages == 0 ? 0 : Math.Round(SpfAligned * 100.0 / Messages, 1);
+    public double DkimAlignedRate => Messages == 0 ? 0 : Math.Round(DkimAligned * 100.0 / Messages, 1);
+
+    /// <summary>
+    /// The policy receivers were applying during the period, written as the
+    /// record it came from.
+    /// </summary>
+    /// <remarks>
+    /// Rebuilt from what the reports carried rather than read from DNS today,
+    /// because a report describes a period: the record may have changed since,
+    /// and printing today's beside last month's figures is the same mistake as
+    /// dating the figures wrongly.
+    /// </remarks>
+    public string Record
+    {
+        get
+        {
+            if (!PolicyKnown) { return "not known for this period"; }
+
+            var record = $"v=DMARC1; p={Policy}";
+            if (SubdomainPolicy.Length > 0) { record += $"; sp={SubdomainPolicy}"; }
+            if (Pct != 100) { record += $"; pct={Pct}"; }
+            if (StrictAlignment) { record += "; adkim=s"; }
+            return record;
+        }
+    }
+
+    /// <summary>What to do about this domain, in one line.</summary>
+    public string Recommended =>
+        Messages == 0 ? "Confirm whether this domain sends mail at all."
+        : IsStruggling ? "Correct the senders below before the policy is raised."
+        : IsEnforcing ? "Nothing. Keep watching."
+        : PassRate >= 99 ? $"Move from p={Policy} to p=quarantine."
+        : $"Account for the {Failing:N0} failing message(s), then move to p=quarantine.";
 
     public double PassRate => Messages == 0 ? 0 : Math.Round(Passing * 100.0 / Messages, 1);
     public bool IsEnforcing => Policy is "reject" or "quarantine";
@@ -563,6 +633,56 @@ public sealed record ClientReport
         var names = string.Join(", ", ordered.Take(shown).Select(s => s.Display));
 
         return ordered.Count > shown ? $"{names} and {ordered.Count - shown} more" : names;
+    }
+
+    /// <summary>
+    /// The one-line verdict an executive reads and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// Written to be quotable in a meeting: a state, the number behind it, and
+    /// what it means for a decision about enforcement. "DMARC passed 98% of
+    /// messages" is a fact nobody can act on; "ready to enforce once two
+    /// senders are corrected" is a decision.
+    ///
+    /// Never flatters. A domain losing mail outranks a good average, because
+    /// an average across an estate is how a broken domain stays invisible.
+    /// </remarks>
+    public string Verdict
+    {
+        get
+        {
+            if (Messages == 0) { return "No mail was reported for this client in this period."; }
+
+            if (StrugglingDomains.Count > 0)
+            {
+                var worst = StrugglingDomains[0];
+                return $"Not ready for enforcement. {worst.Domain} is losing {worst.Failing:N0} of its own "
+                     + $"message(s) ({worst.PassRate:0.#}% arriving), and raising a policy now would stop them.";
+            }
+
+            var broken = InventoryOf(SenderClass.Misconfigured).Count;
+            var watching = Domains.Count(d => d is { IsEnforcing: false, Messages: > 0 });
+
+            if (watching > 0 && broken > 0)
+            {
+                return $"Conditional readiness. {PassRate:0.#}% of your mail is provably yours, and {broken} "
+                     + $"service(s) still need correcting before {(watching == 1 ? "the domain that is" : $"the {watching} domains")} "
+                     + "only being watched can be protected.";
+            }
+
+            if (watching > 0)
+            {
+                return $"Ready for enforcement. {PassRate:0.#}% of your mail is provably yours and no sender "
+                     + $"needs correcting, so {(watching == 1 ? "the domain" : $"the {watching} domains")} "
+                     + "only being watched can be moved to quarantine.";
+            }
+
+            return broken > 0
+                ? $"Protected, with work outstanding. Every domain is enforcing and {PassRate:0.#}% of your mail "
+                + $"is provably yours; {broken} service(s) still send mail that is not."
+                : $"Protected. Every domain is enforcing, {PassRate:0.#}% of your mail is provably yours, and no "
+                + "sender needs correcting.";
+        }
     }
 
     // ---- the inventory ------------------------------------------------------
