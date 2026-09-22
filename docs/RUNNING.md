@@ -531,6 +531,23 @@ only files this wrote — a directory you also keep other things in is safe.
 On Linux `deploy/install.sh` enables `dmarc-backup.timer` from the first day,
 nightly at 03:20, into `/opt/dmarc/backups`.
 
+### Who can read a backup
+
+A backup is a **complete copy of every client's data**. It is written `0600`
+into a directory forced to `0700`, so it is readable by the service account and
+nobody else — matching the live database rather than whatever the umask
+happened to give it.
+
+`dmarc export --out` is the same: `0600`, created that way rather than
+chmod'ed afterwards, so the file never exists with rows in it at the wrong
+permissions.
+
+Neither is **encrypted at rest**. On AWS that is EBS encryption's job (turn it
+on at launch — it cannot be added to a running volume without a snapshot
+round-trip), and S3's bucket default encryption for the offsite copy. If you
+want the file itself encrypted regardless of where it lands, pipe it through
+`age` or `gpg` in `ExecStartPost` before the sync.
+
 ### Offsite
 
 A backup on the same machine as the database protects against a bad change.

@@ -69,7 +69,7 @@ public static class ExportCommand
         // The writer is built here rather than inside the exporter so that
         // stdout is never closed: this is meant to be the left-hand side of a
         // pipe, and closing somebody else's stdout only shows up there.
-        TextWriter writer = outPath is null ? Console.Out : new StreamWriter(outPath);
+        TextWriter writer = outPath is null ? Console.Out : OwnerOnly(outPath);
 
         ExportResult result;
         try
@@ -94,5 +94,32 @@ public static class ExportCommand
                               + $". Next run: --after-id {result.LastId}");
 
         return 0;
+    }
+
+    /// <summary>
+    /// Opens the output file readable by its owner and nobody else.
+    /// </summary>
+    /// <remarks>
+    /// An export is a complete dump of other people's mail data - every
+    /// sending address, every domain, every authentication result, across
+    /// whichever clients the query matched. Written with the ordinary umask it
+    /// lands 0644, readable by any local account on the machine, which is a
+    /// weaker setting than the database it was read from (0600).
+    ///
+    /// UnixCreateMode rather than a chmod afterwards, so there is never a
+    /// moment where the file exists with the wrong permissions and rows are
+    /// already going into it. Windows has no mode and inherits the directory's
+    /// ACL, so it takes the plain path.
+    /// </remarks>
+    private static StreamWriter OwnerOnly(string path)
+    {
+        if (OperatingSystem.IsWindows()) { return new StreamWriter(path); }
+
+        return new StreamWriter(new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.Create,
+            Access = FileAccess.Write,
+            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,   // 0600
+        }));
     }
 }

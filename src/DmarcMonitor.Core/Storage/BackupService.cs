@@ -112,6 +112,7 @@ public sealed class BackupService(string databasePath)
         await CheckSourceAsync(quick, ct).ConfigureAwait(false);
 
         Directory.CreateDirectory(directory);
+        RestrictToOwner(directory, isDirectory: true);
 
         var target = Path.Combine(directory, NameFor(now ?? DateTimeOffset.UtcNow));
 
@@ -123,6 +124,7 @@ public sealed class BackupService(string databasePath)
         }
 
         await WriteCopyAsync(target, ct).ConfigureAwait(false);
+        RestrictToOwner(target);
 
         long reports, records;
         try
@@ -329,6 +331,51 @@ public sealed class BackupService(string databasePath)
         }
 
         return removed;
+    }
+
+    /// <summary>
+    /// Takes a backup's permissions down to the owner alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A backup is a complete copy of every client's data, and until this
+    /// existed it was written with whatever the process umask gave it - 0644
+    /// on an ordinary server, in a directory created 0755. The live database
+    /// is 0600. So taking a backup silently DOWNGRADED the protection on the
+    /// data: any local account on the box could read the copy, and the nightly
+    /// timer made a fresh one every night.
+    /// </para>
+    /// <para>
+    /// Set after the file exists rather than through the umask, because VACUUM
+    /// INTO is what creates it and SQLite does not offer a mode. That leaves a
+    /// window of milliseconds at 0644; the directory being 0700 is what closes
+    /// it, which is why that is set first and before anything is written into
+    /// it.
+    /// </para>
+    /// <para>
+    /// Unix only. Windows inherits the parent directory's ACL, which for a
+    /// service account's own folder is already restrictive, and there is no
+    /// mode to set. Failing to tighten permissions must never fail the backup
+    /// itself - a copy that exists and is readable is worth more than no copy.
+    /// </para>
+    /// </remarks>
+    private static void RestrictToOwner(string path, bool isDirectory = false)
+    {
+        if (OperatingSystem.IsWindows()) { return; }
+
+        try
+        {
+            var mode = isDirectory
+                ? UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute   // 0700
+                : UnixFileMode.UserRead | UnixFileMode.UserWrite;                             // 0600
+
+            File.SetUnixFileMode(path, mode);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // Left as the umask made it. The copy is still taken, and the
+            // operator's own tooling may have its own view of the directory.
+        }
     }
 
     private static void TryDelete(string path)

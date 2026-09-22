@@ -339,6 +339,60 @@ public sealed class BackupServiceTests : IDisposable
         Assert.Contains("aggregate_records", ex.Message, StringComparison.Ordinal);
     }
 
+    // ---- a backup is a complete copy of every client's data --------------------
+
+    [Fact]
+    public async Task ABackupIsReadableByItsOwnerAndNobodyElse()
+    {
+        // This was 0644 in a 0755 directory, because VACUUM INTO takes whatever
+        // the umask gives it. The live database is 0600 - so taking a backup
+        // silently DOWNGRADED the protection on the data, every night, on a
+        // timer. Any local account on the box could read a full copy.
+        if (OperatingSystem.IsWindows()) { return; }   // no mode to check
+
+        var result = await Service().RunAsync(_dir);
+
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            File.GetUnixFileMode(result.Path!));
+    }
+
+    [Fact]
+    public async Task TheBackupDirectoryIsNotTraversableByOthers()
+    {
+        // The file mode is set after VACUUM INTO has created it, so there is a
+        // window of milliseconds where it exists at 0644. The directory being
+        // 0700 is what actually closes that window, which is why it is set
+        // before anything is written into it.
+        if (OperatingSystem.IsWindows()) { return; }
+
+        await Service().RunAsync(_dir);
+
+        var mode = File.GetUnixFileMode(_dir);
+
+        Assert.False(mode.HasFlag(UnixFileMode.GroupRead), "the group can read the backup directory");
+        Assert.False(mode.HasFlag(UnixFileMode.OtherRead), "anybody can read the backup directory");
+        Assert.False(mode.HasFlag(UnixFileMode.OtherExecute), "anybody can traverse into the backup directory");
+    }
+
+    [Fact]
+    public async Task ADirectoryTheOperatorAlreadyMadeIsTightenedToo()
+    {
+        // Pointed at somewhere that already exists - another disk, a mount -
+        // the permissions are still brought down. An operator who made the
+        // directory with `mkdir` got 0755 and no warning.
+        if (OperatingSystem.IsWindows()) { return; }
+
+        Directory.CreateDirectory(_dir);
+        File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                                 | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                                 | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);   // 0755
+
+        await Service().RunAsync(_dir);
+
+        Assert.False(File.GetUnixFileMode(_dir).HasFlag(UnixFileMode.OtherRead));
+    }
+
     [Fact]
     public async Task KeepingNoneIsRefused()
     {
