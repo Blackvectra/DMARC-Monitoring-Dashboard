@@ -104,6 +104,70 @@ public sealed record FailingSource
         : SourceVerdict.Unauthenticated;
 }
 
+/// <summary>
+/// Several addresses at one operator, seen failing against the estate.
+/// </summary>
+/// <remarks>
+/// <para>
+/// From a real import of 83 reports over 17 domains, the sources list
+/// reported four separate findings:
+/// </para>
+/// <code>
+///   107.175.149.54   107-175-149-54-host.colocrossing.com   ndgga.com
+///   192.210.194.21   192-210-194-21-host.colocrossing.com   ndunited.org
+///   198.46.243.200   198-46-243-200-host.colocrossing.com   ndunited.org
+///   192.210.134.82   192-210-134-82-host.colocrossing.com   bmcedc.com
+/// </code>
+/// <para>
+/// One hosting provider, four addresses, three unrelated customers. As four
+/// single-domain rows each is noise; as one operator working through the
+/// estate it is the pattern only a multi-client platform can see - and the
+/// per-address view misses it entirely, because changing address between
+/// customers costs nothing on a VPS host.
+/// </para>
+/// <para>
+/// The addresses are kept rather than replaced. They are the identity, and
+/// blocking is done by address.
+/// </para>
+/// </remarks>
+public sealed record FailingOperator
+{
+    /// <summary>The vendor the catalogue recognises, else the registrable domain.</summary>
+    public required string Name { get; init; }
+
+    /// <summary>The registrable domain the addresses share, e.g. colocrossing.com.</summary>
+    public required string Domain { get; init; }
+
+    public SourceKind Kind { get; init; }
+
+    /// <summary>The addresses, worst first, exactly as the per-source list has them.</summary>
+    public required IReadOnlyList<FailingSource> Sources { get; init; }
+
+    public int AddressCount => Sources.Count;
+    public long FailedMessages => Sources.Sum(s => s.FailedMessages);
+
+    public IReadOnlyList<string> Domains =>
+        [.. Sources.SelectMany(s => s.Domains).Distinct(StringComparer.OrdinalIgnoreCase)
+                   .OrderBy(d => d, StringComparer.Ordinal)];
+
+    public IReadOnlyList<string> Clients =>
+        [.. Sources.SelectMany(s => s.Clients).Distinct(StringComparer.OrdinalIgnoreCase)
+                   .OrderBy(c => c, StringComparer.Ordinal)];
+
+    public DateTimeOffset? LastSeen =>
+        Sources.Where(s => s.LastSeen is not null).Max(s => s.LastSeen);
+
+    /// <summary>
+    /// The worst verdict any of its addresses earned.
+    /// </summary>
+    /// <remarks>
+    /// The group does not get a softer reading than its members. One address
+    /// authenticating for itself does not excuse the three beside it that
+    /// authenticated nothing.
+    /// </remarks>
+    public SourceVerdict Verdict => Sources.Max(s => s.Verdict);
+}
+
 public enum SourceVerdict
 {
     /// <summary>Authenticated for its own domain. A real service, set up unaligned.</summary>
@@ -254,6 +318,79 @@ public sealed class CorrelationService(string databasePath)
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Sources that share an operator, where that tells you something the
+    /// per-address list cannot.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A pure function of the rows the list already returns, so it needs no
+    /// query, no schema and no network - and can be tested against the exact
+    /// shapes that came out of a real estate.
+    /// </para>
+    /// <para>
+    /// Three exclusions, each of which would otherwise produce a finding
+    /// nobody should act on:
+    /// </para>
+    /// <para>
+    /// Mail providers. Grouping every Microsoft address into one row produces
+    /// "Microsoft 365, 9 domains" on every estate on earth, which is true,
+    /// useless, and would sit at the top of the page forever. A provider in
+    /// the catalogue is infrastructure, not an actor. Gateways are kept: a
+    /// gateway breaking signatures across five customers is a real finding,
+    /// and one an MSP is uniquely placed to notice.
+    /// </para>
+    /// <para>
+    /// Single addresses. If an operator has one address here, the row for
+    /// that address already says everything this would, and saying it twice
+    /// makes the page longer without making it truer.
+    /// </para>
+    /// <para>
+    /// Single domains. Several addresses at one host against one customer is
+    /// ordinary - it is what a mail provider looks like. The finding is the
+    /// same operator reaching customers that have nothing to do with each
+    /// other.
+    /// </para>
+    /// </remarks>
+    public static IReadOnlyList<FailingOperator> ByOperator(IReadOnlyList<FailingSource> sources)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+
+        var groups = new List<FailingOperator>();
+
+        foreach (var group in sources
+            .Select(s => (Source: s, Domain: SourceCatalog.OrganizationalDomain(s.ReverseName)))
+            .Where(x => !string.IsNullOrWhiteSpace(x.Domain))
+            .GroupBy(x => x.Domain!, StringComparer.OrdinalIgnoreCase))
+        {
+            var members = group.Select(x => x.Source).ToList();
+            var identity = SourceCatalog.Identify(members[0].ReverseName);
+
+            // Infrastructure rather than an actor. See the remarks above.
+            if (identity is { Kind: SourceKind.MailProvider }) { continue; }
+
+            if (members.Count < 2) { continue; }
+
+            var operators = new FailingOperator
+            {
+                Name = identity?.Name ?? group.Key,
+                Domain = group.Key,
+                Kind = identity?.Kind ?? SourceKind.Unknown,
+                Sources = members,
+            };
+
+            if (operators.Domains.Count < 2) { continue; }
+
+            groups.Add(operators);
+        }
+
+        // Reach first, then volume: an operator against five customers matters
+        // more than one against two, whatever the message counts say.
+        return [.. groups
+            .OrderByDescending(o => o.Domains.Count)
+            .ThenByDescending(o => o.FailedMessages)];
     }
 
     private static List<string> Split(string value) =>

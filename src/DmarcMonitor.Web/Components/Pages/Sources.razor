@@ -55,6 +55,50 @@ else if (_rows.Count == 0)
 }
 else
 {
+    @if (_operators.Count > 0)
+    {
+        @* One operator, several addresses, customers unrelated to each other.
+           Above the per-address table because the table cannot show it: four
+           rows at one hosting provider against three customers read as four
+           unrelated findings, and changing address between customers costs
+           nothing on a VPS host. *@
+        <section class="callout urgent">
+            <h2>@_operators.Count operator(s) using several addresses across your customers</h2>
+            <p>
+                The same operator, reaching customers that have nothing to do with each other. Each
+                address below is listed again in the table underneath — blocking is done by address —
+                but the pattern is only visible here.
+            </p>
+
+            <table class="triage">
+                <thead>
+                    <tr>
+                        <th>Operator</th>
+                        <th class="num">Addresses</th>
+                        <th class="num">Domains</th>
+                        <th>Seen against</th>
+                        <th class="num">Failed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var o in _operators)
+                    {
+                        <tr class="@Css(o.Verdict)">
+                            <td>
+                                <span class="source-name">@o.Name</span>
+                                <code class="source-ip muted">@o.Domain</code>
+                            </td>
+                            <td class="num">@o.AddressCount</td>
+                            <td class="num"><strong class="bad">@o.Domains.Count</strong></td>
+                            <td class="muted">@string.Join(", ", o.Domains)</td>
+                            <td class="num">@o.FailedMessages.ToString("N0")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </section>
+    }
+
     @if (_crossClient.Count > 0)
     {
         <section class="callout urgent">
@@ -112,6 +156,7 @@ else
 @code {
     private IReadOnlyList<FailingSource>? _rows;
     private IReadOnlyList<FailingSource> _crossClient = [];
+    private IReadOnlyList<FailingOperator> _operators = [];
     private string? _error;
     private int _days = 30;
 
@@ -129,11 +174,13 @@ else
             var access = await Org.GetAsync();
             _rows = await Correlation.GetFailingSourcesAsync(_days, tenantId: access.TenantId, clientSlug: access.RestrictedClient);
             _crossClient = [.. _rows.Where(r => r.IsCrossClient)];
+            _operators = CorrelationService.ByOperator(_rows);
         }
         catch (Exception ex)
         {
             _rows = Array.Empty<FailingSource>();
             _crossClient = [];
+            _operators = [];
             _error = ex.Message;
         }
     }
