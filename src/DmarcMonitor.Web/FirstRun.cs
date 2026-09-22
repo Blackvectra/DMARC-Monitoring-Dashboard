@@ -147,13 +147,25 @@ internal static class FirstRun
         {
             var result = await DatabaseMigrations.ApplyAsync(dbPath, ct).ConfigureAwait(false);
 
-            // Guarded because the join is the one argument here that costs
-            // anything, and CA1873 is right that it should not be paid for a
-            // message nobody is listening to. The upgrade itself has already
-            // happened either way - only the sentence about it is conditional.
-            if (logger.IsEnabled(LogLevel.Information))
+            // One line for the upgrade and one per migration, rather than a
+            // list joined into the first. Every argument here is a value
+            // already in hand, which is what CA1873 asks for - and it asks for
+            // it whether or not the call sits behind IsEnabled, so guarding
+            // the join did not satisfy it and was the wrong shape anyway.
+            //
+            // It also reads better in a console somebody is watching during an
+            // upgrade: nine migrations are nine lines rather than one long one.
+            // Into locals first: the analyzer judges the argument expression,
+            // and a local is unambiguously free where a property access on an
+            // interface is a judgement call this build cannot make locally.
+            var applied = result.Applied;
+            var count = applied.Count;
+
+            FirstRunLog.Upgraded(logger, version, result.Version, count);
+
+            foreach (var migration in applied)
             {
-                FirstRunLog.Upgraded(logger, version, result.Version, string.Join(", ", result.Applied));
+                FirstRunLog.UpgradeStep(logger, migration);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -200,8 +212,18 @@ internal static partial class FirstRunLog
         EventId = 1013,
         Level = LogLevel.Information,
         Message = "The database was at schema {Was} and this build expects {Now}, so it has been "
-                + "brought up to date. Applied: {Applied}. Nothing in it was replaced.")]
-    public static partial void Upgraded(ILogger logger, string was, string now, string applied);
+                + "brought up to date: {Count} migration(s) applied. Nothing in it was replaced.")]
+    public static partial void Upgraded(ILogger logger, string was, string now, int count);
+
+    /// <summary>
+    /// One line per migration, so the list is never built for a message
+    /// nobody is listening to.
+    /// </summary>
+    [LoggerMessage(
+        EventId = 1018,
+        Level = LogLevel.Information,
+        Message = "  applied {Migration}")]
+    public static partial void UpgradeStep(ILogger logger, string migration);
 
     [LoggerMessage(
         EventId = 1014,
