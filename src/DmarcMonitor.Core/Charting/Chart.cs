@@ -207,6 +207,67 @@ public static class Chart
     }
 
     /// <summary>
+    /// The unreported stretches of a series, as bands to shade.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Runs rather than days, for two reasons. Twenty-five separate rectangles
+    /// for twenty-five silent days is twenty-five elements to draw a single
+    /// fact, and - the reason this exists - a per-day marker at this scale is
+    /// too small to see. The old one was two units wide on a 600-unit canvas
+    /// stretched across a browser window, so each silent day rendered about
+    /// four pixels wide and two high, at the very bottom. Twenty-five of them
+    /// were on screen and the legend said so, and nobody could find one.
+    /// </para>
+    /// <para>
+    /// A band is drawn between the MIDPOINTS either side of a run, so it
+    /// covers the ground the missing readings would have occupied rather than
+    /// only the points themselves. A run at either end reaches that end, since
+    /// there is nothing beyond it to share the gap with.
+    /// </para>
+    /// <para>
+    /// The distinction being drawn is the one that matters most in this
+    /// product and the easiest to lose: a day with no report is not a quiet
+    /// day. A quiet day is mail nobody sent; an unreported day is mail nobody
+    /// can account for, and a month of them means collection has stopped.
+    /// Drawn as a flat line at zero, those two look identical.
+    /// </para>
+    /// </remarks>
+    /// <param name="reported">One flag per bucket: true when that day was reported on.</param>
+    /// <returns>Each run as its left edge and width, in the same units as <paramref name="width"/>.</returns>
+    public static IReadOnlyList<(double X, double Width)> Gaps(IReadOnlyList<bool> reported, double width)
+    {
+        ArgumentNullException.ThrowIfNull(reported);
+        if (reported.Count == 0) { return []; }
+
+        // One bucket, unreported: the whole canvas is the gap. X() would put
+        // the single point in the middle and a band of zero width would draw
+        // nothing at all.
+        if (reported.Count == 1) { return reported[0] ? [] : [(0, width)]; }
+
+        var bands = new List<(double, double)>();
+        var count = reported.Count;
+
+        for (var i = 0; i < count; i++)
+        {
+            if (reported[i]) { continue; }
+
+            var start = i;
+            while (i + 1 < count && !reported[i + 1]) { i++; }
+
+            // Halfway back towards the last reported day, and halfway on
+            // towards the next - or the edge of the canvas when the run
+            // starts or ends the window.
+            var left = start == 0 ? 0 : (X(start - 1, count, width) + X(start, count, width)) / 2;
+            var right = i == count - 1 ? width : (X(i, count, width) + X(i + 1, count, width)) / 2;
+
+            bands.Add((left, right - left));
+        }
+
+        return bands;
+    }
+
+    /// <summary>
     /// One segment of a semicircular gauge, as a filled donut arc.
     /// </summary>
     /// <remarks>

@@ -402,9 +402,13 @@ section[id] { scroll-margin-top: 16px; }
 .chart-svg .line-total { fill: none; stroke: var(--accent); stroke-width: 1.5; }
 .chart-svg .fill-fail  { fill: var(--urgent); opacity: .30; }
 
-/* A day nobody reported on. Marked on the baseline so an absent stretch
-   reads as a collection failure rather than a quiet week. */
-.chart-svg .no-report { fill: var(--dim); }
+/* The stretches nobody reported on, shaded full height.
+   
+   Faint on purpose: it has to be unmistakable that the chart has no readings
+   there, and it must not compete with the data drawn over it. A hatch would
+   read better still but cannot be drawn without a <pattern>, which does not
+   survive this SVG being inlined into an emailed report. */
+.chart-svg .no-report { fill: var(--dim); opacity: .10; }
 
 .chart-axis {
     display: flex;
