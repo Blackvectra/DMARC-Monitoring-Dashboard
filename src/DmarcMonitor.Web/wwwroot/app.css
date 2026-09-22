@@ -1632,3 +1632,13 @@ table.grid .num.urgent { color: var(--urgent); }
     font-size: 11.5px;
     color: var(--dim);
 }
+
+/* An option with its consequences under it, for a choice that is half
+   permanent. */
+.check { display: flex; gap: 10px; align-items: flex-start; margin-top: 12px; max-width: 78ch; }
+.check input { margin-top: 3px; }
+.check strong { display: block; font-size: 13px; font-weight: 600; }
+.check-note { display: block; font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+
+.filed { list-style: none; margin-top: 8px; display: grid; gap: 4px; font-size: 13px; }
+.filed .muted { font-size: 12px; }

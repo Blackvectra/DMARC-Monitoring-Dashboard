@@ -65,6 +65,24 @@ public sealed class ImportUiService(DatabaseInfo database)
     public Task<IReadOnlyList<string>> GetUnassignedDomainsAsync(string? tenantId, CancellationToken ct = default) =>
         Store(ReportStore.DefaultTenantSlug).GetUnassignedDomainsAsync(tenantId, ct);
 
+    /// <summary>
+    /// Files every domain nobody has assigned under a client of its own.
+    /// </summary>
+    /// <remarks>
+    /// An import of a real mailbox arrives with seventeen domains in it and,
+    /// without this, leaves all seventeen in Unassigned for somebody to file
+    /// by hand - seventeen clients created, seventeen domains assigned, to
+    /// reach the grouping the import already knew. The domain IS the grouping
+    /// until a person says otherwise.
+    ///
+    /// Offered rather than assumed: it runs when the import page's box is
+    /// ticked, and the box explains that the name can be changed afterwards
+    /// and the slug cannot.
+    /// </remarks>
+    public Task<FilingResult> FileNewDomainsAsync(
+        string organization, string? tenantId, CancellationToken ct = default) =>
+        ClientFiler.ApplyAsync(Store(organization), tenantId, ct);
+
     private static async IAsyncEnumerable<ImportFile> ReadAsync(
         IReadOnlyList<IBrowserFile> files, [EnumeratorCancellation] CancellationToken ct)
     {
