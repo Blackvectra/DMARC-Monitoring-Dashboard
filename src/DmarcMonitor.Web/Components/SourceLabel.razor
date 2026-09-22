@@ -1,0 +1,41 @@
+@*
+    One sending source, written the way somebody reads it.
+
+    The name on top and the address beneath, or - when nothing has resolved
+    the address yet - the address alone, exactly as every row looked before
+    any of this existed. That fallback is the important half: the nightly pass
+    fills the cache a few hundred addresses at a time, so a table is a mixture
+    for a while, and a row with no name has to look deliberate rather than
+    broken.
+
+    The address always stays. It is the identity, it is what somebody pastes
+    into a ticket or a firewall, and a table that showed only "Microsoft 365"
+    would have thrown away the one thing that is precise.
+
+    The name is for reading and never for judging. Whoever holds an address
+    writes its PTR, so recognising a vendor says who owns the wire and nothing
+    about whether the mail is legitimate - every verdict on these rows still
+    comes from what was signed and from how many unrelated customers the same
+    address was seen against.
+*@
+
+@if (Named)
+{
+    <span class="source-name">@Name</span>
+    <code class="source-ip muted">@Address</code>
+}
+else
+{
+    <code>@Address</code>
+}
+
+@code {
+    /// <summary>The address, always shown.</summary>
+    [Parameter, EditorRequired] public string Address { get; set; } = "";
+
+    /// <summary>What to call it, or the address again when nothing is known.</summary>
+    [Parameter, EditorRequired] public string Name { get; set; } = "";
+
+    private bool Named => !string.IsNullOrWhiteSpace(Name)
+        && !string.Equals(Name, Address, StringComparison.Ordinal);
+}

@@ -270,7 +270,7 @@ else
                     @foreach (var s in _detail.Forwarders)
                     {
                         <tr class="warn">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td>
                                 @* Named where it can be, and otherwise the
                                    evidence itself. A hosted gateway re-sends
@@ -337,7 +337,7 @@ else
                     @foreach (var s in _detail.Impersonating)
                     {
                         <tr class="@(s.OtherClients > 0 ? "urgent" : "act")">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="num">@s.Failing.ToString("N0")</td>
                             <td class="num">
@@ -404,7 +404,7 @@ else
                             <tr class="act">
                                 @if (i == 0)
                                 {
-                                    <td rowspan="@s.UnalignedDkim.Count"><code>@s.SourceIp</code></td>
+                                    <td rowspan="@s.UnalignedDkim.Count"><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                                     <td class="num" rowspan="@s.UnalignedDkim.Count">@s.Failing.ToString("N0")</td>
                                 }
                                 <td><code>d=@u.Domain</code></td>
@@ -474,7 +474,7 @@ else
                     switched over:
                     @foreach (var (s, i) in group.Select((s, i) => (s, i)))
                     {
-                        @(i > 0 ? ", " : "")<code>@s.SourceIp</code>
+                        @(i > 0 ? ", " : "")<code title="@s.SourceIp">@s.Display</code>
                     }.
                 </p>
             }
@@ -501,7 +501,7 @@ else
                     @foreach (var s in _detail.Misconfigured)
                     {
                         <tr class="act">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="num">@s.Failing.ToString("N0")</td>
                             <td>
@@ -538,7 +538,7 @@ else
                     @foreach (var s in _detail.Clean.Take(_showAllClean ? int.MaxValue : 10))
                     {
                         <tr class="fine">
-                            <td><code>@s.SourceIp</code></td>
+                            <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td class="num">@s.Messages.ToString("N0")</td>
                             <td class="muted">@Ago(s.LastSeen)</td>
                         </tr>
