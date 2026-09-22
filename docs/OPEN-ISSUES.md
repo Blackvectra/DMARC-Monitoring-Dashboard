@@ -603,6 +603,28 @@ with an owner and a definition of done for each item. What it does not have:
 - **Nothing schedules or keeps it.** Generated on demand, never stored, so
   there is no history of what was sent to whom.
 
+## 14. v1.1.2 carries a stray screenshot
+
+**Area** the repository, and the `v1.1.2` tag
+**Severity** None to anyone using it. Recorded because a release should not
+contain files nobody meant to ship.
+
+`undefined/fix-nrg.png`, 238 KB, was committed by accident: a Playwright script
+ran with an unset environment variable, wrote its screenshot to a directory
+literally named `undefined`, and a later `git add -A` swept it in. It is in the
+merge that became `v1.1.2`.
+
+It reaches nothing that is published. The release builds binaries from source
+and attaches those; no shipped artifact contains it, and the source zip GitHub
+generates is not something the install path uses.
+
+Removed from `main`. The tag keeps it, because a published tag is not worth
+moving for a file nobody will see — the next release will not have it.
+
+**The lesson worth keeping:** `git add -A` from the repository root adds
+whatever a tool happened to leave there. Scratch output belongs in the
+scratchpad directory, not beside the checkout.
+
 ## 8. Smaller things
 
 | area | what | how |
