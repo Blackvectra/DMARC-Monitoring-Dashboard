@@ -47,6 +47,7 @@ public sealed class ClientReportBuilder(string databasePath)
 
         var domains = await GetDomainHealthAsync(db, clientId, period, ct).ConfigureAwait(false);
         var sources = await GetSourcesAsync(db, clientId, period, ct).ConfigureAwait(false);
+        sources.AddRange(await GetRetiredAsync(db, clientId, period, sources, ct).ConfigureAwait(false));
         var changes = await GetChangesAsync(db, clientId, period, ct).ConfigureAwait(false);
         var current = await GetTotalsAsync(db, clientId, period.Start, period.End, ct).ConfigureAwait(false);
         var previous = await GetTotalsAsync(db, clientId, period.PreviousStart, period.PreviousEnd, ct).ConfigureAwait(false);
@@ -394,7 +395,23 @@ public sealed class ClientReportBuilder(string databasePath)
                    -- rather than a join, because source_names is a cache that
                    -- may not have been filled - a LEFT JOIN would do as well
                    -- and this keeps the grouping above untouched.
-                   {{name}}
+                   {{name}},
+                   -- The raw checks, and then the failures split by cause.
+                   -- "1,204 messages failed" is a number to worry about;
+                   -- "1,100 are a service signing as itself, 90 are
+                   -- forwarding, 14 are nobody we can account for" is three
+                   -- different afternoons, two of which belong to somebody
+                   -- else.
+                   SUM(CASE WHEN r.spf_auth_result  = 'pass' THEN r.message_count ELSE 0 END),
+                   SUM(CASE WHEN r.dkim_auth_result = 'pass' THEN r.message_count ELSE 0 END),
+                   SUM(CASE WHEN r.dmarc_result <> 'pass' AND r.spf_auth_result  = 'pass'
+                            THEN r.message_count ELSE 0 END),
+                   SUM(CASE WHEN r.dmarc_result <> 'pass' AND r.dkim_auth_result = 'pass'
+                            THEN r.message_count ELSE 0 END),
+                   SUM(CASE WHEN r.dmarc_result <> 'pass'
+                             AND COALESCE(r.spf_auth_result, '')  <> 'pass'
+                             AND COALESCE(r.dkim_auth_result, '') <> 'pass'
+                            THEN r.message_count ELSE 0 END)
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.client_id = $client AND r.date_begin >= $from AND r.date_begin <= $to
@@ -428,8 +445,74 @@ public sealed class ClientReportBuilder(string databasePath)
                 AuthenticatedFor = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 OtherClientsAffected = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
                 ReverseName = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                SpfPass = reader.GetInt64(7),
+                DkimPass = reader.GetInt64(8),
+                FailedSpfNotAligned = reader.GetInt64(9),
+                FailedDkimNotAligned = reader.GetInt64(10),
+                FailedBoth = reader.GetInt64(11),
             });
         }
+        return results;
+    }
+
+    /// <summary>
+    /// Sources that sent last period and not this one.
+    /// </summary>
+    /// <remarks>
+    /// Not a failure, and worth a line anyway: either a service was retired
+    /// and is still authorised to send as the client, or something stopped
+    /// working quietly and nobody noticed because nothing failed - it simply
+    /// stopped. A report that only lists what sent mail cannot say either.
+    ///
+    /// Carried with no message count, because they sent none. Every list that
+    /// counts mail excludes them by that; see
+    /// <see cref="ClientReport.LegitimateSources"/>.
+    /// </remarks>
+    private static async Task<List<ReportSource>> GetRetiredAsync(
+        SqliteConnection db, string clientId, ReportPeriod period,
+        List<ReportSource> current, CancellationToken ct)
+    {
+        var seen = new HashSet<string>(current.Select(s => s.SourceIp), StringComparer.OrdinalIgnoreCase);
+
+        var name = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false)
+            ? "(SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip)"
+            : "NULL";
+
+        await using var command = db.CreateCommand();
+        command.CommandText = $$"""
+            SELECT r.source_ip, SUM(r.message_count), GROUP_CONCAT(DISTINCT d.name), {{name}}
+            FROM aggregate_records r
+            JOIN domains d ON d.id = r.domain_id
+            WHERE r.client_id = $client AND r.date_begin >= $from AND r.date_begin <= $to
+            GROUP BY r.source_ip
+            -- A single message last period is noise rather than a retired
+            -- service, and a report listing every one-off would bury the
+            -- three that matter.
+            HAVING SUM(r.message_count) >= 10
+            ORDER BY SUM(r.message_count) DESC
+            LIMIT 25
+            """;
+        command.Parameters.AddWithValue("$client", clientId);
+        command.Parameters.AddWithValue("$from", Iso(period.PreviousStart));
+        command.Parameters.AddWithValue("$to", Iso(period.PreviousEnd));
+
+        var results = new List<ReportSource>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            var ip = reader.GetString(0);
+            if (seen.Contains(ip)) { continue; }
+
+            results.Add(new ReportSource
+            {
+                SourceIp = ip,
+                Retired = true,
+                Domains = reader.IsDBNull(2) ? [] : [.. reader.GetString(2).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)],
+                ReverseName = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            });
+        }
+
         return results;
     }
 

@@ -420,7 +420,8 @@ public sealed record ClientReport
     /// message counts reads as a contradiction rather than as nuance.
     /// </remarks>
     public IReadOnlyList<ReportSource> LegitimateSources =>
-        [.. Sources.Where(s => s.IsClean).OrderByDescending(s => s.Messages)];
+        [.. Sources.Where(s => s is { IsClean: true, Retired: false, Messages: > 0 })
+                   .OrderByDescending(s => s.Messages)];
 
     /// <summary>
     /// The same sources, gathered under the service they belong to.
