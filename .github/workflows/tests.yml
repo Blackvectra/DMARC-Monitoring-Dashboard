@@ -885,6 +885,24 @@ jobs:
             if ($page -notmatch 'No domains yet') { throw 'the empty state did not render' }
             if ($page -notmatch 'Local trial mode') { throw 'the trial-mode banner is missing' }
 
+            # Every other page, on the published executable, on Windows.
+            #
+            # The checks above are all about the dashboard, and a trial copy
+            # is judged by clicking around it. A page that throws still
+            # answers 200 with an error boundary in the body, so the status
+            # code proves nothing on its own - which is why the body is what
+            # is read here.
+            #
+            # Cheap, and it covers the routes nothing else on Windows touches:
+            # the two report pages, the sources list, and the fix view.
+            foreach ($route in '/domains', '/sources', '/fix', '/reports', '/tls', '/failures', '/clients', '/settings') {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:5000$route" -WebSession $session -SkipHttpErrorCheck
+              "$route : $($r.StatusCode)"
+              if ($r.StatusCode -ne 200) { throw "$route answered $($r.StatusCode)" }
+              if ($r.Content -match 'An unhandled error has occurred') { throw "$route rendered an error boundary" }
+              if ($r.Content -match 'Could not read the database')     { throw "$route could not read the database" }
+            }
+
             # Local trial mode still refuses anything arriving through a proxy.
             # A copy on somebody's desktop must not become a way in if they
             # ever port-forward to it.
