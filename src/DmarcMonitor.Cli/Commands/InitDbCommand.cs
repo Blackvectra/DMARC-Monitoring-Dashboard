@@ -148,12 +148,25 @@ internal static class Args
     /// A value that happens to begin with two dashes is not a flag here; only
     /// the positions a flag can occupy are checked, so "--reason --urgent" is
     /// still a reason.
+    ///
+    /// A flag given TWICE is refused too, which is a different mistake with
+    /// the same shape. Value() returns the first match and drops the rest, so
+    ///
+    ///     dmarc import --from .\dmarc.exe import --from "C:\dmarc-export"
+    ///
+    /// - a command line pasted twice, which is an ordinary thing to do in a
+    /// terminal - imported the executable itself, reported "files seen 1, not
+    /// reports 1", and exited 0. Nothing on screen suggested the folder that
+    /// was actually wanted had never been looked at. No command here takes a
+    /// repeated flag, so there is no case where the second one is meant to be
+    /// discarded silently.
     /// </remarks>
     public static int Reject(string[] args, params string[] known)
     {
         var takesValue = new HashSet<string>(known.Where(k => !k.StartsWith('!')),
                                              StringComparer.OrdinalIgnoreCase);
         var all = new HashSet<string>(known.Select(k => k.TrimStart('!')), StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -162,6 +175,15 @@ internal static class Args
 
             if (all.Contains(arg))
             {
+                if (!seen.Add(arg))
+                {
+                    Console.Error.WriteLine($"{arg} was given more than once.");
+                    Console.Error.WriteLine("Only the first one would have been used, which is rarely what was meant.");
+                    Console.Error.WriteLine("If a command line was pasted twice, run just one copy of it.");
+                    Console.Error.WriteLine();
+                    return 64;
+                }
+
                 // Step over this flag's value, so a value of its own that
                 // looks like a flag is not then judged as one.
                 if (takesValue.Contains(arg) && i + 1 < args.Length) { i++; }
