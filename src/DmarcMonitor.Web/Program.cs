@@ -311,7 +311,17 @@ try
     // has already run `dmarc init-db` by this point and this does nothing; a
     // copy somebody downloaded and double-clicked has not, and without this
     // every page reports a table that does not exist.
-    await FirstRun.EnsureDatabaseAsync(dbPath, logger).ConfigureAwait(false);
+    //
+    // The same is true a second time over on the upgrade. A new release is
+    // extracted to a new folder, so somebody carrying their database across
+    // brings one built by an older schema - and the only thing that used to
+    // bring it up to date was a command named nowhere they would look. In the
+    // trial this now happens by itself; on a server it does not, because
+    // migrating a production database is a decision an operator makes and
+    // deploy/update.sh already makes it out loud.
+    await FirstRun
+        .EnsureDatabaseAsync(dbPath, logger, mayUpgrade: AuthSetup.IsLocalTrial(app.Configuration))
+        .ConfigureAwait(false);
 
     // Only ever for the Windows trial download - see TrialBrowser for the four
     // cases this is deliberately not. Hooked to ApplicationStarted so the

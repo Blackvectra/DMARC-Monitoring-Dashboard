@@ -103,6 +103,22 @@ That name goes on every client report, so it will not produce one until you
 have given it.
 
 
+WHEN A NEWER VERSION COMES OUT
+------------------------------
+Everything you import lives in dmarc.db in this folder, so a new version
+extracted to a new folder starts empty. Nothing is lost - it is still here -
+but to carry it across:
+
+    1. Close this one (closing the window stops it).
+    2. Copy dmarc.db into the new folder. Copy the keys folder too if you
+       would rather not sign in again.
+    3. Start the new one.
+
+It brings the database up to whatever the new version needs, by itself, and
+says in its window what it changed. Your reports, clients and settings come
+with it.
+
+
 IF THE PORT IS ALREADY TAKEN
 ----------------------------
 Port 5000 is a popular default and something else may have it. Open
