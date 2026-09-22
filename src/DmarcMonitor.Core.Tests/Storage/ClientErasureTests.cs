@@ -61,7 +61,9 @@ public sealed class ClientErasureTests : IDisposable
             INSERT INTO clients (id,tenant_id,slug,name,created_at,updated_at)
               VALUES ('c-a','t-a','acme','Acme Corp','{when}','{when}'),
                      ('c-other','t-a','beta','Beta Ltd','{when}','{when}'),
-                     ('c-b','t-b','gamma','Gamma Inc','{when}','{when}');
+                     ('c-b','t-b','gamma','Gamma Inc','{when}','{when}'),
+                     ('c-dup-a','t-a','shared','Shared, Org A','{when}','{when}'),
+                     ('c-dup-b','t-b','shared','Shared, Org B','{when}','{when}');
             INSERT INTO domains (id,tenant_id,client_id,name,created_at,updated_at)
               VALUES ('d-a','t-a','c-a','acme.com','{when}','{when}'),
                      ('d-a2','t-a','c-a','acme.net','{when}','{when}'),
@@ -281,5 +283,116 @@ public sealed class ClientErasureTests : IDisposable
         // PreviewAsync did - caught by xunit's analyzers on the version bump,
         // not by the test failing.
         await Assert.ThrowsAsync<ArgumentException>(() => Erasure().PreviewAsync("  "));
+    }
+
+    // ---- the same slug in two organizations ----------------------------------
+    //
+    // Client slugs are unique PER ORGANIZATION - UNIQUE(tenant_id, slug) - so
+    // two MSPs on one install may each have an 'acme-corp'. The lookup used
+    // LIMIT 1 with no ORDER BY, and the CLI passed no tenant at all, so
+    // `--org nextlayersec` printed the other organization's client, said it
+    // was in nrg, and would have destroyed it on --apply. Reproduced against a
+    // two-organization database before it was fixed.
+
+    [Fact]
+    public async Task TheRightOrganizationsClientIsFoundWhenTwoShareASlug()
+    {
+        var a = await Erasure().PreviewAsync("shared", tenantId: "t-a");
+        var b = await Erasure().PreviewAsync("shared", tenantId: "t-b");
+
+        Assert.Equal("Shared, Org A", a!.Name);
+        Assert.Equal("orga", a.Organization);
+        Assert.Equal("Shared, Org B", b!.Name);
+        Assert.Equal("orgb", b.Organization);
+    }
+
+    [Fact]
+    public async Task AnAmbiguousSlugIsRefusedRatherThanPicked()
+    {
+        // The only safe answer. Choosing is what went wrong.
+        var ex = await Assert.ThrowsAsync<AmbiguousClientException>(
+            () => Erasure().PreviewAsync("shared"));
+
+        Assert.Equal("shared", ex.Slug);
+        Assert.Equal(["orga", "orgb"], ex.Organizations.OrderBy(o => o, StringComparer.Ordinal));
+        Assert.Contains("--org", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnAmbiguousSlugErasesNothing()
+    {
+        await Assert.ThrowsAsync<AmbiguousClientException>(
+            () => Erasure().ApplyAsync("shared", null, "matthew", null));
+
+        Assert.Equal(2, await ScalarAsync("SELECT COUNT(*) FROM clients WHERE slug = 'shared'"));
+    }
+
+    [Fact]
+    public async Task ErasingOneOrganizationsCopyLeavesTheOthersAlone()
+    {
+        await Erasure().ApplyAsync("shared", "t-a", "matthew", null);
+
+        Assert.Equal(0, await ScalarAsync("SELECT COUNT(*) FROM clients WHERE id = 'c-dup-a'"));
+        Assert.Equal(1, await ScalarAsync("SELECT COUNT(*) FROM clients WHERE id = 'c-dup-b'"));
+    }
+
+    [Fact]
+    public async Task AnUnambiguousSlugStillNeedsNoOrganization()
+    {
+        // The convenience that made the bug tempting has to keep working, or
+        // the fix is just an obstacle.
+        var preview = await Erasure().PreviewAsync("acme");
+
+        Assert.Equal("Acme Corp", preview!.Name);
+    }
+
+    [Fact]
+    public async Task AnOrganizationSlugResolvesToItsId()
+    {
+        Assert.NotNull(await Erasure().OrganizationIdAsync("orga"));
+        Assert.Null(await Erasure().OrganizationIdAsync("no-such-org"));
+    }
+
+    [Fact]
+    public async Task ATableWithNoForeignKeyIsStillErased()
+    {
+        // forensic_reports and ingest_log carry a client_id and have NO
+        // foreign keys, so nothing cascades to them. Both are empty today,
+        // which is why the cascade looked complete - and why this would have
+        // surfaced as "erasure is impossible for this client" the first time
+        // a forensic report was parsed, long after the code was written.
+        const string when = "2026-09-20 00:00:00";
+
+        await RunAsync($"""
+            INSERT INTO forensic_reports
+              (tenant_id, client_id, domain_id, arrival_date, source_ip, header_from, subject, received_at, ingested_at)
+              VALUES ('t-a','c-a','d-a','{when}','192.0.2.50','acme.com','Invoice attached','{when}','{when}');
+            """);
+
+        Assert.Equal(1, await ScalarAsync("SELECT COUNT(*) FROM forensic_reports WHERE client_id = 'c-a'"));
+
+        var result = await Erasure().ApplyAsync("acme", "t-a", "matthew", null);
+
+        Assert.NotNull(result);
+        Assert.Equal(0, await ScalarAsync("SELECT COUNT(*) FROM forensic_reports WHERE client_id = 'c-a'"));
+    }
+
+    [Fact]
+    public async Task ASubjectLineDoesNotSurviveAnErasure()
+    {
+        // The one row in this database that is unambiguously personal data.
+        // If anything survives an erasure it must not be this.
+        const string when = "2026-09-20 00:00:00";
+
+        await RunAsync($"""
+            INSERT INTO forensic_reports
+              (tenant_id, client_id, domain_id, arrival_date, source_ip, header_from, subject, received_at, ingested_at)
+              VALUES ('t-a','c-a','d-a','{when}','192.0.2.50','acme.com','Payroll for September','{when}','{when}');
+            """);
+
+        await Erasure().ApplyAsync("acme", "t-a", "matthew", null);
+
+        Assert.Equal(0, await ScalarAsync(
+            "SELECT COUNT(*) FROM forensic_reports WHERE subject = 'Payroll for September'"));
     }
 }

@@ -120,9 +120,14 @@ jobs:
       # --include-transitive because the direct references were never the
       # problem: what ships is resolved, not what is written down.
       #
-      # dotnet exits 0 whatever it finds, so the output is what decides.
+      # dotnet exits 0 whatever it finds, so the output is what decides - and
+      # set -o pipefail so `dotnet` itself failing is not swallowed by tee.
+      # Without it a restore error leaves audit.txt empty, the grep finds
+      # nothing, and the gate reports "No known advisories" having in fact
+      # checked nothing at all.
       - name: Vulnerable dependencies
         run: |
+          set -o pipefail
           dotnet list src/DmarcMonitor.sln package --vulnerable --include-transitive 2>&1 | tee audit.txt
           if grep -qiE '^\s*>' audit.txt; then
             echo "::error::A dependency has a published advisory. See the table above."

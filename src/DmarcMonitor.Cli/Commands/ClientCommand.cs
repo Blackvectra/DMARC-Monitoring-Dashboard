@@ -325,15 +325,52 @@ public static class ClientCommand
 
         var erasure = new ClientErasure(dbPath);
 
-        // Organization-wide on the command line, which is what an operator
-        // standing at the machine has. Anything serving a signed-in person
-        // passes a tenant; erasure reaching across organizations would be the
-        // worst possible version of the cross-tenant bug.
-        var preview = await erasure.PreviewAsync(client, null, ct).ConfigureAwait(false);
+        // --org is RESOLVED and passed, not ignored.
+        //
+        // This read "organization-wide on the command line, which is what an
+        // operator standing at the machine has" and passed null. Client slugs
+        // are unique per organization - UNIQUE(tenant_id, slug) - so two
+        // organizations may each have an 'acme-corp', and null meant the
+        // lookup ranged over both and took whichever SQLite returned first.
+        //
+        // Reproduced before it was fixed: `--org nextlayersec` printed NRG's
+        // client and NRG's domain, said "in nrg", and would have permanently
+        // destroyed the wrong customer's data on --apply. The tests missed it
+        // because they exercised the service with an explicit tenant and never
+        // this command.
+        string? tenantId = null;
+        var org = Args.Value(args, "--org");
+
+        if (!string.IsNullOrWhiteSpace(org))
+        {
+            tenantId = await erasure.OrganizationIdAsync(org, ct).ConfigureAwait(false);
+
+            if (tenantId is null)
+            {
+                Console.Error.WriteLine($"No organization called '{org}'. Run: dmarc org list");
+                return 66;
+            }
+        }
+
+        ErasureResult? preview;
+        try
+        {
+            preview = await erasure.PreviewAsync(client, tenantId, ct).ConfigureAwait(false);
+        }
+        catch (AmbiguousClientException ex)
+        {
+            // Two organizations, one slug, no --org. There is no safe choice
+            // to make here, and making one is exactly what went wrong.
+            Console.Error.WriteLine($"  {ex.Message}");
+            return 64;
+        }
 
         if (preview is null)
         {
-            Console.Error.WriteLine($"No client called '{client}'. Run: dmarc client list");
+            Console.Error.WriteLine(
+                org is null
+                    ? $"No client called '{client}'. Run: dmarc client list"
+                    : $"No client called '{client}' in {org}. Run: dmarc client list");
             return 66;
         }
 
@@ -354,7 +391,7 @@ public static class ClientCommand
         if (!Args.Flag(args, "--apply"))
         {
             Console.WriteLine("  Nothing was removed. To do it:");
-            Console.WriteLine($"    dmarc client erase --client {preview.Slug} --apply --confirm {preview.Slug} --by <name>");
+            Console.WriteLine($"    dmarc client erase --client {preview.Slug}{(org is null ? "" : $" --org {org}")} --apply --confirm {preview.Slug} --by <name>");
             Console.WriteLine();
             return 0;
         }
@@ -378,7 +415,7 @@ public static class ClientCommand
         }
 
         var result = await erasure
-            .ApplyAsync(preview.Slug, null, by, new AuditLog(dbPath), ct)
+            .ApplyAsync(preview.Slug, tenantId, by, new AuditLog(dbPath), ct)
             .ConfigureAwait(false);
 
         Console.WriteLine($"  Erased. {result!.Total:N0} row(s) removed, and verified gone.");

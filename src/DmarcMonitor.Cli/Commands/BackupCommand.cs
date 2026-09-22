@@ -82,5 +82,27 @@ public static class BackupCommand
             Console.Error.WriteLine($"  Could not write the backup: {ex.Message}");
             return 73;   // EX_CANTCREAT
         }
+        catch (Microsoft.Data.Sqlite.SqliteException ex)
+        {
+            // A full disk arrives as SQLITE_FULL from VACUUM INTO, and an
+            // unwritable --to as SQLITE_CANTOPEN. Neither is a bug in this
+            // program, and without this they fell through to Program.cs's
+            // catch-all and were printed under a banner reading "This is a
+            // bug" with a stack trace and exit 1 - the exact outcome the
+            // corruption path was written to avoid, on the most ordinary
+            // failure a nightly backup has.
+            Console.Error.WriteLine();
+            Console.Error.WriteLine($"  Could not write the backup: {ex.Message}");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("  Nothing was pruned, so every backup already held is still there.");
+
+            const int full = 13;   // SQLITE_FULL
+            if (ex.SqliteErrorCode == full)
+            {
+                Console.Error.WriteLine("  The disk is full. Free space, or point --to somewhere with room.");
+            }
+
+            return 73;   // EX_CANTCREAT
+        }
     }
 }

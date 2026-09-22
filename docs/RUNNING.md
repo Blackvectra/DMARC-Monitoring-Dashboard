@@ -609,12 +609,35 @@ how.
 ### Restoring
 
 A backup is an ordinary SQLite database. Stop the services, put it in place,
-and start them:
+and start them — **and delete the `-wal` and `-shm` files first:**
 
-    sudo systemctl stop dmarc-web 'dmarc-ingest*.timer'
+    sudo systemctl stop dmarc-web 'dmarc-ingest*.timer' dmarc-backup.timer
+
+    # THIS LINE IS NOT OPTIONAL
+    sudo -u dmarc rm -f /opt/dmarc/data/dmarc.db-wal /opt/dmarc/data/dmarc.db-shm
+
     sudo -u dmarc cp /opt/dmarc/backups/dmarc-20260922-032000.bak /opt/dmarc/data/dmarc.db
     sudo -u dmarc dmarc init-db --db /opt/dmarc/data/dmarc.db    # applies any newer migrations
-    sudo systemctl start dmarc-web 'dmarc-ingest*.timer'
+    sudo -u dmarc dmarc backup --db /opt/dmarc/data/dmarc.db --to /tmp/verify --keep 1   # integrity-checks it
+    sudo systemctl start dmarc-web 'dmarc-ingest*.timer' dmarc-backup.timer
+
+**Why the `rm` matters.** The database runs in WAL mode, so recent writes live
+in `dmarc.db-wal` rather than in `dmarc.db`. Copy a backup over `dmarc.db` and
+leave the old `-wal` beside it, and SQLite replays that write-ahead log onto
+the file you just restored.
+
+Reproduced: a backup taken at 200 rows, restored with the old `-wal` left in
+place, opened showing **500 rows — 300 of them written after the backup was
+taken.** A clean shutdown checkpoints the WAL away and hides this, which is
+exactly why it bites: restores happen after crashes, where it survives.
+
+In the case this section exists for — a database that failed its integrity
+check — the damage is as likely to be in the WAL as anywhere, and this lands
+it on top of the clean copy.
+
+The `dmarc backup` line before starting the services is not ceremony: it
+integrity-checks the restored file and tells you the row counts, so you find
+out now rather than when the collector writes to it.
 
 Nothing is lost in the gap: reports stay in the mailbox until a run stores
 them, so the next collection picks up whatever arrived meanwhile.

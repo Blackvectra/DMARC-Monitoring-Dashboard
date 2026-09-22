@@ -123,7 +123,22 @@ public sealed class BackupService(string databasePath)
             throw new IOException($"{target} already exists, so this run would overwrite a backup.");
         }
 
-        await WriteCopyAsync(target, ct).ConfigureAwait(false);
+        try
+        {
+            await WriteCopyAsync(target, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // VACUUM INTO creates the file as it goes, so a run that dies part
+            // way - a full disk is the ordinary way - leaves a truncated .bak
+            // sitting there. Left behind it is worse than nothing: it is a
+            // fresh timestamp, so the health check reports a backup was taken
+            // on the night one was not, and retention counts it toward --keep
+            // and evicts a copy that was real.
+            TryDelete(target);
+            throw;
+        }
+
         RestrictToOwner(target);
 
         long reports, records;

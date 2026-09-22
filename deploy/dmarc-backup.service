@@ -21,14 +21,22 @@
 #
 # ExecStartPost with a leading '-' so a failed upload does not mark the run
 # failed: the local copy IS the backup, and a network problem must not make it
-# look as though nothing was taken. The upload failing is visible in the
-# journal and, with dmarc-backup-failed@.service, on OnFailure of the sync
-# itself if you want to go further.
+# look as though nothing was taken. A failed upload is visible in the journal
+# and nowhere else; if you want it to page you, drop the leading '-' and it
+# becomes a unit failure like any other, carried by the OnFailure= above.
 
 [Unit]
 Description=Back up the DMARC database
 After=network-online.target
 Wants=network-online.target
+
+# The whole point of the exit codes this command is careful about. It returns
+# 74 when the database failed its integrity check and 73 when the copy could
+# not be written, and without this line both went to the journal and nowhere
+# else - a corrupt database found at 03:20 and nobody told until somebody
+# happened to look. dmarc-health.service has had this from the start; this
+# unit, which is the one that can discover corruption, did not.
+OnFailure=dmarc-alert@%n.service
 
 [Service]
 Type=oneshot
@@ -41,9 +49,20 @@ ExecStartPost=-/bin/sh -c 'test -n "$DMARC_BACKUP_S3" && exec aws s3 sync "$DMAR
 
 Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net
 
-# Needs the database (read) and the backup directory (write). The backup
-# directory is listed separately because an operator who points it at another
-# disk - which is the advice - puts it outside /opt/dmarc.
+# Needs the database (read) and the backup directory (write).
+#
+# IF YOU MOVE DMARC_BACKUP_DIR, ADD IT HERE TOO. systemd does not expand
+# environment variables in ReadWritePaths, so this list is literal - and the
+# docs advise putting backups on another disk, which lands them outside
+# everything named below. The run then fails every night with a read-only
+# filesystem error that says nothing about why.
+#
+#   sudo systemctl edit dmarc-backup.service
+#   [Service]
+#   ReadWritePaths=/mnt/backups
+#
+# A drop-in adds to the list rather than replacing it, so the two paths below
+# keep working.
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true

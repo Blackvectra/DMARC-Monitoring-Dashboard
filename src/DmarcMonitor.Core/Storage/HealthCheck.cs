@@ -155,10 +155,19 @@ public static class HealthCheck
 
     private static void Quiet(List<HygieneFinding> findings, HealthFacts facts, DateTimeOffset now)
     {
-        // Only worth raising when collection itself is working. If nothing has
-        // been stored at all, every domain is quiet and saying so seventeen
+        // Only worth raising when collection itself is BROKEN. If nothing is
+        // being stored at all, every domain is quiet and saying so seventeen
         // times buries the one finding that matters.
-        if (findings.Exists(f => f.Record == "collection")) { return; }
+        //
+        // Severity, not just Record. Matching any collection finding also
+        // matched the Weakness raised for an organization that has never
+        // collected - so adding one new organization silenced every
+        // quiet-domain finding for the organizations that WERE working, which
+        // is the opposite of what this guard is for.
+        if (findings.Exists(f => f.Record == "collection" && f.Severity >= HygieneSeverity.Breaking))
+        {
+            return;
+        }
         if (facts.Quiet.Count == 0) { return; }
 
         var named = facts.Quiet.Take(5).Select(q => q.Domain).ToList();

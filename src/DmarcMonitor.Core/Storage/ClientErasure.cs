@@ -61,6 +61,34 @@ public sealed class ClientErasure(string databasePath)
         return value;
     }
 
+    /// <summary>
+    /// The id of an organization named by slug, or null if there is no such one.
+    /// </summary>
+    /// <remarks>
+    /// Here rather than left to the caller because the caller is a command
+    /// line holding a slug, and the alternative - passing null and letting the
+    /// lookup range over every organization - is what made erasure able to
+    /// destroy the wrong customer's data.
+    /// </remarks>
+    public async Task<string?> OrganizationIdAsync(string slug, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(slug);
+
+        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = _databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+        }.ToString());
+
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT id FROM tenants WHERE slug = $slug LIMIT 1";
+        command.Parameters.AddWithValue("$slug", slug.Trim().ToLowerInvariant());
+
+        return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+    }
+
     /// <summary>What would go, without touching anything.</summary>
     public Task<ErasureResult?> PreviewAsync(
         string clientSlug, string? tenantId = null, CancellationToken ct = default) =>
@@ -112,6 +140,37 @@ public sealed class ClientErasure(string databasePath)
 
         await using (var transaction = (SqliteTransaction)await db.BeginTransactionAsync(ct).ConfigureAwait(false))
         {
+            // Every table carrying a client_id, explicitly, before the client
+            // row goes.
+            //
+            // Relying on the cascade alone was not enough, and the gap was
+            // silent. Most of these tables reach clients through a foreign
+            // key - directly, or through a parent that has one, as
+            // aggregate_records does via report_id. Two do not:
+            // forensic_reports and ingest_log carry a client_id and have NO
+            // foreign keys whatsoever, so nothing cascades to them at all.
+            //
+            // Both are empty today - forensic reports are not parsed yet, and
+            // ingest_log fills only under the collector - so the cascade
+            // looked complete. The moment either held a row, erasure would
+            // have left it behind and the verification below would have
+            // thrown, making erasure impossible for that client. Worse, had
+            // the verification been the thing relaxed instead, a customer's
+            // message headers would have quietly survived an erasure they
+            // asked for.
+            //
+            // Children first, parent last: deleting in this order never
+            // trips a constraint, and doing it explicitly makes the result
+            // the same whether or not a cascade exists.
+            foreach (var table in tables)
+            {
+                await using var delete = db.CreateCommand();
+                delete.Transaction = transaction;
+                delete.CommandText = $"DELETE FROM {table} WHERE client_id = $id";   // names from sqlite_master
+                delete.Parameters.AddWithValue("$id", clientId);
+                await delete.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
             await using (var delete = db.CreateCommand())
             {
                 delete.Transaction = transaction;
@@ -131,7 +190,8 @@ public sealed class ClientErasure(string databasePath)
                 throw new InvalidOperationException(
                     $"Erasing {slug} left {left.Sum(r => r.Rows):N0} row(s) behind in "
                     + $"{string.Join(", ", left.Select(r => r.Table))}. Nothing was removed. "
-                    + "This means the cascade did not fire, which is a bug rather than a data problem.");
+                    + "Every table carrying a client_id is deleted from explicitly, so this is a bug "
+                    + "rather than a data problem.");
             }
 
             await transaction.CommitAsync(ct).ConfigureAwait(false);
@@ -166,20 +226,39 @@ public sealed class ClientErasure(string databasePath)
         SqliteConnection db, string slug, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
+
+        // Every match, not LIMIT 1. Client slugs are unique per organization -
+        // UNIQUE(tenant_id, slug) - so two organizations may each have an
+        // 'acme-corp', and LIMIT 1 without an ORDER BY returned whichever
+        // SQLite felt like. Unscoped, that made this command able to
+        // permanently destroy a customer belonging to somebody else while
+        // printing the organization it thought it was in.
         command.CommandText = """
             SELECT c.id, c.name, t.slug
             FROM clients c
             JOIN tenants t ON t.id = c.tenant_id
             WHERE c.slug = $slug AND ($tenant IS NULL OR c.tenant_id = $tenant)
-            LIMIT 1
+            ORDER BY t.slug
             """;
         command.Parameters.AddWithValue("$slug", slug);
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
-        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        return await reader.ReadAsync(ct).ConfigureAwait(false)
-            ? (reader.GetString(0), reader.GetString(1), reader.GetString(2))
-            : null;
+        var found = new List<(string Id, string Name, string Organization)>();
+
+        await using (var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                found.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+        }
+
+        if (found.Count == 0) { return null; }
+        if (found.Count == 1) { return found[0]; }
+
+        // Refused rather than guessed. There is no safe way to choose here,
+        // and choosing is exactly what went wrong.
+        throw new AmbiguousClientException(slug, [.. found.Select(f => f.Organization)]);
     }
 
     private static async Task<IReadOnlyList<string>> DomainsAsync(
@@ -266,4 +345,22 @@ public sealed class ClientErasure(string databasePath)
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
+}
+
+/// <summary>
+/// More than one organization has a client with this slug.
+/// </summary>
+/// <remarks>
+/// Its own type so a caller can say something useful rather than printing a
+/// stack trace. Slugs are unique per organization, so this is an ordinary
+/// state on a shared install and not a corruption - the only wrong answer is
+/// to pick one.
+/// </remarks>
+public sealed class AmbiguousClientException(string slug, IReadOnlyList<string> organizations)
+    : Exception($"'{slug}' exists in more than one organization: {string.Join(", ", organizations)}. "
+                + "Name one with --org; nothing was removed.")
+{
+    public string Slug { get; } = slug;
+
+    public IReadOnlyList<string> Organizations { get; } = organizations;
 }

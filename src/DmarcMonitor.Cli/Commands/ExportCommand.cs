@@ -115,11 +115,26 @@ public static class ExportCommand
     {
         if (OperatingSystem.IsWindows()) { return new StreamWriter(path); }
 
-        return new StreamWriter(new FileStream(path, new FileStreamOptions
+        const UnixFileMode ownerOnly = UnixFileMode.UserRead | UnixFileMode.UserWrite;   // 0600
+
+        // UnixCreateMode applies only when the file is CREATED. Exporting over
+        // one that already exists - the second run of the same command - kept
+        // whatever mode it had, so a file that started life 0644 stayed
+        // world-readable while this code claimed otherwise.
+        var stream = new FileStream(path, new FileStreamOptions
         {
             Mode = FileMode.Create,
             Access = FileAccess.Write,
-            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,   // 0600
-        }));
+            UnixCreateMode = ownerOnly,
+        });
+
+        try { File.SetUnixFileMode(path, ownerOnly); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Left as it was. The export still runs; a file somebody else owns
+            // is their permissions to set.
+        }
+
+        return new StreamWriter(stream);
     }
 }
