@@ -260,6 +260,9 @@ render_unit dmarc-prune.service
 render_unit dmarc-prune.timer
 render_unit dmarc-backup.service
 render_unit dmarc-backup.timer
+render_unit dmarc-health.service
+render_unit dmarc-health.timer
+render_unit 'dmarc-alert@.service'
 
 systemctl daemon-reload
 echo "  starting dmarc-web"
@@ -289,6 +292,15 @@ systemctl enable --now dmarc-prune.timer >/dev/null
 # because a backup on the same instance does not survive losing the instance.
 echo "  enabling the nightly database backup (${ROOT}/backups, 14 kept)"
 systemctl enable --now dmarc-backup.timer >/dev/null
+
+# The check that notices this install has stopped working. Enabled because
+# the failure it catches - a collector that quietly stopped - is the one this
+# product is worst at noticing on its own: every screen goes on showing the
+# figures from before it stopped, and those look fine. It writes to the
+# journal and fails the unit; wiring that to mail, Slack or SNS is a line in
+# /etc/systemd/system/dmarc-alert@.service.
+echo "  enabling the twice-daily health check (journal only until dmarc-alert@ is filled in)"
+systemctl enable --now dmarc-health.timer >/dev/null
 
 ok=false
 for _ in $(seq 1 30); do

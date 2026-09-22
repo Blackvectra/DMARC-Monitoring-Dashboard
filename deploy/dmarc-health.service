@@ -1,0 +1,51 @@
+# Asks whether this install is still doing its job. Started by
+# dmarc-health.timer; runnable by hand with
+#   sudo systemctl start dmarc-health
+#
+# --quiet, so a healthy run prints nothing at all. Findings go to stderr and
+# the command exits 1 when something is actually broken.
+#
+# HOW THIS BECOMES AN ALERT
+#
+# Three ways, none of which need this product to grow an SMTP client, a
+# webhook signer, or credentials of its own:
+#
+#   1. systemd. OnFailure= below starts dmarc-alert@dmarc-health, which is
+#      whatever you want it to be - see dmarc-alert@.service. Nothing is
+#      installed for it by default, because a unit that silently does nothing
+#      is worse than one you had to write.
+#
+#   2. Anything already watching the journal. A failed unit is a state the
+#      monitoring you may already run - Zabbix, Datadog, CloudWatch agent,
+#      node_exporter's systemd collector - reports without being told how.
+#
+#   3. Nothing at all. `systemctl status dmarc-health` and
+#      `journalctl -u dmarc-health` say what it last found, which beats
+#      finding out from a customer.
+#
+# The severity split matters here. A weakness prints and exits 0; only
+# something broken exits 1. A check that pages every night over a stale
+# backup is a check somebody mutes, and then the collector stops into a muted
+# channel.
+
+[Unit]
+Description=Check the DMARC collector is still working
+After=network-online.target
+OnFailure=dmarc-alert@%n.service
+
+[Service]
+Type=oneshot
+User=dmarc
+EnvironmentFile=-/etc/dmarc-backup.env
+Environment=DMARC_BACKUP_DIR=/opt/dmarc/backups
+ExecStart=/usr/local/bin/dmarc health --db /opt/dmarc/data/dmarc.db --backups ${DMARC_BACKUP_DIR} --quiet
+
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net
+
+# Reads the database and lists the backup directory. Writes nothing.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/dmarc/data
+ReadOnlyPaths=/opt/dmarc/backups

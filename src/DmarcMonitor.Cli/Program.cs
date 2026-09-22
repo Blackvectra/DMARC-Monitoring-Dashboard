@@ -55,6 +55,7 @@ public static class Program
                 "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "export" => await ExportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "backup" => await BackupCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "health" => await HealthCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -261,6 +262,21 @@ public static class Program
                                  costs you yesterday's.
                 --db <path>      Database file. Default: dmarc.db
 
+              health             Whether this install is still doing its job. Everything it
+                                 looks at fails silently: a collector whose certificate
+                                 expired stops storing reports and says nothing, while every
+                                 screen goes on showing the figures from before it stopped.
+                                 Judged on what was STORED, not on whether a process ran - a
+                                 run against the wrong mailbox succeeds every time.
+                                 Exits 1 when something is broken, so systemd OnFailure= or
+                                 cron's mail-on-output turns it into an alert with no SMTP
+                                 configuration of its own.
+                --backups <dir>  Also check a backup was taken recently. Left out, nothing
+                                 is concluded about backups rather than assumed missing.
+                --quiet          Print nothing when there is nothing wrong. What a
+                                 scheduled run wants.
+                --db <path>      Database file. Default: dmarc.db
+
               fix              Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
@@ -351,6 +367,7 @@ public static class Program
               dmarc export --days 7 --failures-only | jq -r .source_ip | sort | uniq -c
               dmarc export --format csv --out book.csv
               dmarc backup --to /var/backups/dmarc
+              dmarc health --quiet          # silent unless something is wrong
               dmarc export --after-id 41232 | jq -c '{index:{_index:"dmarc",_id:.id}},.'
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"

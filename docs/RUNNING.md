@@ -511,6 +511,47 @@ rclone, restic or scp is one line you edit rather than a feature you wait for.
 A failed upload does not fail the run — the local copy *is* the backup, and a
 network problem must not make it look as though nothing was taken.
 
+### Is it still working?
+
+    dmarc health
+    dmarc health --backups /opt/dmarc/backups
+    dmarc health --quiet            # prints nothing when nothing is wrong
+
+**Everything this looks at fails silently.** A collector whose certificate
+expired stops storing reports and says nothing — the pages go on showing the
+figures from before it stopped, and those figures look fine. A customer whose
+DMARC record somebody else edited stops being reported on, and an empty chart
+reads as "no problems" rather than "no data".
+
+Judged on what was **stored**, not on whether a process ran. A collector that
+runs perfectly every hour against a mailbox nothing is delivered to succeeds
+every time, and a run-history table would call it healthy.
+
+What it checks:
+
+| | |
+|---|---|
+| Collection, **per organization** | Nothing stored in 36 hours. Per organization because two collectors break independently, and one still working keeps the install-wide figure looking healthy while a whole customer book goes dark. |
+| Domains gone quiet | Reports stopped more than 7 days ago while others kept arriving. Not raised when collection itself is broken — then everything is quiet, and saying so 17 times buries the finding that matters. |
+| Backups | Only when you name a directory. Left out, nothing is concluded rather than assumed missing. |
+| A name in two organizations | Usually a mistyped `--org` on a collector. Reported, not judged. |
+
+**Exit 1 only when something is actually broken.** A weakness prints and exits
+0, because a check that pages every night over a stale backup is a check
+somebody mutes — and then the collector stops into a muted channel.
+
+That exit code is the whole alerting story: it needs no SMTP client, no
+webhook signer and no credentials of its own. `deploy/install.sh` enables
+`dmarc-health.timer` twice daily, and its `OnFailure=` starts
+`dmarc-alert@.service` — which ships doing nothing but writing to the journal,
+deliberately, because a unit that pretends to alert is worse than one you had
+to write. It carries commented examples for mail, Slack, SNS and
+Healthchecks.io; uncomment one, put any secret in `/etc/dmarc-alert.env`, done.
+
+If you already run monitoring, a failed systemd unit is a state Zabbix,
+Datadog, the CloudWatch agent and node_exporter all report without being told
+how.
+
 ### Restoring
 
 A backup is an ordinary SQLite database. Stop the services, put it in place,
