@@ -625,6 +625,38 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("href=\"tls\"", html, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A scoped view is a place, not something you retype.
+    /// </summary>
+    /// <remarks>
+    /// The filter box filtered as you typed and forgot the moment you opened
+    /// a domain, so working through one customer meant retyping it on every
+    /// return. Held in the address now, which also makes it a link: "here is
+    /// the one I mean" can be pasted into a ticket.
+    /// </remarks>
+    [Fact]
+    public async Task TheTriageViewIsRestoredFromTheAddress()
+    {
+        var html = await Client().GetStringAsync("/?find=acme&level=urgent");
+
+        // The controls come back holding what the address asked for, rather
+        // than the page opening on everything again.
+        Assert.Contains("value=\"acme\"", html, StringComparison.Ordinal);
+        Assert.Contains("aria-pressed=\"true\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A hand-typed window the control does not offer is ignored rather than
+    /// obeyed, so the select and the page cannot disagree.
+    /// </summary>
+    [Fact]
+    public async Task AnImpossibleWindowInTheAddressIsNotAdopted()
+    {
+        var html = await Client().GetStringAsync("/?days=900");
+
+        Assert.DoesNotContain("value=\"900\"", html, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task FailureReportsHaveAPage()
     {
