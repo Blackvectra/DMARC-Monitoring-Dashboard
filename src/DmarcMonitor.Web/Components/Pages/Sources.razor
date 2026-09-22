@@ -116,7 +116,10 @@ else
             <tr>
                 <th></th>
                 <th>Source</th>
-                <th class="num">Clients</th>
+                @* "Parties", not "Clients": a domain still in the Unassigned
+                   bucket counts for itself here, so the number is not always a
+                   count of customers. *@
+                <th class="num">Parties</th>
                 <th class="num">Failed</th>
                 <th>Seen against</th>
                 <th>What it looks like</th>
@@ -134,14 +137,22 @@ else
                        here is the old case rather than a gap where a name
                        should be. *@
                     <td><SourceLabel Address="@row.SourceIp" Name="@row.Display" /></td>
+                    @* IndependentParties, not ClientCount, because that is the
+                       number the verdict was reached on. Every domain still in
+                       the Unassigned bucket counts for itself - two domains
+                       waiting there are no more related than two belonging to
+                       different customers - so on a fresh install, where
+                       everything is unassigned, ClientCount is 1 for every row
+                       in the table. Printing it put "against 1 unrelated
+                       clients" beside a row flagged for hitting several. *@
                     <td class="num">
                         @if (row.IsCrossClient)
                         {
-                            <strong class="bad">@row.ClientCount</strong>
+                            <strong class="bad">@row.IndependentParties</strong>
                         }
                         else
                         {
-                            <span class="muted">@row.ClientCount</span>
+                            <span class="muted">@row.IndependentParties</span>
                         }
                     </td>
                     <td class="num">@row.FailedMessages.ToString("N0")</td>
@@ -199,8 +210,9 @@ else
     private static string Explain(FailingSource row) => row.Verdict switch
     {
         SourceVerdict.CrossClientImpersonation =>
-            $"Authenticated nothing, against {row.ClientCount} unrelated clients. "
-          + "One domain would be noise; several is somebody working through a list.",
+            $"Authenticated nothing, against {row.IndependentParties} unrelated "
+          + $"{(row.IndependentParties == 1 ? "party" : "parties")}. "
+          + "One would be noise; several is somebody working through a list.",
 
         SourceVerdict.Unauthenticated =>
             "Authenticated nothing. Either a service nobody recorded, or somebody sending as this domain.",
