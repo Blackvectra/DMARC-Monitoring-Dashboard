@@ -79,6 +79,25 @@
     --shadow: 0 1px 2px rgba(0, 0, 0, .04);
     --ring: 0 0 0 3px rgba(79, 70, 229, .18);
     --radius: 10px;
+
+    /*
+        The navigation rail, and deliberately NOT part of the light/dark
+        theme. It stays dark whichever theme the content is in, so flipping
+        to dark does not lose the distinction between the frame and the page.
+
+        This does not contradict the light-first rule above. That rule is
+        about the CONTENT: a screenshot of a page lands in a client's ticket
+        or a printed report, and a dark one looks like a terminal in a
+        document. The rail is never in that screenshot.
+    */
+    --side:        #16182a;   /* the rail */
+    --side-2:      #1e2138;   /* hover, and the fold headers */
+    --side-text:   #e6e7ee;
+    --side-muted:  #9498b4;
+    --side-dim:    #6b7094;
+    --side-line:   #272a45;
+    --side-accent: #8b93f8;   /* readable on the rail, where --accent is not */
+    --side-on:     #ffffff;   /* the active label, brighter than --side-text */
 }
 
 /*
@@ -1260,3 +1279,100 @@ tr.act    .needs-doing { color: var(--act); }
 }
 
 .figure-pair > * { min-width: 0; }
+
+/* ============================================================================
+   THE SIDEBAR IS DARK
+   ============================================================================
+
+   Asked for: styling closer to the platforms this is weighed against. Their
+   shared signature is a dark rail against light content, and it is the single
+   most recognisable thing about them - more than any accent colour.
+
+   It does not contradict the light-first rule at the top of this file. That
+   rule is about the CONTENT: a screenshot of a page lands in a client's
+   ticket or a printed report, and a dark one looks like a terminal in a
+   document. The rail is never in that screenshot, and it earns its darkness -
+   the eye stops treating the navigation as part of the page and starts
+   treating it as the frame.
+
+   Its own tokens, deliberately not the theme's. The rail stays dark whichever
+   theme the content is in, so a person who flips to dark does not lose the
+   distinction between frame and page.
+*/
+.sidebar {
+    background: var(--side);
+    border-right: 0;
+    color: var(--side-text);
+}
+
+.brand-name { color: var(--side-text); }
+
+/* Inverted from the content's mark: light tile, dark glyph, so it reads as a
+   logo rather than as a hole in the rail. */
+.brand-mark { background: var(--side-text); color: var(--side); }
+
+.nav-item { color: var(--side-muted); }
+.nav-item:hover { color: var(--side-text); background: var(--side-2); }
+
+/*
+   The active item is a tinted block with a bar down its leading edge, rather
+   than the raised white pill the light rail used. A white pill on a dark rail
+   is a hole punched in it.
+*/
+.sidebar .nav-item.active {
+    color: var(--side-on);
+    background: var(--side-2);
+    box-shadow: inset 2px 0 0 var(--side-accent);
+}
+
+.sidebar .nav-group { color: var(--side-dim); }
+.sidebar .nav-fold > summary:hover { color: var(--side-text); }
+
+.sidebar .org-label,
+.sidebar .org-role { color: var(--side-dim); }
+.sidebar .org-name { color: var(--side-text); }
+
+/* The switcher has to read as a control on the rail, not a white box sitting
+   on it. */
+.sidebar .org-switch {
+    background: var(--side-2);
+    border-color: var(--side-line);
+    color: var(--side-text);
+}
+
+.sidebar-foot { border-top-color: var(--side-line); }
+.sidebar .who { color: var(--side-muted); }
+.sidebar .signout,
+.sidebar .theme-toggle { color: var(--side-accent); }
+.sidebar .theme-toggle:hover { color: var(--side-on); }
+
+/* ---- an icon per navigation item --------------------------------------- */
+
+/*
+    Inline SVG, sized to the text. No icon font and no sprite sheet: this
+    application is installed on machines that cannot reach a CDN, and a font
+    that fails to load leaves a column of empty boxes where the navigation was.
+
+    currentColor throughout, so an icon is exactly as bright as the label
+    beside it in every state without a second rule per state.
+*/
+.nav-item { display: flex; align-items: center; gap: 9px; }
+
+.nav-icon {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 15px;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: .85;
+}
+
+.nav-item.active .nav-icon { opacity: 1; }
+
+/* The fold headers line up with the items under them. */
+.nav-fold > summary { display: flex; align-items: center; gap: 9px; padding: 6px 10px; }
+.nav-fold > summary::after { margin-left: auto; float: none; }
+.nav-fold .nav-item { padding-left: 34px; }

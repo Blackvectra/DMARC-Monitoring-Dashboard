@@ -97,13 +97,13 @@
             matters because this application is installed on machines that
             cannot reach a CDN, and it keeps working if the circuit drops.
         *@
-        <NavLink class="nav-item" href="" Match="NavLinkMatch.All">Dashboard</NavLink>
-        <NavLink class="nav-item" href="domains">Domain health</NavLink>
-        <NavLink class="nav-item" href="sources">Sending sources</NavLink>
-        <NavLink class="nav-item" href="fix">Fix</NavLink>
+        <NavLink class="nav-item" href="" Match="NavLinkMatch.All"><NavIcon Name="dashboard" />Dashboard</NavLink>
+        <NavLink class="nav-item" href="domains"><NavIcon Name="domains" />Domain health</NavLink>
+        <NavLink class="nav-item" href="sources"><NavIcon Name="sources" />Sending sources</NavLink>
+        <NavLink class="nav-item" href="fix"><NavIcon Name="fix" />Fix</NavLink>
 
         <details class="nav-fold" open="@In("reports", "tls", "import")">
-            <summary class="nav-group">Reporting</summary>
+            <summary class="nav-group"><NavIcon Name="reporting" />Reporting</summary>
             <NavLink class="nav-item" href="reports">Client reports</NavLink>
             <NavLink class="nav-item" href="tls">TLS reports</NavLink>
             @if (_access is not { RestrictedClient: not null })
@@ -117,7 +117,7 @@
         @if (_access is not { RestrictedClient: not null })
         {
             <details class="nav-fold" open="@In("clients", "settings", "updates")">
-                <summary class="nav-group">Settings</summary>
+                <summary class="nav-group"><NavIcon Name="settings" />Settings</summary>
                 <NavLink class="nav-item" href="clients">Clients</NavLink>
                 <NavLink class="nav-item" href="settings">Configuration</NavLink>
                 <NavLink class="nav-item" href="updates">Updates</NavLink>
