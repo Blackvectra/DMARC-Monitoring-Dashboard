@@ -298,9 +298,25 @@ else
                             <p class="sub">
                                 No policy has been created for this domain yet, so there is no version to
                                 announce and the <code>_mta-sts</code> record is not shown — publishing an id
-                                this app does not serve is worse than publishing nothing. Create one first:
-                                <code>dmarc mta-sts set --domain @d.Domain</code>
+                                this app does not serve is worse than publishing nothing.
                             </p>
+                            @if (_canOperate)
+                            {
+                                @* The button this page used to print a command
+                                   instead of. Testing mode only: it reports
+                                   failures and delivers the mail anyway, so it
+                                   cannot lose a message. Enforce is the mode
+                                   that refuses mail, and it stays a separate,
+                                   deliberate act. *@
+                                <button class="primary" disabled="@_busy"
+                                        @onclick="() => CreatePolicyAsync(d.Domain)">
+                                    Create the policy, in testing mode
+                                </button>
+                                <p class="sub">
+                                    Reads this domain's MX records and serves a policy listing them. Nothing
+                                    is published to DNS by this, and nothing is refused while it is in testing.
+                                </p>
+                            }
                         }
                     </details>
                 }
@@ -580,6 +596,36 @@ else
         {
             var outcome = await Fixes.ApplyAsync(plan, await WhoAsync(), reason);
             Set(outcome.Message, isError: !outcome.Applied);
+        }
+        catch (Exception ex)
+        {
+            Set(ex.Message, isError: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Creates the policy this product serves for a domain, so the record
+    /// that announces it can then be published.
+    /// </summary>
+    /// <remarks>
+    /// The role check is repeated here because a hidden button is not a
+    /// permission: the handler runs on the server, and the only thing
+    /// stopping a Viewer is this line.
+    /// </remarks>
+    private async Task CreatePolicyAsync(string domain)
+    {
+        if (!_canOperate) { return; }
+
+        _busy = true;
+        try
+        {
+            Set(await Fixes.CreatePolicyAsync(domain, await WhoAsync()), isError: false);
         }
         catch (Exception ex)
         {
