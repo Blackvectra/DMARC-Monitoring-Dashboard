@@ -235,10 +235,10 @@ reports:
   outside the eight seen (Proofpoint, Barracuda, Fastmail, ProtonMail, Zoho,
   GoDaddy, Rackspace, non-Western providers).
 
-## 7. Nothing has been released yet
+## 7. Released once. Merging still produces nothing installable
 
 **Area** `.github/workflows/release.yml`
-**Severity** Low, now that the workflow exists but has never run.
+**Severity** Low, and no longer about whether the workflow runs.
 
 `dmarc` publishes as a genuinely single file - schema compiled in, SQLite's
 native library bundled rather than sitting beside it - and the workflow proves
@@ -247,12 +247,27 @@ create a database there. That check is the point: a missing embedded schema or
 an unbundled native library both look fine until somebody copies the exe
 somewhere on its own, which is the first thing anybody does.
 
-Both the Windows and Linux jobs, and the web bundle, are untried: the workflow
-has not been triggered. Tag a version or run it manually and see. What IS
-tried, on every push, is the Linux artifacts being built the same way and
-installed on a fresh Ubuntu runner by `deploy/install.sh` (the `Install on a
-fresh Ubuntu` job in `tests.yml`), so the first tag will not be the first
-time the bundle has been unpacked onto a server.
+**Done.** `v1.0.0` was tagged and carries all five files - `dmarc.exe`,
+`dmarc-linux-x64`, `dmarc-linux-arm64`, `dmarc-web.zip` and
+`dmarc-deploy.tar.gz`. Every job is now executed rather than assembled: all
+three CLI builds run their own binary (including `linux-arm64`, on an arm64
+runner), and the workflow has since been dispatched manually against a branch
+to prove the whole of it without publishing - its `release` job is gated on
+`refs/tags/v*` and correctly skipped.
+
+**What remains is the shape of it, and it is worth saying plainly because it
+is not obvious:** the release fires on a **tag**, so *merging to `main`
+produces nothing anybody can install*. `bootstrap.sh` downloads the latest
+release, which means an install run straight after a merge quietly gets the
+previous tag's build - the same binaries, the same version number, none of the
+new work, and no error to explain it. Tag, wait for the build, then install.
+`docs/AWS.md` §2.2 now says so at the point where somebody would otherwise be
+caught by it.
+
+What is also tried, on every push, is the Linux artifacts being built the same
+way and installed on a fresh Ubuntu runner by `deploy/install.sh` - on x64 and
+arm64 - so a tag has never been the first time the bundle was unpacked onto a
+server.
 
 The release also attaches `dmarc-deploy.tar.gz` - the scripts and systemd
 units under `deploy/` - because the server has no checkout and the docs tell
