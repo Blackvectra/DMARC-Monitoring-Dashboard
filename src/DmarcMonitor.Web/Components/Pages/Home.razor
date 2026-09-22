@@ -107,6 +107,13 @@ else
                at the top of a dashboard and none of them says what it is
                made of, which makes it worth nothing to the person reading. *@
             <p class="score-sub">@_score.Weakest</p>
+            @if (_score.Unassessed.Length > 0)
+            {
+                @* Said out loud rather than scored as a failure. The two are
+                   not the same thing and the page must not blame a customer
+                   for a reading nobody took. *@
+                <p class="score-sub">@_score.Unassessed <a href="/domains">Read DNS</a></p>
+            }
         </div>
 
         <div class="score-card">
@@ -732,7 +739,8 @@ else
                 tlsEnforcing: scoped.Count(r =>
                     dns.TryGetValue(r.Domain, out var read)
                     && read.MtaStsMode.Equals("enforce", StringComparison.OrdinalIgnoreCase)),
-                rates: _rates);
+                rates: _rates,
+                dnsRead: scoped.Count(r => dns.ContainsKey(r.Domain)));
         }
         catch (Exception)
         {

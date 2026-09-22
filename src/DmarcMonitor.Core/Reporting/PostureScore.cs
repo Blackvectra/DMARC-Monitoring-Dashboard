@@ -203,8 +203,36 @@ public sealed record PostureScore
     public double Visibility { get; init; }
     public double Transport { get; init; }
 
-    /// <summary>The whole number shown at the top of the dashboard.</summary>
-    public int Score => (int)Math.Round(Enforcement + Alignment + Visibility + Transport, MidpointRounding.AwayFromZero);
+    /// <summary>
+    /// False when nothing has read DNS, so the transport part is not judged at
+    /// all rather than judged as zero.
+    /// </summary>
+    /// <remarks>
+    /// The difference between "nobody requires TLS" and "nobody has looked"
+    /// is the whole discipline of this product, and the score broke it: a
+    /// fresh install scored 76 and explained itself with "10 of the 10 points
+    /// lost to domains not requiring TLS", which blames a customer's
+    /// configuration for a reading that was never taken. Two of those domains
+    /// were serving enforce at the time.
+    /// </remarks>
+    public bool TransportKnown { get; init; } = true;
+
+    /// <summary>What the score is out of, once anything unmeasured is left out.</summary>
+    private int Possible => TransportKnown ? 100 : 100 - TransportWeight;
+
+    /// <summary>
+    /// The whole number shown at the top of the dashboard, out of 100 and
+    /// scored only on what is known.
+    /// </summary>
+    public int Score => (int)Math.Round(
+        (Enforcement + Alignment + Visibility + Transport) * 100.0 / Possible,
+        MidpointRounding.AwayFromZero);
+
+    /// <summary>
+    /// What is not being judged, or empty when everything is.
+    /// </summary>
+    public string Unassessed =>
+        TransportKnown ? "" : "Encryption in transit is not counted yet: nothing has read these domains' DNS.";
 
     /// <summary>
     /// False when there is nothing to score: no domains, or no mail reported.
@@ -232,18 +260,26 @@ public sealed record PostureScore
         {
             if (!Known) { return "Not enough reported mail to score yet."; }
 
-            var losses = new (string What, double Lost)[]
+            var losses = new List<(string What, double Lost)>
             {
                 ("domains not yet enforcing", EnforcementWeight - Enforcement),
                 ("mail that does not align", AlignmentWeight - Alignment),
                 ("domains sending no reports", VisibilityWeight - Visibility),
-                ("domains not requiring TLS", TransportWeight - Transport),
             };
+
+            // Only where it was measured. Naming a loss nobody established is
+            // the failure this whole type is careful about elsewhere.
+            if (TransportKnown) { losses.Add(("domains not requiring TLS", TransportWeight - Transport)); }
 
             var worst = losses.OrderByDescending(l => l.Lost).First();
 
+            // The all-clear names only what was measured. Claiming "and
+            // requiring TLS" where nothing read DNS is the same false
+            // statement as blaming the loss on it, said the other way round.
             return worst.Lost < 0.5
-                ? "Every domain enforcing, aligned, reporting and requiring TLS."
+                ? TransportKnown
+                    ? "Every domain enforcing, aligned, reporting and requiring TLS."
+                    : "Every domain enforcing, aligned and reporting."
                 : string.Create(CultureInfo.InvariantCulture,
                     $"{worst.Lost:0} of the {Total(worst.What)} points lost to {worst.What}.");
         }
@@ -265,8 +301,13 @@ public sealed record PostureScore
     /// <param name="reporting">Domains that sent any mail in the window.</param>
     /// <param name="tlsEnforcing">Domains serving an MTA-STS policy in enforce mode.</param>
     /// <param name="rates">The window's authentication results.</param>
+    /// <param name="dnsRead">
+    /// How many of those domains anything has read the DNS of. Zero means the
+    /// transport part is unmeasured, and it is then left out of the score
+    /// rather than counted as a failure.
+    /// </param>
     public static PostureScore For(
-        int enforcing, int domains, int reporting, int tlsEnforcing, AuthenticationRates rates)
+        int enforcing, int domains, int reporting, int tlsEnforcing, AuthenticationRates rates, int dnsRead = -1)
     {
         ArgumentNullException.ThrowIfNull(rates);
 
@@ -278,13 +319,18 @@ public sealed record PostureScore
             return new PostureScore { Known = false };
         }
 
+        // A negative dnsRead is a caller that does not know, which keeps the
+        // old meaning: score it and say nothing.
+        var transportKnown = dnsRead != 0;
+
         return new PostureScore
         {
             Known = true,
+            TransportKnown = transportKnown,
             Enforcement = EnforcementWeight * Clamp(enforcing / (double)domains),
             Alignment = AlignmentWeight * Clamp(rates.DmarcRate / 100.0),
             Visibility = VisibilityWeight * Clamp(reporting / (double)domains),
-            Transport = TransportWeight * Clamp(tlsEnforcing / (double)domains),
+            Transport = transportKnown ? TransportWeight * Clamp(tlsEnforcing / (double)domains) : 0,
         };
     }
 

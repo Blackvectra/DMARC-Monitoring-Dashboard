@@ -79,6 +79,55 @@ public sealed class PostureScoreTests
         Assert.False(PostureScore.For(4, 4, 0, 4, new AuthenticationRates()).Known);
     }
 
+    /// <summary>
+    /// Nothing has read DNS: transport is not judged, and the page says so.
+    /// </summary>
+    /// <remarks>
+    /// The bug this exists for reached a screenshot. A fresh install scored 76
+    /// and explained itself with "10 of the 10 points lost to domains not
+    /// requiring TLS" - while two of those domains were serving enforce, and
+    /// nothing had ever looked. Not knowing and failing are different things,
+    /// and the score said the wrong one.
+    /// </remarks>
+    [Fact]
+    public void TransportIsNotJudgedWhenNothingHasReadDns()
+    {
+        var score = PostureScore.For(
+            enforcing: 4, domains: 4, reporting: 4, tlsEnforcing: 0, Rates(), dnsRead: 0);
+
+        // Out of the ninety that could be measured, all of which were earned.
+        Assert.Equal(100, score.Score);
+        Assert.False(score.TransportKnown);
+        Assert.Contains("nothing has read", score.Unassessed, StringComparison.Ordinal);
+
+        // And it never names transport as the thing that cost the points.
+        Assert.DoesNotContain("requiring TLS", score.Weakest, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadingDnsAndFindingNoPolicyIsStillAFailure()
+    {
+        // The other half: looked, and nobody requires TLS. That IS a loss.
+        var score = PostureScore.For(
+            enforcing: 4, domains: 4, reporting: 4, tlsEnforcing: 0, Rates(), dnsRead: 4);
+
+        Assert.Equal(100 - PostureScore.TransportWeight, score.Score);
+        Assert.True(score.TransportKnown);
+        Assert.Contains("requiring TLS", score.Weakest, StringComparison.Ordinal);
+        Assert.Empty(score.Unassessed);
+    }
+
+    [Fact]
+    public void ACallerThatDoesNotSayKeepsBeingScoredOnEverything()
+    {
+        // dnsRead left out: the old meaning, so nothing already calling this
+        // quietly changes behaviour.
+        var score = PostureScore.For(enforcing: 4, domains: 4, reporting: 4, tlsEnforcing: 4, Rates());
+
+        Assert.True(score.TransportKnown);
+        Assert.Equal(100, score.Score);
+    }
+
     [Fact]
     public void EachPartIsWorthWhatItSaysItIs()
     {
