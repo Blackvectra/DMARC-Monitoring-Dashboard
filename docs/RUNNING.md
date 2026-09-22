@@ -468,6 +468,64 @@ safe: it returns what it has already done, and the next run resumes.
 
 ---
 
+## Backups
+
+    dmarc backup --to /var/backups/dmarc
+    dmarc backup --to /mnt/backup --keep 30
+
+**This is the only thing here that protects the reports.** `dmarc update` and
+`rollback.sh` roll the *binary* back; years of a customer's history had
+nothing at all, on a product designed to run on one machine.
+
+Safe to run while the collector is working. The copy comes from SQLite rather
+than from the filesystem, so it is a transactionally consistent snapshot — not
+whatever the bytes happened to be mid-write. `cp dmarc.db` is not equivalent:
+in WAL mode it can catch a torn page and a `-wal` file that does not match it.
+
+Every copy is **opened, integrity-checked and counted** before it is trusted,
+and one that fails verification is deleted rather than left looking like a good
+backup. The counts are printed, because "0 reports" in a log has taught you
+something that a silent success would have hidden until a restore.
+
+Retention keeps the newest `--keep` (default 14) and runs **only after a new
+copy has verified**, so a failed run never costs you yesterday's. It matches
+only files this wrote — a directory you also keep other things in is safe.
+
+On Linux `deploy/install.sh` enables `dmarc-backup.timer` from the first day,
+nightly at 03:20, into `/opt/dmarc/backups`.
+
+### Offsite
+
+A backup on the same machine as the database protects against a bad change.
+It does nothing about the failure that actually takes a single-machine install
+down, which is the machine. Set `DMARC_BACKUP_S3` in `/etc/dmarc-backup.env`
+and the unit syncs the directory after each run:
+
+    DMARC_BACKUP_S3=s3://your-bucket/dmarc
+
+On EC2 the instance role supplies the credentials, so **nothing has to be
+stored, rotated or kept out of a config file**. The sync is `aws s3 sync` in
+the unit rather than an S3 client inside the product, so swapping it for
+rclone, restic or scp is one line you edit rather than a feature you wait for.
+
+A failed upload does not fail the run — the local copy *is* the backup, and a
+network problem must not make it look as though nothing was taken.
+
+### Restoring
+
+A backup is an ordinary SQLite database. Stop the services, put it in place,
+and start them:
+
+    sudo systemctl stop dmarc-web 'dmarc-ingest*.timer'
+    sudo -u dmarc cp /opt/dmarc/backups/dmarc-20260922-032000.bak /opt/dmarc/data/dmarc.db
+    sudo -u dmarc dmarc init-db --db /opt/dmarc/data/dmarc.db    # applies any newer migrations
+    sudo systemctl start dmarc-web 'dmarc-ingest*.timer'
+
+Nothing is lost in the gap: reports stay in the mailbox until a run stores
+them, so the next collection picks up whatever arrived meanwhile.
+
+---
+
 ## Where things live
 
 | | |

@@ -210,6 +210,61 @@ resumes.
 
 ---
 
+## More than one mailbox
+
+An MSP collecting for more than one organization needs one collector per
+mailbox, because **a domain belongs to an organization**. A mailbox collected
+under the wrong one does not file into the right customer's domain — it makes
+a *second copy* of that domain under the collecting organization, and says
+nothing while the real one quietly stops growing.
+
+On Linux that is the templated unit, one instance per mailbox. The instance
+name picks the environment file and nothing else, so name it after the
+organization:
+
+```bash
+# one env file per mailbox
+sudo cp /etc/dmarc-ingest.env /etc/dmarc-ingest-acme.env
+sudo chmod 0600 /etc/dmarc-ingest-acme.env
+```
+
+Then in each copy set the two lines that differ:
+
+```bash
+DMARC_MAILBOX=dmarc@acme-managed.example
+DMARC_ORGANIZATION=acme          # must match a slug from: dmarc org list
+```
+
+```bash
+sudo systemctl enable --now dmarc-ingest@acme.timer
+sudo systemctl enable --now dmarc-ingest@beta.timer
+
+# and turn off the single-mailbox one, so nothing is collected twice
+sudo systemctl disable --now dmarc-ingest.timer
+```
+
+`--org` is passed explicitly by the unit rather than left to the environment.
+An instance whose env file is missing `DMARC_ORGANIZATION` fails loudly
+instead of quietly collecting a customer's mailbox into `local`.
+
+**Two collectors writing at once is safe.** Their timers are independent and
+both write to the same SQLite file, which is in WAL mode with a retry on a
+busy database — concurrent runs serialize rather than failing. Verified with
+two writers against one file: 400 of 400 rows committed, none lost.
+
+To check the result, and to catch a mistyped `--org`:
+
+```bash
+dmarc org list
+dmarc reachability          # flags a domain name held by more than one organization
+```
+
+The single-mailbox `dmarc-ingest.service` still exists and still reads
+`/etc/dmarc-ingest.env`, so an install already using it keeps working. Use one
+shape or the other, not both against the same mailbox.
+
+---
+
 ## Keeping the mailbox from filling up
 
 Every receiver sends a report for every domain every day, and by default a

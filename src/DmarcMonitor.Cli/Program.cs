@@ -54,6 +54,7 @@ public static class Program
                 "reachability" => await ReachabilityCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "export" => await ExportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "backup" => await BackupCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -246,6 +247,20 @@ public static class Program
                                  Every run prints the number to use next time.
                 --db <path>      Database file. Default: dmarc.db
 
+              backup             Take a verified copy of the database. The only thing here
+                                 that protects the reports - update and rollback roll the
+                                 BINARY back, and years of a customer's history had nothing.
+                                 Safe while the collector is running: the copy comes from
+                                 SQLite, not the filesystem, so it is a consistent snapshot
+                                 rather than whatever the bytes were mid-write. Every copy
+                                 is opened and integrity-checked before it is trusted, and
+                                 one that fails is deleted rather than left looking good.
+                --to <dir>       Where to write. Put it on a different disk from --db.
+                --keep <n>       Backups to keep, newest first. Default: 14. Older ones go
+                                 only after a new copy has verified, so a failed run never
+                                 costs you yesterday's.
+                --db <path>      Database file. Default: dmarc.db
+
               fix              Fix what 'check' found, in the customer's DNS. A dry run
                                  unless --apply is given. Every apply is recorded with who,
                                  when, why and what was there before, and appears on the
@@ -335,6 +350,7 @@ public static class Program
               dmarc prune --apply
               dmarc export --days 7 --failures-only | jq -r .source_ip | sort | uniq -c
               dmarc export --format csv --out book.csv
+              dmarc backup --to /var/backups/dmarc
               dmarc export --after-id 41232 | jq -c '{index:{_index:"dmarc",_id:.id}},.'
               dmarc fix --domain example.com
               dmarc fix --domain example.com --policy quarantine --apply --reason "30 days at p=none with everything authenticating"

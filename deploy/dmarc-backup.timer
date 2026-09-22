@@ -1,0 +1,28 @@
+# Backs the database up nightly.
+#
+# Nightly rather than weekly, and deliberately not matched to the prune
+# schedule: the thing a backup protects against most often is not the disk
+# dying, it is a change nobody meant to make. Fourteen nightly copies is two
+# weeks to notice one, which is about how long it takes.
+#
+# 03:20, before the 04:40 prune on Sunday, so the week's oldest copy is always
+# one taken BEFORE the retention sweep ran rather than after it. If a prune
+# ever removes something it should not have, the copy that still has it is the
+# one from a few hours earlier.
+#
+# Persistent=true catches up after downtime. The randomised delay is small
+# here on purpose - unlike the collector there is nobody else to collide with,
+# and a predictable backup window is easier to reason about when restoring.
+#
+# Enabled by deploy/install.sh.
+
+[Unit]
+Description=Back up the DMARC database nightly
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

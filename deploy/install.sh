@@ -112,6 +112,10 @@ fi
 
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$ROOT"
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "${ROOT}/data"
+# Backups default here. On this disk it protects against a bad change rather
+# than a dead machine, which is why dmarc-backup.service can sync it off the
+# box and the docs say to.
+install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "${ROOT}/backups"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -180,6 +184,26 @@ if [[ ! -f "$INGEST_ENV" ]]; then
 # and takes the rest from this environment. Fill these in, then:
 #   sudo systemctl enable --now dmarc-ingest.timer
 # See docs/INGEST-SETUP.md for the app registration and the certificate.
+#
+# COLLECTING MORE THAN ONE MAILBOX
+#
+# This file drives the single-mailbox unit. For several - one per organization
+# is the usual shape - copy it once per mailbox and use the templated unit
+# instead, which reads /etc/dmarc-ingest-<instance>.env:
+#
+#   sudo cp /etc/dmarc-ingest.env /etc/dmarc-ingest-acme.env
+#   sudo chmod 0600 /etc/dmarc-ingest-acme.env
+#   # edit DMARC_MAILBOX and DMARC_ORGANIZATION in the copy
+#   sudo systemctl enable --now dmarc-ingest@acme.timer
+#
+# Then disable this one, so the same mailbox is not collected twice:
+#   sudo systemctl disable --now dmarc-ingest.timer
+#
+# Give every instance its own DMARC_ORGANIZATION. Domains belong to an
+# organization, so a mailbox collected under the wrong one makes a second copy
+# of a customer's domain instead of filing into theirs - and says nothing,
+# while the real domain stops growing. `dmarc reachability` flags a name held
+# by more than one organization.
 DMARC_MAILBOX=dmarc@example.com
 DMARC_TENANT_ID=
 DMARC_CLIENT_ID=
@@ -222,10 +246,20 @@ render_unit() {
 render_unit dmarc-web.service
 render_unit dmarc-ingest.service
 render_unit dmarc-ingest.timer
+
+# The templated pair, for an install collecting more than one mailbox - one
+# instance per organization. Installed always, enabled never: which instances
+# exist is the operator's decision and depends on env files only they can
+# write. The non-templated unit above is left in place so an existing install
+# that has it enabled keeps collecting across this upgrade.
+render_unit 'dmarc-ingest@.service'
+render_unit 'dmarc-ingest@.timer'
 render_unit dmarc-dns.service
 render_unit dmarc-dns.timer
 render_unit dmarc-prune.service
 render_unit dmarc-prune.timer
+render_unit dmarc-backup.service
+render_unit dmarc-backup.timer
 
 systemctl daemon-reload
 echo "  starting dmarc-web"
@@ -247,6 +281,14 @@ systemctl enable --now dmarc-dns.timer >/dev/null
 # it, rather than left to a default that might move in a later release.
 echo "  enabling the weekly retention prune (aggregate 400 days, forensic 30)"
 systemctl enable --now dmarc-prune.timer >/dev/null
+
+# Enabled from the first day for the same reason as the prune, and one more:
+# a backup nobody turned on is the single most common way a single-machine
+# install loses years of a customer's history. Local copies only until
+# DMARC_BACKUP_S3 is set in /etc/dmarc-backup.env - which is worth doing,
+# because a backup on the same instance does not survive losing the instance.
+echo "  enabling the nightly database backup (${ROOT}/backups, 14 kept)"
+systemctl enable --now dmarc-backup.timer >/dev/null
 
 ok=false
 for _ in $(seq 1 30); do
@@ -279,6 +321,8 @@ Next, in this order:
   1. Put Caddy (or nginx) in front of it with a certificate - docs/DEPLOYING.md, step 4.
   2. Fill in AzureAd in ${SETTINGS}, then: sudo systemctl restart dmarc-web
   3. Fill in ${INGEST_ENV}, then: sudo systemctl enable --now dmarc-ingest.timer
+     Collecting several mailboxes? ${INGEST_ENV} says how; it is one instance
+     of dmarc-ingest@.timer per mailbox, each with its own DMARC_ORGANIZATION.
   4. For the Updates page's Install button: sudo ${HERE}/install-update-agent.sh
 
 Until step 2 is done, see it from your own machine through an SSH tunnel:

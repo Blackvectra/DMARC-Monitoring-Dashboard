@@ -1,0 +1,51 @@
+# One backup run. Started by dmarc-backup.timer; runnable by hand with
+#   sudo systemctl start dmarc-backup
+#
+# Writes a verified copy into DMARC_BACKUP_DIR and keeps the newest
+# DMARC_BACKUP_KEEP. Safe while the collector is running - the copy comes from
+# SQLite rather than the filesystem, so it is a consistent snapshot rather than
+# whatever the bytes happened to be mid-write.
+#
+# OFFSITE
+#
+# A backup on the same instance as the database protects against exactly one
+# thing: somebody deleting rows. It does nothing about the failure that
+# actually takes a single-machine install down, which is the machine. So if
+# DMARC_BACKUP_S3 is set, ExecStartPost syncs the directory to it.
+#
+# Deliberately `aws s3 sync` in this unit rather than an S3 client inside the
+# product. On EC2 the instance role supplies the credentials, so nothing has
+# to be stored, rotated, or kept out of a config file - and an operator who
+# would rather use rclone, restic or scp edits one line here instead of
+# waiting for the product to grow a second backend.
+#
+# ExecStartPost with a leading '-' so a failed upload does not mark the run
+# failed: the local copy IS the backup, and a network problem must not make it
+# look as though nothing was taken. The upload failing is visible in the
+# journal and, with dmarc-backup-failed@.service, on OnFailure of the sync
+# itself if you want to go further.
+
+[Unit]
+Description=Back up the DMARC database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dmarc
+EnvironmentFile=-/etc/dmarc-backup.env
+Environment=DMARC_BACKUP_DIR=/opt/dmarc/backups
+Environment=DMARC_BACKUP_KEEP=14
+ExecStart=/usr/local/bin/dmarc backup --db /opt/dmarc/data/dmarc.db --to ${DMARC_BACKUP_DIR} --keep ${DMARC_BACKUP_KEEP}
+ExecStartPost=-/bin/sh -c 'test -n "$DMARC_BACKUP_S3" && exec aws s3 sync "$DMARC_BACKUP_DIR" "$DMARC_BACKUP_S3" --only-show-errors'
+
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net
+
+# Needs the database (read) and the backup directory (write). The backup
+# directory is listed separately because an operator who points it at another
+# disk - which is the advice - puts it outside /opt/dmarc.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/dmarc/data /opt/dmarc/backups
