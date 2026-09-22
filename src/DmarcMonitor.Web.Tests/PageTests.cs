@@ -302,15 +302,41 @@ public sealed class PageTests : IClassFixture<SeededApp>
     }
 
     [Fact]
-    public async Task TheShellSeparatesDailyWorkFromSetup()
+    public async Task TheShellKeepsDailyWorkAtTheTopAndFoldsTheRest()
     {
-        // Nine links in one flat list made Triage, which is where every
-        // morning starts, look like the same kind of thing as Updates.
+        // Nine links in one flat list made the dashboard, where every morning
+        // starts, look like the same kind of thing as Updates. The shape now
+        // matches the platforms this is compared against: the few things
+        // looked at daily are top level, the rest are named groups.
         var html = await Client().GetStringAsync("/");
 
         Assert.Contains("nav-group", html, StringComparison.Ordinal);
-        Assert.Contains(">Daily<", html, StringComparison.Ordinal);
-        Assert.Contains(">Setup<", html, StringComparison.Ordinal);
+        Assert.Contains(">Reporting<", html, StringComparison.Ordinal);
+        Assert.Contains(">Settings<", html, StringComparison.Ordinal);
+
+        // Daily work is not inside a fold: a group opened every morning is a
+        // click paid for every morning.
+        var dashboard = html.IndexOf(">Dashboard<", StringComparison.Ordinal);
+        var firstFold = html.IndexOf("nav-fold", StringComparison.Ordinal);
+        Assert.True(dashboard >= 0 && firstFold >= 0 && dashboard < firstFold,
+            "the dashboard link must sit above the first collapsible group");
+    }
+
+    /// <summary>
+    /// A group that stays shut while you are inside it makes the sidebar
+    /// disagree with the page, and the person hunting for where they are is
+    /// the one least able to afford that.
+    /// </summary>
+    [Fact]
+    public async Task TheGroupYouAreInsideIsOpen()
+    {
+        var onReports = await Client().GetStringAsync("/reports");
+        var onDashboard = await Client().GetStringAsync("/");
+
+        Assert.Contains("<details class=\"nav-fold\" open", onReports, StringComparison.Ordinal);
+
+        // And shut when you are not in it, or the fold is decoration.
+        Assert.DoesNotContain("<details class=\"nav-fold\" open", onDashboard, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -1180,3 +1180,37 @@ pre.policy {
    the sentence and the pip beside it agree without repeating the word. */
 tr.urgent .needs-doing { color: var(--urgent); }
 tr.act    .needs-doing { color: var(--act); }
+
+/* ---- folded navigation groups ------------------------------------------ */
+
+/*
+    Reporting and Settings collapse; the daily items do not, because a group
+    you open every morning is a click somebody pays for every morning.
+
+    <details> rather than a scripted toggle. This application is installed on
+    machines that cannot reach the internet and the shell is statically
+    rendered, so a control that needs a circuit to work is a control that
+    sometimes does not.
+*/
+.nav-fold { margin-top: 10px; }
+
+.nav-fold > summary {
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+}
+
+/* The disclosure triangle, drawn rather than inherited, so it sits where the
+   text does and turns without the browser's own spacing. */
+.nav-fold > summary::-webkit-details-marker { display: none; }
+
+.nav-fold > summary::after {
+    content: "›";
+    float: right;
+    transform: rotate(90deg);
+    transition: transform .12s ease;
+}
+
+.nav-fold:not([open]) > summary::after { transform: rotate(0deg); }
+
+.nav-fold > summary:hover { color: var(--text); }

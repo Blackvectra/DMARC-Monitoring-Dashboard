@@ -3,6 +3,7 @@
 @using DmarcMonitor.Web.Auth
 @inject IConfiguration Configuration
 @inject OrgContext Org
+@inject NavigationManager Navigation
 
 @*
     The shell. Three jobs beyond holding the page: say which navigation is
@@ -81,23 +82,45 @@
             </div>
         }
 
-        @* What you open to find out what needs doing today. *@
-        <p class="nav-group">Daily</p>
-        <NavLink class="nav-item" href="" Match="NavLinkMatch.All">Triage</NavLink>
-        <NavLink class="nav-item" href="domains">Domains</NavLink>
+        @*
+            Shaped like the platforms an MSP is comparing this against: the
+            few things looked at daily sit at the top level, and the rest are
+            folded into named groups that open when you are in them.
+
+            Only routes that exist. A nav listing pages that are not built is
+            a worse first impression than a short one, and the competitor
+            navs this was modelled on are long because those products are
+            older, not because the shape requires it - there is room in
+            Reporting for failure and TLS reports when they are written.
+
+            <details> rather than a toggle: it collapses with no script, which
+            matters because this application is installed on machines that
+            cannot reach a CDN, and it keeps working if the circuit drops.
+        *@
+        <NavLink class="nav-item" href="" Match="NavLinkMatch.All">Dashboard</NavLink>
+        <NavLink class="nav-item" href="domains">Domain health</NavLink>
+        <NavLink class="nav-item" href="sources">Sending sources</NavLink>
         <NavLink class="nav-item" href="fix">Fix</NavLink>
-        <NavLink class="nav-item" href="sources">Sources</NavLink>
-        <NavLink class="nav-item" href="reports">Reports</NavLink>
+
+        <details class="nav-fold" open="@In("reports", "import")">
+            <summary class="nav-group">Reporting</summary>
+            <NavLink class="nav-item" href="reports">Client reports</NavLink>
+            @if (_access is not { RestrictedClient: not null })
+            {
+                <NavLink class="nav-item" href="import">Import</NavLink>
+            }
+        </details>
 
         @* What you set once, or when a client is onboarded. A customer's own
            login gets none of it; there is nothing there for them. *@
         @if (_access is not { RestrictedClient: not null })
         {
-            <p class="nav-group">Setup</p>
-            <NavLink class="nav-item" href="clients">Clients</NavLink>
-            <NavLink class="nav-item" href="import">Import</NavLink>
-            <NavLink class="nav-item" href="settings">Settings</NavLink>
-            <NavLink class="nav-item" href="updates">Updates</NavLink>
+            <details class="nav-fold" open="@In("clients", "settings", "updates")">
+                <summary class="nav-group">Settings</summary>
+                <NavLink class="nav-item" href="clients">Clients</NavLink>
+                <NavLink class="nav-item" href="settings">Configuration</NavLink>
+                <NavLink class="nav-item" href="updates">Updates</NavLink>
+            </details>
         }
 
         <div class="sidebar-foot">
@@ -154,6 +177,21 @@
 
 @code {
     private OrganizationAccess? _access;
+
+    /// <summary>
+    /// Whether the current page is one of these, so its group opens.
+    /// </summary>
+    /// <remarks>
+    /// A group that stays shut while you are inside it makes the sidebar
+    /// disagree with the page, and the person hunting for where they are is
+    /// the person least able to afford that.
+    /// </remarks>
+    private bool In(params string[] routes)
+    {
+        var path = Navigation.ToBaseRelativePath(Navigation.Uri).Split('?')[0].Trim('/');
+        return routes.Any(r => path.Equals(r, StringComparison.OrdinalIgnoreCase)
+                            || path.StartsWith(r + "/", StringComparison.OrdinalIgnoreCase));
+    }
 
     private bool EntraConfigured => DmarcMonitor.Web.Auth.AuthSetup.IsEntraConfigured(Configuration);
 
