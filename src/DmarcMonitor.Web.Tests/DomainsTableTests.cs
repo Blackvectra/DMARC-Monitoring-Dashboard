@@ -36,11 +36,23 @@ public sealed class DomainsTableUnreadTests : IClassFixture<SeededApp>
         Assert.DoesNotContain("chip ok", html, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The unread state explains itself, and points at the control rather
+    /// than at a terminal.
+    /// </summary>
+    /// <remarks>
+    /// A dash with no explanation is a feature that looks broken. Naming a
+    /// command to type is barely better when the button that runs it is in
+    /// the same div, which is what this used to assert.
+    /// </remarks>
     [Fact]
-    public async Task TheUnreadStateNamesTheCommandThatFillsIt()
+    public async Task TheUnreadStateExplainsItselfAndOffersTheControl()
     {
-        // A dash with no explanation is a feature that looks broken.
-        Assert.Contains("dmarc check --all --save", await PageAsync(), StringComparison.Ordinal);
+        var html = await PageAsync();
+
+        Assert.Contains("DNS has not been read yet", html, StringComparison.Ordinal);
+        Assert.Contains("Read DNS now", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("dmarc check --all --save", html, StringComparison.Ordinal);
     }
 
     [Fact]

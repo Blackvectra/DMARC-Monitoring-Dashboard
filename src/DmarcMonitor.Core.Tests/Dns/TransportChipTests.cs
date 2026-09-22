@@ -123,7 +123,11 @@ public sealed class TransportChipTests
         Assert.Equal(RecordState.Unknown, chip.State);
         Assert.NotEqual("✗", chip.Glyph);
         Assert.Contains("has not been fetched", chip.Detail, StringComparison.Ordinal);
-        Assert.Contains("dmarc check", chip.Detail, StringComparison.Ordinal);
+
+        // What to do, not what to type. These sentences are tooltips on a
+        // page that has a "Read DNS now" button on it.
+        Assert.Contains("Reading this domain's DNS again", chip.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("dmarc ", chip.Detail, StringComparison.Ordinal);
     }
 
     [Fact]

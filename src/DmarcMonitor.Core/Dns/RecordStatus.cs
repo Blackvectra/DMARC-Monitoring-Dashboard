@@ -365,8 +365,8 @@ public static class RecordStatus
         {
             return new RecordChip("MTA-STS", RecordState.Unknown,
                 $"A policy is announced at _mta-sts.{dns.Domain}, but the file at mta-sts.{dns.Domain} has "
-                + "not been fetched, so what mode it is in is unknown. Run: dmarc check "
-                + $"{dns.Domain} --save",
+                + "not been fetched, so what mode it is in is unknown. Reading this domain's DNS again "
+                + "fetches it.",
                 dns.CheckedAt, stale);
         }
 
@@ -395,7 +395,7 @@ public static class RecordStatus
             _ => new RecordChip("MTA-STS", RecordState.Weak,
                 $"A policy is announced at _mta-sts.{dns.Domain} and the file could not be fetched from "
                 + $"mta-sts.{dns.Domain}. Senders ignore a policy they cannot fetch, so this protects "
-                + "nothing. Run: dmarc mta-sts check " + dns.Domain,
+                + "nothing. The Fix page has what to publish.",
                 dns.CheckedAt, stale),
         };
     }
@@ -496,7 +496,7 @@ public static class RecordStatus
         {
             return new RecordChip(label, RecordState.Unknown,
                 $"The DNS for {dns.Domain} has not been read yet, so nothing is known about its "
-                + $"{label} record. Run: dmarc check --all --save");
+                + $"{label} record.");
         }
 
         if (dns.Status == DnsCheckStatus.Failed)
