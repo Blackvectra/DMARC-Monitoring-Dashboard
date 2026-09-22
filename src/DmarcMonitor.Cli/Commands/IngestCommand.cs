@@ -105,6 +105,14 @@ public static class IngestCommand
             return 69;   // EX_UNAVAILABLE
         }
 
+        // Before the mailbox is opened, not after: a collector that reads a
+        // hundred messages and then cannot store any of them has moved or
+        // deleted them from the mailbox for nothing.
+        if (!dryRun && !await SchemaGuard.IsCurrentAsync(dbPath, ct).ConfigureAwait(false))
+        {
+            return 69;   // EX_UNAVAILABLE
+        }
+
         X509Certificate2 certificate;
         try
         {

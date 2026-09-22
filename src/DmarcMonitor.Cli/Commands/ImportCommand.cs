@@ -50,6 +50,10 @@ public static class ImportCommand
             return 69;
         }
 
+        // Ours, but older than this build. Said once here rather than once per
+        // file, and before anything is read.
+        if (!await SchemaGuard.IsCurrentAsync(dbPath, ct).ConfigureAwait(false)) { return 69; }
+
         // The same importer the browser uses. Two implementations of this
         // would drift, and "it worked from the terminal" is a support question
         // nobody can answer.
