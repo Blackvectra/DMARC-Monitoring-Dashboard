@@ -146,7 +146,15 @@ internal static class FirstRun
         try
         {
             var result = await DatabaseMigrations.ApplyAsync(dbPath, ct).ConfigureAwait(false);
-            FirstRunLog.Upgraded(logger, version, result.Version, string.Join(", ", result.Applied));
+
+            // Guarded because the join is the one argument here that costs
+            // anything, and CA1873 is right that it should not be paid for a
+            // message nobody is listening to. The upgrade itself has already
+            // happened either way - only the sentence about it is conditional.
+            if (logger.IsEnabled(LogLevel.Information))
+            {
+                FirstRunLog.Upgraded(logger, version, result.Version, string.Join(", ", result.Applied));
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
