@@ -51,4 +51,23 @@ public sealed class OnboardingService(DatabaseInfo database)
     /// <summary>The customer's own login group for a client. Null clears it.</summary>
     public Task<bool> SetClientGroupAsync(string clientSlug, string? entraGroupId, string? tenantId, CancellationToken ct = default) =>
         _store.SetClientGroupAsync(clientSlug, entraGroupId, tenantId, ct);
+
+    /// <summary>
+    /// Changes a client's display name. The slug does not move.
+    /// </summary>
+    /// <remarks>
+    /// The slug is printed in report filenames and has been sent to the
+    /// customer, so it is permanent; the name is what a person reads and the
+    /// thing with a typo in it.
+    /// </remarks>
+    public Task<bool> RenameClientAsync(string slug, string name, string? tenantId, CancellationToken ct = default) =>
+        _store.RenameClientAsync(slug, name, tenantId, ct);
+
+    /// <summary>
+    /// Moves a client, its domains and its whole history into another
+    /// organization.
+    /// </summary>
+    public Task<ReportStore.MoveOutcome> MoveClientAsync(
+        string slug, string toOrganization, string? fromTenantId, CancellationToken ct = default) =>
+        _store.MoveClientAsync(slug, toOrganization, fromTenantId, ct);
 }
