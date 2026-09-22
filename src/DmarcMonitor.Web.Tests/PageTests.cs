@@ -1023,4 +1023,23 @@ public sealed class UnnamedProviderTests : IClassFixture<UnnamedProviderApp>
         Assert.Contains("primary-link disabled", html, StringComparison.Ordinal);
         Assert.DoesNotContain("reports/download/acme-corp", html, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The way out is on the page that is blocked, not on another one.
+    /// </summary>
+    /// <remarks>
+    /// Refusing is right and sending somebody elsewhere to find one field is
+    /// not: on a first run it leaves the one thing the product is for behind
+    /// a setting nobody knew existed. The field that unlocks it is here, and
+    /// it writes to the organization - which is also the correct answer on a
+    /// multi-organization install, where each one signs its own reports.
+    /// </remarks>
+    [Fact]
+    public async Task ThePageOffersTheFieldThatUnlocksItself()
+    {
+        var html = await Client().GetStringAsync("/reports");
+
+        Assert.Contains("Your name on reports", html, StringComparison.Ordinal);
+        Assert.Contains("Use this name", html, StringComparison.Ordinal);
+    }
 }
