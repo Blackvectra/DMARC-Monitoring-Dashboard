@@ -1045,14 +1045,29 @@ public sealed class ReportStore
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = transaction;
-            // Unassigned exists once per organization; the domain's own is the
-            // one meant. Any other slug is unique across organizations.
+            // A scoped caller stays inside its organization. Slugs are unique
+            // per organization (UNIQUE(tenant_id, slug)), not across them,
+            // and this used to look the slug up with no tenant at all: two
+            // MSPs on one install each with an "acme-corp", and a Tech filing
+            // their own domain under their own client could have it - and
+            // every report, DNS snapshot and provider config behind it -
+            // rewritten into the other organization's tenant, depending on
+            // which row SQLite scanned first.
+            //
+            // Only a caller with no tenant - the master account, which sees
+            // every organization - may file a domain under another
+            // organization's client; that is the one documented way a domain
+            // changes organization. Even then, Unassigned means the domain's
+            // own.
             lookup.CommandText = """
                 SELECT id, tenant_id FROM clients
-                WHERE slug = $slug AND (slug <> $unassigned OR tenant_id = $current)
+                WHERE slug = $slug AND deleted_at IS NULL
+                  AND CASE WHEN $tenant IS NOT NULL THEN tenant_id = $tenant
+                           ELSE (slug <> $unassigned OR tenant_id = $current) END
                 LIMIT 1
                 """;
             lookup.Parameters.AddWithValue("$slug", slug);
+            lookup.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
             lookup.Parameters.AddWithValue("$unassigned", UnassignedClientSlug);
             lookup.Parameters.AddWithValue("$current", currentTenantId);
             await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);

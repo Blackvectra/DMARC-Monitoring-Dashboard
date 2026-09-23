@@ -321,6 +321,44 @@ public sealed record ReportDomainHealth
     /// <summary>Distinct addresses that sent mail for this domain which failed.</summary>
     public int FailingSources { get; init; }
 
+    /// <summary>
+    /// Failed messages from addresses that never authenticated for this
+    /// client in the period - not once passed DMARC, not once proved
+    /// themselves for any domain. Forged, not the domain's own.
+    /// </summary>
+    public long Forged { get; init; }
+
+    /// <summary>The domain's own mail: everything that was not forged.</summary>
+    public long OwnMessages => Math.Max(0, Messages - Forged);
+
+    /// <summary>The domain's own messages that failed.</summary>
+    public long OwnFailing => Math.Max(0, OwnMessages - Passing);
+
+    /// <summary>
+    /// How much of the domain's OWN mail authenticated.
+    /// </summary>
+    /// <remarks>
+    /// This, not <see cref="PassRate"/>, decides whether a domain is losing
+    /// mail. Judged on the total, a domain under a spoofing run - 300 real
+    /// messages all passing, 700 forged - read as 30% arriving and "raising a
+    /// policy now would stop them", which told the one client who most needed
+    /// to enforce not to. The forged mail is what a policy is FOR.
+    /// </remarks>
+    public double OwnPassRate => OwnMessages == 0 ? 0 : Math.Round(Passing * 100.0 / OwnMessages, 1);
+
+    /// <summary>
+    /// True when the policy actually covers this domain's mail: enforcing,
+    /// applied to all of it, and not undone for subdomains.
+    /// </summary>
+    /// <remarks>
+    /// <c>p=reject; sp=none</c> refuses nothing sent as a subdomain, and
+    /// <c>pct=25</c> lets three quarters of failures through. Both are real
+    /// rollout states, and both were being described to the client as
+    /// "already refused... this is the protection working".
+    /// </remarks>
+    public bool IsFullyEnforcing =>
+        IsEnforcing && Pct >= 100 && SubdomainPolicy is not "none";
+
     public double SpfAlignedRate => Messages == 0 ? 0 : Math.Round(SpfAligned * 100.0 / Messages, 1);
     public double DkimAlignedRate => Messages == 0 ? 0 : Math.Round(DkimAligned * 100.0 / Messages, 1);
 
@@ -369,7 +407,7 @@ public sealed record ReportDomainHealth
     /// Judged per domain, never against the estate's average - which is the
     /// whole point. See <see cref="ClientReport.StrugglingDomains"/>.
     /// </remarks>
-    public bool IsStruggling => Messages > 0 && PassRate < ClientReport.HealthyPassRate;
+    public bool IsStruggling => OwnMessages > 0 && OwnPassRate < ClientReport.HealthyPassRate;
 
     /// <summary>
     /// Whether this domain's policy could safely be raised.
@@ -737,10 +775,17 @@ public sealed record ClientReport
     /// other two domains did.
     /// </remarks>
     public IReadOnlyList<ReportDomainHealth> StrugglingDomains =>
-        [.. Domains.Where(d => d.IsStruggling).OrderBy(d => d.PassRate)];
+        [.. Domains.Where(d => d.IsStruggling).OrderBy(d => d.OwnPassRate)];
 
     /// <summary>The client's own messages that failed, across the domains that are struggling.</summary>
-    public long StrugglingMessages => StrugglingDomains.Sum(d => d.Failing);
+    public long StrugglingMessages => StrugglingDomains.Sum(d => d.OwnFailing);
+
+    /// <summary>
+    /// Every domain enforcing with nothing undoing it: no <c>sp=none</c>, no
+    /// <c>pct</c> below 100. The only state in which forged mail can be
+    /// called refused.
+    /// </summary>
+    public bool EveryDomainFullyEnforcing => Domains.Count > 0 && Domains.All(d => d.IsFullyEnforcing);
 
     /// <summary>
     /// Below this, a finding is real and not urgent.
@@ -793,12 +838,19 @@ public sealed record ClientReport
             if (StrugglingDomains.Count > 0)
             {
                 var worst = StrugglingDomains[0];
-                return $"Not ready for enforcement. {worst.Domain} is losing {worst.Failing:N0} of its own "
-                     + $"message(s) ({worst.PassRate:0.#}% arriving), and raising a policy now would stop them.";
+                return $"Not ready for enforcement. {worst.Domain} is losing {worst.OwnFailing:N0} of its own "
+                     + $"message(s) ({worst.OwnPassRate:0.#}% arriving), and raising a policy now would stop them.";
             }
 
             var broken = InventoryOf(SenderClass.Misconfigured).Count;
-            var watching = Domains.Count(d => d is { IsEnforcing: false, Messages: > 0 });
+
+            // Every domain not enforcing, whether or not it sent anything
+            // this month. Counted only the ones with mail, a p=none domain
+            // that happened to be quiet dropped out and the verdict read
+            // "Protected. Every domain is enforcing" over a domain anybody
+            // could send as tomorrow. A policy is about what a domain
+            // permits, not about what it did in a given month.
+            var watching = Domains.Count(d => !d.IsEnforcing);
 
             if (watching > 0 && broken > 0)
             {
@@ -974,8 +1026,8 @@ public sealed record ClientReport
                 items.Add(new RemediationItem
                 {
                     Priority = "Critical",
-                    Finding = $"{domain.Domain} is losing {domain.Failing:N0} of its own message(s) "
-                            + $"({domain.PassRate:0.#}% arriving).",
+                    Finding = $"{domain.Domain} is losing {domain.OwnFailing:N0} of its own message(s) "
+                            + $"({domain.OwnPassRate:0.#}% arriving).",
                     Impact = domain.IsEnforcing
                         ? "Real mail is being refused or filed as junk by the receiving provider right now."
                         : "Real mail would be refused the moment this domain's policy is raised.",
@@ -1039,9 +1091,16 @@ public sealed record ClientReport
                 var volume = strangers.Sum(s => s.Failing);
                 var spread = strangers.Max(s => s.OtherClientsAffected);
 
+                // "Refused" only when the policy actually refuses it. p=reject
+                // with sp=none refuses nothing sent as a subdomain, and
+                // pct=25 lets three quarters through; both are states two
+                // real domains here are in, and both were being called "the
+                // protection working".
+                var refused = EveryDomainFullyEnforcing;
+
                 items.Add(new RemediationItem
                 {
-                    Priority = EveryDomainEnforcing ? "Low"
+                    Priority = refused ? "Low"
                              : volume >= MaterialMessages ? "High" : "Medium",
                     Finding = $"{strangers.Count} source(s) sent {volume:N0} message(s) as you and never "
                             + $"authenticated once: {Name(strangers)}"
@@ -1049,35 +1108,50 @@ public sealed record ClientReport
                                 ? $". The busiest was seen against {spread} unrelated organisation(s), so this is "
                                 + "broad activity rather than somebody targeting you."
                                 : "."),
-                    Impact = EveryDomainEnforcing
+                    Impact = refused
                         ? "Already refused or filed as junk by the receiving provider, because your policy is "
                         + "enforcing. This is the protection working."
-                        : "Not currently stopped: your policy asks receivers to do nothing about it.",
-                    Action = EveryDomainEnforcing
+                        : EveryDomainEnforcing
+                            ? "Not all of it stopped: your policy is enforcing, but a subdomain policy of none or "
+                            + "a pct below 100 lets some of this through to inboxes."
+                            : "Not currently stopped: your policy asks receivers to do nothing about it.",
+                    Action = refused
                         ? "No action needed. Recorded so the pattern is visible if it grows."
-                        : "Raise the policy so receivers are asked to refuse it.",
+                        : EveryDomainEnforcing
+                            ? "Close the gap: set sp= to match p=, and take pct to 100."
+                            : "Raise the policy so receivers are asked to refuse it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
-                    Validation = EveryDomainEnforcing
+                    Validation = refused
                         ? "The volume stops, or stays refused."
-                        : "The policy is enforcing and this mail is being refused.",
+                        : "The policy is fully enforcing and this mail is being refused.",
                 });
             }
 
             // Only after the mail is right. Told to raise a policy first, an
             // MSP breaks a customer's invoicing and learns not to trust the
             // report.
-            foreach (var domain in Domains.Where(d => d is { IsEnforcing: false, IsStruggling: false, Messages: > 0 }))
+            // Including the ones that sent nothing this month. A quiet
+            // p=none domain is still a domain anybody can send as, and
+            // leaving it out of the register let the all-clear print
+            // "every domain is enforcing" over it.
+            foreach (var domain in Domains.Where(d => d is { IsEnforcing: false, IsStruggling: false }))
             {
                 items.Add(new RemediationItem
                 {
                     Priority = "Medium",
-                    Finding = $"{domain.Domain} is at p={domain.Policy}, so receivers are asked to do nothing "
-                            + "about mail that fails.",
+                    Finding = domain.PolicyKnown
+                        ? $"{domain.Domain} is at p={domain.Policy}, so receivers are asked to do nothing "
+                          + "about mail that fails."
+                        : $"{domain.Domain}'s policy is not known for this period: no receiver has reported "
+                          + "on it.",
                     Impact = "Anybody can send mail as this domain today and have it delivered.",
-                    Action = domain.Readiness == "Ready"
-                        ? "Its own mail authenticates. Move to p=quarantine, then to p=reject."
-                        : $"Account for the {domain.Failing:N0} failing message(s) first, then move to "
-                        + "p=quarantine.",
+                    Action = domain.Messages == 0
+                        ? "Confirm whether this domain sends mail at all. If it does not, publish p=reject "
+                        + "and it is closed."
+                        : domain.Readiness == "Ready"
+                            ? "Its own mail authenticates. Move to p=quarantine, then to p=reject."
+                            : $"Account for the {domain.OwnFailing:N0} failing message(s) first, then move to "
+                            + "p=quarantine.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
                     Validation = "The policy is published and the domain's own mail keeps arriving.",
                 });

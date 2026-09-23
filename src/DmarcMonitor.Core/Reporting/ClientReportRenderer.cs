@@ -585,7 +585,19 @@ public static class ClientReportRenderer
         var sources = report.ImpersonatingSources;
         if (sources.Count == 0)
         {
-            html.Append("""
+            // A month nobody reported on is not a month nobody forged. The
+            // PDF and the register both refuse the all-clear for it; this
+            // section printed "Nobody" regardless.
+            html.Append(report.NothingWasReported
+                ? """
+                <section>
+                  <h2>Who tried to send mail as you</h2>
+                  <p class="note">Nothing can be said: no receiver reported on your domains this period, so
+                  nothing was observed either way.</p>
+                </section>
+
+                """
+                : """
                 <section>
                   <h2>Who tried to send mail as you</h2>
                   <p class="good">Nobody. No source sent mail claiming to be one of your domains without

@@ -83,13 +83,28 @@ public static class ReportNarrative
             // after naming 137. A number larger than the one it claims to be
             // part of is the kind of thing a client spots immediately, and
             // then nothing else in the document is believed.
+            // Judged against the domains the forgeries were actually sent
+            // as, fully enforcing or not - not against whether ANY domain
+            // enforces. A client with acme.com at p=reject and acme.org at
+            // p=none was told forgeries of acme.org "were refused", and they
+            // had been delivered.
+            var targeted = impersonating.SelectMany(s => s.Domains)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(name => report.Domains.FirstOrDefault(d => d.Domain.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            var open = targeted.Where(d => d is null || !d.IsFullyEnforcing).Select(d => d?.Domain).OfType<string>().ToList();
+            var allRefused = targeted.Count > 0 && targeted.All(d => d is { IsFullyEnforcing: true });
+
             points.Add(
                 $"{Count(impersonating.Sum(s => s.Failing))} message(s) from {impersonating.Count} source(s) "
                 + "were sent by someone who is not you and could not prove otherwise"
-                + (report.Domains.Any(d => d.IsEnforcing)
+                + (allRefused
                     ? ". Because your domains enforce DMARC, they were refused or sent to junk by the "
                       + "receiving mail provider rather than landing in an inbox."
-                    : ". Your domains are not yet enforcing, so these were delivered normally."));
+                    : open.Count > 0 && open.Count < targeted.Count
+                        ? $". Those sent as {string.Join(", ", open)} were delivered normally, because that "
+                          + "domain's policy does not yet refuse them; the rest were refused or sent to junk."
+                        : ". Your domains are not yet enforcing against them, so these were delivered normally."));
 
             var shared = impersonating.Where(s => s.OtherClientsAffected > 0).ToList();
             if (shared.Count > 0)
@@ -115,11 +130,11 @@ public static class ReportNarrative
         {
             points.Add(
                 (struggling.Count == 1
-                    ? $"{struggling[0].Domain} is the exception: {struggling[0].PassRate}% of the mail sent "
-                      + $"using it was genuinely yours, so {Count(struggling[0].Failing)} message(s) may not "
+                    ? $"{struggling[0].Domain} is the exception: {struggling[0].OwnPassRate}% of its own mail "
+                      + $"authenticated, so {Count(struggling[0].OwnFailing)} message(s) may not "
                       + "have arrived."
                     : $"{struggling.Count} of your domains are doing worse than the total above - "
-                      + $"{string.Join(", ", struggling.Select(d => $"{d.Domain} at {d.PassRate}%"))} - "
+                      + $"{string.Join(", ", struggling.Select(d => $"{d.Domain} at {d.OwnPassRate}%"))} - "
                       + $"so {Count(report.StrugglingMessages)} message(s) may not have arrived.")
                 + $" {Opening(report.ProviderName)} is looking at this.");
         }

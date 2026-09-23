@@ -260,6 +260,19 @@ else
             _access = await Org.GetAsync();
             var tenant = _access.TenantId;
 
+            // A customer's own login has no business here. The sidebar link
+            // is hidden for them, and the URL typed by hand listed every
+            // client of the MSP - names, slugs, message totals - because
+            // nothing on the page itself asked who was looking.
+            if (_access.RestrictedClient is not null)
+            {
+                _clients = [];
+                _domains = [];
+                _unassigned = [];
+                _error = "This page is for the provider. Your own domains are under Domain health.";
+                return;
+            }
+
             _clients = await Onboarding.GetClientsAsync(tenant);
             _domains = await Onboarding.GetDomainsAsync(tenant);
             _unassigned = await Onboarding.GetUnassignedDomainsAsync(tenant);

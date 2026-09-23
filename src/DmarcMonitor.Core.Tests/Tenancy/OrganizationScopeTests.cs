@@ -179,6 +179,32 @@ public sealed class OrganizationScopeTests : IAsyncLifetime, IDisposable
         }
     }
 
+    /// <summary>
+    /// The one that would end an MSP. Slugs are unique per organization, not
+    /// across them, and the client lookup used to range over every
+    /// organization with LIMIT 1: a Tech filing their own domain under their
+    /// own "acme-corp" could have it - and every report behind it - rewritten
+    /// into whichever organization's "acme-corp" SQLite scanned first.
+    /// </summary>
+    [Fact]
+    public async Task AScopedAssignStaysInsideItsOrganizationEvenWhenTheSlugExistsElsewhere()
+    {
+        var nrg = new ReportStore(_dbPath);
+        var nls = new ReportStore(_dbPath, "nextlayersec");
+
+        // The same slug in both organizations, NextLayerSec's created first so
+        // an unscoped scan would find it first.
+        Assert.NotNull(await nls.CreateClientAsync("Shared Slug", "shared-slug", "nextlayersec"));
+        Assert.NotNull(await nrg.CreateClientAsync("Shared Slug", "shared-slug"));
+
+        // NRG, scoped to NRG, files NRG's domain under NRG's shared-slug.
+        Assert.Equal(ReportStore.AssignOutcome.Assigned, await nrg.AssignDomainAsync("acme.com", "shared-slug", _nrg));
+
+        Assert.Single(await new TriageService(_dbPath).GetAsync(30, _nrg));
+        Assert.Equal(["acme.com"], (await nrg.GetDomainsAsync(_nrg)).Select(d => d.Domain));
+        Assert.DoesNotContain((await nrg.GetDomainsAsync(_nls)).Select(d => d.Domain), d => d == "acme.com");
+    }
+
     [Fact]
     public async Task AScopedAssignCannotReachAnotherOrganizationsDomain()
     {
