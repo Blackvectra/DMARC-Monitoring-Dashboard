@@ -180,8 +180,17 @@ public sealed class ClientReportBuilder(string databasePath)
                    -- mail that PASSED ("SPF ignored due to local policy" on
                    -- DKIM-authenticated traffic), and counting that as left
                    -- out took a client's own clean mail out of its report.
+                   --
+                   -- And never sampled_out. Under pct=25 a receiver tags the
+                   -- three quarters of failing mail it let through with
+                   -- exactly that reason, and it was being filed here as
+                   -- "handled by the receiver" - so during the one rollout
+                   -- step where forgeries are still landing, three quarters
+                   -- of them vanished from the threat table and were
+                   -- described to the client as mailing-list traffic.
                    COALESCE(SUM(CASE WHEN dmarc_result <> 'pass'
                                       AND override_reason IS NOT NULL AND override_reason <> ''
+                                      AND override_reason <> 'sampled_out'
                                      THEN message_count END), 0)
             FROM aggregate_records
             WHERE client_id = $client AND date_begin >= $from AND date_begin <= $to
@@ -326,7 +335,24 @@ public sealed class ClientReportBuilder(string databasePath)
                                       AND (LOWER(r.dkim_domain) = LOWER(d.name)
                                            OR LOWER(r.dkim_domain) LIKE '%.' || LOWER(d.name))
                                      THEN r.message_count END), 0),
-                   COUNT(DISTINCT CASE WHEN r.dmarc_result <> 'pass' THEN r.source_ip END)
+                   COUNT(DISTINCT CASE WHEN r.dmarc_result <> 'pass' THEN r.source_ip END),
+                   -- Failures from addresses that never authenticated for
+                   -- this client in the period: not once passed DMARC, not
+                   -- once proved themselves for any domain. That is forged
+                   -- mail, and it is not the domain's own. Judged against
+                   -- the total, a domain under a spoofing run read as
+                   -- "losing 700 of its own messages - raising a policy now
+                   -- would stop them", which told the one client who most
+                   -- needed to enforce not to.
+                   COALESCE(SUM(CASE WHEN r.dmarc_result <> 'pass'
+                                      AND r.source_ip NOT IN (
+                                          SELECT a.source_ip FROM aggregate_records a
+                                          WHERE a.client_id = $client
+                                            AND a.date_begin >= $from AND a.date_begin <= $to
+                                            AND (a.dmarc_result = 'pass'
+                                                 OR a.spf_auth_result = 'pass'
+                                                 OR a.dkim_auth_result = 'pass'))
+                                     THEN r.message_count END), 0)
             FROM domains d
             LEFT JOIN aggregate_records r
                    ON r.domain_id = d.id AND r.date_begin >= $from AND r.date_begin <= $to
@@ -361,6 +387,7 @@ public sealed class ClientReportBuilder(string databasePath)
                 SpfAligned = reader.GetInt64(8),
                 DkimAligned = reader.GetInt64(9),
                 FailingSources = reader.GetInt32(10),
+                Forged = reader.GetInt64(11),
             });
         }
         return results;
@@ -446,7 +473,8 @@ public sealed class ClientReportBuilder(string databasePath)
               -- and merely carried a receiver note is the client's own mail
               -- and belongs in the table.
               AND NOT (r.dmarc_result <> 'pass'
-                       AND r.override_reason IS NOT NULL AND r.override_reason <> '')
+                       AND r.override_reason IS NOT NULL AND r.override_reason <> ''
+                       AND r.override_reason <> 'sampled_out')
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             """;

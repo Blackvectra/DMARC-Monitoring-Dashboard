@@ -317,7 +317,18 @@ else
         _preview = null;
         _summary = null;
 
-        if (string.IsNullOrEmpty(_slug)) { return; }
+        // Only a client this login was offered. The dropdown is filtered to
+        // the customer's own client, but the value it posts back is whatever
+        // the browser says it is, and a customer who edited the option in
+        // devtools was previewing another client's month. The list built at
+        // load is the authority, not the bound string.
+        if (string.IsNullOrEmpty(_slug)
+            || _clients is null
+            || !_clients.Any(c => c.Slug.Equals(_slug, StringComparison.OrdinalIgnoreCase)))
+        {
+            _slug = "";
+            return;
+        }
 
         try
         {

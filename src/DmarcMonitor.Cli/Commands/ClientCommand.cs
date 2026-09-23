@@ -36,8 +36,8 @@ public static class ClientCommand
         {
             "list" => await ListAsync(store, ct).ConfigureAwait(false),
             "add" => await AddAsync(store, rest, ct).ConfigureAwait(false),
-            "assign" => await AssignAsync(store, rest, ct).ConfigureAwait(false),
-            "auto-assign" => await AutoAssignAsync(store, rest, ct).ConfigureAwait(false),
+            "assign" => await AssignAsync(store, dbPath, rest, ct).ConfigureAwait(false),
+            "auto-assign" => await AutoAssignAsync(dbPath, rest, ct).ConfigureAwait(false),
             "set-group" => await SetGroupAsync(store, rest, ct).ConfigureAwait(false),
             "erase" => await EraseAsync(dbPath, rest, ct).ConfigureAwait(false),
             _ => Usage($"Unknown: dmarc client {action}"),
@@ -145,18 +145,71 @@ public static class ClientCommand
     /// ends up in report filenames, so a dry run prints the whole mapping
     /// first and nothing is written until --apply.
     /// </remarks>
-    private static async Task<int> AutoAssignAsync(ReportStore store, string[] args, CancellationToken ct)
+    private static async Task<int> AutoAssignAsync(string dbPath, string[] args, CancellationToken ct)
     {
         var apply = Args.Flag(args, "--apply");
 
-        var domains = await store.GetUnassignedDomainsAsync(ct: ct).ConfigureAwait(false);
-        if (domains.Count == 0)
+        // One organization at a time, each domain filed in the organization
+        // it already belongs to. This used to list every organization's
+        // unassigned domains together, create the client in whichever
+        // organization --org named (Local, by default), and assign with no
+        // tenant - which moved a second organization's domain, and its whole
+        // history, into the first organization's tenant. Auto-assign is a
+        // filing command; it never changes whose domain something is.
+        var organizations = await new OrganizationStore(dbPath).ListAsync(ct).ConfigureAwait(false);
+        var wanted = Args.Value(args, "--org");
+        if (!string.IsNullOrWhiteSpace(wanted))
+        {
+            organizations = [.. organizations.Where(o => o.Slug.Equals(wanted, StringComparison.OrdinalIgnoreCase))];
+            if (organizations.Count == 0)
+            {
+                Console.Error.WriteLine($"No organization called '{wanted}'. Run: dmarc org list");
+                return 66;
+            }
+        }
+
+        var totalPlanned = 0;
+        var totalFiled = 0;
+        var anyDomains = false;
+
+        foreach (var organization in organizations)
+        {
+            var store = new ReportStore(dbPath, organization.Slug);
+            var domains = await store.GetUnassignedDomainsAsync(organization.Id, ct).ConfigureAwait(false);
+            if (domains.Count == 0) { continue; }
+            anyDomains = true;
+
+            var (planned, filed) = await AutoAssignOrganizationAsync(store, organization, domains, apply, ct).ConfigureAwait(false);
+            totalPlanned += planned;
+            totalFiled += filed;
+        }
+
+        if (!anyDomains)
         {
             Console.WriteLine("Every domain is already filed under a client.");
             return 0;
         }
 
+        if (!apply)
+        {
+            Console.WriteLine($"  {totalPlanned} domain(s) would be filed. Nothing has been written.");
+            Console.WriteLine("  The slug goes into report filenames and cannot be changed afterwards.");
+            Console.WriteLine("  Run it for real:  dmarc client auto-assign --apply");
+            Console.WriteLine();
+            return 0;
+        }
+
+        Console.WriteLine($"  {totalFiled} domain(s) filed.");
+        Console.WriteLine("  Check it: dmarc client list");
         Console.WriteLine();
+        return totalFiled == totalPlanned ? 0 : 65;
+    }
+
+    private static async Task<(int Planned, int Filed)> AutoAssignOrganizationAsync(
+        ReportStore store, Organization organization, IReadOnlyList<string> domains, bool apply, CancellationToken ct)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"  {organization.Name} ({organization.Slug})");
         Console.WriteLine($"  {"domain",-26} {"client",-26} {"slug",-24}");
 
         // Built a name at a time rather than with ToDictionary, because a slug
@@ -174,7 +227,7 @@ public static class ClientCommand
         // and those all go into one organization, so one name per slug is
         // enough.
         var taken = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var client in await store.GetClientsAsync(ct: ct).ConfigureAwait(false))
+        foreach (var client in await store.GetClientsAsync(organization.Id, ct).ConfigureAwait(false))
         {
             taken[client.Slug] = client.Name;
         }
@@ -202,14 +255,7 @@ public static class ClientCommand
 
         Console.WriteLine();
 
-        if (!apply)
-        {
-            Console.WriteLine($"  {planned.Count} domain(s) would be filed. Nothing has been written.");
-            Console.WriteLine("  The slug goes into report filenames and cannot be changed afterwards.");
-            Console.WriteLine("  Run it for real:  dmarc client auto-assign --apply");
-            Console.WriteLine();
-            return 0;
-        }
+        if (!apply) { return (planned.Count, 0); }
 
         var filed = 0;
         foreach (var (domain, name, slug) in planned)
@@ -219,9 +265,11 @@ public static class ClientCommand
             // Null means the slug already exists, which is what happens when
             // two domains map to one client. That is the intended outcome, not
             // a failure, so the assign below runs either way.
-            await store.CreateClientAsync(name, slug, ct: ct).ConfigureAwait(false);
+            await store.CreateClientAsync(name, slug, organization.Slug, ct).ConfigureAwait(false);
 
-            var outcome = await store.AssignDomainAsync(domain, slug, ct: ct).ConfigureAwait(false);
+            // Scoped to this organization, so the client resolved is this
+            // organization's and the domain cannot leave it.
+            var outcome = await store.AssignDomainAsync(domain, slug, organization.Id, ct).ConfigureAwait(false);
             if (outcome is ReportStore.AssignOutcome.Assigned or ReportStore.AssignOutcome.AlreadyAssigned)
             {
                 filed++;
@@ -232,13 +280,10 @@ public static class ClientCommand
             }
         }
 
-        Console.WriteLine($"  {filed} domain(s) filed.");
-        Console.WriteLine("  Check it: dmarc client list");
-        Console.WriteLine();
-        return filed == planned.Count ? 0 : 65;
+        return (planned.Count, filed);
     }
 
-    private static async Task<int> AssignAsync(ReportStore store, string[] args, CancellationToken ct)
+    private static async Task<int> AssignAsync(ReportStore store, string dbPath, string[] args, CancellationToken ct)
     {
         var domain = Args.Value(args, "--domain");
         var client = Args.Value(args, "--client");
@@ -248,7 +293,24 @@ public static class ClientCommand
             return Usage("dmarc client assign --domain <domain> --client <slug> [--db <path>]");
         }
 
-        var outcome = await store.AssignDomainAsync(domain, client, ct: ct).ConfigureAwait(false);
+        // --org scopes the assignment, as it scopes erase. Without it the
+        // client slug ranged over every organization with LIMIT 1, so with
+        // an "acme-corp" in two of them a domain and its history went to
+        // whichever row SQLite returned first. Left out, the command still
+        // works the way the master account does - across organizations.
+        string? tenantId = null;
+        var org = Args.Value(args, "--org");
+        if (!string.IsNullOrWhiteSpace(org))
+        {
+            tenantId = await new ClientErasure(dbPath).OrganizationIdAsync(org, ct).ConfigureAwait(false);
+            if (tenantId is null)
+            {
+                Console.Error.WriteLine($"No organization called '{org}'. Run: dmarc org list");
+                return 66;
+            }
+        }
+
+        var outcome = await store.AssignDomainAsync(domain, client, tenantId, ct).ConfigureAwait(false);
         switch (outcome)
         {
             case ReportStore.AssignOutcome.Assigned:
