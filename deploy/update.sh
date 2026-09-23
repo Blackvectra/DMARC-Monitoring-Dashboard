@@ -161,6 +161,23 @@ echo "Updating ${ROOT} to ${VERSION} (${ARCH})"
 # ---- get everything before touching the running install ---------------------
 download "dmarc-web.zip"   "$WORK/web.zip"
 download "dmarc-${ARCH}"   "$WORK/dmarc"
+download "SHA256SUMS.txt"  "$WORK/SHA256SUMS.txt"
+
+# Checked against the sums the release published before anything is unpacked
+# or installed. The release has always carried SHA256SUMS.txt and this never
+# read it, so the only thing between a tampered asset and a root-run install
+# was TLS to api.github.com. A mismatch stops here, with the running install
+# untouched. Release files are named, so each is checked under its own name.
+verify() {
+    local published="$1" local_file="$2" want got
+    want="$(awk -v f="$published" '$2 == f || $2 == "*" f { print $1; exit }' "$WORK/SHA256SUMS.txt")"
+    [[ -n "$want" ]] || { echo "  $published is not listed in SHA256SUMS.txt; refusing to install it." >&2; return 1; }
+    got="$(sha256sum "$local_file" | awk '{ print $1 }')"
+    [[ "$want" == "$got" ]] || { echo "  $published does not match its published checksum; refusing to install it." >&2; return 1; }
+    echo "  $published checksum ok"
+}
+verify "dmarc-web.zip"  "$WORK/web.zip"
+verify "dmarc-${ARCH}"  "$WORK/dmarc"
 
 unzip -q "$WORK/web.zip" -d "$WORK/unpacked"
 test -f "$WORK/unpacked/dmarc-web/DmarcMonitor.Web.dll" \

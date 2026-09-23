@@ -6,6 +6,7 @@
 @inject ReleaseChannel Releases
 @inject UpdateSpool Spool
 @inject AuthenticationStateProvider Auth
+@inject DmarcMonitor.Web.Auth.OrgContext Org
 @rendermode InteractiveServer
 
 <PageTitle>Updates — DMARC Monitor</PageTitle>
@@ -122,7 +123,7 @@ else
                                 }
                             </td>
                             <td>
-                                @if (!running && Spool.IsAvailable)
+                                @if (!running && Spool.IsAvailable && _mayInstall)
                                 {
                                     <button class="primary" disabled="@Busy"
                                             @onclick="() => InstallAsync(release.Version)">
@@ -187,8 +188,23 @@ else
         _releases = _status.Latest is null ? [] : [_status.Latest];
     }
 
+    // Installing replaces the binary every organization on this install
+    // runs, migrates the shared database and restarts the service. It had no
+    // check at all beyond "signed in", so a customer's own read-only login
+    // could do it. An administrator, and nobody restricted to one client.
+    private bool _mayInstall;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var access = await Org.GetAsync();
+        _mayInstall = access.CanAdminister && access.RestrictedClient is null;
+    }
+
     private async Task InstallAsync(string version)
     {
+        var access = await Org.GetAsync();
+        if (!access.CanAdminister || access.RestrictedClient is not null) { return; }
+
         Busy = true;
         try
         {

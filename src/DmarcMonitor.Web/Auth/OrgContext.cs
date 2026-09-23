@@ -92,6 +92,19 @@ public static class OrganizationSwitch
             HttpContext context, string? slug, string? returnUrl,
             OrganizationStore organizations, IConfiguration configuration, CancellationToken ct) =>
         {
+            // A GET that re-signs the cookie, reachable from any other site:
+            // with Entra the cookie is SameSite=Lax, so a link elsewhere could
+            // quietly switch a signed-in operator's organization, and the next
+            // write on a page they already had open would land in the wrong
+            // one. Every browser in use says where a request came from; one
+            // from another site is refused. Absent - a script, an old browser
+            // - it is allowed, because the risk is a browser following a link.
+            if (context.Request.Headers.TryGetValue("Sec-Fetch-Site", out var site)
+                && site.ToString().Equals("cross-site", StringComparison.OrdinalIgnoreCase))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
             var access = OrgContext.Resolve(
                 context.User,
                 await organizations.ListAsync(ct).ConfigureAwait(false),

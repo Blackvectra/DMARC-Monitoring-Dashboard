@@ -297,6 +297,16 @@ public sealed class GraphMailboxClient : IMailboxClient
                     var name = Str(item, "displayName");
                     if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name)) { continue; }
 
+                    // Remembered by id, so reading this folder next finds it.
+                    // The ingestor asks for a child by name, and the name was
+                    // looked up again among ROOT folders only - where a folder
+                    // one level down is not - found nothing, and then CREATED
+                    // an empty top-level folder of that name and read it. So
+                    // every report a mail rule had sorted into Inbox\acme.com
+                    // was never collected, silently, and a --dry-run wrote
+                    // folders into the live mailbox doing it.
+                    _folderCache[name] = id;
+
                     results.Add(new MailFolder
                     {
                         Id = id,

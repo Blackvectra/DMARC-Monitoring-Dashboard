@@ -1255,12 +1255,12 @@ public sealed class ReportStore
         // Unassigned is per organization: NRG's unfiled domains are NRG's
         // worklist, not NextLayerSec's.
         var clientId = await EnsureRowAsync(connection, tx,
-            $"SELECT id FROM clients WHERE slug = $slug AND tenant_id = '{tenantId}'",
-            $"""
+            "SELECT id FROM clients WHERE slug = $slug AND tenant_id = $tenant",
+            """
             INSERT INTO clients (id, tenant_id, name, slug, status, collection_method, created_at, updated_at)
-            VALUES ($id, '{tenantId}', 'Unassigned', $slug, 'onboarding', 'central_mailbox', $now, $now)
+            VALUES ($id, $tenant, 'Unassigned', $slug, 'onboarding', 'central_mailbox', $now, $now)
             """,
-            UnassignedClientSlug, now, ct).ConfigureAwait(false);
+            UnassignedClientSlug, now, ct, tenantId).ConfigureAwait(false);
 
         var domainId = Guid.NewGuid().ToString("N");
         await using (var insert = connection.CreateCommand())
@@ -1299,13 +1299,18 @@ public sealed class ReportStore
 
     private static async Task<string> EnsureRowAsync(
         SqliteConnection connection, SqliteTransaction tx,
-        string selectSql, string insertSql, string slug, string now, CancellationToken ct)
+        string selectSql, string insertSql, string slug, string now, CancellationToken ct, string? tenantId = null)
     {
+        // The tenant is a parameter like everything else. It was spliced into
+        // the SQL as a string - safe, since it is always an internal GUID, but
+        // the one exception in an otherwise parameterized codebase and the
+        // first thing a static scan flags.
         await using (var select = connection.CreateCommand())
         {
             select.Transaction = tx;
             select.CommandText = selectSql;
             select.Parameters.AddWithValue("$slug", slug);
+            if (tenantId is not null) { select.Parameters.AddWithValue("$tenant", tenantId); }
             if (await select.ExecuteScalarAsync(ct).ConfigureAwait(false) is string existing)
             {
                 return existing;
@@ -1320,6 +1325,7 @@ public sealed class ReportStore
             insert.Parameters.AddWithValue("$id", id);
             insert.Parameters.AddWithValue("$slug", slug);
             insert.Parameters.AddWithValue("$now", now);
+            if (tenantId is not null) { insert.Parameters.AddWithValue("$tenant", tenantId); }
             await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
         return id;

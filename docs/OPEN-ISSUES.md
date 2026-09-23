@@ -625,6 +625,83 @@ moving for a file nobody will see — the next release will not have it.
 whatever a tool happened to leave there. Scratch output belongs in the
 scratchpad directory, not beside the checkout.
 
+## 15. Open from the Critical/High audit of 23 September
+
+**Area** several, named below
+**Severity** High unless marked. Every item here survived three independent
+attempts to refute it, or was found by one finder and not yet verified
+(marked *unverified*). The Criticals from the same audit are fixed (#46), as
+are the role gates on Updates and the brand name, the Settings page listing
+every organization, provider configs resolving a slug across organizations,
+SERVFAIL read as a dead SPF include, ingest never reading rule-sorted child
+folders, the interpolated tenant id, a cross-site switch of organization,
+and update.sh not checking SHA256SUMS.txt.
+
+**Multi-organization installs only.** One organization, which is every install
+today, is not exposed by any of these.
+
+- **The DNS apply path resolves a domain by name alone.**
+  `RemediationService.DomainIdsAsync`, `DnsProviderConfigs.ForDomainAsync`
+  and `MtaStsStore.IdsAsync` take no tenant, so with the same domain in two
+  organizations an Apply can write with the other organization's provider
+  token and file the audit row under its client. Needs a tenant threaded from
+  the Fix page and `dmarc fix` down to the provider lookup.
+- **`dmarc client set-group` ignores `--org`** and sets the customer group on
+  every client with that slug in every organization. *unverified*
+
+**Everywhere.**
+
+- **Windows install ACLs.** `bootstrap.ps1` creates `C:\dmarc\data`, `app`,
+  `bin` and `dotnet` with the ACL inherited from `C:\` (Users read,
+  Authenticated Users modify). Any local account can read the database and the
+  cookie key ring, and replace binaries that run as LocalService. Fix: break
+  inheritance on `C:\dmarc` and grant only SYSTEM, Administrators and
+  LocalService.
+- **`bootstrap.ps1 -Release <tag>` is a no-op on an installed machine.** It
+  skips the download whenever `DmarcMonitor.Web.dll` exists, restarts the old
+  build and prints Done. This is the documented Windows update path.
+- **The Linux secret key sits beside the ciphertext**, and DEPLOYING.md §8
+  says to copy that directory offsite and that a stolen backup cannot yield
+  the Cloudflare token. It can. Either move the key out of `secrets/` or
+  correct the document.
+- **`GITHUB_TOKEN` is passed to curl as an argument** in `update.sh` and
+  `update-agent.sh`, readable by any local account in `/proc/<pid>/cmdline`.
+  Use `curl -H @file` or a netrc. Related: `Updates:Token` lives in plain
+  appsettings rather than the secret store.
+- **DNS rebinding against the local trial.** The trial's only protection is
+  "remote address is loopback", with `AllowedHosts: *`. A page in the trial
+  user's browser can rebind a name to 127.0.0.1 and read the app. Fix:
+  restrict hosts to localhost/127.0.0.1 in trial mode.
+- **`sp=` removal is planned as a safe fix** on every domain without checking
+  the reports for failing subdomain mail, and is applied under the Tech role.
+- **The "policy served elsewhere" MTA-STS guard is Fix-page only.**
+  `dmarc fix` still tells the operator to run `dmarc mta-sts set` for a domain
+  that serves its own policy, and `mta-sts set` does not check.
+- **A crafted zip aborts the whole import run** instead of skipping one file:
+  `ZipArchive.Entries` throws lazily outside the try in
+  `ReportAttachment.FromZip`.
+- **`ClassOf` passes an IP to a catalog keyed on host names**, so the "known
+  provider" classification never fires and a gateway reads as "unrecognised
+  entirely".
+
+**Threat intelligence and naming.** *unverified*
+
+- `dmarc intel --export` writes the raw `source_ip` from an unauthenticated
+  report as a blocklist line, so a forged report can put `0.0.0.0/0` into a
+  firewall file; a DKIM selector containing a newline adds a line of its own.
+- Indicators are never aged out once rated High.
+- A sender-chosen PTR becomes a vendor label ("Microsoft 365") and the source's
+  name on the client report, with no forward-confirmed check.
+- Forged mail whose envelope sits under a catalogued gateway suffix is
+  classified as forwarded.
+
+**Other.** *unverified*
+
+- `dmarc prune --aggregate-days 1O95` silently becomes 400 and deletes:
+  `Args.Int` substitutes the default for anything that does not parse.
+- The zone audit flags the RFC 7489 `*._report._dmarc` wildcard as Breaking,
+  and a Cloudflare flattened apex CNAME likewise.
+
 ## 8. Smaller things
 
 | area | what | how |

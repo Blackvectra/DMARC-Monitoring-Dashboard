@@ -583,9 +583,22 @@
         try
         {
             _access = await Org.GetAsync();
-            _organizations = await Organizations.ListAsync();
+
+            // What this login may see, not the whole install. Every
+            // organization - names, slugs, which role groups exist, counts,
+            // logos - and every DNS provider config went to any signed-in
+            // user, including another organization's viewer and a customer's
+            // own login. The master sees every organization; anybody else
+            // sees the ones they belong to; provider configs are for the
+            // provider's own people, never a customer.
+            var all = await Organizations.ListAsync();
+            _organizations = _access.IsMaster
+                ? all
+                : [.. all.Where(o => _access.Visible.Any(v => v.Slug == o.Slug))];
             _activity = _access.CanAdminister ? await Audit.ListAsync(_access.TenantId, 30) : [];
-            _providers = await Fixes.ProvidersAsync(_access.TenantId);
+            _providers = _access.CanOperate && _access.RestrictedClient is null
+                ? await Fixes.ProvidersAsync(_access.TenantId)
+                : [];
             _clients = [.. (await Onboarding.GetClientsAsync(_access.TenantId))
                 .Where(c => c.Slug != DmarcMonitor.Core.Storage.ReportStore.UnassignedClientSlug)];
         }
@@ -614,7 +627,7 @@
             Put("tenant_id", _tenantId);
             Put("client_id", _clientId);
 
-            var saved = await Fixes.SetProviderAsync(_client, string.IsNullOrWhiteSpace(_domain) ? null : _domain.Trim(),
+            var saved = await Fixes.SetProviderAsync(_access.TenantId, _client, string.IsNullOrWhiteSpace(_domain) ? null : _domain.Trim(),
                 _provider, settings, string.IsNullOrWhiteSpace(_secret) ? null : _secret);
 
             _providerMessage = $"{saved.Provider} saved for {saved.Domain ?? $"every domain of {saved.ClientSlug}"}.";
@@ -644,7 +657,7 @@
         _busy = true;
         try
         {
-            await Fixes.RemoveProviderAsync(config.ClientSlug, config.Domain);
+            await Fixes.RemoveProviderAsync(_access.TenantId, config.ClientSlug, config.Domain);
             _providerMessage = "Removed, and its credential with it.";
             _providerMessageIsError = false;
             await Audit.RecordAsync(_access.Current?.Id, _access.User, "provider.removed", $"{config.Provider} for {config.Domain ?? config.ClientSlug}");
