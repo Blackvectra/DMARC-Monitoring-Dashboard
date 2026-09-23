@@ -590,9 +590,10 @@ brief's ten Phase 1 items collapse into it.
 
 The report now carries a posture summary, a classified sender inventory, the
 failure causes, per-domain enforcement readiness and a remediation register
-with an owner and a definition of done for each item, and `dmarc report --pdf`
-renders it server-side with the product's own header, footer and page numbers.
-What it does not have:
+with an owner and a definition of done for each item, and `dmarc report`
+renders it server-side as a PDF with the product's own header, footer and page
+numbers, the day-by-day chart, and the impersonating sources grouped by
+operator. What it does not have:
 
 - **One report, not three.** The brief asks for an executive report, a
   technical report and a QBR; this is one document that sits between the first

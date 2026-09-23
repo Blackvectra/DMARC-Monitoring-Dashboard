@@ -1,5 +1,6 @@
 using System.Globalization;
 using MigraDoc.DocumentObjectModel;
+using MigraDoc.DocumentObjectModel.Shapes.Charts;
 using MigraDoc.DocumentObjectModel.Tables;
 using MigraDoc.Rendering;
 
@@ -86,8 +87,10 @@ public static class ClientReportPdf
         Header(section, report);
         Verdict(section, report);
         Figures(section, report);
+        Trend(section, report);
         Domains(section, report);
         Senders(section, report);
+        Threats(section, report);
         WhyFailed(section, report);
         Actions(section, report);
         Covered(section, report);
@@ -282,6 +285,88 @@ public static class ClientReportPdf
         small.Format.Font.Color = Muted;
     }
 
+    /// <summary>How many rows a list in a client's copy carries before it summarises.</summary>
+    private const int Rows = 12;
+
+    /// <summary>
+    /// The month, day by day.
+    /// </summary>
+    /// <remarks>
+    /// A month's total cannot show the shape of the month. A client whose
+    /// mail was fine until the 14th and half-refused since reads as "93%
+    /// protected", which is accurate and tells them nothing they can act on.
+    /// The HTML has carried this from the start; the PDF, which is the copy
+    /// the client actually gets, did not.
+    ///
+    /// Days no receiver reported on are drawn as nothing and counted
+    /// underneath, rather than as zero: a cliff to the floor sends somebody
+    /// looking for an outage that never happened.
+    /// </remarks>
+    private static void Trend(Section section, ClientReport report)
+    {
+        if (report.Messages == 0 || report.Daily.Count == 0) { return; }
+
+        Heading(section, "Your mail, day by day");
+        Note(section, "The taller the column, the more mail was sent as you that day. The red part is mail "
+                    + "that failed the checks.");
+
+        var chart = section.AddChart(ChartType.ColumnStacked2D);
+        chart.Width = Unit.FromCentimeter(17.2);
+        chart.Height = Unit.FromCentimeter(4.6);
+        chart.Format.Font.Size = 7;
+        chart.Format.Font.Color = Muted;
+
+        var passing = chart.SeriesCollection.AddSeries();
+        passing.Name = "Passed";
+        passing.FillFormat.Color = Good;
+        passing.LineFormat.Visible = false;
+
+        var failing = chart.SeriesCollection.AddSeries();
+        failing.Name = "Failed";
+        failing.FillFormat.Color = Bad;
+        failing.LineFormat.Visible = false;
+
+        var labels = chart.XValues.AddXSeries();
+        foreach (var day in report.Daily)
+        {
+            passing.Add(day.Reported ? day.Passing : 0);
+            failing.Add(day.Reported ? day.Failing : 0);
+
+            // The day of the month alone. Thirty dated labels do not fit
+            // across seventeen centimetres; thirty numbers do.
+            labels.Add(day.Day.Day.ToString(CultureInfo.InvariantCulture));
+        }
+
+        chart.XAxis.MajorTickMark = TickMarkType.None;
+        chart.XAxis.LineFormat.Color = Rule;
+        chart.YAxis.MajorTickMark = TickMarkType.None;
+        chart.YAxis.TickLabels.Format = "#,##0";   // messages, not 800.0 of them
+        chart.YAxis.HasMajorGridlines = true;
+        chart.YAxis.MajorGridlines.LineFormat.Color = Rule;
+        chart.YAxis.LineFormat.Visible = false;
+        chart.PlotArea.LineFormat.Visible = false;
+
+        var legend = chart.BottomArea.AddLegend();
+        legend.LineFormat.Visible = false;
+        legend.Format.Font.Size = 7;
+
+        var first = report.Daily[0].Day;
+        var last = report.Daily[^1].Day;
+        var missing = report.Daily.Count(d => !d.Reported);
+        var peak = report.Daily.Where(d => d.Reported).Select(d => d.Messages).DefaultIfEmpty(0).Max();
+
+        var axis = section.AddParagraph(
+            $"{first:d MMM} to {last:d MMM} · peak {peak:N0} in a day"
+            + (missing > 0
+                ? $" · {missing} day(s) with no report, left blank rather than drawn as zero: that usually "
+                + "means the receivers sent nothing, not that your mail stopped."
+                : ""));
+        axis.Format.Font.Size = 7.5;
+        axis.Format.Font.Color = Muted;
+        axis.Format.SpaceBefore = 3;
+        axis.Format.SpaceAfter = 10;
+    }
+
     private static void Domains(Section section, ClientReport report)
     {
         if (report.Domains.Count == 0) { return; }
@@ -351,6 +436,93 @@ public static class ClientReportPdf
 
             var note = row[3].AddParagraph(meaning);
             note.Format.Font.Size = 8;
+        }
+
+        section.AddParagraph().Format.SpaceAfter = 8;
+    }
+
+    /// <summary>
+    /// Who sent mail as the client and could never prove it.
+    /// </summary>
+    /// <remarks>
+    /// The figure "message(s) nobody can account for" is a count; this is
+    /// the list behind it, which is what the brief means by threat findings
+    /// and what a client can actually take to somebody. Every row here has
+    /// passed for this client zero times - the one thing a forger cannot do
+    /// - so the client's own relay breaking a share of its signatures is
+    /// never on it.
+    /// </remarks>
+    private static void Threats(Section section, ClientReport report)
+    {
+        if (report.Messages == 0) { return; }
+
+        Heading(section, "Who tried to send mail as you");
+
+        var sources = report.ImpersonatingSources;
+        if (sources.Count == 0)
+        {
+            var clear = section.AddParagraph(
+                "Nobody. No source sent mail claiming to be one of your domains without being able to prove it.");
+            clear.Format.Font.Color = Good;
+            clear.Format.SpaceAfter = 10;
+            return;
+        }
+
+        Note(section, "Each of these sent mail using your domain name and could not prove it was entitled to, "
+                    + "not once. Either a service nobody told us about, or somebody pretending to be you. "
+                    + "\"Also seen elsewhere\" means the same source hit other customers too, which is broad "
+                    + "activity rather than somebody targeting you.");
+
+        // One row per operator, not per address. A security gateway's
+        // outbound fleet is five hostnames with one reverse name, and five
+        // rows saying the same thing is the register mistake all over again;
+        // a client reads two and stops. Unnamed addresses keep their own row,
+        // because nothing says they are the same operator.
+        var grouped = sources
+            .GroupBy(s => s.IsNamed ? s.ReverseName : s.SourceIp, StringComparer.OrdinalIgnoreCase)
+            .Select(g => (
+                Name: g.Key,
+                Addresses: g.Count(),
+                Failing: g.Sum(s => s.Failing),
+                Domains: g.SelectMany(s => s.Domains).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToList(),
+                Elsewhere: g.Max(s => s.OtherClientsAffected),
+                Ip: g.Count() == 1 && g.First().IsNamed ? g.First().SourceIp : ""))
+            .OrderByDescending(g => g.Failing)
+            .ToList();
+
+        var table = Grid(section, [6.0, 2.0, 4.6, 4.6]);
+        HeaderRow(table, ["Source", "Messages", "Sent as", "Also seen elsewhere"]);
+
+        foreach (var source in grouped.Take(Rows))
+        {
+            var row = table.AddRow();
+            row.Borders.Bottom.Width = 0.5;
+            row.Borders.Bottom.Color = Rule;
+
+            var name = row[0].AddParagraph(source.Name);
+            name.Format.Font.Size = 8;
+
+            var detail = source.Addresses > 1 ? $"{source.Addresses} addresses" : source.Ip;
+            if (detail.Length > 0)
+            {
+                var sub = row[0].AddParagraph(detail);
+                sub.Format.Font.Size = 7;
+                sub.Format.Font.Color = Muted;
+            }
+
+            Value(row[1], source.Failing.ToString("N0", CultureInfo.InvariantCulture), Bad);
+            Small(row[2], string.Join(", ", source.Domains));
+            Small(row[3], source.Elsewhere > 0 ? $"Yes, {source.Elsewhere} other customer(s)" : "No");
+        }
+
+        if (grouped.Count > Rows)
+        {
+            var more = section.AddParagraph(
+                $"and {grouped.Count - Rows} more, each with fewer messages. The full list is in the "
+                + "on-screen version of this report.");
+            more.Format.Font.Size = 7.5;
+            more.Format.Font.Color = Muted;
+            more.Format.SpaceBefore = 3;
         }
 
         section.AddParagraph().Format.SpaceAfter = 8;
