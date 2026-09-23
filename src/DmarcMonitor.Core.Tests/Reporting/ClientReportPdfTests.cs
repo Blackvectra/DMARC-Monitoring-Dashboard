@@ -1,6 +1,7 @@
 using System.Text;
 using DmarcMonitor.Core.Reporting;
 using MigraDoc.DocumentObjectModel;
+using MigraDoc.DocumentObjectModel.Shapes.Charts;
 using MigraDoc.DocumentObjectModel.Tables;
 using Xunit;
 
@@ -304,6 +305,106 @@ public sealed class ClientReportPdfTests
         }
 
         throw new InvalidOperationException("no paragraph matched");
+    }
+
+    /// <summary>
+    /// The month's shape, not just its total. Asked for after the PDF became
+    /// the deliverable: the HTML had the day-by-day chart all along, and the
+    /// copy the client actually receives did not.
+    /// </summary>
+    [Fact]
+    public void TheDayByDayChartIsOnIt()
+    {
+        var report = Report() with
+        {
+            Daily = [.. Enumerable.Range(1, 30).Select(d => new DayPoint
+            {
+                Day = new DateOnly(2026, 9, d),
+                Reported = d <= 20,
+                Messages = d <= 20 ? 50 : 0,
+                Passing = d <= 20 ? 48 : 0,
+            })],
+        };
+
+        var document = ClientReportPdf.Build(report);
+        var section = document.Sections[0]!;
+
+        var charts = 0;
+        foreach (var element in section.Elements)
+        {
+            if (element is Chart chart)
+            {
+                charts++;
+                Assert.Equal(ChartType.ColumnStacked2D, chart.Type);
+                Assert.Equal(2, chart.SeriesCollection.Count);
+            }
+        }
+
+        Assert.Equal(1, charts);
+
+        // Unreported days are counted under it, not drawn as zero.
+        var text = Text(document);
+        Assert.Contains("10 day(s) with no report", text, StringComparison.Ordinal);
+        Assert.True(ClientReportPdf.Render(report).Length > 5000);
+    }
+
+    [Fact]
+    public void AMonthWithNoMailHasNoChart()
+    {
+        var quiet = Report(messages: 0, passing: 0);
+        var text = Text(ClientReportPdf.Build(quiet));
+
+        Assert.DoesNotContain("day by day", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The list behind "message(s) nobody can account for", which is what the
+    /// brief calls threat findings and what a client can take to somebody.
+    /// </summary>
+    [Fact]
+    public void ThreatSourcesAreNamedAndGroupedByOperator()
+    {
+        // A gateway's fleet: three addresses, one reverse name. One row.
+        var fleet = Enumerable.Range(1, 3).Select(i => new ReportSource
+        {
+            SourceIp = $"198.51.100.{i}", ReverseName = "outbound.gateway.example",
+            Messages = 10, Passing = 0, Failing = 10, OtherClientsAffected = i,
+            Domains = ["acme.example"],
+        });
+        var stranger = new ReportSource
+        {
+            SourceIp = "203.0.113.200", Messages = 4, Passing = 0, Failing = 4, Domains = ["acme.example"],
+        };
+
+        var report = Report() with { Sources = [.. fleet, stranger] };
+        var text = Text(ClientReportPdf.Build(report));
+
+        Assert.Contains("Who tried to send mail as you", text, StringComparison.Ordinal);
+        Assert.Contains("outbound.gateway.example", text, StringComparison.Ordinal);
+        Assert.Contains("3 addresses", text, StringComparison.Ordinal);
+        Assert.Contains("30", text, StringComparison.Ordinal);                    // summed
+        Assert.Contains("Yes, 3 other customer(s)", text, StringComparison.Ordinal); // the max
+        Assert.Contains("203.0.113.200", text, StringComparison.Ordinal);
+
+        // One grouped row, not three. Counted by the "N addresses" line rather
+        // than by the name, because the remediation register legitimately
+        // names the same source in its finding.
+        Assert.Equal(1, text.Split("3 addresses").Length - 1);
+    }
+
+    /// <summary>
+    /// A source that has passed even once is the client's own mail path and
+    /// never a threat, whatever a particular failing row looks like.
+    /// </summary>
+    [Fact]
+    public void TheClientsOwnBrokenRelayIsNotAThreat()
+    {
+        var text = Text(ClientReportPdf.Build(Report()));
+
+        // Report() carries a vendor that passes some and fails 36 as
+        // unaligned: misconfigured, not impersonating.
+        Assert.Contains("Nobody. No source sent mail", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("smtp.vendor.example\n", text, StringComparison.Ordinal);
     }
 
     [Fact]
