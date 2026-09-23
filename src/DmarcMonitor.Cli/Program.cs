@@ -217,10 +217,11 @@ public static class Program
                 rename           --org <slug> --name <name>
                 --db <path>      Database file. Default: dmarc.db
 
-              report             Write the monthly report a client receives, as one
-                                 self-contained HTML file that opens offline and prints.
-                                 Defaults to the month that has ENDED, so running it twice
-                                 in the same month produces the same document.
+              report             Write the monthly report a client receives, as a PDF:
+                                 the document you attach to an email, carrying your own
+                                 name and none of this server's. Defaults to the month
+                                 that has ENDED, so running it twice in the same month
+                                 produces the same document.
                 --client <slug>  Client to report on.
                 --all            Every client except Unassigned.
                 --month <yyyy-MM> Month to cover. Default: last complete month.
