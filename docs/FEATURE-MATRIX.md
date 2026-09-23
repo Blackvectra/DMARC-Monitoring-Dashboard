@@ -31,8 +31,8 @@ Every "have it" below was checked against the code rather than remembered.
 | MTA-STS and TLS-RPT | including **serving** the policy file, and fetching the live one to judge it |
 | DNS writes | Cloudflare, Azure DNS, Manual — with dry run, verify, rollback and history |
 | Policy rollout guidance | plus `dmarc simulate`, which replays real reports |
-| Monthly client report | one self-contained HTML file that opens offline and prints |
-| White-label | colour, logo, name and contact per organization |
+| Monthly client report | a PDF drawn server-side, with a long HTML version for reading on screen |
+| White-label | colour, logo, name and contact per organization, on both |
 | Role-based access | Entra groups; viewer / operator / admin; customer-only logins |
 | Audit trail | every write, every DNS change, every prune |
 | Retention controls | per data class, forensic shortest |

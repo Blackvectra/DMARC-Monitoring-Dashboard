@@ -215,7 +215,8 @@ already follow.
 **Area** `src/DmarcMonitor.Core/Aggregate/`, `src/DmarcMonitor.Core/Storage/`
 **Severity** Low. Nothing is wrong; something useful is sitting unused.
 
-`envelope_from` is parsed, stored on every record, and never read back out.
+`envelope_from` is parsed, stored on every record, and read back out only by
+`dmarc export`, which dumps every column. No screen and no report uses it.
 On the live corpus 14,937 of 20,465 records carry one, and it is what makes a
 sender identifiable:
 
