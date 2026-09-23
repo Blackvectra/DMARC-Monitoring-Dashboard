@@ -132,7 +132,7 @@ public interface IMailboxClient
     /// </summary>
     /// <remarks>
     /// Needed because sorting reports into a folder per domain with a mail
-    /// rule is the normal way an MSP organises this. Reading only the parent
+    /// rule is the normal way an MSP organizes this. Reading only the parent
     /// would ignore every report, and would do it silently.
     /// </remarks>
     Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderName, CancellationToken cancellationToken = default);

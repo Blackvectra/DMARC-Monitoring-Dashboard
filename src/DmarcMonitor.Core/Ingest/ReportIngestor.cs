@@ -45,7 +45,7 @@ public sealed record IngestOptions
     /// </summary>
     /// <remarks>
     /// Sorting reports into a folder per domain with a mail rule is how an MSP
-    /// normally organises a shared dmarc@ mailbox. Without this, reading
+    /// normally organizes a shared dmarc@ mailbox. Without this, reading
     /// "DMARC" finds nothing while hundreds of reports sit one level below,
     /// and nothing says so.
     /// </remarks>
