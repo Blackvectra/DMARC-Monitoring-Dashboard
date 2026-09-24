@@ -854,23 +854,30 @@ public sealed record ClientReport
 
             if (watching > 0 && broken > 0)
             {
-                return $"Conditional readiness. {PassRate:0.#}% of your mail is provably yours, and {broken} "
+                return $"Conditional readiness. {PassRate:0.#}% of the mail sent using your name was provably yours, and {broken} "
                      + $"service(s) still need correcting before {(watching == 1 ? "the domain that is" : $"the {watching} domains")} "
                      + "only being watched can be protected.";
             }
 
             if (watching > 0)
             {
-                return $"Ready for enforcement. {PassRate:0.#}% of your mail is provably yours and no sender "
+                return $"Ready for enforcement. {PassRate:0.#}% of the mail sent using your name was provably yours and no sender "
                      + $"needs correcting, so {(watching == 1 ? "the domain" : $"the {watching} domains")} "
                      + "only being watched can be moved to quarantine.";
             }
 
+            // "Of the mail sent using your name", not "of your mail". The
+            // figure counts everything that claimed to be the client,
+            // forgeries included, so a domain under a spoofing run read
+            // "Protected... 78.7% of your mail is provably yours" - which
+            // sounds like a fifth of the client's own mail failing, sitting
+            // under a verdict that says it is not.
             return broken > 0
-                ? $"Protected, with work outstanding. Every domain is enforcing and {PassRate:0.#}% of your mail "
-                + $"is provably yours; {broken} service(s) still send mail that is not."
-                : $"Protected. Every domain is enforcing, {PassRate:0.#}% of your mail is provably yours, and no "
-                + "sender needs correcting.";
+                ? $"Protected, with work outstanding. Every domain is enforcing and {PassRate:0.#}% of the mail "
+                + $"sent using your name was provably yours; {broken} of your service(s) still send mail that "
+                + "cannot prove it."
+                : $"Protected. Every domain is enforcing, {PassRate:0.#}% of the mail sent using your name was "
+                + "provably yours, and no sender of yours needs correcting.";
         }
     }
 

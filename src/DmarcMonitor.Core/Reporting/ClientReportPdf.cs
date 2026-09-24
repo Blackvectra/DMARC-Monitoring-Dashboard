@@ -259,7 +259,7 @@ public static class ClientReportPdf
         var values = table.AddRow();
         var labels = table.AddRow();
 
-        Figure(values[0], labels[0], $"{report.PassRate:0.#}%", "of your mail is provably yours",
+        Figure(values[0], labels[0], $"{report.PassRate:0.#}%", "of mail sent using your name was provably yours",
                report.PassRate >= ClientReport.HealthyPassRate ? Good : Bad);
         Figure(values[1], labels[1], $"{enforcing} of {report.Domains.Count}", "domain(s) protected", Ink);
         Figure(values[2], labels[2], $"{unproven:N0}", "message(s) nobody can account for",

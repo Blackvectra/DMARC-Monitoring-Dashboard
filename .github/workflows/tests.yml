@@ -1,10 +1,30 @@
 name: Tests
 
+# Paced to stay inside the free Actions minutes, which bill Windows at double.
+#
+# A pull request runs the fast checks: the .NET build and tests, the schema,
+# and Pester on Ubuntu - about six billable minutes. The install and
+# bootstrap jobs, the arm64 run and everything on Windows prove the product
+# installs, and that only has to be true of what reaches main, so they run on
+# the push a merge makes. A pull request that changes deploy/ or the installers
+# can ask for them early with the full-ci label, or run this by hand.
+#
+# Every push used to run all nine jobs, twice for a merged pull request - about
+# 24 billable minutes a push, and several pushes a pull request.
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**.md']
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths-ignore: ['docs/**', '**.md']
   workflow_dispatch:
+
+# A new push to a pull request makes the run for the previous one worthless;
+# stop paying for it.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -19,7 +39,8 @@ jobs:
         # ubuntu proves the parsers are pure and portable, which is what makes
         # the eventual C# port straightforward. windows is the platform the
         # engine actually ships on, so it is the one that must stay green.
-        os: [ubuntu-latest, windows-latest]
+        # Windows only once it matters: on main, or when asked for.
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -144,6 +165,7 @@ jobs:
 
   install:
     name: Install on a fresh Ubuntu
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -444,6 +466,7 @@ jobs:
   # architecture, on every pull request.
   install-arm64:
     name: Install on a fresh Ubuntu (arm64)
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -533,6 +556,7 @@ jobs:
 
   bootstrap-linux:
     name: One command on a fresh Ubuntu
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -619,6 +643,7 @@ jobs:
 
   bootstrap-windows:
     name: One command on a fresh Windows
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -763,6 +788,7 @@ jobs:
   # screen. Invisible on a server, and the entire experience of a trial copy.
   windows-trial:
     name: Windows trial download
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
