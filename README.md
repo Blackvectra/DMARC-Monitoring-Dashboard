@@ -139,7 +139,8 @@ what they do:
 
 - **`Export-DMARCAttachments.ps1`** — one file to copy onto a machine with
   Outlook open when there is no other way to get the reports out. No
-  repository, no .NET, no app registration. Its tests are in `tests/` and run
+  repository, no .NET, no app registration. Marks each message read once its
+  report is saved (`-LeaveUnread` to skip). Its tests are in `tests/` and run
   in CI.
 - **`Test-DMARCMailRules.ps1`** — a read-only check of the inbox rules that
   file reports into per-domain folders: which are switched off, which Exchange

@@ -30,6 +30,12 @@
     Do not add the Inbox when -Folder is given. Only useful when you know the
     Inbox holds nothing you want.
 
+.PARAMETER LeaveUnread
+    Leave messages as they were. By default a message whose report was saved
+    is marked as read, so the next run's "unread" count means new reports
+    rather than everything ever received. A message whose attachment could
+    not be saved is never marked, so it is still there to be noticed.
+
 .PARAMETER List
     Show what is there and exit, without exporting anything. Use this when a
     name does not match and you want to see what is actually available.
@@ -83,6 +89,7 @@ param(
     [string]$Mailbox,
     [switch]$List,
     [switch]$SkipInbox,
+    [switch]$LeaveUnread,
 
     # A mailbox also holds signature images and auto-replies. Reports are
     # always one of these, so everything else is skipped rather than written.
@@ -415,6 +422,7 @@ function Export-Folder {
     $saved = 0
     $scanned = 0
     $skipped = 0
+    $marked = 0
 
     $items = $null
     try { $items = $MailFolder.Items } catch { $items = $null }
@@ -438,6 +446,9 @@ function Export-Folder {
 
             $attachmentCount = 0
             try { $attachmentCount = $attachments.Count } catch { $attachmentCount = 0 }
+
+            $savedHere = 0
+            $failedHere = 0
 
             for ($a = 1; $a -le $attachmentCount; $a++) {
                 # Every step here is inside the try, and that is the whole
@@ -469,11 +480,31 @@ function Export-Folder {
 
                     $attachment.SaveAsFile($target)
                     $saved++
+                    $savedHere++
                 } catch {
                     # Counted and carried on. One unreadable attachment must
                     # not cost the rest of the mailbox.
                     $skipped++
+                    $failedHere++
                     Write-Verbose "Skipped an attachment in '$($MailFolder.Name)': $($_.Exception.Message)"
+                }
+            }
+
+            # Marked read only once its report is on disk, and never when an
+            # attachment on it failed: a message left unread is one somebody
+            # will still look at. Anything else in the mailbox - an
+            # auto-reply, a message with no report on it - is left alone.
+            if (-not $LeaveUnread -and $savedHere -gt 0 -and $failedHere -eq 0) {
+                try {
+                    if ($item.UnRead) {
+                        $item.UnRead = $false
+                        $item.Save()
+                        $marked++
+                    }
+                } catch {
+                    # A read-only store, or a shared mailbox without write
+                    # access. The export still counts; the flag is a nicety.
+                    Write-Verbose "Could not mark a message read in '$($MailFolder.Name)': $($_.Exception.Message)"
                 }
             }
         }
@@ -485,11 +516,11 @@ function Export-Folder {
     # Every folder looked in is printed, including empty ones. A folder that
     # was searched and held nothing, and a folder that was never searched,
     # are different problems and used to look identical.
-    Write-Host ("    {0,-34} {1,8} {2,7} {3,8}" -f `
-        $MailFolder.Name, $scanned, $saved, $(if ($skipped) { $skipped } else { '' }))
+    Write-Host ("    {0,-34} {1,8} {2,7} {3,8} {4,12}" -f `
+        $MailFolder.Name, $scanned, $saved, $(if ($skipped) { $skipped } else { '' }), $(if ($marked) { $marked } else { '' }))
 
     if ($unread -gt 0) {
-        Write-Host ("    {0,-34} {1}" -f '', "$unread unread (read or not, all of them were scanned)") -ForegroundColor DarkGray
+        Write-Host ("    {0,-34} {1}" -f '', "$unread still unread (read or not, all of them were scanned)") -ForegroundColor DarkGray
     }
 
     $total = $saved
@@ -513,7 +544,7 @@ if ($Folder) {
 }
 Write-Host "Output  : $OutputPath"
 Write-Host ""
-Write-Host ("    {0,-34} {1,8} {2,7} {3,8}" -f 'folder', 'scanned', 'saved', 'skipped') -ForegroundColor DarkGray
+Write-Host ("    {0,-34} {1,8} {2,7} {3,8} {4,12}" -f 'folder', 'scanned', 'saved', 'skipped', 'marked read') -ForegroundColor DarkGray
 
 $count = 0
 foreach ($target in $targets) {
