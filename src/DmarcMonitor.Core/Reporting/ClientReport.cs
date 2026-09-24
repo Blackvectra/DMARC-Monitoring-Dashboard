@@ -536,6 +536,22 @@ public sealed record ClientReport
     /// </remarks>
     public IReadOnlyList<DayPoint> Daily { get; init; } = [];
 
+    /// <summary>
+    /// The last day covered when the month is still in progress, or null
+    /// for a month that has ended.
+    /// </summary>
+    public DateOnly? Through { get; init; }
+
+    /// <summary>The dates the report covers, said as a sentence.</summary>
+    public string Covers => Through is { } through
+        ? string.Create(CultureInfo.InvariantCulture,
+            $"Covers {Period.Start:d MMM yyyy} to {through:d MMM yyyy}; the month is still in progress.")
+        : string.Create(CultureInfo.InvariantCulture,
+            $"Covers {Period.Start:d MMM yyyy} to {Period.End:d MMM yyyy}.");
+
+    /// <summary>" so far" while the month is still running.</summary>
+    private string SoFar => Through is null ? "" : " so far";
+
     public long Messages { get; init; }
     public long Passing { get; init; }
     public long Failing { get; init; }
@@ -611,7 +627,7 @@ public sealed record ClientReport
                 facts.Add(new ReportFact
                 {
                     Label = "Days covered",
-                    Value = $"{reported} of {days}",
+                    Value = $"{reported} of {days}{SoFar}",
 
                     // Said plainly, because it qualifies everything above it.
                     // A month with four days of reports in it can show a
@@ -621,6 +637,8 @@ public sealed record ClientReport
                     {
                         0 => "No receiver reported on any day of this period, so the figures above describe "
                            + "nothing that was observed.",
+                        _ when reported == days && Through is { } through =>
+                            $"The month is not over. Every day to {through:d MMMM} was reported on by at least one receiver.",
                         _ when reported == days =>
                             "Every day of the period was reported on by at least one receiver.",
                         _ => $"The figures above describe the {reported} day(s) that were reported on. A day with "
@@ -663,8 +681,15 @@ public sealed record ClientReport
                 {
                     Label = "Turned away on your behalf",
                     Value = Stopped.ToString("N0", CultureInfo.InvariantCulture),
-                    Note = "Refused or filed as junk by the receiving provider because your policy said to. This "
-                         + "is the protection doing its job.",
+                    // "The protection doing its job" only when it was: at
+                    // River City Boats 224 of 234 were the client's own
+                    // Mailchimp and Avanan mail, sent to junk.
+                    Note = Domains.Sum(d => d.OwnFailing) > 0
+                        ? "Refused or filed as junk by the receiving provider because your policy said to. This "
+                        + "includes mail of your own that failed the checks, not only forgeries; the findings "
+                        + "above name the services."
+                        : "Refused or filed as junk by the receiving provider because your policy said to. This "
+                        + "is the protection doing its job.",
                 });
             }
 
@@ -870,6 +895,14 @@ public sealed record ClientReport
         // an MSP would rightly wonder what the report thinks M365 is.
         || Operator(source) is "Microsoft 365" or "Google Workspace" or "Google";
 
+    /// <summary>
+    /// A bare address: not in either catalogue, and no name to go on.
+    /// </summary>
+    private static bool IsUnnamed(ReportSource source) =>
+        SenderCatalog.Identify(source.SourceIp) is null
+        && Intelligence.SourceCatalog.Identify(source.ReverseName) is null
+        && Intelligence.SourceCatalog.OrganizationalDomain(source.ReverseName) is null;
+
     private static int Operators(IReadOnlyList<ReportSource> sources) =>
         sources.Select(Operator).Distinct(StringComparer.OrdinalIgnoreCase).Count();
 
@@ -920,7 +953,8 @@ public sealed record ClientReport
                 .Distinct().FirstOrDefault();
             var domain = Domains.Count == 1 ? Domains[0].Domain : "your domain";
 
-            var vendors = broken.Where(x => !PassesMailOn(x)).ToList();
+            var unnamed = broken.Where(x => !PassesMailOn(x) && IsUnnamed(x)).ToList();
+            var vendors = broken.Where(x => !PassesMailOn(x) && !IsUnnamed(x)).ToList();
             var gateways = broken.Where(PassesMailOn).ToList();
             var parts = new List<(string, string)>();
 
@@ -930,6 +964,18 @@ public sealed record ClientReport
                 parts.Add((Name(vendors),
                     $"Confirm {(one ? "it is an approved sender" : "they are approved senders")}, and authorise {who} "
                   + $"to arrange custom DKIM signing for {domain} with {(one ? "it" : "each")}."));
+            }
+
+            if (unnamed.Count > 0)
+            {
+                // Nobody can arrange DKIM signing with an address. What the
+                // client can do is say whose it is.
+                var one = unnamed.Count == 1;
+                parts.Add((Name(unnamed),
+                    $"Tell {who} whether you recognise {(one ? "this address" : "these addresses")}. {(one ? "It" : "They")} "
+                  + $"sent mail as {domain} that did not pass DMARC, and nothing on record names the operator. "
+                  + "If it is a service of yours, it needs custom DKIM signing like any other; if not, somebody is "
+                  + "sending as you."));
             }
 
             if (gateways.Count > 0)
@@ -947,11 +993,21 @@ public sealed record ClientReport
                   + $"re-sign as {domain} after processing."));
             }
 
+            var these = Operators(broken) == 1 ? "this passes" : "these pass";
             if (hold is not null)
             {
                 parts.Add(("Policy",
-                    $"Keep {hold} in place. Do not move to p=reject until {(Operators(broken) == 1 ? "this passes" : "these pass")} "
+                    $"Keep {hold} in place. Do not move to p=reject until {these} "
                   + "DMARC and a fuller reporting period has been reviewed."));
+            }
+            else if (Domains.Any(d => !d.IsEnforcing && d.Messages > 0))
+            {
+                // A domain only being watched needs saying just as much: the
+                // next step there is p=quarantine, and the same senders stand
+                // in its way.
+                parts.Add(("Policy",
+                    $"Stay at p=none (monitoring) for now. Move to p=quarantine once {these} DMARC, with a "
+                  + "full month reviewed first."));
             }
 
             return parts;
@@ -975,7 +1031,7 @@ public sealed record ClientReport
 
             var reported = Daily.Count(d => d.Reported);
             return reported * 2 < Daily.Count
-                ? $" Confidence is limited: reports arrived for {reported} of {Daily.Count} days, so treat this as "
+                ? $" Confidence is limited: reports arrived for {reported} of {Daily.Count} days{SoFar}, so treat this as "
                 + "directional until a fuller month is in."
                 : "";
         }

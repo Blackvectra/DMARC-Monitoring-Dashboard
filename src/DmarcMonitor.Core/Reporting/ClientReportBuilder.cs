@@ -12,8 +12,13 @@ namespace DmarcMonitor.Core.Reporting;
 /// leave the section out or overstate it, and both are worse than a short,
 /// accurate list.
 /// </summary>
-public sealed class ClientReportBuilder(string databasePath)
+/// <param name="clock">
+/// Today, for a month still in progress. Defaults to the system clock.
+/// </param>
+public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock = null)
 {
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+
     private readonly string _connectionString = new SqliteConnectionStringBuilder
     {
         DataSource = databasePath,
@@ -51,11 +56,18 @@ public sealed class ClientReportBuilder(string databasePath)
         var changes = await GetChangesAsync(db, clientId, period, ct).ConfigureAwait(false);
         var current = await GetTotalsAsync(db, clientId, period.Start, period.End, ct).ConfigureAwait(false);
         var previous = await GetTotalsAsync(db, clientId, period.PreviousStart, period.PreviousEnd, ct).ConfigureAwait(false);
-        var daily = await GetDailyAsync(db, clientId, period, ct).ConfigureAwait(false);
+        // A month still running is covered up to yesterday: today's reports
+        // have not been sent yet, and the days after it have not happened.
+        // Counted as unreported, they told a client on the 24th that
+        // receivers had missed sixteen days of thirty.
+        var today = DateOnly.FromDateTime(_clock.GetUtcNow().UtcDateTime);
+        DateOnly? through = DateOnly.FromDateTime(period.End.UtcDateTime) >= today ? today.AddDays(-1) : null;
+        var daily = await GetDailyAsync(db, clientId, period, through, ct).ConfigureAwait(false);
 
         return new ClientReport
         {
             Daily = daily,
+            Through = through is null || daily.Count == 0 ? null : daily[^1].Day,
             ClientName = clientName,
             ProviderName = providerName,
             BrandColor = brand.Color,
@@ -217,7 +229,7 @@ public sealed class ClientReportBuilder(string databasePath)
     /// stopped on a day it did not.
     /// </remarks>
     private static async Task<List<DayPoint>> GetDailyAsync(
-        SqliteConnection db, string clientId, ReportPeriod period, CancellationToken ct)
+        SqliteConnection db, string clientId, ReportPeriod period, DateOnly? through, CancellationToken ct)
     {
         var reported = new HashSet<DateOnly>();
         await using (var command = db.CreateCommand())
@@ -288,6 +300,13 @@ public sealed class ClientReportBuilder(string databasePath)
         var points = new List<DayPoint>();
         var first = DateOnly.FromDateTime(period.Start.UtcDateTime);
         var last = DateOnly.FromDateTime(period.End.UtcDateTime);
+        if (through is { } cut)
+        {
+            // Never before a day that was reported on: a receiver that has
+            // already sent today's report has told us about today.
+            var latest = reported.Concat(counted.Keys).DefaultIfEmpty(cut).Max();
+            last = cut > latest ? cut : latest;
+        }
 
         for (var day = first; day <= last; day = day.AddDays(1))
         {

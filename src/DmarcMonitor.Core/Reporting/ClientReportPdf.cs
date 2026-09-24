@@ -700,7 +700,7 @@ public static class ClientReportPdf
 
         var generated = section.AddParagraph(
             $"Generated {report.GeneratedAt:d MMMM yyyy} by {report.ProviderName}. "
-            + $"Covers {report.Period.Start:d MMM yyyy} to {report.Period.End:d MMM yyyy}.");
+            + report.Covers);
         generated.Format.Font.Size = 8;
         generated.Format.Font.Color = Muted;
     }
