@@ -357,7 +357,7 @@ public static class ClientReportRenderer
                 </div>
                 <div class="fig">
                   <span class="fig-n">{N(enforcing)} of {N(report.Domains.Count)}</span>
-                  <span class="fig-l">domain(s) protected</span>
+                  <span class="fig-l">domain(s) enforcing a policy</span>
                   <span class="fig-s">{(enforcing == report.Domains.Count
                       ? "Every domain asks receivers to act on mail that fails."
                       : $"The rest are being watched only. {N(ready)} could be raised now.")}</span>

@@ -389,7 +389,14 @@ public sealed record ReportDomainHealth
     /// <summary>What to do about this domain, in one line.</summary>
     public string Recommended =>
         Messages == 0 ? "Confirm whether this domain sends mail at all."
-        : IsStruggling ? "Correct the senders below before the policy is raised."
+        // "Before the policy is raised" read, on a domain already at
+        // p=quarantine, as though it were not enforcing at all. Name the step.
+        : IsStruggling ? Policy switch
+        {
+            "reject" => "Correct the senders below: their mail is being refused now.",
+            "quarantine" => "Correct the senders below before moving to p=reject.",
+            _ => "Correct the senders below before moving to p=quarantine.",
+        }
         : IsEnforcing ? "Nothing. Keep watching."
         : PassRate >= 99 ? $"Move from p={Policy} to p=quarantine."
         : $"Account for the {Failing:N0} failing message(s), then move to p=quarantine.";
@@ -829,7 +836,32 @@ public sealed record ClientReport
     /// Never flatters. A domain losing mail outranks a good average, because
     /// an average across an estate is how a broken domain stays invisible.
     /// </remarks>
-    public string Verdict
+    public string Verdict => VerdictCore + CoverageCaveat;
+
+    /// <summary>
+    /// Appended to the verdict when reports cover less than half the period.
+    /// </summary>
+    /// <remarks>
+    /// "Days covered" was already stated, on page three. A verdict built on
+    /// fourteen days of a thirty-day month is directional, and the reader who
+    /// stops after the first paragraph - most of them - is owed that in the
+    /// same paragraph, not two pages later.
+    /// </remarks>
+    private string CoverageCaveat
+    {
+        get
+        {
+            if (NothingWasReported || Daily.Count == 0) { return ""; }
+
+            var reported = Daily.Count(d => d.Reported);
+            return reported * 2 < Daily.Count
+                ? $" Confidence is limited: reports arrived for {reported} of {Daily.Count} days, so treat this as "
+                + "directional until a fuller month is in."
+                : "";
+        }
+    }
+
+    private string VerdictCore
     {
         get
         {
@@ -837,9 +869,25 @@ public sealed record ClientReport
 
             if (StrugglingDomains.Count > 0)
             {
+                // Said in terms of the step that is next, because "not ready
+                // for enforcement" is false of a domain already at
+                // p=quarantine - it is enforcing, and a client reading the
+                // verdict and then the record sees a contradiction. And
+                // "authenticated", not "arriving": the figure is DMARC, not
+                // delivery.
                 var worst = StrugglingDomains[0];
-                return $"Not ready for enforcement. {worst.Domain} is losing {worst.OwnFailing:N0} of its own "
-                     + $"message(s) ({worst.OwnPassRate:0.#}% arriving), and raising a policy now would stop them.";
+                var failed = $"{worst.OwnFailing:N0} of its own message(s) failed to authenticate "
+                           + $"({worst.OwnPassRate:0.#}% did)";
+                return worst.Policy switch
+                {
+                    "reject" => $"Losing mail now. {worst.Domain} is at p=reject and {failed}; those are being "
+                              + "refused. Correct the senders named below.",
+                    "quarantine" => $"Not ready for p=reject. {worst.Domain} is already at p=quarantine, and {failed}; "
+                                  + "those are going to junk now, and would be refused outright under p=reject. "
+                                  + "Correct the senders named below before moving further.",
+                    _ => $"Not ready for enforcement. {worst.Domain} is at p={worst.Policy}, and {failed}; raising "
+                       + "the policy now would stop them. Correct the senders named below first.",
+                };
             }
 
             var broken = InventoryOf(SenderClass.Misconfigured).Count;
@@ -1033,8 +1081,8 @@ public sealed record ClientReport
                 items.Add(new RemediationItem
                 {
                     Priority = "Critical",
-                    Finding = $"{domain.Domain} is losing {domain.OwnFailing:N0} of its own message(s) "
-                            + $"({domain.OwnPassRate:0.#}% arriving).",
+                    Finding = $"{domain.OwnFailing:N0} of {domain.Domain}'s own message(s) failed to authenticate "
+                            + $"({domain.OwnPassRate:0.#}% did).",
                     Impact = domain.IsEnforcing
                         ? "Real mail is being refused or filed as junk by the receiving provider right now."
                         : "Real mail would be refused the moment this domain's policy is raised.",
@@ -1068,8 +1116,14 @@ public sealed record ClientReport
                     Impact = "These are your own messages. They are at risk of being refused under an enforcing "
                            + "policy, and some are already being filed as junk.",
                     Action = broken.Any(s => s.Authenticated)
-                        ? "Each signs as its own domain rather than as yours. Turn on custom DKIM for your domain "
-                        + "at the vendor, or authorise it in SPF."
+                        // DKIM first. Adding the vendor to SPF authorises its
+                        // servers, but SPF only counts for DMARC when the
+                        // return-path domain is also yours - which it is
+                        // not, by default, at any bulk sender. Told to "add
+                        // it to SPF", a client does, and nothing changes.
+                        ? "Each signs as its own domain rather than as yours. Turn on custom DKIM signing for your "
+                        + "domain at each vendor. If the vendor also offers a custom return-path (bounce) domain "
+                        + "under yours, set that up too. Adding the vendor to SPF alone does not fix this."
                         : "Confirm which systems these are, then authorise them properly rather than leaving them "
                         + "half-configured.",
                     Owner = $"The vendors named, with {(ProviderIsUnnamed ? "your IT provider" : ProviderName)}",

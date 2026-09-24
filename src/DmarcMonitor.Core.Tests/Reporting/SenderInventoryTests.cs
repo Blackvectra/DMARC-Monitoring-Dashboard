@@ -495,9 +495,39 @@ public sealed class VerdictTests
             Domain("broken.example", "quarantine", messages: 100, passing: 40),
         ]);
 
-        Assert.StartsWith("Not ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+        // Already at p=quarantine, so the next step is reject. "Not ready
+        // for enforcement" was false of a domain that is enforcing, and a
+        // client reading the verdict and then the record saw a contradiction.
+        Assert.StartsWith("Not ready for p=reject.", report.Verdict, StringComparison.Ordinal);
         Assert.Contains("broken.example", report.Verdict, StringComparison.Ordinal);
         Assert.Contains("60", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnUnenforcedDomainLosingMailIsNotReadyForEnforcement()
+    {
+        var report = Report([Domain("broken.example", "none", messages: 100, passing: 40)]);
+
+        Assert.StartsWith("Not ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("arriving", report.Verdict, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A verdict from a fraction of the month says so where it is read.
+    /// </summary>
+    [Fact]
+    public void AThinMonthCarriesItsCaveatInTheVerdict()
+    {
+        var days = Enumerable.Range(1, 30).Select(d => new DayPoint
+        {
+            Day = new DateOnly(2026, 9, d), Reported = d <= 14, Messages = d <= 14 ? 10 : 0, Passing = d <= 14 ? 10 : 0,
+        }).ToList();
+
+        var thin = Report() with { Daily = days };
+        Assert.Contains("reports arrived for 14 of 30 days", thin.Verdict, StringComparison.Ordinal);
+
+        var full = Report() with { Daily = [.. days.Select(d => d with { Reported = true })] };
+        Assert.DoesNotContain("Confidence is limited", full.Verdict, StringComparison.Ordinal);
     }
 
     [Fact]
