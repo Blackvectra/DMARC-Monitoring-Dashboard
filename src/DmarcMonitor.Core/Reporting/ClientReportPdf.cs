@@ -445,7 +445,13 @@ public static class ClientReportPdf
             label.Format.Font.Size = 8.5;
 
             Value(row[1], rows.Count.ToString(CultureInfo.InvariantCulture));
-            Value(row[2], rows.Sum(r => r.Messages).ToString("N0", CultureInfo.InvariantCulture));
+            // Misconfigured services sometimes pass, so the group's total is
+            // not the number that failed - and the headline quotes the failed
+            // one. Both, so the row and the verdict visibly agree.
+            var sent = rows.Sum(r => r.Messages).ToString("N0", CultureInfo.InvariantCulture);
+            Value(row[2], which == SenderClass.Misconfigured && rows.Sum(r => r.Failing) is var failing and > 0
+                ? $"{sent} ({failing.ToString("N0", CultureInfo.InvariantCulture)} failed)"
+                : sent);
 
             var note = row[3].AddParagraph(meaning);
             note.Format.Font.Size = 8;

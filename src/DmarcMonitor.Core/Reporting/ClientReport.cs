@@ -819,9 +819,10 @@ public sealed record ClientReport
         const int shown = 4;
 
         var ordered = sources.OrderByDescending(s => s.Failing).ThenByDescending(s => s.Messages).ToList();
-        var names = string.Join(", ", ordered.Take(shown).Select(s => s.Display));
+        var listed = ordered.Take(shown).Select(s => s.Display).ToList();
 
-        return ordered.Count > shown ? $"{names} and {ordered.Count - shown} more" : names;
+        if (ordered.Count > shown) { return $"{string.Join(", ", listed)} and {ordered.Count - shown} more"; }
+        return listed.Count <= 1 ? string.Concat(listed) : $"{string.Join(", ", listed[..^1])} and {listed[^1]}";
     }
 
     /// <summary>
@@ -862,7 +863,8 @@ public sealed record ClientReport
 
             return $"Confirm that {Name(broken)} {(broken.Count == 1 ? "is an approved sender" : "are approved senders")}"
                  + $", and authorise {who} to arrange custom DKIM signing with {(broken.Count == 1 ? "it" : "each")}."
-                 + (hold is null ? "" : $" Keep {hold} in place until they authenticate as you.");
+                 + (hold is null ? "" : $" Keep {hold} in place until they authenticate as "
+                    + $"{(Domains.Count == 1 ? Domains[0].Domain : "your domain")}.");
         }
     }
 
@@ -910,9 +912,24 @@ public sealed record ClientReport
                 // with them - that is a separate count, stated separately,
                 // because it also includes forged mail and a reader who adds
                 // the two up gets neither.
+                //
+                // And the count is the named services', not the domain's
+                // total. Those are the figures the register and the sender
+                // table use; a headline of 225 over a register of 224 and an
+                // inventory row of 229 read as one number counted three ways.
+                // 229 is everything those services sent, some of which
+                // passed; 224 is what did not, and is what the headline says.
                 var worst = StrugglingDomains[0];
-                var failed = $"{worst.OwnFailing:N0} message(s) from your own senders did not pass DMARC "
-                           + $"({worst.OwnPassRate:0.#}% did)";
+                var services = InventoryOf(SenderClass.Misconfigured)
+                    .Where(x => x.Domains.Contains(worst.Domain, StringComparer.OrdinalIgnoreCase)).ToList();
+                var failed = services.Count > 0
+                    ? $"{services.Sum(x => x.Failing):N0} message(s) from {services.Count} of your sending "
+                      + $"service(s) did not pass DMARC"
+                      + (services.Sum(x => x.FailedBothNotAligned) is var vendor and > 0
+                          ? $" ({vendor:N0} of them authenticated as the vendor's own domain rather than as {worst.Domain})"
+                          : "")
+                    : $"{worst.OwnFailing:N0} message(s) from your own senders did not pass DMARC "
+                      + $"({worst.OwnPassRate:0.#}% did)";
                 var verdict = worst.Policy switch
                 {
                     "reject" => $"Losing mail now. {worst.Domain} is at p=reject, and {failed}, so receivers are "
@@ -1122,13 +1139,18 @@ public sealed record ClientReport
                 items.Add(new RemediationItem
                 {
                     Priority = "Critical",
-                    Finding = $"{domain.OwnFailing:N0} message(s) from {domain.Domain}'s own senders did not pass DMARC "
-                            + $"({domain.OwnPassRate:0.#}% did).",
+                    // The same count the headline gives, for the same reason.
+                    Finding = InventoryOf(SenderClass.Misconfigured)
+                        .Where(x => x.Domains.Contains(domain.Domain, StringComparer.OrdinalIgnoreCase)).ToList() is { Count: > 0 } svc
+                        ? $"{svc.Sum(x => x.Failing):N0} message(s) from {svc.Count} of {domain.Domain}'s sending service(s) "
+                          + "did not pass DMARC."
+                        : $"{domain.OwnFailing:N0} message(s) from {domain.Domain}'s own senders did not pass DMARC "
+                          + $"({domain.OwnPassRate:0.#}% did).",
                     Impact = domain.IsEnforcing
                         ? "Real mail is being refused or filed as junk by the receiving provider right now."
                         : "Real mail would be refused the moment this domain's policy is raised.",
-                    Action = "Name every sender in the inventory below, then correct the ones marked as needing it "
-                           + "before touching the policy.",
+                    Action = "Confirm the services named in the next finding are yours, identify anything still "
+                           + "unrecognized, and have each vendor sign as your domain before the policy changes.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
                     Validation = $"{domain.Domain} above {HealthyPassRate:0}% for seven consecutive days.",
                 });
