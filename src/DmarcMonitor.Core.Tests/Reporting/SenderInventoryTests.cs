@@ -440,7 +440,7 @@ public sealed class EnforcementReadinessTests
 
         var ask = Assert.IsType<string>(report.DecisionRequested);
         Assert.Contains("Avanan", ask, StringComparison.Ordinal);
-        Assert.Contains("mail path", ask, StringComparison.Ordinal);
+        Assert.Contains("outbound mail", ask, StringComparison.Ordinal);
         Assert.DoesNotContain("custom DKIM", ask, StringComparison.Ordinal);
 
         var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
@@ -585,7 +585,7 @@ public sealed class VerdictTests
         var ask = Assert.IsType<string>(report.DecisionRequested);
         Assert.Contains("vendor.example", ask, StringComparison.Ordinal);
         Assert.Contains("custom DKIM", ask, StringComparison.Ordinal);
-        Assert.Contains("Keep p=quarantine", ask, StringComparison.Ordinal);
+        Assert.Contains("Keep p=quarantine in place", ask, StringComparison.Ordinal);
 
         Assert.Null(Report([Domain()]).DecisionRequested);
     }

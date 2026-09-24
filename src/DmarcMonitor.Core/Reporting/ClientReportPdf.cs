@@ -248,16 +248,39 @@ public static class ClientReportPdf
         verdict.Format.LeftIndent = Unit.FromCentimeter(0.35);
 
         // What only the client can settle, under the verdict it follows from.
-        if (report.DecisionRequested is { } decision)
+        // One labelled line per thing to settle, so a client can see at a
+        // glance what is being asked of whom.
+        if (report.DecisionItems is { Count: > 0 } items)
         {
-            var ask = section.AddParagraph();
-            ask.Format.Font.Size = 9;
-            ask.Format.SpaceBefore = -8;
-            ask.Format.SpaceAfter = 14;
-            ask.Format.LeftIndent = Unit.FromCentimeter(0.35);
-            ask.Format.Shading.Color = new Color(0xF4, 0xF4, 0xF5);
-            ask.AddFormattedText("Decision requested: ", TextFormat.Bold);
-            ask.AddText(decision);
+            var box = section.AddTable();
+            box.Borders.Width = 0;
+            box.Shading.Color = new Color(0xF4, 0xF4, 0xF5);
+            box.LeftPadding = Unit.FromCentimeter(0.35);
+            box.RightPadding = Unit.FromCentimeter(0.3);
+            box.TopPadding = 2;
+            box.BottomPadding = 2;
+            box.AddColumn(Unit.FromCentimeter(4.8));
+            box.AddColumn(Unit.FromCentimeter(12.4));
+
+            var head = box.AddRow();
+            head.Cells[0].MergeRight = 1;
+            var title = head.Cells[0].AddParagraph("DECISION REQUESTED");
+            title.Format.Font.Size = 7.5;
+            title.Format.Font.Bold = true;
+            title.Format.Font.Color = Muted;
+            title.Format.SpaceBefore = 3;
+
+            foreach (var (who, text) in items)
+            {
+                var row = box.AddRow();
+                var name = row.Cells[0].AddParagraph(who);
+                name.Format.Font.Size = 8.5;
+                name.Format.Font.Bold = true;
+                var body = row.Cells[1].AddParagraph(text);
+                body.Format.Font.Size = 8.5;
+            }
+
+            section.AddParagraph().Format.SpaceAfter = 8;
         }
     }
 
