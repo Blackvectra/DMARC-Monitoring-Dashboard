@@ -385,13 +385,66 @@ public sealed class EnforcementReadinessTests
 
         var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
 
-        Assert.Contains("5 service(s)", item.Finding, StringComparison.Ordinal);
+        // One operator, five servers: one service, named once. Listed per
+        // server, a client was asked to confirm the same company over and
+        // over, and the unfamiliar sender among them was buried.
+        Assert.Contains("1 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("vendor.example (5 servers)", item.Finding, StringComparison.Ordinal);
         Assert.Contains("38 message(s) affected", item.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("smtp003", item.Finding, StringComparison.Ordinal);
+    }
 
-        // Busiest first, and the tail counted rather than listed.
-        Assert.Contains("smtp003.vendor.example", item.Finding, StringComparison.Ordinal);
+    [Fact]
+    public void ManyOperatorsKeepTheBusiestAndCountTheTail()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "reject", messages: 1000, passing: 1000)],
+            Sources =
+            [
+                Broken("mail.one.example", 20),
+                Broken("mail.two.example", 12),
+                Broken("mail.three.example", 3),
+                Broken("mail.four.example", 2),
+                Broken("mail.five.example", 1),
+            ],
+        };
+
+        var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+
+        Assert.Contains("5 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("one.example", item.Finding, StringComparison.Ordinal);
         Assert.Contains("and 1 more", item.Finding, StringComparison.Ordinal);
-        Assert.DoesNotContain("smtp011.vendor.example", item.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("five.example", item.Finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A security gateway passes the client's mail on and breaks the
+    /// signature doing it. "Arrange custom DKIM signing with Avanan" is the
+    /// wrong fix, and it was going to every client that uses one.
+    /// </summary>
+    [Fact]
+    public void AGatewayIsNotAskedToSignAsTheClient()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "quarantine", messages: 1000, passing: 1000)],
+            Sources = [Broken("us.cloud-sec-av.com", 20)],
+        };
+
+        var ask = Assert.IsType<string>(report.DecisionRequested);
+        Assert.Contains("Avanan", ask, StringComparison.Ordinal);
+        Assert.Contains("mail path", ask, StringComparison.Ordinal);
+        Assert.DoesNotContain("custom DKIM", ask, StringComparison.Ordinal);
+
+        var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+        Assert.Contains("in their settings", item.Action, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -530,7 +583,7 @@ public sealed class VerdictTests
             }]);
 
         var ask = Assert.IsType<string>(report.DecisionRequested);
-        Assert.Contains("smtp.vendor.example", ask, StringComparison.Ordinal);
+        Assert.Contains("vendor.example", ask, StringComparison.Ordinal);
         Assert.Contains("custom DKIM", ask, StringComparison.Ordinal);
         Assert.Contains("Keep p=quarantine", ask, StringComparison.Ordinal);
 
