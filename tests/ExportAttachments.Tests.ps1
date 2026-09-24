@@ -24,7 +24,7 @@ BeforeAll {
     # ---- a fake Outlook ------------------------------------------------------
 
     function New-FakeAttachment {
-        param([string]$FileName, [string]$Body = 'report', [switch]$ThrowsOnName)
+        param([string]$FileName, [string]$Body = 'report', [switch]$ThrowsOnName, [switch]$ThrowsOnSave)
         $a = [pscustomobject]@{ Body = $Body; SavedTo = $null }
         if ($ThrowsOnName) {
             $a | Add-Member ScriptProperty FileName { throw 'The attachment is not readable (OLE)' }
@@ -33,8 +33,13 @@ BeforeAll {
         }
         # Records where it was asked to save, so a test can check the path was
         # absolute - which is the bug this file exists to pin.
+        $a | Add-Member NoteProperty ThrowsOnSave ([bool]$ThrowsOnSave)
         $a | Add-Member ScriptMethod SaveAsFile {
             param([string]$Path)
+            # A method that throws does propagate, unlike a property getter,
+            # so this is a real failure the way a full disk or a blocked file
+            # type is.
+            if ($this.ThrowsOnSave) { throw 'Cannot save the attachment.' }
             $this.SavedTo = $Path
             Set-Content -LiteralPath $Path -Value $this.Body -NoNewline
         }
@@ -50,8 +55,12 @@ BeforeAll {
     }
 
     function New-FakeItem {
-        param([object[]]$Attachments = @())
-        [pscustomobject]@{ Attachments = (New-FakeCollection $Attachments) }
+        param([object[]]$Attachments = @(), [bool]$UnRead = $true)
+        # UnRead and Save() as Outlook has them: the flag changes nothing
+        # until the item is saved, so Saved counts the writes.
+        $item = [pscustomobject]@{ Attachments = (New-FakeCollection $Attachments); UnRead = $UnRead; Saved = 0 }
+        $item | Add-Member ScriptMethod Save { $this.Saved++ }
+        $item
     }
 
     function New-FakeFolder {
@@ -491,6 +500,64 @@ Describe 'Export-DMARCAttachments' {
 
             $r.ExitCode | Should -Be 0
             Test-Path (Join-Path $script:Out 'Inbox' 'after.xml') | Should -BeTrue
+        }
+    }
+
+    Context 'marking as read' {
+        It 'marks a message read once its report is saved' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $item.UnRead | Should -BeFalse
+            $item.Saved  | Should -Be 1
+            $r.Text | Should -Match 'marked read'
+        }
+
+        It 'leaves a message with no report on it alone' {
+            $item = New-FakeItem @(New-FakeAttachment 'signature.png')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            $item.UnRead | Should -BeTrue
+        }
+
+        It 'leaves a message unread when one of its attachments could not be saved' {
+            # Unread is how somebody notices it. Marking it read would hide
+            # the one message that needs looking at.
+            $item = New-FakeItem @((New-FakeAttachment 'broken.xml' -ThrowsOnSave), (New-FakeAttachment 'google.xml'))
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            $item.UnRead | Should -BeTrue
+        }
+
+        It 'does not rewrite a message that was already read' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml') -UnRead $false
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            $item.Saved | Should -Be 0
+        }
+
+        It 'changes nothing with -LeaveUnread' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-LeaveUnread') | Out-Null
+
+            Test-Path (Join-Path $script:Out 'Inbox' 'google.xml') | Should -BeTrue
+            $item.UnRead | Should -BeTrue
+            $item.Saved  | Should -Be 0
         }
     }
 
