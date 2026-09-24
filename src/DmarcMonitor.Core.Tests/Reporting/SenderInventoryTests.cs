@@ -385,13 +385,66 @@ public sealed class EnforcementReadinessTests
 
         var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
 
-        Assert.Contains("5 service(s)", item.Finding, StringComparison.Ordinal);
+        // One operator, five servers: one service, named once. Listed per
+        // server, a client was asked to confirm the same company over and
+        // over, and the unfamiliar sender among them was buried.
+        Assert.Contains("1 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("vendor.example (5 servers)", item.Finding, StringComparison.Ordinal);
         Assert.Contains("38 message(s) affected", item.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("smtp003", item.Finding, StringComparison.Ordinal);
+    }
 
-        // Busiest first, and the tail counted rather than listed.
-        Assert.Contains("smtp003.vendor.example", item.Finding, StringComparison.Ordinal);
+    [Fact]
+    public void ManyOperatorsKeepTheBusiestAndCountTheTail()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "reject", messages: 1000, passing: 1000)],
+            Sources =
+            [
+                Broken("mail.one.example", 20),
+                Broken("mail.two.example", 12),
+                Broken("mail.three.example", 3),
+                Broken("mail.four.example", 2),
+                Broken("mail.five.example", 1),
+            ],
+        };
+
+        var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+
+        Assert.Contains("5 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("one.example", item.Finding, StringComparison.Ordinal);
         Assert.Contains("and 1 more", item.Finding, StringComparison.Ordinal);
-        Assert.DoesNotContain("smtp011.vendor.example", item.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("five.example", item.Finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A security gateway passes the client's mail on and breaks the
+    /// signature doing it. "Arrange custom DKIM signing with Avanan" is the
+    /// wrong fix, and it was going to every client that uses one.
+    /// </summary>
+    [Fact]
+    public void AGatewayIsNotAskedToSignAsTheClient()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "quarantine", messages: 1000, passing: 1000)],
+            Sources = [Broken("us.cloud-sec-av.com", 20)],
+        };
+
+        var ask = Assert.IsType<string>(report.DecisionRequested);
+        Assert.Contains("Avanan", ask, StringComparison.Ordinal);
+        Assert.Contains("outbound mail", ask, StringComparison.Ordinal);
+        Assert.DoesNotContain("custom DKIM", ask, StringComparison.Ordinal);
+
+        var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+        Assert.Contains("in their settings", item.Action, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -495,9 +548,73 @@ public sealed class VerdictTests
             Domain("broken.example", "quarantine", messages: 100, passing: 40),
         ]);
 
-        Assert.StartsWith("Not ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+        // Already at p=quarantine, so the next step is reject. "Not ready
+        // for enforcement" was false of a domain that is enforcing, and a
+        // client reading the verdict and then the record saw a contradiction.
+        Assert.StartsWith("Not ready for p=reject.", report.Verdict, StringComparison.Ordinal);
         Assert.Contains("broken.example", report.Verdict, StringComparison.Ordinal);
         Assert.Contains("60", report.Verdict, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Most of this mail authenticated - as the vendor. "Failed to
+    /// authenticate" is wrong about it, and "those are going to junk" claims a
+    /// disposition the report does not establish per message.
+    /// </summary>
+    [Fact]
+    public void TheVerdictSaysDmarcAndDoesNotClaimWhatReceiversDid()
+    {
+        var report = Report([Domain("broken.example", "quarantine", messages: 100, passing: 40)]);
+
+        Assert.Contains("did not pass DMARC", report.Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("failed to authenticate", report.Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("going to junk", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MisconfiguredSendersBecomeADecisionOnlyTheClientCanMake()
+    {
+        var report = Report(
+            [Domain("acme.example", "quarantine")],
+            [new ReportSource
+            {
+                SourceIp = "203.0.113.9", ReverseName = "smtp.vendor.example",
+                Messages = 50, Passing = 10, Failing = 40, AuthenticatedFor = "vendor.example",
+            }]);
+
+        var ask = Assert.IsType<string>(report.DecisionRequested);
+        Assert.Contains("vendor.example", ask, StringComparison.Ordinal);
+        Assert.Contains("custom DKIM", ask, StringComparison.Ordinal);
+        Assert.Contains("Keep p=quarantine in place", ask, StringComparison.Ordinal);
+
+        Assert.Null(Report([Domain()]).DecisionRequested);
+    }
+
+    [Fact]
+    public void AnUnenforcedDomainLosingMailIsNotReadyForEnforcement()
+    {
+        var report = Report([Domain("broken.example", "none", messages: 100, passing: 40)]);
+
+        Assert.StartsWith("Not ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("arriving", report.Verdict, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A verdict from a fraction of the month says so where it is read.
+    /// </summary>
+    [Fact]
+    public void AThinMonthCarriesItsCaveatInTheVerdict()
+    {
+        var days = Enumerable.Range(1, 30).Select(d => new DayPoint
+        {
+            Day = new DateOnly(2026, 9, d), Reported = d <= 14, Messages = d <= 14 ? 10 : 0, Passing = d <= 14 ? 10 : 0,
+        }).ToList();
+
+        var thin = Report() with { Daily = days };
+        Assert.Contains("reports arrived for 14 of 30 days", thin.Verdict, StringComparison.Ordinal);
+
+        var full = Report() with { Daily = [.. days.Select(d => d with { Reported = true })] };
+        Assert.DoesNotContain("Confidence is limited", full.Verdict, StringComparison.Ordinal);
     }
 
     [Fact]

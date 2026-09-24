@@ -246,6 +246,42 @@ public static class ClientReportPdf
         verdict.Format.Borders.Left.Width = 3;
         verdict.Format.Borders.Left.Color = report.StrugglingDomains.Count > 0 ? Bad : Good;
         verdict.Format.LeftIndent = Unit.FromCentimeter(0.35);
+
+        // What only the client can settle, under the verdict it follows from.
+        // One labelled line per thing to settle, so a client can see at a
+        // glance what is being asked of whom.
+        if (report.DecisionItems is { Count: > 0 } items)
+        {
+            var box = section.AddTable();
+            box.Borders.Width = 0;
+            box.Shading.Color = new Color(0xF4, 0xF4, 0xF5);
+            box.LeftPadding = Unit.FromCentimeter(0.35);
+            box.RightPadding = Unit.FromCentimeter(0.3);
+            box.TopPadding = 2;
+            box.BottomPadding = 2;
+            box.AddColumn(Unit.FromCentimeter(4.8));
+            box.AddColumn(Unit.FromCentimeter(12.4));
+
+            var head = box.AddRow();
+            head.Cells[0].MergeRight = 1;
+            var title = head.Cells[0].AddParagraph("DECISION REQUESTED");
+            title.Format.Font.Size = 7.5;
+            title.Format.Font.Bold = true;
+            title.Format.Font.Color = Muted;
+            title.Format.SpaceBefore = 3;
+
+            foreach (var (who, text) in items)
+            {
+                var row = box.AddRow();
+                var name = row.Cells[0].AddParagraph(who);
+                name.Format.Font.Size = 8.5;
+                name.Format.Font.Bold = true;
+                var body = row.Cells[1].AddParagraph(text);
+                body.Format.Font.Size = 8.5;
+            }
+
+            section.AddParagraph().Format.SpaceAfter = 8;
+        }
     }
 
     private static void Figures(Section section, ClientReport report)
@@ -259,9 +295,9 @@ public static class ClientReportPdf
         var values = table.AddRow();
         var labels = table.AddRow();
 
-        Figure(values[0], labels[0], $"{report.PassRate:0.#}%", "of your mail is provably yours",
+        Figure(values[0], labels[0], $"{report.PassRate:0.#}%", "of mail sent using your name was provably yours",
                report.PassRate >= ClientReport.HealthyPassRate ? Good : Bad);
-        Figure(values[1], labels[1], $"{enforcing} of {report.Domains.Count}", "domain(s) protected", Ink);
+        Figure(values[1], labels[1], $"{enforcing} of {report.Domains.Count}", "domain(s) enforcing a policy", Ink);
         Figure(values[2], labels[2], $"{unproven:N0}", "message(s) nobody can account for",
                unproven > 0 ? Bad : Good);
         Figure(values[3], labels[3],
@@ -432,7 +468,13 @@ public static class ClientReportPdf
             label.Format.Font.Size = 8.5;
 
             Value(row[1], rows.Count.ToString(CultureInfo.InvariantCulture));
-            Value(row[2], rows.Sum(r => r.Messages).ToString("N0", CultureInfo.InvariantCulture));
+            // Misconfigured services sometimes pass, so the group's total is
+            // not the number that failed - and the headline quotes the failed
+            // one. Both, so the row and the verdict visibly agree.
+            var sent = rows.Sum(r => r.Messages).ToString("N0", CultureInfo.InvariantCulture);
+            Value(row[2], which == SenderClass.Misconfigured && rows.Sum(r => r.Failing) is var failing and > 0
+                ? $"{sent} ({failing.ToString("N0", CultureInfo.InvariantCulture)} failed)"
+                : sent);
 
             var note = row[3].AddParagraph(meaning);
             note.Format.Font.Size = 8;

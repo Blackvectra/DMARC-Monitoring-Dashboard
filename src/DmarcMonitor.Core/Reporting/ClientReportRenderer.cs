@@ -352,12 +352,12 @@ public static class ClientReportRenderer
               <div class="posture">
                 <div class="fig">
                   <span class="fig-n {(report.PassRate >= ClientReport.HealthyPassRate ? "ok" : "bad")}">{N(report.PassRate)}%</span>
-                  <span class="fig-l">of your mail is provably yours</span>
+                  <span class="fig-l">of mail sent using your name was provably yours</span>
                   <span class="fig-s">{N(report.Passing)} of {N(report.Messages)} message(s)</span>
                 </div>
                 <div class="fig">
                   <span class="fig-n">{N(enforcing)} of {N(report.Domains.Count)}</span>
-                  <span class="fig-l">domain(s) protected</span>
+                  <span class="fig-l">domain(s) enforcing a policy</span>
                   <span class="fig-s">{(enforcing == report.Domains.Count
                       ? "Every domain asks receivers to act on mail that fails."
                       : $"The rest are being watched only. {N(ready)} could be raised now.")}</span>

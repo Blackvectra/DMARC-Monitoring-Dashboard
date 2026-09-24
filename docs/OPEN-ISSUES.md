@@ -595,6 +595,16 @@ renders it server-side as a PDF with the product's own header, footer and page
 numbers, the day-by-day chart, and the impersonating sources grouped by
 operator. What it does not have:
 
+- **From an outside review of the River City Boats report (24 Sep)**, worth
+  adding and not yet done: an enforcement-readiness panel under the verdict
+  (policy / senders identified / unknowns / coverage / ready for reject, each
+  pass-partial-no with its evidence); a "decision needed" line naming what the
+  client must confirm; the full sender inventory as a CSV appendix rather than
+  on the PDF; and a one-line DNS posture strip (DMARC, SPF, DKIM, MTA-STS,
+  TLS-RPT, last change). The four related figures are now reconciled: the
+  verdict, the Critical and High findings all quote what the named services
+  failed (224 on River City Boats), the sender row shows "229 (224 failed)",
+  and what receivers did (234) is its own labelled sentence.
 - **One report, not three.** The brief asks for an executive report, a
   technical report and a QBR; this is one document that sits between the first
   two.
