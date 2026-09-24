@@ -246,6 +246,19 @@ public static class ClientReportPdf
         verdict.Format.Borders.Left.Width = 3;
         verdict.Format.Borders.Left.Color = report.StrugglingDomains.Count > 0 ? Bad : Good;
         verdict.Format.LeftIndent = Unit.FromCentimeter(0.35);
+
+        // What only the client can settle, under the verdict it follows from.
+        if (report.DecisionRequested is { } decision)
+        {
+            var ask = section.AddParagraph();
+            ask.Format.Font.Size = 9;
+            ask.Format.SpaceBefore = -8;
+            ask.Format.SpaceAfter = 14;
+            ask.Format.LeftIndent = Unit.FromCentimeter(0.35);
+            ask.Format.Shading.Color = new Color(0xF4, 0xF4, 0xF5);
+            ask.AddFormattedText("Decision requested: ", TextFormat.Bold);
+            ask.AddText(decision);
+        }
     }
 
     private static void Figures(Section section, ClientReport report)

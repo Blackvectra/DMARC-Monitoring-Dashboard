@@ -839,6 +839,34 @@ public sealed record ClientReport
     public string Verdict => VerdictCore + CoverageCaveat;
 
     /// <summary>
+    /// What the client has to decide, when there is something only they can
+    /// confirm. Null when nothing is waiting on them.
+    /// </summary>
+    /// <remarks>
+    /// The register says what to do; this says what the provider cannot do
+    /// without the client. Services sending as them that are not set up to
+    /// prove it are either theirs - and a vendor has to be asked to sign as
+    /// them - or not theirs. Only the client knows which, and until they say,
+    /// nothing moves.
+    /// </remarks>
+    public string? DecisionRequested
+    {
+        get
+        {
+            var broken = InventoryOf(SenderClass.Misconfigured);
+            if (broken.Count == 0) { return null; }
+
+            var who = ProviderIsUnnamed ? "your IT provider" : ProviderName;
+            var hold = Domains.Where(d => d.IsEnforcing && d.Policy != "reject").Select(d => $"p={d.Policy}")
+                .Distinct().FirstOrDefault();
+
+            return $"Confirm that {Name(broken)} {(broken.Count == 1 ? "is an approved sender" : "are approved senders")}"
+                 + $", and authorise {who} to arrange custom DKIM signing with {(broken.Count == 1 ? "it" : "each")}."
+                 + (hold is null ? "" : $" Keep {hold} in place until they authenticate as you.");
+        }
+    }
+
+    /// <summary>
     /// Appended to the verdict when reports cover less than half the period.
     /// </summary>
     /// <remarks>
@@ -875,19 +903,31 @@ public sealed record ClientReport
                 // verdict and then the record sees a contradiction. And
                 // "authenticated", not "arriving": the figure is DMARC, not
                 // delivery.
+                //
+                // "Did not pass DMARC", not "failed to authenticate": most of
+                // these authenticate perfectly well, as the vendor, which is
+                // the whole problem. And nothing here says what receivers DID
+                // with them - that is a separate count, stated separately,
+                // because it also includes forged mail and a reader who adds
+                // the two up gets neither.
                 var worst = StrugglingDomains[0];
-                var failed = $"{worst.OwnFailing:N0} of its own message(s) failed to authenticate "
+                var failed = $"{worst.OwnFailing:N0} message(s) from your own senders did not pass DMARC "
                            + $"({worst.OwnPassRate:0.#}% did)";
-                return worst.Policy switch
+                var verdict = worst.Policy switch
                 {
-                    "reject" => $"Losing mail now. {worst.Domain} is at p=reject and {failed}; those are being "
-                              + "refused. Correct the senders named below.",
+                    "reject" => $"Losing mail now. {worst.Domain} is at p=reject, and {failed}, so receivers are "
+                              + "told to refuse them. Correct the senders named below.",
                     "quarantine" => $"Not ready for p=reject. {worst.Domain} is already at p=quarantine, and {failed}; "
-                                  + "those are going to junk now, and would be refused outright under p=reject. "
-                                  + "Correct the senders named below before moving further.",
+                                  + "under p=reject they would be refused outright. Correct the senders named below "
+                                  + "before moving further.",
                     _ => $"Not ready for enforcement. {worst.Domain} is at p={worst.Policy}, and {failed}; raising "
                        + "the policy now would stop them. Correct the senders named below first.",
                 };
+
+                return Stopped > 0
+                    ? verdict + $" Separately, receivers reported quarantining or refusing {Stopped:N0} message(s) "
+                      + "under the current policy; that count includes forged mail, not only yours."
+                    : verdict;
             }
 
             var broken = InventoryOf(SenderClass.Misconfigured).Count;
@@ -1006,7 +1046,8 @@ public sealed record ClientReport
                      + "cause, and usually fixed by turning on custom DKIM at the vendor."),
                     ("Both checks passed, neither aligned", bothUnaligned,
                      "SPF and DKIM both verified, and both were about the sender's own domain rather than "
-                     + "yours. Nothing is broken at their end: the work is to have them sign as you."),
+                     + "yours. The vendor's authentication works for its own domain; it is not set up to "
+                     + "authenticate as yours, and that is the change to ask for."),
                     ("Neither check passed", neither,
                      "Nothing verified. Forwarding and mailing lists land here legitimately; so does anybody "
                      + "sending as you."),
@@ -1081,7 +1122,7 @@ public sealed record ClientReport
                 items.Add(new RemediationItem
                 {
                     Priority = "Critical",
-                    Finding = $"{domain.OwnFailing:N0} of {domain.Domain}'s own message(s) failed to authenticate "
+                    Finding = $"{domain.OwnFailing:N0} message(s) from {domain.Domain}'s own senders did not pass DMARC "
                             + $"({domain.OwnPassRate:0.#}% did).",
                     Impact = domain.IsEnforcing
                         ? "Real mail is being refused or filed as junk by the receiving provider right now."

@@ -503,6 +503,40 @@ public sealed class VerdictTests
         Assert.Contains("60", report.Verdict, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Most of this mail authenticated - as the vendor. "Failed to
+    /// authenticate" is wrong about it, and "those are going to junk" claims a
+    /// disposition the report does not establish per message.
+    /// </summary>
+    [Fact]
+    public void TheVerdictSaysDmarcAndDoesNotClaimWhatReceiversDid()
+    {
+        var report = Report([Domain("broken.example", "quarantine", messages: 100, passing: 40)]);
+
+        Assert.Contains("did not pass DMARC", report.Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("failed to authenticate", report.Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("going to junk", report.Verdict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MisconfiguredSendersBecomeADecisionOnlyTheClientCanMake()
+    {
+        var report = Report(
+            [Domain("acme.example", "quarantine")],
+            [new ReportSource
+            {
+                SourceIp = "203.0.113.9", ReverseName = "smtp.vendor.example",
+                Messages = 50, Passing = 10, Failing = 40, AuthenticatedFor = "vendor.example",
+            }]);
+
+        var ask = Assert.IsType<string>(report.DecisionRequested);
+        Assert.Contains("smtp.vendor.example", ask, StringComparison.Ordinal);
+        Assert.Contains("custom DKIM", ask, StringComparison.Ordinal);
+        Assert.Contains("Keep p=quarantine", ask, StringComparison.Ordinal);
+
+        Assert.Null(Report([Domain()]).DecisionRequested);
+    }
+
     [Fact]
     public void AnUnenforcedDomainLosingMailIsNotReadyForEnforcement()
     {
