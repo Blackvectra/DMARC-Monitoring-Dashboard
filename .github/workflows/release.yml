@@ -17,8 +17,20 @@ permissions:
   contents: write        # needed only to attach files to a release
 
 jobs:
+  # The whole test suite, install and Windows jobs included, before anything
+  # is built. Those jobs no longer run on every merge to main, so this is
+  # where they guarantee that what a customer downloads installs.
+  tests:
+    name: Tests
+    uses: ./.github/workflows/tests.yml
+    with:
+      full: true
+    permissions:
+      contents: read
+
   cli:
     name: dmarc.exe (${{ matrix.rid }})
+    needs: tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -202,6 +214,7 @@ jobs:
   # somebody tries is the product rather than a demo of it.
   trial:
     name: Windows trial bundle
+    needs: tests
     runs-on: windows-latest
 
     steps:
@@ -375,6 +388,7 @@ jobs:
 
   web:
     name: Web app bundle
+    needs: tests
     runs-on: ubuntu-latest
 
     steps:
@@ -448,9 +462,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only this workflow's builds. The test run above shares this run and
+      # uploads its own results, which do not belong in a release.
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: dmarc-*
 
       - name: Package
         run: |
