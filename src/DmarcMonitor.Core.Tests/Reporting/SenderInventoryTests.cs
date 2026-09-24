@@ -590,6 +590,59 @@ public sealed class VerdictTests
         Assert.Null(Report([Domain()]).DecisionRequested);
     }
 
+    /// <summary>
+    /// "Arrange custom DKIM signing with 185.56.86.144" asks the client to
+    /// negotiate with an address. What they can do is say whose it is.
+    /// </summary>
+    [Fact]
+    public void AnAddressNobodyCanNameIsAskedAboutNotSignedFor()
+    {
+        var report = Report(
+            [Domain("acme.example", "quarantine")],
+            [new ReportSource { SourceIp = "198.51.100.77", Messages = 50, Passing = 10, Failing = 40 }]);
+
+        var (label, text) = Assert.Single(report.DecisionItems, i => i.Label != "Policy");
+        Assert.Equal("198.51.100.77", label);
+        Assert.StartsWith("Tell NRG Tech Services whether you recognise this address", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("custom DKIM signing for", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Morton and Red River are only being watched, and their decision box
+    /// said nothing about the policy at all.
+    /// </summary>
+    [Fact]
+    public void AMonitoredDomainIsToldItsNextStepToo()
+    {
+        var report = Report(
+            [Domain("acme.example", "none", messages: 100, passing: 90)],
+            [new ReportSource
+            {
+                SourceIp = "203.0.113.9", ReverseName = "smtp.vendor.example",
+                Messages = 50, Passing = 40, Failing = 10, AuthenticatedFor = "vendor.example",
+            }]);
+
+        var policy = Assert.Single(report.DecisionItems, i => i.Label == "Policy");
+        Assert.StartsWith("Stay at p=none (monitoring) for now. Move to p=quarantine", policy.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// River City Boats: 234 turned away, 224 of them the client's own
+    /// Mailchimp and Avanan mail. "The protection doing its job" was not what
+    /// happened to those.
+    /// </summary>
+    [Fact]
+    public void MailTurnedAwayIsOnlyCalledProtectionWhenNoneOfItWasTheirs()
+    {
+        DayPoint[] daily = [new() { Day = new DateOnly(2026, 9, 1), Reported = true, Messages = 100, Passing = 40, Quarantined = 60 }];
+
+        var losing = Report([Domain("acme.example", "quarantine", messages: 100, passing: 40)]) with { Daily = daily };
+        var fine = Report([Domain("acme.example", "quarantine", messages: 100, passing: 100)]) with { Daily = daily };
+
+        Assert.Contains("includes mail of your own", losing.Covered.Single(f => f.Label == "Turned away on your behalf").Note, StringComparison.Ordinal);
+        Assert.Contains("protection doing its job", fine.Covered.Single(f => f.Label == "Turned away on your behalf").Note, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AnUnenforcedDomainLosingMailIsNotReadyForEnforcement()
     {

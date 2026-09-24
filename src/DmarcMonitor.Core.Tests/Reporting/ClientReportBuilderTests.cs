@@ -117,6 +117,61 @@ public sealed class ClientReportBuilderTests : IDisposable
         return report!;
     }
 
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private async Task<ClientReport> SeptemberAsOfAsync(DateTimeOffset now)
+    {
+        await StoreAsync(Xml("acme.com", "reject",
+            Row("203.0.113.9", 10, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass")), 9);
+        var slug = await _store.CreateClientAsync("Acme Corp");
+        await _store.AssignDomainAsync("acme.com", slug!);
+
+        var report = await new ClientReportBuilder(_dbPath, new FixedClock(now))
+            .BuildAsync(slug!, ReportPeriod.ForMonth(2026, 9), "NRG Tech Services");
+        return Assert.IsType<ClientReport>(report);
+    }
+
+    // ---- a month still in progress ---------------------------------------------
+
+    /// <summary>
+    /// Generated on 24 September, the report said receivers had missed
+    /// sixteen days of thirty: six of them had not happened yet.
+    /// </summary>
+    [Fact]
+    public async Task AMonthInProgressIsCoveredUpToYesterday()
+    {
+        var report = await SeptemberAsOfAsync(new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero));
+
+        Assert.Equal(19, report.Daily.Count);
+        Assert.Equal(new DateOnly(2026, 9, 19), report.Through);
+        Assert.Contains("19 Sep 2026; the month is still in progress", report.Covers, StringComparison.Ordinal);
+        Assert.Equal("1 of 19 so far", report.Covered.Single(f => f.Label == "Days covered").Value);
+    }
+
+    [Fact]
+    public async Task AFinishedMonthIsCoveredToItsLastDay()
+    {
+        var report = await SeptemberAsOfAsync(new DateTimeOffset(2026, 10, 5, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Equal(30, report.Daily.Count);
+        Assert.Null(report.Through);
+        Assert.Equal("Covers 1 Sep 2026 to 30 Sep 2026.", report.Covers);
+    }
+
+    [Fact]
+    public async Task AReportedDayIsNeverCutOff()
+    {
+        // Reports for the 15th, read on the 10th: a receiver's clock, or a
+        // test fixture, is not a reason to drop mail from the chart.
+        var report = await SeptemberAsOfAsync(new DateTimeOffset(2026, 9, 10, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.Equal(new DateOnly(2026, 9, 15), report.Daily[^1].Day);
+        Assert.True(report.Daily[^1].Reported);
+    }
+
     // ---- the distinction the product exists to make --------------------------
 
     [Fact]

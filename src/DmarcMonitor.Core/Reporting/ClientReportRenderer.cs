@@ -829,8 +829,7 @@ public static class ClientReportRenderer
             </section>
             <footer>
               <p>Generated {E(report.GeneratedAt.ToString("d MMMM yyyy", CultureInfo.InvariantCulture))}
-              by {E(report.ProviderName)}. Covers {E(report.Period.Start.ToString("d MMM yyyy", CultureInfo.InvariantCulture))}
-              to {E(report.Period.End.ToString("d MMM yyyy", CultureInfo.InvariantCulture))}.</p>
+              by {E(report.ProviderName)}. {E(report.Covers)}</p>
               {Contact(report)}
             </footer>
 
