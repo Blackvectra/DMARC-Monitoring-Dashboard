@@ -48,7 +48,7 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
     /// </remarks>
     public async Task<DnsProviderConfig> SetAsync(
         string clientSlug, string? domain, string provider,
-        IReadOnlyDictionary<string, string> settings, string? secret, CancellationToken ct = default)
+        IReadOnlyDictionary<string, string> settings, string? secret, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
         ArgumentException.ThrowIfNullOrWhiteSpace(provider);
@@ -81,7 +81,7 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        var (tenantId, tenantSlug, clientId) = await ClientAsync(db, clientSlug, ct).ConfigureAwait(false)
+        var (ownerTenant, tenantSlug, clientId) = await ClientAsync(db, clientSlug, tenantId, ct).ConfigureAwait(false)
             ?? throw new ArgumentException($"No client filed as '{clientSlug}'.", nameof(clientSlug));
 
         string? domainId = null;
@@ -113,19 +113,19 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
                 (id, tenant_id, client_id, domain_id, provider, config_json, credential_ref, is_enabled, created_at, updated_at)
             VALUES ($id, $tenant, $client, $domain, $provider, $config, $ref, 1, $now, $now)
             """, ct,
-            ("$id", id), ("$tenant", tenantId), ("$client", clientId), ("$domain", (object?)domainId ?? DBNull.Value),
+            ("$id", id), ("$tenant", ownerTenant), ("$client", clientId), ("$domain", (object?)domainId ?? DBNull.Value),
             ("$provider", kind), ("$config", JsonSerializer.Serialize(settings)),
             ("$ref", (object?)credentialRef ?? DBNull.Value), ("$now", now)).ConfigureAwait(false);
 
         return new DnsProviderConfig(id, clientSlug, domainName, kind, settings, credentialRef, null, null);
     }
 
-    public async Task<bool> RemoveAsync(string clientSlug, string? domain, CancellationToken ct = default)
+    public async Task<bool> RemoveAsync(string clientSlug, string? domain, string? tenantId = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        var client = await ClientAsync(db, clientSlug, ct).ConfigureAwait(false);
+        var client = await ClientAsync(db, clientSlug, tenantId, ct).ConfigureAwait(false);
         if (client is null) { return false; }
 
         string? domainId = null;
@@ -284,14 +284,25 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
             settings, r.IsDBNull(5) ? null : r.GetString(5), verified, r.IsDBNull(7) ? null : r.GetString(7));
     }
 
-    private static async Task<(string TenantId, string TenantSlug, string ClientId)?> ClientAsync(SqliteConnection db, string slug, CancellationToken ct)
+    /// <remarks>
+    /// Resolved inside the caller's organization. Slugs are unique per
+    /// organization, not across them, and this used to take whichever
+    /// "acme-corp" SQLite scanned first - so saving a provider on one
+    /// organization's Settings page could delete another organization's
+    /// Cloudflare token and store the new one under that organization.
+    /// </remarks>
+    private static async Task<(string TenantId, string TenantSlug, string ClientId)?> ClientAsync(
+        SqliteConnection db, string slug, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT t.id, t.slug, c.id FROM clients c JOIN tenants t ON t.id = c.tenant_id
-            WHERE c.slug = $slug AND c.deleted_at IS NULL LIMIT 1
+            WHERE c.slug = $slug AND c.deleted_at IS NULL
+              AND ($tenant IS NULL OR c.tenant_id = $tenant)
+            LIMIT 1
             """;
         command.Parameters.AddWithValue("$slug", slug.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
         return (reader.GetString(0), reader.GetString(1), reader.GetString(2));

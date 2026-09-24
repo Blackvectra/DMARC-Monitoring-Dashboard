@@ -220,6 +220,17 @@ else
         try
         {
             var access = await Org.GetAsync();
+
+            // The name printed on every report the organization sends. The
+            // form showed to anybody while the organization was unnamed, and
+            // saved for anybody, so a customer's read-only login could sign
+            // the MSP's reports with a name of their choosing.
+            if (!access.CanAdminister || access.RestrictedClient is not null)
+            {
+                _providerError = "Only an administrator of this organization can set its name.";
+                return;
+            }
+
             var organization = access.Current
                 ?? (await Organizations.ListAsync()).FirstOrDefault();
 

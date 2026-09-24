@@ -106,7 +106,7 @@ public static class DnsCommand
 
         try
         {
-            var config = await configs.SetAsync(client, Args.Value(args, "--domain"), provider, settings, secret, ct).ConfigureAwait(false);
+            var config = await configs.SetAsync(client, Args.Value(args, "--domain"), provider, settings, secret, ct: ct).ConfigureAwait(false);
             Console.WriteLine($"{config.Provider} set for {config.Domain ?? $"every domain of {client}"}.");
             if (config.CredentialRef is not null) { Console.WriteLine($"Credential stored as {config.CredentialRef}. {configs.Secrets.Description}"); }
             Console.WriteLine($"Check it: dmarc dns test --domain <domain>");
@@ -155,7 +155,7 @@ public static class DnsCommand
         var client = Args.Value(args, "--client");
         if (string.IsNullOrWhiteSpace(client)) { return Usage("dmarc dns remove --client <slug> [--domain <d>]"); }
 
-        var removed = await configs.RemoveAsync(client, Args.Value(args, "--domain"), ct).ConfigureAwait(false);
+        var removed = await configs.RemoveAsync(client, Args.Value(args, "--domain"), ct: ct).ConfigureAwait(false);
         Console.WriteLine(removed ? "Removed, and its credential with it." : "Nothing was configured there.");
         return 0;
     }

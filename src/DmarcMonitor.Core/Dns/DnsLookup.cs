@@ -454,6 +454,19 @@ public sealed class DnsLookup(ILookupClient? client = null)
     {
         var response = await _client.QueryAsync(name, QueryType.TXT, cancellationToken: ct).ConfigureAwait(false);
 
+        // An error answer is not an empty answer. DnsClient returns SERVFAIL
+        // and REFUSED without throwing unless told to, and this read them as
+        // "no records" - so a live SPF include whose servers hiccupped for a
+        // minute was classified dead and planned for removal as a SAFE fix,
+        // and applying it took the customer's Salesforce mail out of their
+        // SPF. Only NXDOMAIN - the authoritative "this name does not exist" -
+        // is an answer; anything else is a failed lookup and is raised as
+        // one, which every caller already treats as "do not conclude".
+        if (response.HasError && response.Header.ResponseCode != DnsHeaderResponseCode.NotExistentDomain)
+        {
+            throw new DnsResponseException((DnsResponseCode)response.Header.ResponseCode);
+        }
+
         // A TXT record longer than 255 characters arrives as several strings
         // that must be joined with nothing between them. Long SPF records and
         // DKIM keys are routinely split this way, and joining with a space

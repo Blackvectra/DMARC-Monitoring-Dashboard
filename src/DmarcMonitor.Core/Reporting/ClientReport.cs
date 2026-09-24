@@ -1105,7 +1105,7 @@ public sealed record ClientReport
                     Finding = $"{strangers.Count} source(s) sent {volume:N0} message(s) as you and never "
                             + $"authenticated once: {Name(strangers)}"
                             + (spread > 0
-                                ? $". The busiest was seen against {spread} unrelated organisation(s), so this is "
+                                ? $". The busiest was seen against {spread} unrelated organization(s), so this is "
                                 + "broad activity rather than somebody targeting you."
                                 : "."),
                     Impact = refused

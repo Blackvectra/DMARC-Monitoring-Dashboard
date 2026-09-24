@@ -58,7 +58,7 @@ letters.
    never subject to a SmartScreen download warning. Not a fit for this - it is
    a server product with a trial copy attached - but it is the honest answer
    to "how do I make it stop".
-2. **Being inside the organisation.** See *The case that needs no
+2. **Being inside the organization.** See *The case that needs no
    certificate* below. For an MSP this is the one that actually matters.
 
 ## Nothing here is instant
@@ -75,7 +75,7 @@ Two Azure prerequisites that are easy to miss and will stop you on day one:
   subscriptions are explicitly unsupported; the portal refuses to create the
   account.
 - Eligibility is verified businesses and self-employed individuals in the US,
-  Canada, EU and UK. Organisations under three years old were originally
+  Canada, EU and UK. Organizations under three years old were originally
   excluded; individual validation is now open and is a separate path with its
   own document checks.
 
@@ -125,7 +125,7 @@ A public repository is not an open source one. The source is readable on
 GitHub because the platform's terms let signed-in users read public
 repositories - which `LICENSE` says in as many words - and that grants
 nobody any right to use it. Applying anyway would mean representing this as
-something it is not, to an organisation whose whole purpose is vouching for
+something it is not, to an organization whose whole purpose is vouching for
 identity.
 
 This changes only if the licence changes, and that is a business decision
@@ -154,7 +154,7 @@ runner - or an HSM that costs more than the certificate.
 
 ## The case that needs no certificate at all
 
-If the Windows copy only ever runs on machines inside one organisation -
+If the Windows copy only ever runs on machines inside one organization -
 the normal case for an MSP running this internally, and probably the case
 that matters most here - then:
 

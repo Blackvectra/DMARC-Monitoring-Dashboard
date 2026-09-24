@@ -349,11 +349,13 @@ public sealed class RemediationUiService(
     public Task<IReadOnlyList<DnsProviderConfig>> ProvidersAsync(string? tenantId, CancellationToken ct = default) =>
         providers.ListAsync(tenantId, ct);
 
+    /// <param name="tenantId">The caller's organization; the client slug is resolved inside it.</param>
     public Task<DnsProviderConfig> SetProviderAsync(
-        string clientSlug, string? domain, string provider, IReadOnlyDictionary<string, string> settings, string? secret,
-        CancellationToken ct = default) =>
-        providers.SetAsync(clientSlug, domain, provider, settings, secret, ct);
+        string? tenantId, string clientSlug, string? domain, string provider, IReadOnlyDictionary<string, string> settings,
+        string? secret, CancellationToken ct = default) =>
+        providers.SetAsync(clientSlug, domain, provider, settings, secret, tenantId, ct);
 
-    public Task<bool> RemoveProviderAsync(string clientSlug, string? domain, CancellationToken ct = default) =>
-        providers.RemoveAsync(clientSlug, domain, ct);
+    /// <param name="tenantId">The caller's organization; the client slug is resolved inside it.</param>
+    public Task<bool> RemoveProviderAsync(string? tenantId, string clientSlug, string? domain, CancellationToken ct = default) =>
+        providers.RemoveAsync(clientSlug, domain, tenantId, ct);
 }
