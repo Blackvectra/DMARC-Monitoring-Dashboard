@@ -2,15 +2,22 @@ name: Tests
 
 # Paced to stay inside the free Actions minutes, which bill Windows at double.
 #
-# A pull request runs the fast checks: the .NET build and tests, the schema,
-# and Pester on Ubuntu - about six billable minutes. The install and
-# bootstrap jobs, the arm64 run and everything on Windows prove the product
-# installs, and that only has to be true of what reaches main, so they run on
-# the push a merge makes. A pull request that changes deploy/ or the installers
-# can ask for them early with the full-ci label, or run this by hand.
+# Every pull request and every merge to main runs the fast checks: the .NET
+# build and tests with the schema, and Pester on Ubuntu - about three
+# billable minutes.
 #
-# Every push used to run all nine jobs, twice for a merged pull request - about
-# 24 billable minutes a push, and several pushes a pull request.
+# The install and bootstrap jobs, the arm64 run and everything on Windows
+# prove the product installs. That has to be true of what a customer can
+# download, so they run BEFORE EVERY RELEASE: release.yml calls this workflow
+# with full: true and publishes nothing unless it passes. They also run
+# weekly on main, so a broken installer does not wait for the next tag to
+# surface, and on demand: run this by hand, or label a pull request that
+# changes deploy/ or the installers full-ci.
+#
+# History: every push once ran all nine jobs, twice for a merged pull request,
+# about 24 billable minutes a push. Then only merges did, about 22 minutes
+# each, which at four merges a day was more than the whole monthly allowance
+# on its own.
 on:
   push:
     branches: [main]
@@ -19,6 +26,16 @@ on:
     types: [opened, synchronize, reopened, labeled]
     paths-ignore: ['docs/**', '**.md']
   workflow_dispatch:
+  # Monday 13:00 UTC. The heavy jobs no longer run on every merge.
+  schedule:
+    - cron: '0 13 * * 1'
+  # release.yml runs the whole suite first and publishes only if it passes.
+  workflow_call:
+    inputs:
+      full:
+        description: Run the install, bootstrap, arm64 and Windows jobs too.
+        type: boolean
+        default: false
 
 # A new push to a pull request makes the run for the previous one worthless;
 # stop paying for it.
@@ -39,8 +56,9 @@ jobs:
         # ubuntu proves the parsers are pure and portable, which is what makes
         # the eventual C# port straightforward. windows is the platform the
         # engine actually ships on, so it is the one that must stay green.
-        # Windows only once it matters: on main, or when asked for.
-        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+        # Windows only with the full suite: before a release, weekly, or
+        # when asked for.
+        os: ${{ fromJSON((inputs.full || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +137,71 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      # The schema checks used to be their own job. They take four seconds,
+      # and a job is billed as a whole minute however short it is.
+      - name: Apply schema to an empty database
+        run: |
+          # db/schema.sql is the contract the future EF Core migration is
+          # generated from. If it stops applying cleanly, everything built on
+          # it is built on sand.
+          sqlite3 /tmp/schema-check.db < db/schema.sql
+          echo "--- tables ---"
+          sqlite3 /tmp/schema-check.db \
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+          echo "--- views ---"
+          sqlite3 /tmp/schema-check.db "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name;"
+
+      - name: Run schema constraint checks
+        run: |
+          # Proves the constraints actually fire: report dedup, one-domain-one-
+          # client, FK integrity, CHECK enums, tenant isolation, cascade delete.
+          # The negative cases are expected to error, so this deliberately does
+          # not use "set -e" semantics for the whole file.
+          sqlite3 /tmp/schema-check.db < db/schema-verify.sql > /tmp/verify.out 2>&1 || true
+          cat /tmp/verify.out
+
+          fail=0
+          check() {
+            if grep -qF "$1" /tmp/verify.out; then
+              echo "ok   $2"
+            else
+              echo "FAIL $2 (expected to find: $1)"
+              fail=1
+            fi
+          }
+          check "UNIQUE constraint failed: aggregate_reports.org_name" "duplicate report rejected"
+          check "UNIQUE constraint failed: domains.tenant_id, domains.name" "same-tenant domain conflict rejected"
+          check "FOREIGN KEY constraint failed"                        "orphan record rejected"
+          check "CHECK constraint failed"                              "invalid enum rejected"
+          check "orphan_domains=0"                                     "cascade delete removed client's domains"
+          check "acme_survives=2"                                      "other client's data untouched"
+          # Tenant layer. These are the security boundary in a hosted
+          # deployment, not a convenience: if a tenant-scoped read ever
+          # returns another tenant's rows, one MSP is reading a competitor's
+          # book of business.
+          check "nls_sees_rival_rows=0"                                "TENANT ISOLATION: no cross-tenant rows"
+          check "rival_row_count=1"                                    "the other tenant has its own data"
+          check "acme_com_managed_by=2_tenants"                        "two tenants may manage the same domain name"
+          check "acme_corp_slug_used_by=2_tenants"                     "two tenants may reuse a client slug"
+          check "UNIQUE constraint failed: clients.tenant_id, clients.slug" "one tenant cannot reuse a client slug"
+          check "rival_clients=0"                                      "tenant cascade removed its clients"
+          check "rival_domains=0"                                      "tenant cascade removed its domains"
+          check "rival_records=0"                                      "tenant cascade removed its aggregate records"
+          check "nls_survives=2"                                       "deleting one tenant leaves the other intact"
+          check "USING INDEX ix_agg_rec_tenant_date"                   "isolation filter uses a tenant-leading index"
+          # Remediation tables: a refused plan is still recorded, an applied
+          # change keeps its rollback target, secrets stay out of the database,
+          # and a client's remediation history dies with the client.
+          check "refused_plan_stored=1"                                "refused plan is still recorded"
+          check "change_rollback_target=v=spf1 include:a -all"         "applied change keeps its rollback target"
+          check "stores_only_ref=DnsToken_c-acme_cloudflare"           "provider config stores a credential ref, not a secret"
+          check "UNIQUE constraint failed: spf_flatten_state.domain_id" "one flatten state per domain enforced"
+          check "orphan_plans=0"                                       "cascade removed change plans"
+          check "orphan_changes=0"                                     "cascade removed applied changes"
+          check "orphan_provider=0"                                    "cascade removed provider configs"
+          check "orphan_flatten=0"                                     "cascade removed flatten state"
+          exit $fail
+
       - name: Restore
         run: dotnet restore src/DmarcMonitor.sln
 
@@ -165,7 +248,7 @@ jobs:
 
   install:
     name: Install on a fresh Ubuntu
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    if: inputs.full || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -466,7 +549,7 @@ jobs:
   # architecture, on every pull request.
   install-arm64:
     name: Install on a fresh Ubuntu (arm64)
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    if: inputs.full || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -556,7 +639,7 @@ jobs:
 
   bootstrap-linux:
     name: One command on a fresh Ubuntu
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    if: inputs.full || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -643,7 +726,7 @@ jobs:
 
   bootstrap-windows:
     name: One command on a fresh Windows
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    if: inputs.full || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -788,7 +871,7 @@ jobs:
   # screen. Invisible on a server, and the entire experience of a trial copy.
   windows-trial:
     name: Windows trial download
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    if: inputs.full || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -1038,7 +1121,10 @@ jobs:
       # Every job above has already run against it: the launcher, the first
       # run against no database, and dmarc.exe from inside the bundle. What is
       # uploaded here is that exact folder.
+      # Not when release.yml runs this: the release builds and publishes its
+      # own bundle under the same name, in the same run.
       - name: Keep the bundle
+        if: ${{ !inputs.full }}
         uses: actions/upload-artifact@v4
         with:
           name: dmarc-windows-trial
@@ -1048,72 +1134,3 @@ jobs:
           # enough that unsigned builds do not accumulate indefinitely.
           retention-days: 14
           if-no-files-found: error
-
-  schema:
-    name: SQLite schema
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Apply schema to an empty database
-        run: |
-          # db/schema.sql is the contract the future EF Core migration is
-          # generated from. If it stops applying cleanly, everything built on
-          # it is built on sand.
-          sqlite3 /tmp/schema-check.db < db/schema.sql
-          echo "--- tables ---"
-          sqlite3 /tmp/schema-check.db \
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
-          echo "--- views ---"
-          sqlite3 /tmp/schema-check.db "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name;"
-
-      - name: Run schema constraint checks
-        run: |
-          # Proves the constraints actually fire: report dedup, one-domain-one-
-          # client, FK integrity, CHECK enums, tenant isolation, cascade delete.
-          # The negative cases are expected to error, so this deliberately does
-          # not use "set -e" semantics for the whole file.
-          sqlite3 /tmp/schema-check.db < db/schema-verify.sql > /tmp/verify.out 2>&1 || true
-          cat /tmp/verify.out
-
-          fail=0
-          check() {
-            if grep -qF "$1" /tmp/verify.out; then
-              echo "ok   $2"
-            else
-              echo "FAIL $2 (expected to find: $1)"
-              fail=1
-            fi
-          }
-          check "UNIQUE constraint failed: aggregate_reports.org_name" "duplicate report rejected"
-          check "UNIQUE constraint failed: domains.tenant_id, domains.name" "same-tenant domain conflict rejected"
-          check "FOREIGN KEY constraint failed"                        "orphan record rejected"
-          check "CHECK constraint failed"                              "invalid enum rejected"
-          check "orphan_domains=0"                                     "cascade delete removed client's domains"
-          check "acme_survives=2"                                      "other client's data untouched"
-          # Tenant layer. These are the security boundary in a hosted
-          # deployment, not a convenience: if a tenant-scoped read ever
-          # returns another tenant's rows, one MSP is reading a competitor's
-          # book of business.
-          check "nls_sees_rival_rows=0"                                "TENANT ISOLATION: no cross-tenant rows"
-          check "rival_row_count=1"                                    "the other tenant has its own data"
-          check "acme_com_managed_by=2_tenants"                        "two tenants may manage the same domain name"
-          check "acme_corp_slug_used_by=2_tenants"                     "two tenants may reuse a client slug"
-          check "UNIQUE constraint failed: clients.tenant_id, clients.slug" "one tenant cannot reuse a client slug"
-          check "rival_clients=0"                                      "tenant cascade removed its clients"
-          check "rival_domains=0"                                      "tenant cascade removed its domains"
-          check "rival_records=0"                                      "tenant cascade removed its aggregate records"
-          check "nls_survives=2"                                       "deleting one tenant leaves the other intact"
-          check "USING INDEX ix_agg_rec_tenant_date"                   "isolation filter uses a tenant-leading index"
-          # Remediation tables: a refused plan is still recorded, an applied
-          # change keeps its rollback target, secrets stay out of the database,
-          # and a client's remediation history dies with the client.
-          check "refused_plan_stored=1"                                "refused plan is still recorded"
-          check "change_rollback_target=v=spf1 include:a -all"         "applied change keeps its rollback target"
-          check "stores_only_ref=DnsToken_c-acme_cloudflare"           "provider config stores a credential ref, not a secret"
-          check "UNIQUE constraint failed: spf_flatten_state.domain_id" "one flatten state per domain enforced"
-          check "orphan_plans=0"                                       "cascade removed change plans"
-          check "orphan_changes=0"                                     "cascade removed applied changes"
-          check "orphan_provider=0"                                    "cascade removed provider configs"
-          check "orphan_flatten=0"                                     "cascade removed flatten state"
-          exit $fail
