@@ -117,7 +117,11 @@ public sealed record SelectorReading(string Selector, DkimKey? Key, DateTimeOffs
 /// from, and calling it a change would fire "this domain's DNS was edited" at
 /// every newly onboarded customer.
 /// </param>
-public sealed record SnapshotSave(bool Stored, bool Changed);
+public sealed record SnapshotSave(bool Stored, bool Changed)
+{
+    /// <summary>What changed, record by record, when <see cref="Changed"/> is true.</summary>
+    public IReadOnlyList<DriftChange> Drift { get; init; } = [];
+}
 
 /// <summary>A selector seen signing, and the key found at it.</summary>
 /// <param name="Selector">The selector, as the reports spelled it.</param>
@@ -343,11 +347,11 @@ public sealed class DnsSnapshotStore(string databasePath)
             await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        var changed = false;
+        IReadOnlyList<DriftChange>? drift = null;
 
         if (status == DnsCheckStatus.Ok)
         {
-            changed = await WriteSnapshotAsync(
+            drift = await WriteSnapshotAsync(
                 db, transaction, domainId, tenantId!, clientId!, published, now, ct).ConfigureAwait(false);
 
             await WriteDkimAsync(
@@ -355,10 +359,16 @@ public sealed class DnsSnapshotStore(string databasePath)
         }
 
         await transaction.CommitAsync(ct).ConfigureAwait(false);
-        return new SnapshotSave(Stored: true, changed);
+        return drift is null
+            ? new SnapshotSave(Stored: true, Changed: false)
+            : new SnapshotSave(Stored: true, Changed: true) { Drift = drift };
     }
 
-    private static async Task<bool> WriteSnapshotAsync(
+    /// <returns>
+    /// Null when the domain publishes what it was last seen publishing, or
+    /// this is its first reading; otherwise what changed.
+    /// </returns>
+    private static async Task<IReadOnlyList<DriftChange>?> WriteSnapshotAsync(
         SqliteConnection db, SqliteTransaction transaction, string domainId, string tenantId, string clientId,
         PublishedRecords published, DateTimeOffset now, CancellationToken ct)
     {
@@ -377,8 +387,8 @@ public sealed class DnsSnapshotStore(string databasePath)
         // than against every reading ever stored, because a domain that
         // reverts to a record it used to have HAS changed, and its old row
         // still being on file does not make that a non-event.
-        var previous = await LatestHashAsync(db, transaction, domainId, ct).ConfigureAwait(false);
-        var changed = previous is not null && !string.Equals(previous, hash, StringComparison.Ordinal);
+        var previous = await LatestAsync(db, transaction, domainId, ct).ConfigureAwait(false);
+        var changed = previous is not null && !string.Equals(previous.Value.Hash, hash, StringComparison.Ordinal);
 
         // The next place in this domain's order of observations. Read and
         // written inside the transaction, which SQLite serialises against
@@ -427,7 +437,73 @@ public sealed class DnsSnapshotStore(string databasePath)
             await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        return changed;
+        if (!changed) { return null; }
+
+        var drift = DnsDrift.Compare(previous!.Value.State, new DnsState
+        {
+            Spf = spf,
+            SpfCount = published.SpfRecords.Count,
+            Dmarc = published.DmarcRecord,
+            MtaSts = published.MtaStsRecord,
+            TlsRpt = published.TlsRptRecord,
+        });
+
+        await WriteDriftAsync(db, transaction, domainId, tenantId, clientId, drift, now, ct).ConfigureAwait(false);
+        return drift;
+    }
+
+    /// <summary>
+    /// Records each change, marked expected when this product changed the
+    /// domain's DNS itself in the two days before.
+    /// </summary>
+    /// <remarks>
+    /// "Change I made" against "change the client made without telling me"
+    /// is the distinction the table was designed around. A change applied
+    /// here and not rolled back is the first kind; anything else is the
+    /// second, and is what an MSP needs to hear about.
+    /// </remarks>
+    private static async Task WriteDriftAsync(
+        SqliteConnection db, SqliteTransaction transaction, string domainId, string tenantId, string clientId,
+        IReadOnlyList<DriftChange> drift, DateTimeOffset now, CancellationToken ct)
+    {
+        if (drift.Count == 0) { return; }
+
+        bool expected;
+        await using (var ours = db.CreateCommand())
+        {
+            ours.Transaction = transaction;
+            ours.CommandText = """
+                SELECT EXISTS (SELECT 1 FROM dns_changes
+                               WHERE domain_id = $domain AND rolled_back_at IS NULL AND applied_at >= $since)
+                """;
+            ours.Parameters.AddWithValue("$domain", domainId);
+            ours.Parameters.AddWithValue("$since", Stamp(now.AddDays(-2)));
+            expected = Convert.ToInt64(await ours.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) == 1;
+        }
+
+        foreach (var change in drift)
+        {
+            await using var insert = db.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO dns_drift_events
+                    (id, tenant_id, client_id, domain_id, detected_at, record_type,
+                     old_value, new_value, summary, severity, was_expected)
+                VALUES ($id, $tenant, $client, $domain, $at, $type, $old, $new, $summary, $severity, $expected)
+                """;
+            insert.Parameters.AddWithValue("$id", Guid.NewGuid().ToString());
+            insert.Parameters.AddWithValue("$tenant", tenantId);
+            insert.Parameters.AddWithValue("$client", clientId);
+            insert.Parameters.AddWithValue("$domain", domainId);
+            insert.Parameters.AddWithValue("$at", Stamp(now));
+            insert.Parameters.AddWithValue("$type", change.RecordType);
+            insert.Parameters.AddWithValue("$old", (object?)change.OldValue ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$new", (object?)change.NewValue ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$summary", change.Summary);
+            insert.Parameters.AddWithValue("$severity", change.Severity);
+            insert.Parameters.AddWithValue("$expected", expected ? 1 : 0);
+            await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -474,20 +550,33 @@ public sealed class DnsSnapshotStore(string databasePath)
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
-    private static async Task<string?> LatestHashAsync(
+    private static async Task<(string Hash, DnsState State)?> LatestAsync(
         SqliteConnection db, SqliteTransaction transaction, string domainId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT content_hash FROM dns_snapshots
+            SELECT content_hash, spf_record, COALESCE(spf_record_count, 0), dmarc_record, mta_sts_record, tls_rpt_record
+            FROM dns_snapshots
             WHERE domain_id = $domain
             ORDER BY last_seen_seq DESC
             LIMIT 1
             """;
         command.Parameters.AddWithValue("$domain", domainId);
 
-        return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
+
+        string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+
+        return (reader.GetString(0), new DnsState
+        {
+            Spf = Text(1),
+            SpfCount = reader.GetInt32(2),
+            Dmarc = Text(3),
+            MtaSts = Text(4),
+            TlsRpt = Text(5),
+        });
     }
 
     /// <summary>

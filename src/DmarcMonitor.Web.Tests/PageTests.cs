@@ -220,7 +220,7 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.True(start >= 0, "the authentication panel is missing");
         var panel = html[start..Math.Min(start + 2500, html.Length)];
 
-        Assert.Contains("the sending server was authorised by the envelope domain", panel, StringComparison.Ordinal);
+        Assert.Contains("the sending server was authorized by the envelope domain", panel, StringComparison.Ordinal);
         Assert.Contains("the signature verified", panel, StringComparison.Ordinal);
         Assert.Contains("matched the domain recipients see", panel, StringComparison.Ordinal);
     }
@@ -771,6 +771,16 @@ public sealed class PageTests : IClassFixture<SeededApp>
         var html = await Client().GetStringAsync("/");
 
         Assert.Contains("href=\"failures\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DnsChangesIsReachableAndSaysWhatItIsFor()
+    {
+        var home = await Client().GetStringAsync("/");
+        var html = await Client().GetStringAsync("/dns-changes");
+
+        Assert.Contains("href=\"dns-changes\"", home, StringComparison.Ordinal);
+        Assert.Contains("<h1>DNS changes</h1>", html, StringComparison.Ordinal);
     }
 
     [Theory]

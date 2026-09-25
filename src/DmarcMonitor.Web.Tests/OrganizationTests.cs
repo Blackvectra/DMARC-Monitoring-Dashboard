@@ -93,6 +93,7 @@ public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
     [InlineData("/fix")]
     [InlineData("/sources")]
     [InlineData("/reports")]
+    [InlineData("/dns-changes")]
     public async Task SomebodyInNoGroupIsToldSoAndShownNothing(string route)
     {
         var html = await As("stranger@example.com", "33333333-3333-3333-3333-333333333333").GetStringAsync(route);

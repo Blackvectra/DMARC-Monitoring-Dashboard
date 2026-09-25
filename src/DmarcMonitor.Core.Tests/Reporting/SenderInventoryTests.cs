@@ -30,6 +30,35 @@ public sealed class SenderInventoryTests
             OtherClientsAffected = otherClients,
         };
 
+    /// <summary>
+    /// INKY and Proofpoint re-sending a client's message to the recipient
+    /// behind them never authenticate as the client. Eleven of nineteen
+    /// September reports printed them under "somebody pretending to be you".
+    /// </summary>
+    [Fact]
+    public void ASecurityGatewayThatNeverAuthenticatesIsRelayedNotAnImpersonator()
+    {
+        var inky = Source(ip: "198.51.100.20", messages: 2, passing: 0) with { ReverseName = "ipw-outbound.inkyphishfence.com" };
+        var stranger = Source(ip: "198.51.100.77", messages: 5, passing: 0);
+        var report = Report(inky, stranger);
+
+        Assert.Equal(SenderClass.Relayed, ClientReport.ClassOf(inky));
+        Assert.Equal("198.51.100.77", Assert.Single(report.ImpersonatingSources).SourceIp);
+    }
+
+    /// <summary>
+    /// The source catalogue is keyed on host names, and was being asked about
+    /// the address, so it never matched: every never-authenticated source at
+    /// a catalogued provider read as nobody-knows-who.
+    /// </summary>
+    [Fact]
+    public void AProviderIsRecognizedByItsReverseName()
+    {
+        var zoho = Source(ip: "198.51.100.30", messages: 3, passing: 0) with { ReverseName = "mx.zoho.com" };
+
+        Assert.Equal(SenderClass.Unidentified, ClientReport.ClassOf(zoho));
+    }
+
     [Fact]
     public void CleanMailIsApproved()
     {
@@ -69,11 +98,11 @@ public sealed class SenderInventoryTests
     }
 
     /// <summary>
-    /// Never authenticated, and nothing recognises the operator. This is the
+    /// Never authenticated, and nothing recognizes the operator. This is the
     /// only bucket that reads as an accusation, so it is the narrowest.
     /// </summary>
     [Fact]
-    public void AnUnprovenSourceNobodyRecognisesIsSuspicious()
+    public void AnUnprovenSourceNobodyRecognizesIsSuspicious()
     {
         // Documentation range, in no catalog.
         var stranger = Source(ip: "198.51.100.77", messages: 40, passing: 0);
@@ -82,8 +111,8 @@ public sealed class SenderInventoryTests
     }
 
     /// <summary>
-    /// A recognised operator is not innocence - a shared ESP is where an
-    /// unauthorised sender hides most comfortably - it is the difference
+    /// A recognized operator is not innocence - a shared ESP is where an
+    /// unauthorized sender hides most comfortably - it is the difference
     /// between a question for the customer and an alarm.
     /// </summary>
     [Fact]
@@ -603,7 +632,7 @@ public sealed class VerdictTests
 
         var (label, text) = Assert.Single(report.DecisionItems, i => i.Label != "Policy");
         Assert.Equal("198.51.100.77", label);
-        Assert.StartsWith("Tell NRG Tech Services whether you recognise this address", text, StringComparison.Ordinal);
+        Assert.StartsWith("Tell NRG Tech Services whether you recognize this address", text, StringComparison.Ordinal);
         Assert.DoesNotContain("custom DKIM signing for", text, StringComparison.Ordinal);
     }
 
@@ -641,6 +670,47 @@ public sealed class VerdictTests
 
         Assert.Contains("includes mail of your own", losing.Covered.Single(f => f.Label == "Turned away on your behalf").Note, StringComparison.Ordinal);
         Assert.Contains("protection doing its job", fine.Covered.Single(f => f.Label == "Turned away on your behalf").Note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// "Nothing. Keep watching." beside "3 of your services still send mail
+    /// that cannot prove it" - in eleven of nineteen September reports.
+    /// </summary>
+    [Fact]
+    public void WhatToDoNamesTheServicesWhenTheyStillFail()
+    {
+        ReportSource vendor = new()
+        {
+            SourceIp = "203.0.113.9", ReverseName = "smtp.vendor.example",
+            Messages = 50, Passing = 49, Failing = 1, AuthenticatedFor = "vendor.example",
+        };
+        var quarantine = Domain("acme.example", "quarantine");
+        var none = Domain("acme.example", "none");
+
+        Assert.Equal("Correct the named services before moving to p=reject.", Report([quarantine], [vendor]).WhatToDo(quarantine));
+        Assert.Equal("Correct the named services, then move to p=quarantine.", Report([none], [vendor]).WhatToDo(none));
+        Assert.Equal("Conditional", Report([none], [vendor]).ReadinessOf(none));
+        Assert.Equal("Nothing. Keep watching.", Report([quarantine]).WhatToDo(quarantine));
+    }
+
+    /// <summary>
+    /// The register said "raise the policy" beside a decision box saying to
+    /// hold at p=none until the services pass.
+    /// </summary>
+    [Fact]
+    public void TheRegisterDoesNotSayRaiseThePolicyWhileTheServicesFail()
+    {
+        ReportSource vendor = new()
+        {
+            SourceIp = "203.0.113.9", ReverseName = "smtp.vendor.example",
+            Messages = 50, Passing = 40, Failing = 10, AuthenticatedFor = "vendor.example",
+        };
+        ReportSource stranger = new() { SourceIp = "198.51.100.77", Messages = 5, Failing = 5 };
+
+        var register = Report([Domain("acme.example", "none", messages: 1000, passing: 995)], [vendor, stranger]).Remediation;
+
+        Assert.DoesNotContain(register, i => i.Action.StartsWith("Raise the policy", StringComparison.Ordinal));
+        Assert.Contains(register, i => i.Action == "Correct the named services first, then move to p=quarantine.");
     }
 
     [Fact]

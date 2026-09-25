@@ -50,7 +50,7 @@ public static class ProxySetup
             // lists are cleared first because whatever is configured is meant
             // to be the whole answer.
             options.KnownProxies.Clear();
-            options.KnownNetworks.Clear();
+            options.KnownIPNetworks.Clear();
 
             var proxies = builder.Configuration.GetSection("Proxy:KnownProxies").Get<string[]>() ?? [];
             foreach (var proxy in proxies)
@@ -61,12 +61,12 @@ public static class ProxySetup
             var networks = builder.Configuration.GetSection("Proxy:KnownNetworks").Get<string[]>() ?? [];
             foreach (var network in networks)
             {
-                if (TryNetwork(network, out var known)) { options.KnownNetworks.Add(known); }
+                if (TryNetwork(network, out var known)) { options.KnownIPNetworks.Add(known); }
             }
 
             // Nothing named means the commonest case by far: a proxy on this
             // machine, talking to the app over loopback.
-            if (options.KnownProxies.Count == 0 && options.KnownNetworks.Count == 0)
+            if (options.KnownProxies.Count == 0 && options.KnownIPNetworks.Count == 0)
             {
                 options.KnownProxies.Add(IPAddress.Loopback);
                 options.KnownProxies.Add(IPAddress.IPv6Loopback);
@@ -116,9 +116,9 @@ public static class ProxySetup
     public static bool ShouldRedirectToHttps(IConfiguration configuration) =>
         !IsBehindProxy(configuration) && !AuthSetup.IsLocalTrial(configuration);
 
-    private static bool TryNetwork(string cidr, out Microsoft.AspNetCore.HttpOverrides.IPNetwork network)
+    private static bool TryNetwork(string cidr, out System.Net.IPNetwork network)
     {
-        network = default!;
+        network = default;
 
         var parts = cidr.Split('/', 2);
         if (parts.Length != 2
@@ -128,7 +128,19 @@ public static class ProxySetup
             return false;
         }
 
-        network = new Microsoft.AspNetCore.HttpOverrides.IPNetwork(address, prefix);
+        var bits = address.GetAddressBytes();
+        if (prefix < 0 || prefix > bits.Length * 8) { return false; }
+
+        // System.Net.IPNetwork refuses a base address with host bits set -
+        // "10.0.0.1/8" - where the ASP.NET type it replaces took it. Masked
+        // here, so a configuration that worked on .NET 8 keeps working.
+        for (var i = 0; i < bits.Length; i++)
+        {
+            var keep = Math.Clamp(prefix - (i * 8), 0, 8);
+            bits[i] &= (byte)(0xFF << (8 - keep));
+        }
+
+        network = new System.Net.IPNetwork(new IPAddress(bits), prefix);
         return true;
     }
 }

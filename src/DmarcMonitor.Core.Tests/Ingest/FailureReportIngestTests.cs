@@ -136,11 +136,11 @@ public sealed class FailureReportIngestTests
     }
 
     /// <summary>
-    /// A message that is not a report is still filed as unrecognised, and is
+    /// A message that is not a report is still filed as unrecognized, and is
     /// not thrown away because one more fetch came back with nothing.
     /// </summary>
     [Fact]
-    public async Task OrdinaryMailIsStillFiledAsUnrecognised()
+    public async Task OrdinaryMailIsStillFiledAsUnrecognized()
     {
         var mailbox = new FakeMailboxClient();
         mailbox.Add(

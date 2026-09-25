@@ -172,7 +172,7 @@ What to check in the output:
 - **Messages read** roughly matches what is in the mailbox. A much smaller
   number means folders are not being walked.
 - **Every client domain appears.** The domains the Outlook export truncated —
-  `mortonnd.gov`, `redriverrc.com`, `mcleanelectric.com` — should show
+  `acme.example`, `client-e.example`, `client-f.example` — should show
   current data here. If they do not, the reports genuinely are not arriving
   and that is a finding rather than a bug.
 - **Errors are named, not counted.** Anything unreadable is listed.
@@ -320,7 +320,7 @@ likely to behave differently from the test fake:
   in tests, and a mailbox with thousands of messages is where that is first
   exercised for real.
 - **Folder names containing a backslash.** The live mailbox has folders named
-  `DMARC\bmcedc.com`. Graph addresses folders by id so this should not matter,
+  `DMARC\client-a.example`. Graph addresses folders by id so this should not matter,
   but it has not been proved.
 - **Attachment shapes.** Large or unusual attachments come back from Graph
   differently from the way the fake produces them.

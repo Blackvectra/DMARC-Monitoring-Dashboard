@@ -121,6 +121,7 @@ builder.Services.AddScoped<RemediationUiService>();
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tls.TlsReportService(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Forensic.ForensicReportService(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Dns.DnsDriftStore(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());
 
@@ -306,7 +307,11 @@ app.MapGet("/reports/download/{slug}/{month}", async (
     return Results.File(ClientReportPdf.Render(report), "application/pdf");
 });
 
-app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+// Since .NET 9 Blazor stamps its own "frame-ancestors 'self'" policy on
+// interactive pages, and SecurityHeaders steps aside for a policy already
+// present - so the app's whole policy, frame-ancestors 'none' included, went
+// missing. Ours is stricter on framing and covers everything else.
+app.MapRazorComponents<App>().AddInteractiveServerRenderMode(o => o.ContentSecurityFrameAncestorsPolicy = null);
 
 // Everything from here can fail in a way somebody on a desktop has to be
 // told about: the port is taken, the folder is read-only, the database will

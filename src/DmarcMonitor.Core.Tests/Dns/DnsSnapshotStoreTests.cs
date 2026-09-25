@@ -79,6 +79,50 @@ public sealed class DnsSnapshotStoreTests : IDisposable
         SpfLookups = 4,
     };
 
+    /// <summary>
+    /// A changed reading records what changed, and the record can be
+    /// acknowledged - once, by somebody in the same organization.
+    /// </summary>
+    [Fact]
+    public async Task AChangedReadingIsRecordedAsDriftAndCanBeAcknowledged()
+    {
+        var domain = await DomainAsync();
+        var first = await _store.SaveAsync(domain, Good(domain));
+        Assert.Empty(first.Drift);
+
+        var weaker = Good(domain) with { DmarcRecord = "v=DMARC1; p=none; rua=mailto:d@example.net" };
+        var second = await _store.SaveAsync(domain, weaker);
+
+        Assert.True(second.Changed);
+        var change = Assert.Single(second.Drift);
+        Assert.Equal("critical", change.Severity);
+
+        var drift = new DnsDriftStore(_dbPath);
+        var stored = Assert.Single(await drift.ListAsync(tenantId: null, openOnly: true));
+        Assert.Equal(domain, stored.Domain);
+        Assert.Equal(change.Summary, stored.Summary);
+        Assert.False(stored.WasExpected);
+
+        Assert.False(await drift.AcknowledgeAsync(stored.Id, "someone@else", null, tenantId: "another-organization"));
+        Assert.True(await drift.AcknowledgeAsync(stored.Id, "tech@msp.example", "client moved registrar", tenantId: null));
+        Assert.False(await drift.AcknowledgeAsync(stored.Id, "tech@msp.example", null, tenantId: null));
+
+        Assert.Empty(await drift.ListAsync(tenantId: null, openOnly: true));
+        var seen = Assert.Single(await drift.ListAsync(tenantId: null, domain: domain));
+        Assert.Equal("tech@msp.example", seen.AcknowledgedBy);
+        Assert.Equal("client moved registrar", seen.Note);
+    }
+
+    [Fact]
+    public async Task AnUnchangedReadingRecordsNoDrift()
+    {
+        var domain = await DomainAsync();
+        await _store.SaveAsync(domain, Good(domain));
+        await _store.SaveAsync(domain, Good(domain));
+
+        Assert.Empty(await new DnsDriftStore(_dbPath).ListAsync(tenantId: null));
+    }
+
     [Fact]
     public async Task StoresAReadingAndReadsItBack()
     {

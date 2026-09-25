@@ -48,6 +48,20 @@ window.dmarcTheme = {
         this.set(!this.isDark());
     },
 
+    /* The stored preference, applied again if the page has lost it. Only
+       ever adds dark: removing it is set()'s job. */
+    restore() {
+        let stored = null;
+        try {
+            stored = localStorage.getItem('dmarc-theme');
+        } catch (e) {
+            return;
+        }
+        if (stored === 'dark' && !this.isDark()) {
+            document.documentElement.dataset.theme = 'dark';
+        }
+    },
+
     /* The button says what clicking it will do, not what the page currently
        is. "Dark" on a light page means "make it dark". */
     label() {
@@ -102,5 +116,27 @@ document.addEventListener('keydown', (e) => {
    markup ships the light-theme wording, and a dark-theme user navigating
    would otherwise be told they are about to switch to the theme they are
    already in. */
-document.addEventListener('DOMContentLoaded', () => window.dmarcTheme.label());
-document.addEventListener('enhancedload', () => window.dmarcTheme.label());
+document.addEventListener('DOMContentLoaded', () => {
+    window.dmarcTheme.label();
+
+    /* Blazor raises enhancedload through its own event API, not on the
+       document, so the listener that used to sit here never fired. It is
+       registered here because blazor.web.js has run by DOMContentLoaded. */
+    if (window.Blazor && typeof window.Blazor.addEventListener === 'function') {
+        window.Blazor.addEventListener('enhancedload', () => {
+            window.dmarcTheme.restore();
+            window.dmarcTheme.label();
+        });
+    }
+});
+
+/* Enhanced navigation merges the next page into this one, <html> element
+   included, and the server-rendered <html> never carries data-theme: the
+   preference lives in the browser. Every in-app link was dropping dark mode.
+   Put it back the moment it goes. */
+try {
+    new MutationObserver(() => window.dmarcTheme.restore())
+        .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+} catch (e) {
+    /* No MutationObserver: the enhancedload hook above still restores it. */
+}

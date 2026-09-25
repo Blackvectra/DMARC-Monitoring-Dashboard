@@ -176,7 +176,7 @@ public sealed class FailingDomainTests
 ///
 /// The Sources page has named these since reverse lookups were stored and the
 /// report did not, so a customer was handed a row of digits and asked whether
-/// they recognised it. Nobody recognises an address.
+/// they recognized it. Nobody recognizes an address.
 /// </summary>
 public sealed class NamedSourceTests
 {

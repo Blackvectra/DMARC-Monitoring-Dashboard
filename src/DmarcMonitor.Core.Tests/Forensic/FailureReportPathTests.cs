@@ -100,7 +100,7 @@ public sealed class FailureReportPathTests : IDisposable
     }
 
     [Fact]
-    public void AFailureReportIsRecognisedForWhatItIs()
+    public void AFailureReportIsRecognizedForWhatItIs()
     {
         Assert.Equal(ReportKind.DmarcFailure, ReportAttachment.Classify(Report()));
     }
@@ -111,7 +111,7 @@ public sealed class FailureReportPathTests : IDisposable
     /// these were Unknown until now. The other two must still be read.
     /// </summary>
     [Fact]
-    public void TheOtherTwoReportTypesAreStillRecognised()
+    public void TheOtherTwoReportTypesAreStillRecognized()
     {
         Assert.Equal(
             ReportKind.DmarcAggregate,
@@ -199,14 +199,14 @@ public sealed class FailureReportPathTests : IDisposable
     }
 
     [Fact]
-    public async Task TheServiceSummarisesWhatArrivedWithoutReadingAnyOfIt()
+    public async Task TheServiceSummarizesWhatArrivedWithoutReadingAnyOfIt()
     {
         await new ReportImporter(_store).ImportAsync(Files(
             File_("a.eml", Report("ndaco.org", "One", delivery: "reject")),
             File_("b.eml", Report("ndaco.org", "Two", delivery: "none")),
             File_("c.eml", Report("dmvwrr.com", "Three", delivery: "delivered"))));
 
-        var summary = await new ForensicReportService(_dbPath).SummariseAsync(days: 3650);
+        var summary = await new ForensicReportService(_dbPath).SummarizeAsync(days: 3650);
 
         Assert.Equal(3, summary.Total);
         Assert.Equal(2, summary.Domains);

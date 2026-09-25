@@ -159,22 +159,29 @@ on the host. The `dmarc` command-line tool is self-contained and needs
 nothing. Caddy is the proxy, because it is the whole TLS setup in three lines
 and renews the certificate itself.
 
-**Ubuntu 24.04** - everything is in Ubuntu's own repositories:
+**Ubuntu 24.04** - the tools are in Ubuntu's own repositories:
 
 ```bash
 sudo apt update
-sudo apt install -y aspnetcore-runtime-8.0 caddy unzip sqlite3
+sudo apt install -y aspnetcore-runtime-10.0 caddy unzip sqlite3
 ```
 
-If `aspnetcore-runtime-8.0` is not found, add Microsoft's package feed first:
-<https://learn.microsoft.com/dotnet/core/install/linux-ubuntu>.
-
-**Amazon Linux 2023** - the runtime and the tools are in Amazon's own
-repositories. Caddy is not, so it is the static binary from Caddy's download
-service, installed the way Caddy's documentation describes:
+If `aspnetcore-runtime-10.0` is not found, install the runtime with
+Microsoft's script instead - which is what `bootstrap.sh` does for you:
 
 ```bash
-sudo dnf install -y aspnetcore-runtime-8.0 unzip sqlite
+curl -fsSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+sudo bash dotnet-install.sh --runtime aspnetcore --channel 10.0 --install-dir /opt/dotnet
+sudo ln -sf /opt/dotnet/dotnet /usr/local/bin/dotnet
+```
+
+**Amazon Linux 2023** - the tools are in Amazon's own repositories. If
+`aspnetcore-runtime-10.0` is not, use Microsoft's script as above. Caddy is
+not either, so it is the static binary from Caddy's download service,
+installed the way Caddy's documentation describes:
+
+```bash
+sudo dnf install -y aspnetcore-runtime-10.0 unzip sqlite
 
 # Caddy. arch=amd64 on x86_64; arch=arm64 on a t4g.
 curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o caddy
@@ -481,7 +488,7 @@ that does not exist would. Guests invited into your directory work, so a
 customer signs in with their own email address.
 
 ```bash
-dmarc client set-group --client morton-nd --group <id>
+dmarc client set-group --client acme-corp --group <id>
 ```
 
 Or **Clients → Customer login group** as an admin. Somebody who is also in a
@@ -780,7 +787,7 @@ What it sets up, and where:
 
 | | Linux | Windows |
 |---|---|---|
-| Runtime | the distribution's `aspnetcore-runtime-8.0` | a private copy under `C:\dmarc\dotnet`, installed with Microsoft's `dotnet-install.ps1` |
+| Runtime | the distribution's `aspnetcore-runtime-10.0`, or Microsoft's copy in `/opt/dotnet` | a private copy under `C:\dmarc\dotnet`, installed with Microsoft's `dotnet-install.ps1` |
 | The app | `dmarc-web.service`, user `dmarc`, sandboxed | Windows service `dmarc-web`, account `NT AUTHORITY\LocalService`, writable only under `C:\dmarc\data` |
 | The proxy | Caddy as a systemd service | Caddy as a Windows service through WinSW, ports 80 and 443 opened in Windows Firewall |
 | Configuration | `/opt/dmarc/app/appsettings.Production.json` | `C:\dmarc\app\appsettings.Production.json` |

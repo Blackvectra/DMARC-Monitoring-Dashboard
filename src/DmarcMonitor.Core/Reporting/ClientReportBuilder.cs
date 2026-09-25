@@ -454,8 +454,8 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
                        AND o.client_id <> $client
                        AND o.dmarc_result = 'fail'),
                    -- What the address reverses to, so a client is not handed
-                   -- a row of digits and asked whether they recognise it.
-                   -- Nobody recognises an address. A correlated subquery
+                   -- a row of digits and asked whether they recognize it.
+                   -- Nobody recognizes an address. A correlated subquery
                    -- rather than a join, because source_names is a cache that
                    -- may not have been filled - a LEFT JOIN would do as well
                    -- and this keeps the grouping above untouched.
@@ -535,7 +535,7 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
     /// </summary>
     /// <remarks>
     /// Not a failure, and worth a line anyway: either a service was retired
-    /// and is still authorised to send as the client, or something stopped
+    /// and is still authorized to send as the client, or something stopped
     /// working quietly and nobody noticed because nothing failed - it simply
     /// stopped. A report that only lists what sent mail cannot say either.
     ///

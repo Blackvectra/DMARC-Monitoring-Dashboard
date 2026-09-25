@@ -92,9 +92,9 @@ else
         </svg>
 
         <div class="chart-axis">
-            <span>@Points[0].Day.ToString("d MMM")</span>
+            <span>@Points[0].Day.ToString("MMM d")</span>
             <span class="muted">peak @Ceiling.ToString("N0") / day</span>
-            <span>@Points[^1].Day.ToString("d MMM")</span>
+            <span>@Points[^1].Day.ToString("MMM d")</span>
         </div>
 
         @* Every number the picture shows, written out. A chart nobody can read

@@ -193,18 +193,37 @@ if [[ "$PKG" == apt ]]; then
     # Ubuntu carries the runtime itself. Debian does not, and this is where it
     # shows: the runtime is checked below and the fix is named there.
     apt-get install -y -qq unzip sqlite3 curl ca-certificates openssl python3 >/dev/null
-    apt-get install -y -qq aspnetcore-runtime-8.0 >/dev/null 2>&1 || true
+    apt-get install -y -qq aspnetcore-runtime-10.0 >/dev/null 2>&1 || true
 else
-    dnf install -y -q unzip sqlite curl tar openssl python3 aspnetcore-runtime-8.0
+    dnf install -y -q unzip sqlite curl tar openssl python3
+    dnf install -y -q aspnetcore-runtime-10.0 >/dev/null 2>&1 || true
 fi
 
-if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft.AspNetCore.App 8\.'; then
-    echo "the ASP.NET Core 8 runtime is not installed and the distribution's repositories did not provide it." >&2
-    echo "Add Microsoft's package feed, then run this again:" >&2
+have_runtime() {
+    command -v dotnet >/dev/null 2>&1 && dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft.AspNetCore.App 10\.'
+}
+
+# Not every distribution carries .NET 10 yet. Where the package manager did
+# not provide it, Microsoft's own installer puts a private copy in
+# /opt/dotnet - the same way bootstrap.ps1 does on Windows - and the symlink
+# in /usr/local/bin is found ahead of any older system dotnet.
+if ! have_runtime; then
+    echo "   the distribution has no ASP.NET Core 10 runtime; installing Microsoft's into /opt/dotnet"
+    installer="$(mktemp)"
+    fetch https://dot.net/v1/dotnet-install.sh -o "$installer"
+    bash "$installer" --runtime aspnetcore --channel 10.0 --install-dir /opt/dotnet >/dev/null
+    rm -f "$installer"
+    ln -sf /opt/dotnet/dotnet /usr/local/bin/dotnet
+    hash -r
+fi
+
+if ! have_runtime; then
+    echo "the ASP.NET Core 10 runtime could not be installed: neither the distribution nor Microsoft's installer provided it." >&2
+    echo "Install it by hand, then run this again:" >&2
     echo "  https://learn.microsoft.com/dotnet/core/install/linux" >&2
     exit 69
 fi
-echo "   $(dotnet --list-runtimes | grep '^Microsoft.AspNetCore.App 8\.' | head -1)"
+echo "   $(dotnet --list-runtimes | grep '^Microsoft.AspNetCore.App 10\.' | head -1)"
 
 # ---- 3. Caddy ---------------------------------------------------------------
 install_caddy_static() {

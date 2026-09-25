@@ -763,8 +763,8 @@ public static class ZoneAudit
 
             // A name with no dot in it is not a domain anybody can send mail
             // as, so the record authorizes nothing that exists. It is the
-            // shape a dropped suffix leaves behind - "mcleanelectric" where
-            // "mcleanelectric.com" was meant - and it is invisible in a
+            // shape a dropped suffix leaves behind - "client-f" where
+            // "client-f.example" was meant - and it is invisible in a
             // provider's panel, where the zone's own name is added on the end
             // and the whole row reads as a sensible hostname.
             if (authorized.Length > 0 && !authorized.Contains('.', StringComparison.Ordinal))
