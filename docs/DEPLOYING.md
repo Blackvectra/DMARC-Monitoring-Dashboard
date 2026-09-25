@@ -742,11 +742,14 @@ that it cannot install them. The command works either way:
 sudo ./deploy/update.sh v1.3.0
 ```
 
-Both paths run the same script, which backs up the database with SQLite's own `.backup`, keeps the old install
-rather than overwriting it, carries `appsettings.Production.json` across,
-applies any schema migration *after* the new binary is in place and *before*
-the service starts, and checks the app answers afterwards - putting the old
-one back if it does not.
+Both paths run the same script, which backs up the database - the
+organization's and every client's file ([CLIENT-FILES.md](CLIENT-FILES.md)) -
+with SQLite's own `.backup`, keeps the old install rather than overwriting it,
+carries `appsettings.Production.json` across, applies any schema migration
+*after* the new binary is in place and *before* the service starts, and checks
+the app answers afterwards - putting the old one back if it does not, and the
+database as it was too when the update had migrated it, because the old
+version cannot read what the new one migrated it to.
 
 Rolling back is a move, not a download:
 
@@ -758,7 +761,10 @@ sudo ./deploy/rollback.sh 20260918-120000 --database   # and the database
 Those are two decisions on purpose. Swapping the application back is always
 safe. Restoring the database is not always wanted: if the version you are
 leaving applied no migration, the current database is fine and holds
-everything collected since the update, which restoring would discard.
+everything collected since the update, which restoring would discard. With
+`--database`, the organization's database and its client files go back
+together, and the ones replaced are moved aside to `dmarc-replaced-<time>.db`
+and `dmarc-replaced-<time>-clients/` rather than deleted.
 
 ## Before it is reachable by anybody else
 

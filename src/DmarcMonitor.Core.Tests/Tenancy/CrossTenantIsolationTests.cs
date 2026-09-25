@@ -2,6 +2,7 @@ using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Reporting;
 using DmarcMonitor.Core.Rollout;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tests.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Tests.Tenancy;
@@ -37,29 +38,15 @@ public sealed class CrossTenantIsolationTests : IDisposable
         SeedAsync().GetAwaiter().GetResult();
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     /// <summary>Two organizations, each managing a domain called example.com.</summary>
     private async Task SeedAsync()
     {
         const string when = "2026-09-20 00:00:00";
 
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-
-        async Task Run(string sql)
-        {
-            await using var command = db.CreateCommand();
-            command.CommandText = sql;
-            await command.ExecuteNonQueryAsync();
-        }
+        // Written as one database; split into client files as an upgrade would.
+        Task Run(string sql) => SingleDatabase.ExecuteAsync(_dbPath, sql);
 
         await Run($"""
             INSERT INTO tenants (id,slug,name,created_at,updated_at)
@@ -210,8 +197,7 @@ public sealed class CrossTenantIsolationTests : IDisposable
             dkim: null,
             scopeTenantId: "t-a");
 
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
+        await using var db = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
 
         await using var command = db.CreateCommand();
         command.CommandText = "SELECT domain_id FROM dns_snapshots";

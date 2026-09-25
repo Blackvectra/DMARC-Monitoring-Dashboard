@@ -291,6 +291,13 @@
                     }
                 </td>
             </tr>
+            @* Where each client's reports are. The folder rather than a count
+               of what is in it: this install may keep other organizations'
+               clients there too, and how many is not this login's business. *@
+            <tr>
+                <td>Client files</td>
+                <td><code>@DmarcMonitor.Core.Storage.ClientDatabases.FolderFor(Db.Path)</code> — one database file per client, readable by the service account alone</td>
+            </tr>
             <tr><td>Opened</td><td>read-only, except onboarding and import</td></tr>
             @* What is kept, and for how long, said where somebody can read it
                without opening a unit file. A product that deletes a

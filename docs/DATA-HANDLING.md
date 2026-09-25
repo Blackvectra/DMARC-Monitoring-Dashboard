@@ -85,7 +85,7 @@ in a backup or an export can be used to authenticate as anybody.
 
 | | |
 |---|---|
-| The database | one SQLite file, `0600`, on the machine you run it on |
+| The database | SQLite, on the machine you run it on: one file for the organization - clients, domains, users, the audit log - and one per client for that client's reports and DNS history, `0600` in a `0700` folder ([CLIENT-FILES.md](CLIENT-FILES.md)) |
 | Backups | `0600`, in a `0700` directory, same machine unless you configure offsite |
 | Offsite copies | only if `DMARC_BACKUP_S3` is set — your bucket, your region, your keys |
 | Exports | `0600`, only when somebody runs `dmarc export --out` |
@@ -182,16 +182,17 @@ level — say which, and do not claim application-level encryption.
     dmarc client erase --client acme-corp                       # what would go
     dmarc client erase --client acme-corp --apply --confirm acme-corp --by matthew
 
-It removes the client and everything belonging to them — reports, records,
-domains, selectors, DNS snapshots — and then **proves it**: every table in the
-schema carrying a `client_id` is checked afterwards, and anything left behind
-takes the whole transaction back rather than leaving a half-erased customer and
-a confident message.
+It removes the client and everything belonging to them and then **proves
+it**. Their reports, records, selectors and DNS history are a database file of
+their own, which is deleted and checked to be gone; their domains, contacts and
+settings are rows in the organization's database, and every table there
+carrying a `client_id` is checked afterwards. Anything left behind in either
+takes the whole erasure back rather than leaving a half-erased customer and a
+confident message.
 
-The table list is read from the schema rather than written down, because
-nineteen tables cascade from a client today and that number only goes up. A
-stale list would leave a table full of an erased customer's data that nobody
-counted.
+The table list is read from the schema rather than written down, because the
+number of tables only goes up. A stale list would leave a table full of an
+erased customer's data that nobody counted.
 
 What survives, deliberately: the **audit log** entry recording that you did it,
 who asked, and how many rows went. It carries the client's name and the counts
@@ -203,6 +204,13 @@ reach the nightly copies. With the default 14 kept, the last copy ages out
 about two weeks later, and any offsite sync carries its own retention on top.
 The command prints that date every time it runs. **Give the customer that
 timeframe rather than saying "it is gone".**
+
+Nor does it reach the whole copies of the database kept beside it on purpose:
+`dmarc.pre-0019.db` from the upgrade that gave each client a file,
+`update.sh`'s copy from each update, and whatever a restore or rollback moved
+aside. Nothing prunes those - they are there to be gone back to - so the
+command lists every one it finds. Delete them once they are no longer needed,
+and before telling a customer their data is gone.
 
 **"Do you have SOC 2?"** No. Neither does a self-hosted install of anything.
 If a client's procurement requires it, that is an argument for a platform that

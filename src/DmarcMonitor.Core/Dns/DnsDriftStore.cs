@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
@@ -38,11 +39,8 @@ public sealed record DriftEvent
 /// </remarks>
 public sealed class DnsDriftStore(string databasePath)
 {
-    private readonly string _connection = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadWrite,
-    }.ToString();
+    /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="tenantId">The organization, or null for every one (the master account).</param>
     /// <param name="clientSlug">Only this client's domains, for a customer login.</param>
@@ -52,8 +50,8 @@ public sealed class DnsDriftStore(string databasePath)
         string? tenantId, string? clientSlug = null, string? domain = null, bool openOnly = false,
         int limit = 200, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connection);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug, domain), ["dns_drift_events"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -113,25 +111,28 @@ public sealed class DnsDriftStore(string databasePath)
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentException.ThrowIfNullOrWhiteSpace(by);
 
-        await using var db = new SqliteConnection(_connection);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The event is in whichever client's file its domain is; each file in
+        // the caller's scope is asked in turn, and the first to hold it
+        // answers.
+        return await _files.FirstAsync(ClientScope.For(tenantId, clientSlug), write: true, async (db, _, token) =>
+        {
+            await using var command = db.CreateCommand();
+            command.CommandText = """
+                UPDATE dns_drift_events
+                SET acknowledged_at = $at, acknowledged_by = $by, acknowledgement_note = $note
+                WHERE id = $id AND acknowledged_at IS NULL
+                  AND ($tenant IS NULL OR tenant_id = $tenant)
+                  AND ($client IS NULL OR client_id = (SELECT id FROM clients WHERE slug = $client AND tenant_id = dns_drift_events.tenant_id))
+                """;
+            command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+            command.Parameters.AddWithValue("$by", by.Trim());
+            command.Parameters.AddWithValue("$note", string.IsNullOrWhiteSpace(note) ? DBNull.Value : note.Trim());
+            command.Parameters.AddWithValue("$id", id);
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$client", (object?)clientSlug ?? DBNull.Value);
 
-        await using var command = db.CreateCommand();
-        command.CommandText = """
-            UPDATE dns_drift_events
-            SET acknowledged_at = $at, acknowledged_by = $by, acknowledgement_note = $note
-            WHERE id = $id AND acknowledged_at IS NULL
-              AND ($tenant IS NULL OR tenant_id = $tenant)
-              AND ($client IS NULL OR client_id = (SELECT id FROM clients WHERE slug = $client AND tenant_id = dns_drift_events.tenant_id))
-            """;
-        command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
-        command.Parameters.AddWithValue("$by", by.Trim());
-        command.Parameters.AddWithValue("$note", string.IsNullOrWhiteSpace(note) ? DBNull.Value : note.Trim());
-        command.Parameters.AddWithValue("$id", id);
-        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
-        command.Parameters.AddWithValue("$client", (object?)clientSlug ?? DBNull.Value);
-
-        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
+            return await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) == 1;
+        }, ct).ConfigureAwait(false);
     }
 
     private static DateTimeOffset? Parse(string raw) =>

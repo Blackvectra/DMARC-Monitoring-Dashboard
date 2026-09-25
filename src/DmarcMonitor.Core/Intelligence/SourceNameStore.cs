@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Intelligence;
@@ -58,6 +59,8 @@ public sealed record SourceName(
 /// </remarks>
 public sealed class SourceNameStore(string databasePath)
 {
+    private readonly string _databasePath = databasePath;
+
     private readonly string _connectionString = new SqliteConnectionStringBuilder
     {
         DataSource = databasePath,
@@ -181,8 +184,10 @@ public sealed class SourceNameStore(string databasePath)
         var age = maxAge ?? TimeSpan.FromDays(30);
         var retry = retryAfter ?? TimeSpan.FromDays(1);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // Names are the organization's; the addresses to name are in every
+        // client's file.
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -226,8 +231,8 @@ public sealed class SourceNameStore(string databasePath)
     /// </remarks>
     public async Task<int> UncheckedFailingSourcesAsync(DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using (var probe = db.CreateCommand())
         {
@@ -257,8 +262,8 @@ public sealed class SourceNameStore(string databasePath)
     /// <summary>How many addresses have a name, out of how many are known at all.</summary>
     public async Task<(int Named, int Total)> CoverageAsync(CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """

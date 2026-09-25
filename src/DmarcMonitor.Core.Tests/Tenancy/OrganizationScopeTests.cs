@@ -5,6 +5,7 @@ using DmarcMonitor.Core.Reporting;
 using DmarcMonitor.Core.Rollout;
 using DmarcMonitor.Core.Storage;
 using DmarcMonitor.Core.Tenancy;
+using DmarcMonitor.Core.Tests.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Tests.Tenancy;
@@ -51,14 +52,7 @@ public sealed class OrganizationScopeTests : IAsyncLifetime, IDisposable
 
     public Task DisposeAsync() => Task.CompletedTask;
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     [Fact]
     public async Task TriageShowsOneOrganizationsDomainsOrAll()
@@ -163,18 +157,36 @@ public sealed class OrganizationScopeTests : IAsyncLifetime, IDisposable
         Assert.Equal(2, moved.Count);
         Assert.Equal(105, moved.Single(r => r.Domain == "acme.com").Messages);
 
-        // Every table that carries the domain now says NextLayerSec.
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString());
-        await db.OpenAsync();
+        // Every row about the domain is in Corner Post's file now, and says
+        // NextLayerSec. Read across every client of every organization, so a
+        // row left in Acme's file - or anywhere else - is counted.
+        await using var db = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         foreach (var table in ReportStore.DomainScopedTables)
         {
+            // TLS failure details are the report's, and have no domain of their own.
+            var domainOf = table == "tls_failure_details"
+                ? "JOIN tls_reports r ON r.id = t.tls_report_id JOIN domains d ON d.id = r.domain_id"
+                : "JOIN domains d ON d.id = t.domain_id";
+
             await using var count = db.CreateCommand();
             count.CommandText = $"""
                 SELECT COUNT(*) FROM {table} t
-                JOIN domains d ON d.id = t.domain_id
-                WHERE d.name = 'acme.com' AND t.tenant_id <> $nls
+                {domainOf}
+                JOIN clients c ON c.id = t.client_id
+                WHERE d.name = 'acme.com' AND (t.tenant_id <> $nls OR c.slug <> 'corner-post')
                 """;
             count.Parameters.AddWithValue("$nls", _nls);
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync()));
+        }
+
+        // And none of it is left in the file of the client it came from.
+        var files = new ClientDatabases(_dbPath);
+        var acme = Assert.Single(await files.ListAsync(_nrg), c => c.Slug == "acme-corp");
+        await using var old = await files.OpenAsync(ClientScope.Client(acme.Id));
+        foreach (var table in ReportStore.DomainScopedTables)
+        {
+            await using var count = old.CreateCommand();
+            count.CommandText = $"SELECT COUNT(*) FROM {table}";
             Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync()));
         }
     }

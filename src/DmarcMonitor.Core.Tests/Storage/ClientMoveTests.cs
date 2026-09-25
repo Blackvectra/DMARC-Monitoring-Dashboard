@@ -33,14 +33,7 @@ public sealed class ClientMoveTests : IDisposable
         _organizations = new OrganizationStore(_dbPath);
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     private async Task<string> SeedAsync(string domain, string clientName)
     {
@@ -77,10 +70,15 @@ public sealed class ClientMoveTests : IDisposable
         return slug!;
     }
 
+    /// <summary>
+    /// Rows answering to an organization, wherever the table is: the
+    /// organization's database, or every client's file read together.
+    /// </summary>
     private async Task<long> RowsInAsync(string table, string tenantId)
     {
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
+        await using var db = await new ClientDatabases(_dbPath).OpenAsync(
+            ClientScope.Organization(null),
+            ClientDatabases.Tables.Contains(table) ? [table] : []);
         await using var command = db.CreateCommand();
         command.CommandText = $"SELECT COUNT(*) FROM {table} WHERE tenant_id = $t";
         command.Parameters.AddWithValue("$t", tenantId);

@@ -79,6 +79,7 @@ public static class Program
                 "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "export" => await ExportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "backup" => await BackupCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "restore" => await RestoreCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "health" => await HealthCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -349,6 +350,15 @@ public static class Program
                                  The full check is 100ms on 17 MB and 3.8s on 313 MB, so
                                  this is for much later than you think.
                 --db <path>      Database file. Default: dmarc.db
+
+              restore            Put a backup back: the organization's database and every
+                                 client's file. Stop the dashboard and the collector first.
+                                 Every file in the backup is checked before anything live is
+                                 touched; what was in place is moved aside, never deleted,
+                                 with its -wal and -shm, which belong to it. A backup from an
+                                 older build is brought up to date afterwards.
+                --from <file>    The .bak to restore.
+                --db <path>      Where it goes. Default: dmarc.db
 
               health             Whether this install is still doing its job. Everything it
                                  looks at fails silently: a collector whose certificate

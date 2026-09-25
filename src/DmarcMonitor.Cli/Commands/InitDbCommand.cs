@@ -39,15 +39,72 @@ public static class InitDbCommand
                 // build meeting an old database and failing on a table that
                 // was added after it was created.
                 var result = await DatabaseMigrations.ApplyAsync(dbPath, ct).ConfigureAwait(false);
+                var files = new ClientDatabases(dbPath);
 
                 if (result.Changed)
                 {
                     Console.WriteLine($"{dbPath} was already a DMARC Monitor database. Brought it up to date:");
                     foreach (var applied in result.Applied) { Console.WriteLine($"  {applied}"); }
+                    if (result.ClientFiles is { Count: > 0 } changed)
+                    {
+                        Console.WriteLine($"  {changed.Count} client file(s) updated to the current client schema");
+                    }
                 }
                 else
                 {
                     Console.WriteLine($"{dbPath} already exists and is up to date (schema {result.Version}).");
+                }
+
+                if (result.Split is { } split)
+                {
+                    // The one upgrade that moves data. Said in full: where it
+                    // went, and where the copy of what it was is kept.
+                    Console.WriteLine();
+                    Console.WriteLine($"Each client's reports are now in a database file of its own, in {files.Folder}:");
+                    Console.WriteLine($"  {split.Files} client file(s), {split.Rows:N0} row(s) moved and counted in both places.");
+                    Console.WriteLine($"  The database as it was before is kept at {split.Backup}.");
+                    if (split.Unfiled > 0)
+                    {
+                        Console.WriteLine($"  {split.Unfiled:N0} row(s) belonged to clients that no longer exist; they were kept in "
+                                          + $"{Path.Combine(files.Folder, "unfiled-rows.db")} rather than dropped.");
+                    }
+                    if (split.SetAside is not null)
+                    {
+                        Console.WriteLine($"  An earlier, interrupted attempt left {split.SetAside}. It was moved aside, not deleted.");
+                    }
+                }
+
+                // Put the client files right against the organization's
+                // database: a domain filed under another client, or a client
+                // moved to another organization, when the process stopped
+                // part way. Nothing to do on an ordinary day.
+                if (string.CompareOrdinal(result.Version, "0019") >= 0)
+                {
+                    var repaired = await files.ReconcileAsync(ct).ConfigureAwait(false);
+                    if (repaired.Changed)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("Client files were put right against the organization's database:");
+                        foreach (var moved in repaired.MovedDomains) { Console.WriteLine($"  moved {moved}"); }
+                        if (repaired.RetaggedRows > 0)
+                        {
+                            Console.WriteLine($"  {repaired.RetaggedRows:N0} row(s) relabelled with their file's client and organization");
+                        }
+                        foreach (var raised in repaired.RaisedSequences)
+                        {
+                            // Only after the organization's database was put back
+                            // from a copy older than the client files.
+                            Console.WriteLine($"  row ids for {raised}, past the ones already in the client files");
+                        }
+                    }
+                    if (repaired.HomelessRows > 0)
+                    {
+                        Console.WriteLine($"  {repaired.HomelessRows:N0} row(s) are for domains this database no longer has. They were left where they are.");
+                    }
+                    foreach (var refused in repaired.Refused)
+                    {
+                        Console.Error.WriteLine($"  Not touched: {refused}");
+                    }
                 }
 
                 return 0;

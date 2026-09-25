@@ -14,15 +14,15 @@ namespace DmarcMonitor.Core.Tests.Storage;
 /// </summary>
 public sealed class DatabaseSchemaTests
 {
-    private static string FindSchemaFile()
+    private static string FindSchemaFile(string name = "schema.sql")
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         for (var i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
         {
-            var candidate = Path.Combine(dir.FullName, "db", "schema.sql");
+            var candidate = Path.Combine(dir.FullName, "db", name);
             if (File.Exists(candidate)) { return candidate; }
         }
-        throw new FileNotFoundException("Could not find db/schema.sql from the test output directory.");
+        throw new FileNotFoundException($"Could not find db/{name} from the test output directory.");
     }
 
     [Fact]
@@ -34,6 +34,46 @@ public sealed class DatabaseSchemaTests
         var embedded = DatabaseSchema.Sql.ReplaceLineEndings("\n");
 
         Assert.Equal(onDisk, embedded);
+    }
+
+    [Fact]
+    public void TheClientSchemaIsTheSameAsItsFileToo()
+    {
+        var onDisk = File.ReadAllText(FindSchemaFile("client-schema.sql")).ReplaceLineEndings("\n");
+        var embedded = DatabaseSchema.ClientSql.ReplaceLineEndings("\n");
+
+        Assert.Equal(onDisk, embedded);
+    }
+
+    [Fact]
+    public void EveryTableIsInExactlyOneOfTheTwoSchemas()
+    {
+        // The two files between them are what the single database was. A
+        // table in both would be written to one and read from the other; a
+        // table in neither was dropped by 0019 and never rebuilt.
+        static HashSet<string> TablesOf(string sql)
+        {
+            using var db = new SqliteConnection("Data Source=:memory:;Pooling=False");
+            db.Open();
+            using (var create = db.CreateCommand()) { create.CommandText = sql; create.ExecuteNonQuery(); }
+            using var list = db.CreateCommand();
+            list.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'";
+            using var reader = list.ExecuteReader();
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            while (reader.Read()) { names.Add(reader.GetString(0)); }
+            return names;
+        }
+
+        var organization = TablesOf(DatabaseSchema.Sql);
+        var client = TablesOf(DatabaseSchema.ClientSql);
+        var single = TablesOf(File.ReadAllText(FindSchemaFile(Path.Combine("history", "0018-single-database.sql"))));
+
+        // Bookkeeping every file has, and what only the split introduced.
+        var own = new[] { "schema_migrations" };
+        Assert.Empty(organization.Intersect(client).Except(own));
+
+        var accounted = organization.Union(client).Except(["client_file", "row_ids"]).ToHashSet();
+        Assert.Equal(single.OrderBy(t => t), accounted.OrderBy(t => t));
     }
 
     [Fact]
@@ -59,7 +99,9 @@ public sealed class DatabaseSchemaTests
             command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'";
             var tables = Convert.ToInt32(await command.ExecuteScalarAsync(), provider: null);
 
-            Assert.True(tables >= 25, $"only {tables} tables were created");
+            // The organization's fifteen; each client's reports are in a file
+            // of its own, built from client-schema.sql.
+            Assert.True(tables >= 15, $"only {tables} tables were created");
         }
         finally
         {

@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Reporting;
@@ -19,11 +20,11 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
 
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>
+    /// The organization's database and each client's file. A report reads one
+    /// client's file and no other; see ClientDatabases.
+    /// </summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="tenantId">
     /// The organization the caller may see, or null for any. A client of
@@ -36,13 +37,20 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
         ArgumentException.ThrowIfNullOrWhiteSpace(clientSlug);
         ArgumentNullException.ThrowIfNull(period);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
-
-        var client = await GetClientAsync(db, clientSlug, tenantId, ct).ConfigureAwait(false);
+        (string Id, string Name, string TenantId)? client;
+        await using (var registry = await _files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false))
+        {
+            client = await GetClientAsync(registry, clientSlug, tenantId, ct).ConfigureAwait(false);
+        }
         if (client is null) { return null; }
 
-        var (clientId, clientName) = client.Value;
+        var (clientId, clientName, clientTenant) = client.Value;
+
+        // This client's file, and nothing of anybody else's: every figure in
+        // the report below is read from it. The one thing a report says about
+        // other clients - how many of them a sender also hit - is asked of
+        // their files separately, and only the count comes back.
+        await using var db = await _files.OpenAsync(ClientScope.Client(clientId), ct: ct).ConfigureAwait(false);
 
         // The organization's own name and look win over whatever the caller
         // was configured with: NextLayerSec's reports say NextLayerSec even
@@ -52,6 +60,7 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
 
         var domains = await GetDomainHealthAsync(db, clientId, period, ct).ConfigureAwait(false);
         var sources = await GetSourcesAsync(db, clientId, period, ct).ConfigureAwait(false);
+        sources = await WithOtherClientsAsync(sources, clientId, clientTenant, ct).ConfigureAwait(false);
         sources.AddRange(await GetRetiredAsync(db, clientId, period, sources, ct).ConfigureAwait(false));
         var changes = await GetChangesAsync(db, clientId, period, ct).ConfigureAwait(false);
         var current = await GetTotalsAsync(db, clientId, period.Start, period.End, ct).ConfigureAwait(false);
@@ -90,8 +99,7 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
     /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<(string Slug, string Name)>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText =
@@ -122,8 +130,8 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(slug);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, slug), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -161,18 +169,49 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
         return (At(0), At(1), At(2), At(3));
     }
 
-    private static async Task<(string Id, string Name)?> GetClientAsync(
+    private static async Task<(string Id, string Name, string TenantId)?> GetClientAsync(
         SqliteConnection db, string slug, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText =
-            "SELECT id, name FROM clients WHERE slug = $slug AND deleted_at IS NULL AND ($tenant IS NULL OR tenant_id = $tenant) LIMIT 1";
+            "SELECT id, name, tenant_id FROM clients WHERE slug = $slug AND deleted_at IS NULL AND ($tenant IS NULL OR tenant_id = $tenant) LIMIT 1";
         command.Parameters.AddWithValue("$slug", slug);
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
-        return (reader.GetString(0), reader.GetString(1));
+        return (reader.GetString(0), reader.GetString(1), reader.GetString(2));
+    }
+
+    /// <summary>
+    /// How many of the organization's other clients each failing sender also
+    /// failed for, asked of each of their files in turn.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The one cross-client figure on a client's report ("Yes, 3 other
+    /// customers"), and the reason it is worth an MSP's report rather than a
+    /// domain owner's own. Each other file is asked only which of these
+    /// addresses failed there; a count is all that leaves it, never a name
+    /// or a domain.
+    /// </para>
+    /// <para>
+    /// The organization's clients only. This used to count every client in
+    /// the database, so a customer of one MSP was told about another MSP's
+    /// customers - the wrong noun, and a figure one organization should never
+    /// learn about another. All time, as before: a sender that hit somebody
+    /// last year is still broad activity.
+    /// </para>
+    /// </remarks>
+    private async Task<List<ReportSource>> WithOtherClientsAsync(
+        List<ReportSource> sources, string clientId, string tenantId, CancellationToken ct)
+    {
+        var failing = sources.Where(s => s.Failing > 0).Select(s => s.SourceIp).Distinct(StringComparer.Ordinal).ToList();
+        if (failing.Count == 0) { return sources; }
+
+        var reach = await _files.ClientsFailingAsync(tenantId, failing, exceptClientId: clientId, ct: ct).ConfigureAwait(false);
+
+        return [.. sources.Select(s => reach.TryGetValue(s.SourceIp, out var n) ? s with { OtherClientsAffected = n } : s)];
     }
 
     private static async Task<(long Messages, long Passing, long Overridden)> GetTotalsAsync(
@@ -455,11 +494,9 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
                    COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
                      CASE WHEN r.dmarc_result = 'fail' AND r.dkim_auth_result = 'pass' THEN r.dkim_domain
                           WHEN r.dmarc_result = 'fail' AND r.spf_auth_result  = 'pass' THEN r.spf_domain END), ''), ''),
-                   (SELECT COUNT(DISTINCT o.client_id)
-                      FROM aggregate_records o
-                     WHERE o.source_ip = r.source_ip
-                       AND o.client_id <> $client
-                       AND o.dmarc_result = 'fail'),
+                   -- Other clients reached: filled in afterwards from their
+                   -- own files. See WithOtherClientsAsync.
+                   0,
                    -- What the address reverses to, so a client is not handed
                    -- a row of digits and asked whether they recognize it.
                    -- Nobody recognizes an address. A correlated subquery
@@ -673,7 +710,9 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
     private static async Task<bool> TableExistsAsync(SqliteConnection db, string name, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$name";
+        // pragma_table_list rather than sqlite_master, which lists only the
+        // organization's own tables: a client's are in its attached file.
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_list WHERE type = 'table' AND name = $name";
         command.Parameters.AddWithValue("$name", name);
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture) > 0;
     }

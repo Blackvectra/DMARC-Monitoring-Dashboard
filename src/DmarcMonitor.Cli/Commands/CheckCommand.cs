@@ -305,9 +305,9 @@ public static class CheckCommand
     {
         var sources = new List<(IPAddress, long, DateTimeOffset)>();
 
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ToString());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The reports are in the file of the client that owns the domain.
+        await using var db = await new ClientDatabases(dbPath).OpenAsync(
+            ClientScope.For(null, domain: domain), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = "SELECT r.source_ip, SUM(r.message_count), MAX(r.date_begin) "
@@ -345,9 +345,9 @@ public static class CheckCommand
         var domains = new List<string>();
         var observed = new Dictionary<string, ObservedSending>(StringComparer.OrdinalIgnoreCase);
 
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ToString());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // Every client's domains, so every client's file.
+        await using var db = await new ClientDatabases(dbPath).OpenAsync(
+            ClientScope.Organization(null), ["tls_reports", "aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """

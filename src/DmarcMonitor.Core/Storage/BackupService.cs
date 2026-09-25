@@ -21,7 +21,13 @@ public sealed record BackupResult(
 }
 
 /// <summary>
-/// Takes a verified copy of the database.
+/// Takes a verified copy of the database and every client's file.
+///
+/// A backup is one .bak file, as it has always been, but since each client has
+/// a database file of its own it is a zip holding them all, laid out as they
+/// are beside each other on disk: the organization's database, and its client
+/// folder. Restoring is putting them back (dmarc restore). A .bak from before
+/// the split is a single SQLite database, and restores the same way.
 ///
 /// Nothing else here protects the data. `update.sh` and `rollback.sh` roll the
 /// BINARY back; the reports have never had anything. On a single machine -
@@ -33,8 +39,10 @@ public sealed record BackupResult(
 ///   It is consistent. The database is in WAL mode and a collector may be
 ///   mid-write; copying the file with cp catches a torn page and a -wal
 ///   alongside it that may or may not be the matching one. VACUUM INTO asks
-///   SQLite for the copy, so it is a transactionally consistent snapshot
-///   taken without stopping anything.
+///   SQLite for the copy, so each file is a transactionally consistent
+///   snapshot taken without stopping anything. The client files are copied
+///   before the organization's database, so every report in the backup has
+///   its domain in it: a domain is always recorded before its first report.
 ///
 ///   It is verified. A backup nobody has opened is a file, not a backup. Each
 ///   copy is opened, integrity-checked and counted before it is trusted, and
@@ -109,51 +117,83 @@ public sealed class BackupService(string databasePath)
         // nothing is written, and - the point - nothing is PRUNED. Whatever
         // good backups exist stay exactly where they are, and the non-zero
         // exit puts it in front of somebody the same night.
-        await CheckSourceAsync(quick, ct).ConfigureAwait(false);
+        var files = new ClientDatabases(_databasePath);
+        var clientFiles = await ClientFilesAsync(files, ct).ConfigureAwait(false);
+
+        await CheckSourceAsync(_databasePath, quick, ct).ConfigureAwait(false);
+        foreach (var file in clientFiles)
+        {
+            await CheckSourceAsync(file, quick, ct).ConfigureAwait(false);
+        }
 
         Directory.CreateDirectory(directory);
         RestrictToOwner(directory, isDirectory: true);
 
         var target = Path.Combine(directory, NameFor(now ?? DateTimeOffset.UtcNow));
 
-        // VACUUM INTO refuses to overwrite, which is the behaviour we want:
-        // two runs in the same second must not silently leave one copy.
+        // Never overwrite: two runs in the same second must not silently
+        // leave one copy.
         if (File.Exists(target))
         {
             throw new IOException($"{target} already exists, so this run would overwrite a backup.");
         }
 
+        var staging = target + ".partial";
+        long reports = 0, records = 0;
+
         try
         {
-            await WriteCopyAsync(target, ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            // VACUUM INTO creates the file as it goes, so a run that dies part
-            // way - a full disk is the ordinary way - leaves a truncated .bak
-            // sitting there. Left behind it is worse than nothing: it is a
-            // fresh timestamp, so the health check reports a backup was taken
-            // on the night one was not, and retention counts it toward --keep
-            // and evicts a copy that was real.
-            TryDelete(target);
-            throw;
-        }
+            if (Directory.Exists(staging)) { Directory.Delete(staging, recursive: true); }
+            Directory.CreateDirectory(staging);
+            RestrictToOwner(staging, isDirectory: true);
 
-        RestrictToOwner(target);
+            var registryName = Path.GetFileName(files.RegistryPath);
+            var folderName = Path.GetFileName(files.Folder);
 
-        long reports, records;
-        try
-        {
-            (reports, records) = await VerifyAsync(target, ct).ConfigureAwait(false);
+            // Client files first, the organization's database last: see the
+            // class remarks.
+            if (clientFiles.Count > 0) { Directory.CreateDirectory(Path.Combine(staging, folderName)); }
+            foreach (var file in clientFiles)
+            {
+                var copy = Path.Combine(staging, folderName, Path.GetFileName(file));
+                await WriteCopyAsync(file, copy, ct).ConfigureAwait(false);
+                var (r, n) = await VerifyAsync(copy, clientFile: true, ct).ConfigureAwait(false);
+                reports += r;
+                records += n;
+            }
+
+            var registryCopy = Path.Combine(staging, registryName);
+            await WriteCopyAsync(_databasePath, registryCopy, ct).ConfigureAwait(false);
+            var (legacyReports, legacyRecords) = await VerifyAsync(registryCopy, clientFile: false, ct).ConfigureAwait(false);
+            reports += legacyReports;
+            records += legacyRecords;
+
+            // One file, written under a temporary name and renamed, so a run
+            // that dies part way never leaves a .bak that looks whole.
+            var zipping = target + ".zipping";
+            System.IO.Compression.ZipFile.CreateFromDirectory(
+                staging, zipping, System.IO.Compression.CompressionLevel.Optimal, includeBaseDirectory: false);
+            File.Move(zipping, target);
         }
         catch
         {
             // A copy that cannot be verified is worse than no copy, because it
-            // looks like one. Remove it, keep whatever was already there, and
-            // let the exception reach the operator.
+            // looks like one; a truncated file is a fresh timestamp that makes
+            // the health check report a backup that was never taken. Remove
+            // what was made, keep whatever was already there, and let the
+            // exception reach the operator.
+            TryDelete(target + ".zipping");
             TryDelete(target);
             throw;
         }
+        finally
+        {
+            try { if (Directory.Exists(staging)) { Directory.Delete(staging, recursive: true); } }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        RestrictToOwner(target);
 
         // Only now that a good copy exists. A failed run must never be the
         // reason yesterday's backup went away.
@@ -172,14 +212,15 @@ public sealed class BackupService(string databasePath)
     /// the same time waits rather than fails - the same retry that makes two
     /// collectors safe.
     /// </remarks>
-    private async Task CheckSourceAsync(bool quick, CancellationToken ct)
+    private static async Task CheckSourceAsync(string path, bool quick, CancellationToken ct)
     {
         try
         {
             await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = _databasePath,
+                DataSource = path,
                 Mode = SqliteOpenMode.ReadOnly,
+                Pooling = false,
             }.ToString());
 
             await db.OpenAsync(ct).ConfigureAwait(false);
@@ -191,7 +232,7 @@ public sealed class BackupService(string databasePath)
 
                 if (!string.Equals(answer, "ok", StringComparison.Ordinal))
                 {
-                    throw Corrupt(answer ?? "it gave no answer");
+                    throw Corrupt(path, answer ?? "it gave no answer");
                 }
             }
 
@@ -208,7 +249,7 @@ public sealed class BackupService(string databasePath)
                 if (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
                     var table = reader.IsDBNull(0) ? "a table" : reader.GetString(0);
-                    throw Corrupt($"rows in {table} point at parents that are no longer there");
+                    throw Corrupt(path, $"rows in {table} point at parents that are no longer there");
                 }
             }
         }
@@ -221,7 +262,7 @@ public sealed class BackupService(string databasePath)
             // reading "This is a bug" with a stack trace, when it is a finding
             // about somebody's disk and has a real answer - restore from the
             // newest backup, which this run has deliberately not touched.
-            throw Corrupt(ex.Message);
+            throw Corrupt(path, ex.Message);
         }
     }
 
@@ -239,8 +280,8 @@ public sealed class BackupService(string databasePath)
     /// safe before it says what is wrong. The backups already held are the
     /// whole reason this check runs before the copy rather than after it.
     /// </remarks>
-    private InvalidDataException Corrupt(string because) =>
-        new($"The database at {_databasePath} did not pass an integrity check: {because}. "
+    private static InvalidDataException Corrupt(string path, string because) =>
+        new($"The database at {path} did not pass an integrity check: {because}. "
             + "No backup was taken and nothing was removed, so every backup already held is still "
             + "there - restore from the newest one rather than letting tonight's run replace it.");
 
@@ -252,12 +293,13 @@ public sealed class BackupService(string databasePath)
     /// live database, and opening read-only also means a typo in the path
     /// reports rather than creating an empty file to back up.
     /// </remarks>
-    private async Task WriteCopyAsync(string target, CancellationToken ct)
+    private static async Task WriteCopyAsync(string source, string target, CancellationToken ct)
     {
         await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = _databasePath,
+            DataSource = source,
             Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
         }.ToString());
 
         await db.OpenAsync(ct).ConfigureAwait(false);
@@ -283,12 +325,13 @@ public sealed class BackupService(string databasePath)
     /// the numbers. An operator who reads "0 reports" in the log has learned
     /// something a silent success would have hidden.
     /// </remarks>
-    private static async Task<(long Reports, long Records)> VerifyAsync(string target, CancellationToken ct)
+    private static async Task<(long Reports, long Records)> VerifyAsync(string target, bool clientFile, CancellationToken ct)
     {
         await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
         {
             DataSource = target,
             Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
         }.ToString());
 
         await db.OpenAsync(ct).ConfigureAwait(false);
@@ -304,8 +347,41 @@ public sealed class BackupService(string databasePath)
             }
         }
 
+        // The organization's database holds no reports once it is split; one
+        // that has not been yet still does, and its copy is counted like any.
+        if (!clientFile && !await HasTableAsync(db, "aggregate_reports", ct).ConfigureAwait(false))
+        {
+            return (0, 0);
+        }
+
         return (await CountAsync(db, "aggregate_reports", ct).ConfigureAwait(false),
                 await CountAsync(db, "aggregate_records", ct).ConfigureAwait(false));
+    }
+
+    private static async Task<bool> HasTableAsync(SqliteConnection db, string table, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $t";
+        command.Parameters.AddWithValue("$t", table);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture) > 0;
+    }
+
+    /// <summary>
+    /// Every database file in the client folder: each client's, and any rows
+    /// the split kept aside because their client was gone.
+    /// </summary>
+    /// <remarks>
+    /// Whatever is in the folder rather than whatever the client list names, so
+    /// nothing held is left out of a backup because the list and the folder
+    /// disagree - the backup is where a disagreement gets looked into from.
+    /// </remarks>
+    private static Task<IReadOnlyList<string>> ClientFilesAsync(ClientDatabases files, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        IReadOnlyList<string> found = Directory.Exists(files.Folder)
+            ? [.. Directory.EnumerateFiles(files.Folder, "*.db").OrderBy(f => f, StringComparer.Ordinal)]
+            : [];
+        return Task.FromResult(found);
     }
 
     private static async Task<long> CountAsync(SqliteConnection db, string table, CancellationToken ct)

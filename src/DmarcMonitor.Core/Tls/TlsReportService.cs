@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Tls;
@@ -184,11 +185,8 @@ public sealed record TlsFailure
 /// </remarks>
 public sealed class TlsReportService(string databasePath)
 {
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="tenantId">One organization's domains, or null for every organization's.</param>
     /// <param name="clientSlug">One client's, for a customer's own login, or null.</param>
@@ -198,8 +196,8 @@ public sealed class TlsReportService(string databasePath)
         var since = Since(days);
         var client = Normalise(clientSlug);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, client), ["tls_reports", "dns_snapshots"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         command.CommandText = """
@@ -268,8 +266,8 @@ public sealed class TlsReportService(string databasePath)
         var since = Since(days);
         var client = Normalise(clientSlug);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, client), ["tls_reports", "tls_failure_details"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         command.CommandText = """

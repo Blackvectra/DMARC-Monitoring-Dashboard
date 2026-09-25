@@ -24,4 +24,10 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The schema as the release before the split into client files left
+         it: what a database carried across an upgrade looks like. -->
+    <EmbeddedResource Include="..\..\db\history\0018-single-database.sql" LogicalName="single-database.sql" />
+  </ItemGroup>
+
 </Project>

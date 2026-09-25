@@ -14,19 +14,20 @@ namespace DmarcMonitor.Core.Storage;
 /// </summary>
 public static class DatabaseSchema
 {
-    private const string ResourceName = "schema.sql";
+    /// <summary>The organization's database: db/schema.sql.</summary>
+    public static string Sql { get; } = Load("schema.sql");
 
-    /// <summary>The schema SQL compiled into this assembly.</summary>
-    public static string Sql { get; } = Load();
+    /// <summary>One client's own file: db/client-schema.sql.</summary>
+    public static string ClientSql { get; } = Load("client-schema.sql");
 
-    private static string Load()
+    private static string Load(string resourceName)
     {
         var assembly = Assembly.GetExecutingAssembly();
 
-        using var stream = assembly.GetManifestResourceStream(ResourceName)
+        using var stream = assembly.GetManifestResourceStream(resourceName)
             ?? throw new InvalidOperationException(
-                $"'{ResourceName}' is not embedded in {assembly.GetName().Name}. "
-                + "The build should include db/schema.sql as an EmbeddedResource.");
+                $"'{resourceName}' is not embedded in {assembly.GetName().Name}. "
+                + $"The build should include db/{resourceName} as an EmbeddedResource.");
 
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();

@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Intelligence;
@@ -245,17 +246,11 @@ public sealed record FleetSummary
 /// </summary>
 public sealed class ThreatIntelligenceService(string databasePath)
 {
-    private readonly string _readOnly = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
-
-    private readonly string _readWrite = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        ForeignKeys = true,
-    }.ToString();
+    /// <summary>
+    /// The organization's database, where the indicators are kept, and each
+    /// client's file, which they are derived from; see ClientDatabases.
+    /// </summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <summary>
     /// Recomputes indicators from the reports.
@@ -272,8 +267,12 @@ public sealed class ThreatIntelligenceService(string databasePath)
     {
         var since = Iso(DateTimeOffset.UtcNow.AddDays(-days));
 
-        await using var db = new SqliteConnection(_readWrite);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // Every organization's clients' records, read together: the whole
+        // point of indicators is what several clients' reports say at once.
+        // Each organization's indicators come only from its own clients' rows
+        // - the insert below groups by the tenant written on each row.
+        await using var db = await _files.OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], writeRegistry: true, ct: ct).ConfigureAwait(false);
         await using var tx = (SqliteTransaction)await db.BeginTransactionAsync(ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
@@ -360,8 +359,8 @@ public sealed class ThreatIntelligenceService(string databasePath)
     public async Task<IReadOnlyList<ThreatIndicator>> GetIndicatorsAsync(
         bool includeDismissed = false, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_readOnly);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         // Before 0018 no name is confirmed, and an unconfirmed name decides
         // nothing - the safe way round for a database not yet upgraded.
@@ -425,8 +424,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(value);
 
-        await using var db = new SqliteConnection(_readWrite);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenRegistryAsync(write: true, ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -448,8 +446,8 @@ public sealed class ThreatIntelligenceService(string databasePath)
     {
         var since = Iso(DateTimeOffset.UtcNow.AddDays(-days));
 
-        await using var db = new SqliteConnection(_readOnly);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records", "aggregate_reports"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """

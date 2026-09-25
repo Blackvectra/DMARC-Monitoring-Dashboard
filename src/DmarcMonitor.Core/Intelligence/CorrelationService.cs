@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Intelligence;
@@ -206,11 +207,12 @@ public sealed class CorrelationService(string databasePath)
     // intelligence make, and the three disagreeing about one address is how
     // the worst bug of the day was found. A rule this load-bearing belongs
     // where it can be tested.
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>
+    /// The organization's database and each client's file. Seeing one source
+    /// across several clients means reading their files together; see
+    /// ClientDatabases.
+    /// </summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="tenantId">
     /// One organization's clients, or null for every organization's. Scoped
@@ -225,8 +227,8 @@ public sealed class CorrelationService(string databasePath)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug), ["aggregate_records"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         // Overrides are excluded. A mailing list or forwarder breaking
@@ -466,8 +468,8 @@ public sealed class CorrelationService(string databasePath)
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
         var client = string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant();
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         var appearances = new List<SourceAppearance>();
 

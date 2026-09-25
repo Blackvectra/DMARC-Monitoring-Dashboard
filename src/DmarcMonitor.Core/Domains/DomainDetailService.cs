@@ -2,6 +2,7 @@ using System.Globalization;
 using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Intelligence;
 using DmarcMonitor.Core.Rollout;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Domains;
@@ -385,11 +386,8 @@ public sealed record DomainDetail
 /// </summary>
 public sealed class DomainDetailService(string databasePath)
 {
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="tenantId">
     /// The organization the caller may see, or null for any. A domain that
@@ -409,18 +407,16 @@ public sealed class DomainDetailService(string databasePath)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
-
-        string domainId, clientName, owningClient;
+        string domainId, clientName, owningClient, clientId, tenant;
         DateTimeOffset? baseline;
         int baselineDays;
         string target;
 
-        await using (var head = db.CreateCommand())
+        await using (var registry = await _files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false))
+        await using (var head = registry.CreateCommand())
         {
             head.CommandText = """
-                SELECT d.id, c.name, c.slug, d.baseline_started_at, d.baseline_days, d.policy_target
+                SELECT d.id, c.name, c.slug, d.baseline_started_at, d.baseline_days, d.policy_target, c.id, d.tenant_id
                 FROM domains d
                 JOIN clients c ON c.id = d.client_id
                 WHERE d.name = $name AND ($tenant IS NULL OR d.tenant_id = $tenant) AND ($client IS NULL OR c.slug = $client)
@@ -439,13 +435,25 @@ public sealed class DomainDetailService(string databasePath)
             baseline = reader.IsDBNull(3) ? null : ParseDate(reader.GetString(3));
             baselineDays = reader.IsDBNull(4) ? 14 : reader.GetInt32(4);
             target = reader.IsDBNull(5) ? "reject" : reader.GetString(5);
+            clientId = reader.GetString(6);
+            tenant = reader.GetString(7);
         }
+
+        // The domain's client's file, and no other.
+        await using var db = await _files.OpenAsync(ClientScope.Client(clientId), ct: ct).ConfigureAwait(false);
 
         var policyRow = await PolicyAsync(db, domainId, ct).ConfigureAwait(false);
         var (policy, subPolicy, pct, lastReport) = (policyRow.Policy, policyRow.Sub, policyRow.Pct, policyRow.Last);
         var (messages, passing, overridden) = await TotalsAsync(db, domainId, since, ct).ConfigureAwait(false);
         var sources = await SourcesAsync(db, domainId, name, since, ct).ConfigureAwait(false);
         var reporters = await ReportersAsync(db, domainId, since, ct).ConfigureAwait(false);
+
+        // Which unauthenticated senders also failed elsewhere in the
+        // organization, asked of each client's file; only counts come back.
+        var reach = await _files.ClientsFailingAsync(
+            tenant, [.. sources.Where(s => s.Failing > 0).Select(s => s.SourceIp)],
+            exceptDomainId: domainId, ct: ct).ConfigureAwait(false);
+        sources = [.. sources.Select(s => reach.TryGetValue(s.SourceIp, out var n) ? s with { OtherClients = n } : s)];
 
         sources = MarkTheUnaligned(sources, name, policyRow.StrictDkim);
 
@@ -589,11 +597,9 @@ public sealed class DomainDetailService(string databasePath)
                    COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
                      CASE WHEN r.dmarc_result = 'fail' AND r.dkim_auth_result = 'pass' THEN r.dkim_domain
                           WHEN r.dmarc_result = 'fail' AND r.spf_auth_result  = 'pass' THEN r.spf_domain END), ''), ''),
-                   (SELECT COUNT(DISTINCT o.client_id)
-                      FROM aggregate_records o
-                     WHERE o.source_ip = r.source_ip
-                       AND o.domain_id <> $domain
-                       AND o.dmarc_result = 'fail'),
+                   -- Other clients reached: filled in afterwards from their
+                   -- own files. See ClientDatabases.ClientsFailingAsync.
+                   0,
                    MAX(r.date_begin),
                    -- Kept apart from the column above, which merges the two
                    -- mechanisms into one "it proved something". Which one

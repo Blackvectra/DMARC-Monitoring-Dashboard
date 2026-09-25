@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
@@ -258,8 +259,9 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, Mt
 
         var found = new List<(string, DateTimeOffset)>();
 
-        await using var db = new SqliteConnection(ReadOnly());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The reports are in the file of the client that owns the domain.
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.For(tenantId, domain: domain), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
