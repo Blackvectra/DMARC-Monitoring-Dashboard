@@ -199,6 +199,12 @@ or the Import page, which runs the same code. Re-importing the same folder is
 safe — reports already stored are recognized and skipped — so an interrupted
 import is resumed by running it again.
 
+Subfolders are read too. One that cannot be opened is named in the list of
+what failed, and everything else is still imported. A link to a folder is not
+followed, so a link back up the tree cannot send the import round in circles;
+it is named in that list the same way. Import the folder it points to on its
+own.
+
 ---
 
 ## Auditing a zone file

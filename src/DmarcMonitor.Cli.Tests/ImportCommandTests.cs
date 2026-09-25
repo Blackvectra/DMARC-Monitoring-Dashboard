@@ -155,4 +155,40 @@ public sealed class ImportCommandTests : IDisposable
         Assert.Contains("failed          30 file(s)", output, StringComparison.Ordinal);
         Assert.Contains("and 5 more not listed", error, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task AFolderThatCannotBeOpenedIsNamedAndTheRestImported()
+    {
+        // A real folder with its mode taken away, which only shows anything
+        // where the tests are not run as root - root opens it regardless.
+        // The CI runner is not root. The importer's own tests cover the same
+        // ground everywhere, with a listing made to refuse.
+        if (OperatingSystem.IsWindows()) { return; }      // no mode to take away
+        if (Environment.IsPrivilegedProcess) { return; }
+
+        var folder = Folder(("1-good.xml", Report("r-1")), ("3-good.xml.gz", Gzip(Report("r-3"))));
+        var locked = Path.Combine(folder, "2-locked");
+        Directory.CreateDirectory(locked);
+        File.WriteAllBytes(Path.Combine(locked, "r.xml"), Report("r-2"));
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            var (code, output, error) = await ImportAsync(folder);
+
+            Assert.Equal(1, code);
+            Assert.Contains("reports stored  2", output, StringComparison.Ordinal);
+            Assert.Contains("failed          1 file(s)", output, StringComparison.Ordinal);
+            Assert.Contains($"2-locked{Path.DirectorySeparatorChar}: could not be listed: ", error, StringComparison.Ordinal);
+
+            // Not the banner for an exception nobody expected, which is what
+            // the locked folder produced before.
+            Assert.DoesNotContain("This is a bug", error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            // Given back, or the folder could not be cleared away afterwards.
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
 }

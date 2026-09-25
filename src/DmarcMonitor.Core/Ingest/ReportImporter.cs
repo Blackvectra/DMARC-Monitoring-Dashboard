@@ -8,6 +8,7 @@ namespace DmarcMonitor.Core.Ingest;
 /// <summary>What an import did.</summary>
 public sealed record ImportResult
 {
+    /// <summary>Files handed to the importer, a folder that was not read counting as one.</summary>
     public int FilesSeen { get; init; }
 
     /// <summary>Reports written to the database by this import.</summary>
@@ -21,12 +22,16 @@ public sealed record ImportResult
 
     /// <summary>
     /// Things that went wrong, one for each line in <see cref="Errors"/>
-    /// before the cap: a file that could not be read in full, or a report
-    /// that could not be stored.
+    /// before the cap: a file that could not be read in full, a folder that
+    /// could not be listed or a link to one that was not followed, or a
+    /// report that could not be stored.
     /// </summary>
     public int Failed { get; init; }
 
-    /// <summary>How many files <see cref="Failed"/> is spread across.</summary>
+    /// <summary>
+    /// How many files <see cref="Failed"/> is spread across, a folder that was
+    /// not read counting as one.
+    /// </summary>
     /// <remarks>
     /// Separate, because one export can hold a dozen reports that would not
     /// parse, and "12 failed" does not say whether that was one file or
@@ -66,9 +71,16 @@ public sealed record ImportFile(string Name, byte[] Content, string? Error = nul
 /// files they dropped - so extraction gets the larger of the two budgets. The
 /// mail path, where files arrive unbidden from strangers, keeps the tight one.
 /// </summary>
-public sealed class ReportImporter(ReportStore store)
+/// <param name="listFolder">
+/// Lists one folder: the files in it, and the folders in it. Injectable so a
+/// test can have a folder refuse to be listed, which a permission cannot do
+/// when the tests run as root.
+/// </param>
+public sealed class ReportImporter(
+    ReportStore store, Func<string, (string[] Files, string[] Folders)>? listFolder = null)
 {
     private readonly ReportStore _store = store;
+    private readonly Func<string, (string[] Files, string[] Folders)> _listFolder = listFolder ?? ListOnDisk;
 
     /// <summary>Enough detail to act on, without rendering a thousand lines of noise.</summary>
     public const int MaxErrorsKept = 25;
@@ -78,7 +90,7 @@ public sealed class ReportImporter(ReportStore store)
         string folder, IProgress<int>? progress = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(folder);
-        return ImportAsync(ReadFolderAsync(folder, ct), progress, ct);
+        return ImportAsync(ReadFolderAsync(folder, _listFolder, ct), progress, ct);
     }
 
     /// <summary>Imports one file: a single report, or an export holding thousands.</summary>
@@ -285,20 +297,118 @@ public sealed class ReportImporter(ReportStore store)
     }
 
     private static async IAsyncEnumerable<ImportFile> ReadFolderAsync(
-        string folder, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        string folder, Func<string, (string[] Files, string[] Folders)> list,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
-        var files = Directory
-            .EnumerateFiles(folder, "*", SearchOption.AllDirectories)
-            .OrderBy(f => f, StringComparer.Ordinal);
-
-        foreach (var file in files)
+        foreach (var (path, unread) in Walk(folder, list, ct).OrderBy(f => f.Path, StringComparer.Ordinal))
         {
             if (ct.IsCancellationRequested) { yield break; }
 
             // Reported, not skipped silently: a folder half of which could
             // not be read must not come back looking like a clean import.
-            yield return await ReadAsync(file, ct).ConfigureAwait(false);
+            yield return unread ?? await ReadAsync(path, ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Every file under a folder, and every folder under it that was not read,
+    /// each with the path it sorts by.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Walked one folder at a time, rather than by the framework's recursive
+    /// listing, which throws at the first subfolder it cannot open. The files
+    /// were sorted before any was read, so a single locked subfolder ended the
+    /// import before it had read anything, and the command called that a bug.
+    /// A folder that cannot be listed is now named as a failure, the way a
+    /// file that cannot be read is, and the rest of the import goes ahead.
+    /// </para>
+    /// <para>
+    /// A link to a folder is not followed. The recursive listing did follow
+    /// them, and a link back up the tree had it list the same files again at
+    /// every level - forty levels deep on Linux, until the system refused to
+    /// resolve a longer chain of links. It is named rather than skipped: a
+    /// link to a folder somewhere else holds files that used to be imported
+    /// through it, and they must not stop being imported without anybody
+    /// being told.
+    /// </para>
+    /// <para>
+    /// A folder that was not read sorts by its path with a separator on the
+    /// end, which is where its files would have sorted, so it is named in
+    /// the same order as everything around it.
+    /// </para>
+    /// </remarks>
+    private static List<(string Path, ImportFile? Unread)> Walk(
+        string folder, Func<string, (string[] Files, string[] Folders)> list, CancellationToken ct)
+    {
+        var found = new List<(string Path, ImportFile? Unread)>();
+        var pending = new Queue<string>();
+        pending.Enqueue(folder);
+
+        while (!ct.IsCancellationRequested && pending.TryDequeue(out var current))
+        {
+            string[] files, folders;
+            try
+            {
+                (files, folders) = list(current);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                found.Add(Unread(folder, current, $"could not be listed: {ex.Message}"));
+                continue;
+            }
+
+            foreach (var file in files) { found.Add((file, null)); }
+
+            foreach (var sub in folders)
+            {
+                if (IsLink(sub)) { found.Add(Unread(folder, sub, "a link to another folder, not followed")); }
+                else { pending.Enqueue(sub); }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>The files in one folder, and the folders in it, as the disk has them.</summary>
+    /// <remarks>
+    /// Hidden files are included, as they were by the recursive listing this
+    /// replaced: both use the framework's compatible defaults.
+    /// </remarks>
+    internal static (string[] Files, string[] Folders) ListOnDisk(string folder) =>
+        (Directory.GetFiles(folder), Directory.GetDirectories(folder));
+
+    /// <summary>True for a folder that is a link to another, which is not followed.</summary>
+    /// <remarks>
+    /// Anything marked as a reparse point: a symbolic link on Linux; on
+    /// Windows a symbolic link or a junction, and any other kind of reparse
+    /// point as well. A folder that cannot even be looked at is not taken for
+    /// a link: it goes on to be listed like any other, and is named when that
+    /// fails.
+    /// </remarks>
+    private static bool IsLink(string folder)
+    {
+        try { return File.GetAttributes(folder).HasFlag(FileAttributes.ReparsePoint); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>A folder that was not read, and why, keyed to sort where its files would have.</summary>
+    private static (string Path, ImportFile? Unread) Unread(string root, string folder, string why) =>
+        (folder + Path.DirectorySeparatorChar, new ImportFile(FolderName(root, folder), [], why));
+
+    /// <summary>
+    /// Names a folder for an error line by where it sits in the import, with a
+    /// separator on the end so that it reads as a folder rather than a file.
+    /// </summary>
+    private static string FolderName(string root, string folder)
+    {
+        var name = Path.GetRelativePath(root, folder);
+
+        // The folder being imported has no path within itself, so it goes by
+        // its own name.
+        if (name == ".") { name = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(root))); }
+
+        return name + Path.DirectorySeparatorChar;
     }
 
     private static async IAsyncEnumerable<ImportFile> ReadOneAsync(
