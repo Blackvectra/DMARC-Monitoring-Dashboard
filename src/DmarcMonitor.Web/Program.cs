@@ -302,7 +302,7 @@ app.MapGet("/reports/download/{slug}/{month}", async (
     if (stem.Length == 0) { stem = "report"; }
 
     context.Response.Headers.ContentDisposition =
-        $"inline; filename=\"{stem}-{period.Start:yyyy-MM}.pdf\"";
+        $"inline; filename=\"{stem}-{report.PeriodFileTag}.pdf\"";
 
     return Results.File(ClientReportPdf.Render(report), "application/pdf");
 });

@@ -122,7 +122,7 @@ public static class ReportCommand
             // provider is indistinguishable from a provider that stopped.
             if (report.Messages == 0) { empty++; }
 
-            var stem = Path.Combine(outPath, $"{each}-{period.Start:yyyy-MM}");
+            var stem = Path.Combine(outPath, $"{each}-{report.PeriodFileTag}");
 
             if (wantsHtml)
             {

@@ -63,7 +63,7 @@ public static class ClientReportPdf
         ArgumentNullException.ThrowIfNull(report);
 
         var document = new Document();
-        document.Info.Title = $"{report.ClientName} - email authentication report, {report.Period.Label}";
+        document.Info.Title = $"{report.ClientName} - email authentication report, {report.PeriodTitle}";
         document.Info.Author = report.ProviderName;
         document.Info.Subject = "Monthly DMARC and email authentication summary";
 
@@ -94,7 +94,6 @@ public static class ClientReportPdf
         WhyFailed(section, report);
         Actions(section, report);
         Covered(section, report);
-        Explainer(section, report);
 
         return document;
     }
@@ -112,7 +111,7 @@ public static class ClientReportPdf
         footer.Format.Borders.Top.Width = 0.5;
         footer.Format.Borders.Top.Color = Rule;
         footer.Format.SpaceBefore = 6;
-        footer.AddText($"{report.ClientName} · {report.Period.Label} · prepared by {report.ProviderName}");
+        footer.AddText($"{report.ClientName} · {report.PeriodTitle} · prepared by {report.ProviderName}");
 
         footer.AddTab();
         footer.AddText("Page ");
@@ -164,7 +163,7 @@ public static class ClientReportPdf
         title.Format.Font.Bold = true;
         title.Format.SpaceAfter = 2;
 
-        var period = section.AddParagraph($"{report.Period.Label} · prepared by {report.ProviderName}");
+        var period = section.AddParagraph($"{report.PeriodTitle} · prepared by {report.ProviderName}");
         period.Format.Font.Color = Muted;
         period.Format.Borders.Bottom.Width = 1;
         period.Format.Borders.Bottom.Color = Accent(report) ?? Ink;
@@ -297,8 +296,9 @@ public static class ClientReportPdf
 
         Figure(values[0], labels[0], $"{report.PassRate:0.#}%", "of mail sent using your name was provably yours",
                report.PassRate >= ClientReport.HealthyPassRate ? Good : Bad);
-        Figure(values[1], labels[1], $"{enforcing} of {report.Domains.Count}", "domain(s) enforcing a policy", Ink);
-        Figure(values[2], labels[2], $"{unproven:N0}", "message(s) nobody can account for",
+        Figure(values[1], labels[1], $"{enforcing} of {report.Domains.Count}",
+               $"{Plural.Of(report.Domains.Count, "domain", "domains")} enforcing a policy", Ink);
+        Figure(values[2], labels[2], $"{unproven:N0}", $"{Plural.Of(unproven, "message", "messages")} nobody can account for",
                unproven > 0 ? Bad : Good);
         Figure(values[3], labels[3],
                report.HasComparison ? $"{report.PreviousPassRate:0.#}%" : "—",
@@ -394,7 +394,7 @@ public static class ClientReportPdf
         var axis = section.AddParagraph(
             $"{first:MMM d} to {last:MMM d} · peak {peak:N0} in a day"
             + (missing > 0
-                ? $" · {missing} day(s) with no report, left blank rather than drawn as zero: that usually "
+                ? $" · {Plural.Count(missing, "day")} with no report, left blank rather than drawn as zero: that usually "
                 + "means the receivers sent nothing, not that your mail stopped."
                 : ""));
         axis.Format.Font.Size = 7.5;
@@ -487,7 +487,7 @@ public static class ClientReportPdf
     /// Who sent mail as the client and could never prove it.
     /// </summary>
     /// <remarks>
-    /// The figure "message(s) nobody can account for" is a count; this is
+    /// The figure "messages nobody can account for" is a count; this is
     /// the list behind it, which is what the brief means by threat findings
     /// and what a client can actually take to somebody. Every row here has
     /// passed for this client zero times - the one thing a forger cannot do
@@ -554,7 +554,7 @@ public static class ClientReportPdf
 
             Value(row[1], source.Failing.ToString("N0", CultureInfo.InvariantCulture), Bad);
             Small(row[2], string.Join(", ", source.Domains));
-            Small(row[3], source.Elsewhere > 0 ? $"Yes, {source.Elsewhere} other customer(s)" : "No");
+            Small(row[3], source.Elsewhere > 0 ? $"Yes, {Plural.Count(source.Elsewhere, "other customer")}" : "No");
         }
 
         if (grouped.Count > Rows)
@@ -652,7 +652,12 @@ public static class ClientReportPdf
     /// </remarks>
     private static void Covered(Section section, ClientReport report)
     {
-        if (report.Covered.Count == 0) { return; }
+        if (report.Covered.Count == 0)
+        {
+            section.AddParagraph().Format.SpaceAfter = 10;
+            Explainer(section.AddParagraph, report, rule: true);
+            return;
+        }
 
         Heading(section, "What this covered");
 
@@ -673,32 +678,50 @@ public static class ClientReportPdf
             note.Format.Font.Size = 8;
             note.Format.Font.Color = Muted;
         }
+
+        // The note that closes the report is this table's last row, and the
+        // rows are kept together, so the section and its note move to a new
+        // page as one. Left as paragraphs after the table, the note was the
+        // part that spilled: five of nineteen September reports ended on a
+        // page holding three lines of small print.
+        var closing = table.AddRow();
+        closing.TopPadding = Unit.FromPoint(10);
+        closing.Cells[0].MergeRight = 2;
+        Explainer(closing.Cells[0].AddParagraph, report, rule: false);
+
+        table.Rows[0].KeepWith = table.Rows.Count - 1;
     }
 
-    private static void Explainer(Section section, ClientReport report)
+    /// <summary>
+    /// What the report is, what it covered and when it was made, in small print.
+    /// </summary>
+    /// <param name="add">Where the paragraphs go: the page, or the last cell of the table above.</param>
+    /// <param name="rule">Whether to draw a rule above, which a table row already has.</param>
+    private static void Explainer(Func<string, Paragraph> add, ClientReport report, bool rule)
     {
-        section.AddParagraph().Format.SpaceAfter = 10;
-
-        var explainer = section.AddParagraph(
+        var explainer = add(
             "Every mail provider that received mail claiming to come from your domains reports back on what "
             + $"it saw. This summarizes those reports for {report.Period.Label}. It covers mail sent using "
             + "your domain name, by you and by anybody else, which is why the totals can be larger than the "
             + "mail your staff sent.");
         explainer.Format.Font.Size = 8;
         explainer.Format.Font.Color = Muted;
-        explainer.Format.Borders.Top.Width = 0.5;
-        explainer.Format.Borders.Top.Color = Rule;
-        explainer.Format.SpaceBefore = 8;
+        if (rule)
+        {
+            explainer.Format.Borders.Top.Width = 0.5;
+            explainer.Format.Borders.Top.Color = Rule;
+            explainer.Format.SpaceBefore = 8;
+        }
 
         var covers = string.Join(", ", report.Domains.Select(d => d.Domain));
         if (covers.Length > 0)
         {
-            var scope = section.AddParagraph($"Domains covered: {covers}.");
+            var scope = add($"Domains covered: {covers}.");
             scope.Format.Font.Size = 8;
             scope.Format.Font.Color = Muted;
         }
 
-        var generated = section.AddParagraph(
+        var generated = add(
             $"Generated {report.GeneratedAt:MMMM d, yyyy} by {report.ProviderName}. "
             + report.Covers);
         generated.Format.Font.Size = 8;

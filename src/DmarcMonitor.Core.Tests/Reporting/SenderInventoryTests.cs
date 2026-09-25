@@ -331,7 +331,7 @@ public sealed class EnforcementReadinessTests
         var domain = Domain(messages: 1000, passing: 970);
 
         Assert.Equal("Conditional", domain.Readiness);
-        Assert.Contains("30 message(s) would be affected", domain.ReadinessReason, StringComparison.Ordinal);
+        Assert.Contains("30 messages would be affected", domain.ReadinessReason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -452,9 +452,9 @@ public sealed class EnforcementReadinessTests
         // One operator, five servers: one service, named once. Listed per
         // server, a client was asked to confirm the same company over and
         // over, and the unfamiliar sender among them was buried.
-        Assert.Contains("1 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("1 service sending on your behalf is not", item.Finding, StringComparison.Ordinal);
         Assert.Contains("vendor.example (5 servers)", item.Finding, StringComparison.Ordinal);
-        Assert.Contains("38 message(s) affected", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("38 messages affected", item.Finding, StringComparison.Ordinal);
         Assert.DoesNotContain("smtp003", item.Finding, StringComparison.Ordinal);
     }
 
@@ -479,7 +479,7 @@ public sealed class EnforcementReadinessTests
 
         var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
 
-        Assert.Contains("5 service(s)", item.Finding, StringComparison.Ordinal);
+        Assert.Contains("5 services sending on your behalf are not", item.Finding, StringComparison.Ordinal);
         Assert.Contains("one.example", item.Finding, StringComparison.Ordinal);
         Assert.Contains("and 1 more", item.Finding, StringComparison.Ordinal);
         Assert.DoesNotContain("five.example", item.Finding, StringComparison.Ordinal);
@@ -508,7 +508,75 @@ public sealed class EnforcementReadinessTests
         Assert.DoesNotContain("custom DKIM", ask, StringComparison.Ordinal);
 
         var item = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
-        Assert.Contains("in their settings", item.Action, StringComparison.Ordinal);
+        Assert.Contains("in its settings", item.Action, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// One problem, one row.
+    /// </summary>
+    /// <remarks>
+    /// A domain losing mail through a named service got two rows about it: a
+    /// Critical one saying the service's 36 messages did not pass, whose action
+    /// pointed at "the next finding", and a High one saying the same service
+    /// was not set up, 36 messages affected, which carried the fix. A real
+    /// client report printed both for Avanan - two deadlines, two owners - and
+    /// a client reads that as two problems.
+    /// </remarks>
+    [Fact]
+    public void AStrugglingDomainsServicesAreOneRowThatCarriesTheFix()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains = [Domain("acme.example", "quarantine", messages: 100, passing: 64)],
+            Sources = [Broken("mail.vendor.example", 36) with { Domains = ["acme.example"] }],
+        };
+
+        var row = Assert.Single(report.Remediation, i => i.Finding.Contains("vendor.example", StringComparison.Ordinal));
+        Assert.Equal("Critical", row.Priority);
+        Assert.Contains("36 messages from", row.Finding, StringComparison.Ordinal);
+        Assert.Contains("custom DKIM", row.Action, StringComparison.Ordinal);
+        Assert.DoesNotContain("next finding", row.Action, StringComparison.Ordinal);
+        Assert.StartsWith("The vendor named", row.Owner, StringComparison.Ordinal);
+        Assert.Contains("aligned mail from each service named", row.Validation, StringComparison.Ordinal);
+        Assert.DoesNotContain(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A service no Critical row names still gets its own.
+    /// </summary>
+    [Fact]
+    public void AServiceOnAHealthyDomainIsStillInTheRegister()
+    {
+        var report = new ClientReport
+        {
+            ClientName = "Acme",
+            ProviderName = "NRG Tech Services",
+            Period = ReportPeriod.ForMonth(2026, 9),
+            Domains =
+            [
+                Domain("acme.example", "quarantine", messages: 100, passing: 64),
+                Domain("fine.example", "quarantine", messages: 10_000, passing: 9_988),
+            ],
+            Sources =
+            [
+                Broken("mail.vendor.example", 36) with { Domains = ["acme.example"] },
+                Broken("smtp.other.example", 12) with { SourceIp = "198.51.100.12", Domains = ["fine.example"] },
+            ],
+        };
+
+        var critical = Assert.Single(report.Remediation, i => i.Priority == "Critical");
+        Assert.Contains("vendor.example", critical.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("other.example", critical.Finding, StringComparison.Ordinal);
+
+        var rest = Assert.Single(report.Remediation, i => i.Finding.Contains("not set up to prove", StringComparison.Ordinal));
+        Assert.Contains("1 service sending on your behalf is not", rest.Finding, StringComparison.Ordinal);
+        Assert.Contains("other.example", rest.Finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("mail.vendor.example", rest.Finding, StringComparison.Ordinal);
+        Assert.Contains("12 messages affected", rest.Finding, StringComparison.Ordinal);
+        Assert.Contains("aligned mail from it.", rest.Validation, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -31,7 +31,10 @@ public sealed class ReportCommandTests : IDisposable
     [Fact]
     public async Task AskingForHtmlAsWellStillWritesThePdf()
     {
-        var begin = DateTimeOffset.UtcNow.AddDays(-2);
+        // Last month, which is over, so the file is named for the month alone.
+        // A month still running carries "-so-far"; see ClientReportPdfTests.
+        var now = DateTimeOffset.UtcNow;
+        var begin = new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, TimeSpan.Zero).AddMonths(-1).AddDays(9);
         var store = new ReportStore(DbPath);
         await store.InitializeAsync(DatabaseSchema.Sql);
 
