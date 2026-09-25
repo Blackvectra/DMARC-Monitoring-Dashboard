@@ -18,24 +18,27 @@ public static class BuildInfo
     public const string DevelopmentVersion = "development";
 
     /// <summary>The version, or <see cref="DevelopmentVersion"/>.</summary>
-    public static string Version { get; } = Read();
+    public static string Version { get; } = Parse(typeof(BuildInfo).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion);
 
     /// <summary>True when this came from a tagged release rather than a working tree.</summary>
     public static bool IsRelease => !string.Equals(Version, DevelopmentVersion, StringComparison.Ordinal);
 
-    private static string Read()
+    /// <summary>The version an informational version string names.</summary>
+    /// <remarks>
+    /// An unstamped build says "development" because Directory.Build.props
+    /// makes it, not because a number is guessed to be the SDK's default.
+    /// That guess was "1.0.0", which is also a version somebody can tag: the
+    /// v1.0.0 release would have called itself a development build, shown
+    /// that on Settings and Updates, and never been offered an update.
+    /// </remarks>
+    internal static string Parse(string? informational)
     {
-        var informational = typeof(BuildInfo).Assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-
         if (string.IsNullOrWhiteSpace(informational)) { return DevelopmentVersion; }
 
         // SourceLink appends "+<commit>"; the version is the part before it.
         var version = informational.Split('+')[0].Trim();
 
-        // The SDK's default when nothing was passed. Treating it as a real
-        // version would have a development build believe it is up to date
-        // with a release, or behind one, on no evidence at all.
-        return version is "" or "1.0.0" ? DevelopmentVersion : version;
+        return version.Length == 0 ? DevelopmentVersion : version;
     }
 }

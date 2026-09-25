@@ -203,7 +203,7 @@ jobs:
           if-no-files-found: error
 
   # One download, nothing to install, no server. The web bundle below is the
-  # one a deployment uses and it needs the ASP.NET Core 8 runtime on the host;
+  # one a deployment uses and it needs the ASP.NET Core 10 runtime on the host;
   # that is the right trade for a server and the wrong one for somebody who
   # just wants to see whether this is worth deploying. Self-contained costs
   # about 100 MB of release asset and removes every prerequisite: no runtime,
@@ -462,6 +462,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A version re-tagged over an old release would be published INTO it.
+      # Deleting a tag leaves its release behind as a draft, and the publish
+      # step below adopts whatever release already carries the tag rather
+      # than making its own: the new files go up under the old name and, for
+      # a draft, the old notes - "v1.0.0 - beta", written for .NET 8. Moving
+      # a tag with the release kept does much the same. Stopped here, before
+      # anything is published, with what to delete.
+      #
+      # Only releases older than the commit being released. One this same
+      # run created before a retry is newer than that, and is the one to
+      # finish rather than a reason to stop. And not being able to ask is a
+      # warning: this checks for one mistake, and must not become a new way
+      # for a correct release to fail.
+      - name: Refuse to publish into a release left behind
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          built="$(git log -1 --format=%ct)"
+
+          if ! releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"; then
+            echo "::warning::Could not list releases to check for one left behind by a deleted tag. Carrying on."
+            exit 0
+          fi
+
+          if ! stale="$(jq -rs --arg tag "$tag" --argjson built "$built" \
+              '[.[][] | select(.tag_name == $tag and ((.created_at | fromdateiso8601) < $built))
+                      | "\(.name) (id \(.id), created \(.created_at)\(if .draft then ", draft" else "" end))"]
+               | join("; ")' <<<"$releases")"; then
+            echo "::warning::Could not read the release list. Carrying on."
+            exit 0
+          fi
+
+          if [[ -n "$stale" ]]; then
+            echo "::error::$tag already has a release from before this commit: $stale. Publishing now would put this build into it, under its old name. Delete that release on the Releases page (the tag can stay), then re-run this job."
+            exit 1
+          fi
+
+          echo "No earlier release carries $tag."
+
       # Only this workflow's builds. The test run above shares this run and
       # uploads its own results, which do not belong in a release.
       - uses: actions/download-artifact@v4
@@ -541,7 +581,7 @@ jobs:
             | `DMARC-Monitor-Windows.zip` | **trying it.** Self-contained, needs nothing installed |
             | `dmarc.exe` | the command-line tool, on its own. **Not the dashboard** — double-clicked it prints its help and exits |
             | `dmarc-linux-x64`, `dmarc-linux-arm64` | the same tool for a Linux server |
-            | `dmarc-web.zip` | the **server** bundle. Needs the ASP.NET Core 8 runtime. **Contains no Windows executable** |
+            | `dmarc-web.zip` | the **server** bundle. Needs the ASP.NET Core 10 runtime. **Contains no Windows executable** |
             | `dmarc-deploy.tar.gz` | install, update and rollback scripts, and the systemd units |
 
             `dmarc.exe` runs on its own: no .NET install, no checkout, no

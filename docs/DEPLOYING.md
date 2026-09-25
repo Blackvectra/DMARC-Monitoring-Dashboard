@@ -154,7 +154,7 @@ app listens on**. It listens on loopback only and the proxy reaches it from
 the same machine. On AWS the security group is the firewall; neither image
 runs one of its own.
 
-The web app is **not** self-contained - it needs the ASP.NET Core 8 runtime
+The web app is **not** self-contained - it needs the ASP.NET Core 10 runtime
 on the host. The `dmarc` command-line tool is self-contained and needs
 nothing. Caddy is the proxy, because it is the whole TLS setup in three lines
 and renews the certificate itself.

@@ -296,7 +296,7 @@ The release also attaches `dmarc-deploy.tar.gz` - the scripts and systemd
 units under `deploy/` - because the server has no checkout and the docs tell
 somebody to run them.
 
-The web app is not self-contained and needs the ASP.NET Core 8 runtime on the
+The web app is not self-contained and needs the ASP.NET Core 10 runtime on the
 host. That is a deliberate trade - a self-contained web bundle is several
 hundred megabytes - but it means "copy one file and run it" is true of the CLI
 and not of the app.
