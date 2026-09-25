@@ -59,6 +59,19 @@ public sealed class SenderInventoryTests
         Assert.Equal(SenderClass.Unidentified, ClientReport.ClassOf(zoho));
     }
 
+    /// <summary>
+    /// Bulk hosting is not a service a client signs up for. A ColoCrossing
+    /// VPS that never authenticated was being asked about as "a provider we
+    /// recognize... if yours, authorize them".
+    /// </summary>
+    [Fact]
+    public void BulkHostingThatNeverAuthenticatesIsNotAskedAbout()
+    {
+        var vps = Source(ip: "198.51.100.40", messages: 3, passing: 0) with { ReverseName = "198-51-100-40-host.colocrossing.com" };
+
+        Assert.Equal(SenderClass.Suspicious, ClientReport.ClassOf(vps));
+    }
+
     [Fact]
     public void CleanMailIsApproved()
     {
@@ -713,6 +726,22 @@ public sealed class VerdictTests
         Assert.Contains(register, i => i.Action == "Correct the named services first, then move to p=quarantine.");
     }
 
+    /// <summary>
+    /// "Protected" over 79.6% read as a fifth of the client's own mail
+    /// failing, when every failure was a forgery.
+    /// </summary>
+    [Fact]
+    public void AProtectedVerdictSaysTheFailuresWereForged()
+    {
+        var spoofed = Domain("acme.example", "reject", messages: 100, passing: 80) with { Forged = 20 };
+
+        ReportSource forger = new() { SourceIp = "198.51.100.77", Messages = 20, Failing = 20 };
+
+        Assert.EndsWith("The rest was forged mail, which your policy asks receivers to refuse or send to junk.",
+            Report([spoofed], [forger]).Verdict, StringComparison.Ordinal);
+        Assert.DoesNotContain("The rest was forged", Report([Domain()]).Verdict, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AnUnenforcedDomainLosingMailIsNotReadyForEnforcement()
     {
@@ -747,7 +776,7 @@ public sealed class VerdictTests
             [Domain("watched.example", "none", messages: 1000, passing: 1000)],
             [new ReportSource { SourceIp = "203.0.113.9", Messages = 50, Passing = 10, Failing = 40 }]);
 
-        Assert.StartsWith("Conditional readiness.", report.Verdict, StringComparison.Ordinal);
+        Assert.StartsWith("Not ready for p=quarantine.", report.Verdict, StringComparison.Ordinal);
         Assert.Contains("before", report.Verdict, StringComparison.Ordinal);
     }
 
@@ -756,7 +785,7 @@ public sealed class VerdictTests
     {
         var report = Report([Domain("watched.example", "none", messages: 1000, passing: 1000)]);
 
-        Assert.StartsWith("Ready for enforcement.", report.Verdict, StringComparison.Ordinal);
+        Assert.StartsWith("Ready for p=quarantine.", report.Verdict, StringComparison.Ordinal);
     }
 
     [Fact]
