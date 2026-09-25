@@ -859,4 +859,243 @@ public sealed class ReportIngestorTests
         Assert.False(mailbox.Deleted.ContainsKey("m1"));
         Assert.Contains(result.Errors, e => e.Contains("could not be deleted", StringComparison.Ordinal));
     }
+
+    // ---- which folders are read ------------------------------------------------
+    //
+    // Made-up reports to the one shared address, so these are about folders
+    // and nothing else.
+
+    private const string Shared = "dmarc@example.org";
+
+    private static MailMessage In(string folder, string id) => new()
+    {
+        Id = id,
+        Subject = "Report domain: example.org",
+        From = "noreply@receiver.example",
+        ToAddresses = [Shared],
+        ReceivedAt = DateTimeOffset.UtcNow,
+        HasAttachments = true,
+        FolderName = folder,
+    };
+
+    private static MailAttachment AggregateFor(string reportId, string domain = "example.org") =>
+        FakeMailboxClient.Attachment($"{reportId}.xml", SyntheticReports.AggregateXml(reportId, domain));
+
+    private static IngestOptions Reading(params string[] folders) => new()
+    {
+        FallbackAddress = Shared,
+        SourceFolders = folders.Length == 0 ? new IngestOptions().SourceFolders : folders,
+    };
+
+    [Fact]
+    public async Task ReadsInboxAndTheFoldersInsideItWhenNoFolderIsNamed()
+    {
+        // What it has always done, and still does with nothing configured.
+        var mailbox = new FakeMailboxClient();
+        mailbox.AddFolder("example.org", parent: "Inbox");
+        mailbox.Add(In("Inbox", "m1"), AggregateFor("r-inbox"));
+        mailbox.Add(In("example.org", "m2"), AggregateFor("r-child"));
+
+        var result = await Ingestor(mailbox, Reading()).RunAsync();
+
+        Assert.Equal(["Inbox"], mailbox.FoldersLookedUp);
+        Assert.Equal(["Inbox", "example.org"], result.FoldersRead);
+        Assert.Equal(2, result.IngestedCount);
+        Assert.Empty(result.Errors);
+    }
+
+    [Fact]
+    public async Task ReadsEveryNamedFolderBesideInbox()
+    {
+        // The mailbox this was built for: Outlook rules file most of its
+        // reports into folders beside Inbox whose names hold a backslash. A
+        // collector that could only read Inbox never saw any of them.
+        var mailbox = new FakeMailboxClient();
+        mailbox.AddFolder(@"DMARC\example.org");
+        mailbox.AddFolder(@"DMARC\example.net");
+        mailbox.Add(In(@"DMARC\example.org", "m1"), AggregateFor("r-1"));
+        mailbox.Add(In(@"DMARC\example.net", "m2"), AggregateFor("r-2", "example.net"));
+        mailbox.Add(In("Inbox", "m3"), AggregateFor("r-3"));
+
+        var result = await Ingestor(mailbox, Reading(@"DMARC\example.org", @"DMARC\example.net")).RunAsync();
+
+        Assert.Equal([@"DMARC\example.org", @"DMARC\example.net"], result.FoldersRead);
+        Assert.Equal(2, result.IngestedCount);
+        Assert.Equal("DMARC-Processed", mailbox.Moved["m1"]);
+        Assert.Equal("DMARC-Processed", mailbox.Moved["m2"]);
+        Assert.Empty(result.Errors);
+
+        // Inbox was not named, so it was not read.
+        Assert.False(mailbox.Moved.ContainsKey("m3"));
+    }
+
+    [Fact]
+    public async Task ABackslashIsPartOfTheNameNotAPath()
+    {
+        // DMARC\example.org is one folder beside Inbox, not example.org inside
+        // DMARC. With both in the mailbox, the name reaches the first only.
+        var mailbox = new FakeMailboxClient();
+        mailbox.AddFolder("DMARC");
+        mailbox.AddFolder("example.org", parent: "DMARC");
+        mailbox.AddFolder(@"DMARC\example.org");
+        mailbox.Add(In(@"DMARC\example.org", "literal"), AggregateFor("r-literal"));
+        mailbox.Add(In("example.org", "nested"), AggregateFor("r-nested"));
+
+        var result = await Ingestor(mailbox, Reading(@"DMARC\example.org")).RunAsync();
+
+        Assert.Equal([@"DMARC\example.org"], result.FoldersRead);
+        Assert.True(mailbox.Moved.ContainsKey("literal"));
+        Assert.False(mailbox.Moved.ContainsKey("nested"));
+    }
+
+    [Fact]
+    public async Task ReadsTheFoldersInsideANamedFolder()
+    {
+        var mailbox = new FakeMailboxClient();
+        mailbox.AddFolder("DMARC");
+        mailbox.AddFolder("example.org", parent: "DMARC");
+        mailbox.Add(In("example.org", "m1"), AggregateFor("r-1"));
+
+        var result = await Ingestor(mailbox, Reading("DMARC")).RunAsync();
+
+        Assert.Equal(["DMARC", "example.org"], result.FoldersRead);
+
+        // The folder is carried through for attribution, as it is under Inbox.
+        Assert.Contains("mail rule", Assert.Single(result.Reports).Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SaysSoWhenANamedFolderIsNotThereAndStillReadsTheRest()
+    {
+        var mailbox = new FakeMailboxClient();
+        mailbox.AddFolder(@"DMARC\example.org");
+        mailbox.Add(In(@"DMARC\example.org", "m1"), AggregateFor("r-1"));
+
+        var result = await Ingestor(mailbox, Reading(@"DMARC\missing.example", @"DMARC\example.org")).RunAsync();
+
+        Assert.Equal(1, result.IngestedCount);
+        Assert.Contains(@"'DMARC\missing.example'", Assert.Single(result.Errors), StringComparison.Ordinal);
+
+        // Looked for and never made. An empty folder of that name, read every
+        // hour, would look exactly like a quiet mailbox.
+        Assert.Equal(["DMARC-Processed", "DMARC-Unrecognized", "DMARC-Quarantine"], mailbox.FoldersCreated);
+    }
+
+    [Fact]
+    public async Task ANameThatLostItsBackslashFindsNothingAndSaysWhy()
+    {
+        // What an unquoted value in a systemd environment file, or in a shell,
+        // leaves of DMARC\example.org.
+        var mailbox = new FakeMailboxClient();
+        mailbox.AddFolder(@"DMARC\example.org");
+        mailbox.Add(In(@"DMARC\example.org", "m1"), AggregateFor("r-1"));
+
+        var result = await Ingestor(mailbox, Reading("DMARCexample.org")).RunAsync();
+
+        Assert.Empty(result.FoldersRead);
+        Assert.Contains("quote the name", Assert.Single(result.Errors), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NeverReadsAFolderItFilesInto()
+    {
+        // Everything in it has been dealt with. Read again, each message would
+        // be filed again on every run, spending the message cap while new
+        // reports waited.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(In("Inbox", "m1"), AggregateFor("r-1"));
+        mailbox.Add(In("DMARC-Processed", "old"), AggregateFor("r-old"));
+
+        var result = await Ingestor(mailbox, Reading("DMARC-Processed", "Inbox")).RunAsync();
+
+        Assert.Equal(["Inbox"], result.FoldersRead);
+        Assert.False(mailbox.Moved.ContainsKey("old"));
+        Assert.Contains("'DMARC-Processed' is where this run files mail", Assert.Single(result.Errors), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AFolderNamedTwiceIsReadOnce()
+    {
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(In("Inbox", "m1"), AggregateFor("r-1"));
+
+        var result = await Ingestor(mailbox, Reading("Inbox", "INBOX")).RunAsync();
+
+        Assert.Equal(["Inbox"], result.FoldersRead);
+        Assert.Equal(1, result.MessagesRead);
+    }
+
+    // ---- what was not stored is said, and kept ---------------------------------
+
+    [Fact]
+    public async Task AMessageWhoseReportsTheStoreDeclinedIsAnErrorNotASilence()
+    {
+        // Declining used to leave the message in place with nothing recorded,
+        // so the run ended with no error and exit 0 - and the next did the same.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(In("Inbox", "m1"), AggregateFor("r-1"));
+
+        var ingestor = new ReportIngestor(mailbox, Reading(), _ => null, null, (_, _) => Task.FromResult(false));
+        var result = await ingestor.RunAsync();
+
+        Assert.Empty(mailbox.Moved);
+        var error = Assert.Single(result.Errors);
+        Assert.Contains("r-1.xml", error, StringComparison.Ordinal);
+        Assert.Contains("left in place", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AMessageWithAGoodReportAndOneItCannotReadIsKeptNotDeleted()
+    {
+        // The delete setting promises to keep a report this version cannot
+        // read. Beside a good report it was filed as processed - deleted, with
+        // --delete - and the one copy of it went too.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(In("Inbox", "m1"), AggregateFor("r-good"), FakeMailboxClient.Attachment("broken.xml", "<feedback><unclosed>"));
+
+        var result = await Ingestor(mailbox, Reading() with { DeleteProcessed = DeleteProcessed.Permanent }).RunAsync();
+
+        Assert.Equal(1, result.IngestedCount);
+        Assert.Equal(1, result.UnrecognizedCount);
+        Assert.Empty(mailbox.Deleted);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
+    }
+
+    [Fact]
+    public async Task ADamagedAttachmentIsRecordedWithItsReasonAndItsMessageKept()
+    {
+        // Skipped without a word, it left its message looking fully processed.
+        var damaged = SyntheticReports.WithDamagedListOfContents(
+            SyntheticReports.Zip(("r.xml", SyntheticReports.Bytes(SyntheticReports.AggregateXml("r-damaged")))));
+
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(In("Inbox", "m1"),
+            AggregateFor("r-good"),
+            new MailAttachment { Id = "a2", Name = "report.zip", Content = damaged });
+
+        var result = await Ingestor(mailbox, Reading() with { DeleteProcessed = DeleteProcessed.Permanent }).RunAsync();
+
+        var unread = Assert.Single(result.Reports, r => r.Outcome == IngestOutcome.Unrecognized);
+        Assert.StartsWith("report.zip: could not be opened as a zip archive", unread.Reason, StringComparison.Ordinal);
+        Assert.Equal(1, result.IngestedCount);
+        Assert.Empty(mailbox.Deleted);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
+    }
+
+    [Fact]
+    public async Task ATlsReportNamingNoDomainIsNotCountedAsIngested()
+    {
+        // Through the shared address the domain is taken from the report, so
+        // an empty one got through as ingested, was declined by the store, and
+        // left its message to be read and declined again on every run.
+        var mailbox = new FakeMailboxClient();
+        mailbox.Add(In("Inbox", "m1"), FakeMailboxClient.Attachment("tls.json", SyntheticReports.TlsJson("t-1", policies: "[]")));
+
+        var result = await Ingestor(mailbox, Reading()).RunAsync();
+
+        var report = Assert.Single(result.Reports);
+        Assert.Equal(IngestOutcome.Unrecognized, report.Outcome);
+        Assert.Contains("names no policy domain", report.Reason, StringComparison.Ordinal);
+        Assert.Equal("DMARC-Unrecognized", mailbox.Moved["m1"]);
+    }
 }

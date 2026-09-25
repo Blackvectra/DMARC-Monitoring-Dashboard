@@ -121,6 +121,25 @@ internal static class Args
         return null;
     }
 
+    /// <summary>Every value given for a flag that may be repeated, in order.</summary>
+    /// <remarks>
+    /// Only for a flag the command declares repeatable (see <see cref="Reject"/>);
+    /// for any other, a second one is refused before this is reached.
+    /// </remarks>
+    public static IReadOnlyList<string> Values(string[] args, string name)
+    {
+        var values = new List<string>();
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+            {
+                values.Add(args[i + 1]);
+                i++;
+            }
+        }
+        return values;
+    }
+
     public static bool Flag(string[] args, string name) =>
         Array.Exists(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
 
@@ -157,15 +176,26 @@ internal static class Args
     /// - a command line pasted twice, which is an ordinary thing to do in a
     /// terminal - imported the executable itself, reported "files seen 1, not
     /// reports 1", and exited 0. Nothing on screen suggested the folder that
-    /// was actually wanted had never been looked at. No command here takes a
-    /// repeated flag, so there is no case where the second one is meant to be
-    /// discarded silently.
+    /// was actually wanted had never been looked at.
+    ///
+    /// So a flag may appear once unless the command says otherwise, by naming
+    /// it with a trailing "..." - "--folder..." - as the usage text does. Then
+    /// every occurrence is meant, and <see cref="Values"/> reads them all. A
+    /// leading "!" still marks a flag that takes no value.
     /// </remarks>
     public static int Reject(string[] args, params string[] known)
     {
-        var takesValue = new HashSet<string>(known.Where(k => !k.StartsWith('!')),
+        static string Bare(string flag)
+        {
+            var name = flag.TrimStart('!');
+            return name.EndsWith("...", StringComparison.Ordinal) ? name[..^3] : name;
+        }
+
+        var takesValue = new HashSet<string>(known.Where(k => !k.StartsWith('!')).Select(Bare),
                                              StringComparer.OrdinalIgnoreCase);
-        var all = new HashSet<string>(known.Select(k => k.TrimStart('!')), StringComparer.OrdinalIgnoreCase);
+        var repeatable = new HashSet<string>(known.Where(k => k.EndsWith("...", StringComparison.Ordinal)).Select(Bare),
+                                             StringComparer.OrdinalIgnoreCase);
+        var all = new HashSet<string>(known.Select(Bare), StringComparer.OrdinalIgnoreCase);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < args.Length; i++)
@@ -175,7 +205,7 @@ internal static class Args
 
             if (all.Contains(arg))
             {
-                if (!seen.Add(arg))
+                if (!seen.Add(arg) && !repeatable.Contains(arg))
                 {
                     Console.Error.WriteLine($"{arg} was given more than once.");
                     Console.Error.WriteLine("Only the first one would have been used, which is rarely what was meant.");

@@ -229,18 +229,195 @@ public sealed class GraphMailboxClientTests
     }
 
     [Fact]
-    public async Task EscapesAnApostropheInAFolderName()
+    public async Task FindsAFolderWhoseNameHasAnApostropheWithoutCreatingAnother()
     {
-        // OData escapes a quote by doubling it. Without that the filter is
-        // malformed and Graph rejects the request.
-        var stub = new StubHttpMessageHandler().When("/mailFolders?", HttpStatusCode.OK, """{"value":[]}""")
-            .When("/mailFolders", HttpStatusCode.Created, """{"id":"f1"}""");
+        // The name used to go into a $filter, where a quote had to be doubled
+        // or Graph refused the request. It is compared here now, so there is
+        // nothing to escape - but the folder still has to be found rather than
+        // made a second time.
+        var stub = new StubHttpMessageHandler()
+            .When("/mailFolders?", HttpStatusCode.OK, """{"value":[{"id":"f-bob","displayName":"Bob's Reports"}]}""")
+            .When("/mailFolders", HttpStatusCode.Created, """{"id":"should-not-happen"}""");
         var (client, _) = Build(stub);
 
-        await client.EnsureFolderAsync("Bob's Reports");
+        Assert.Equal("f-bob", await client.EnsureFolderAsync("Bob's Reports"));
+        Assert.DoesNotContain(stub.Requests, r => r.Method == HttpMethod.Post);
+    }
 
-        var filterRequest = stub.Requests[0].RequestUri!.ToString();
-        Assert.Contains("''", Uri.UnescapeDataString(filterRequest), StringComparison.Ordinal);
+    // ---- folders named to be read -------------------------------------------
+    //
+    // The live mailbox has Outlook rules filing reports into folders beside
+    // Inbox whose names hold a literal backslash, DMARC\example.org. Graph
+    // addresses a folder by id, so the name only matters once: when it is
+    // turned into one. These are about that moment.
+
+    /// <summary>
+    /// The top of a mailbox holding a folder with a backslash in its name and
+    /// every near miss a looser comparison could land on. JSON escapes the
+    /// backslash; each name has exactly one.
+    /// </summary>
+    private const string TopLevel = """
+        {"value":[
+          {"id":"f-inbox","displayName":"Inbox"},
+          {"id":"f-dmarc","displayName":"DMARC"},
+          {"id":"f-bare","displayName":"example.org"},
+          {"id":"f-old","displayName":"DMARC\\example.org.old"},
+          {"id":"f-right","displayName":"DMARC\\example.org","childFolderCount":0,"totalItemCount":212},
+          {"id":"f-other","displayName":"DMARC\\example.net"}]}
+        """;
+
+    [Fact]
+    public async Task FindsAFolderWhoseNameHasABackslashByTheWholeName()
+    {
+        var stub = new StubHttpMessageHandler().When("/mailFolders?", HttpStatusCode.OK, TopLevel);
+        var (client, _) = Build(stub);
+
+        var folder = await client.FindFolderAsync(@"DMARC\example.org");
+
+        Assert.NotNull(folder);
+        Assert.Equal("f-right", folder.Id);
+        Assert.Equal(@"DMARC\example.org", folder.Name);
+        Assert.Equal(212, folder.TotalItemCount);
+    }
+
+    [Fact]
+    public async Task MatchesTheNameIgnoringCaseAsOutlookDoes()
+    {
+        var (client, _) = Build(new StubHttpMessageHandler().When("/mailFolders?", HttpStatusCode.OK, TopLevel));
+
+        Assert.Equal("f-right", (await client.FindFolderAsync(@"dmarc\EXAMPLE.org"))?.Id);
+    }
+
+    [Fact]
+    public async Task ComparesTheNameHereRatherThanAskingGraphToFilterOnIt()
+    {
+        // A backslash inside a string the server parses is one character
+        // nobody has checked it treats as itself. A comparison made here is a
+        // promise this code can keep.
+        var stub = new StubHttpMessageHandler().When("/mailFolders?", HttpStatusCode.OK, TopLevel);
+        var (client, _) = Build(stub);
+
+        await client.FindFolderAsync(@"DMARC\example.org");
+
+        Assert.DoesNotContain(stub.Requests, r => r.RequestUri!.ToString().Contains("$filter", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task NeverCreatesAFolderItWasOnlyAskedToFind()
+    {
+        // Created, an empty folder of that name is read every hour and looks
+        // exactly like a quiet mailbox - and a --dry-run makes it in the live one.
+        var stub = new StubHttpMessageHandler()
+            .When("/mailFolders?", HttpStatusCode.OK, TopLevel)
+            .When("/mailFolders", HttpStatusCode.Created, """{"id":"should-not-happen"}""");
+        var (client, _) = Build(stub);
+
+        Assert.Null(await client.FindFolderAsync(@"DMARC\missing.example"));
+        Assert.Null(await client.FindFolderAsync("DMARCexample.org"));
+        Assert.DoesNotContain(stub.Requests, r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task LooksForAFolderOnEveryPage()
+    {
+        // The default page is ten folders, and a mailbox sorted by rule easily
+        // has more than that beside Inbox.
+        var stub = new StubHttpMessageHandler()
+            .When("/nextpage", HttpStatusCode.OK, """{"value":[{"id":"f-right","displayName":"DMARC\\example.org"}]}""")
+            .When("/mailFolders?", HttpStatusCode.OK, """
+                {"value":[{"id":"f-inbox","displayName":"Inbox"}],
+                 "@odata.nextLink":"https://graph.microsoft.com/v1.0/nextpage"}
+                """);
+        var (client, _) = Build(stub);
+
+        Assert.Equal("f-right", (await client.FindFolderAsync(@"DMARC\example.org"))?.Id);
+    }
+
+    [Fact]
+    public async Task OneListingServesEveryFolderARunLooksUp()
+    {
+        // The three folders a run files into, and every folder it was asked
+        // to read, are all top-level: one list answers them all.
+        var stub = new StubHttpMessageHandler().When("/mailFolders?", HttpStatusCode.OK, """
+            {"value":[
+              {"id":"f-p","displayName":"DMARC-Processed"},
+              {"id":"f-u","displayName":"DMARC-Unrecognized"},
+              {"id":"f-q","displayName":"DMARC-Quarantine"},
+              {"id":"f-1","displayName":"DMARC\\example.org"},
+              {"id":"f-2","displayName":"DMARC\\example.net"}]}
+            """);
+        var (client, _) = Build(stub);
+
+        await client.EnsureFolderAsync("DMARC-Processed");
+        await client.EnsureFolderAsync("DMARC-Unrecognized");
+        await client.EnsureFolderAsync("DMARC-Quarantine");
+        Assert.Equal("f-1", (await client.FindFolderAsync(@"DMARC\example.org"))?.Id);
+        Assert.Equal("f-2", (await client.FindFolderAsync(@"DMARC\example.net"))?.Id);
+
+        Assert.Single(stub.Requests);
+    }
+
+    [Fact]
+    public async Task FindsInboxByItsWellKnownNameWithoutLookingItUp()
+    {
+        // Addressable by name whatever the mailbox calls it on screen.
+        var (client, stub) = Build(new StubHttpMessageHandler());
+
+        var inbox = await client.FindFolderAsync("Inbox");
+
+        Assert.Equal("Inbox", inbox?.Id);
+        Assert.Empty(stub.Requests);
+    }
+
+    [Fact]
+    public async Task ReadsMessagesFromTheFolderIdItIsGiven()
+    {
+        // No lookup on the way: the id is used as given. Looking a name up
+        // again, somewhere it was not, is how rule-sorted reports once went
+        // uncollected - and how an empty folder of the same name got made.
+        var stub = new StubHttpMessageHandler().When("/messages", HttpStatusCode.OK, OneMessage);
+        var (client, _) = Build(stub);
+
+        var messages = new List<MailMessage>();
+        await foreach (var m in client.GetMessagesAsync("AAMkADf-right=")) { messages.Add(m); }
+
+        Assert.Single(messages);
+
+        // Compared unescaped, as RequestsOldestFirst explains.
+        var request = Assert.Single(stub.Requests);
+        Assert.Contains("/mailFolders/AAMkADf-right=/messages",
+            Uri.UnescapeDataString(request.RequestUri!.ToString()), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ListsTheFoldersInsideAFolderById()
+    {
+        var stub = new StubHttpMessageHandler().When("/childFolders", HttpStatusCode.OK, """
+            {"value":[{"id":"f-child","displayName":"example.org","childFolderCount":0,"totalItemCount":3}]}
+            """);
+        var (client, _) = Build(stub);
+
+        var child = Assert.Single(await client.GetChildFoldersAsync("f-right"));
+
+        Assert.Equal("f-child", child.Id);
+        Assert.Equal("example.org", child.Name);
+        Assert.Contains("/mailFolders/f-right/childFolders", Assert.Single(stub.Requests).RequestUri!.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AChildFolderDoesNotTakeThePlaceOfATopLevelOneWithTheSameName()
+    {
+        // Children used to be remembered by name alongside top-level folders,
+        // so listing Inbox's children could send a later lookup of a top-level
+        // folder with the same name somewhere else entirely.
+        var stub = new StubHttpMessageHandler()
+            .When("/childFolders", HttpStatusCode.OK, """{"value":[{"id":"f-child","displayName":"DMARC\\example.org"}]}""")
+            .When("/mailFolders?", HttpStatusCode.OK, TopLevel);
+        var (client, _) = Build(stub);
+
+        await client.GetChildFoldersAsync("Inbox");
+
+        Assert.Equal("f-right", (await client.FindFolderAsync(@"DMARC\example.org"))?.Id);
     }
 
     [Fact]

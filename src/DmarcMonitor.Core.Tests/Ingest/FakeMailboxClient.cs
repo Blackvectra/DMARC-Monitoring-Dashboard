@@ -72,11 +72,53 @@ public sealed class FakeMailboxClient : IMailboxClient
         Content = System.Text.Encoding.UTF8.GetBytes(content),
     };
 
+    /// <summary>
+    /// Folders by id: each one's display name, and the id of the folder it
+    /// sits in, or null at the top of the mailbox.
+    /// </summary>
+    /// <remarks>
+    /// The ids are not the names, on purpose. The ingestor reads a folder by
+    /// the id it was given, and a fake whose ids were its names could not
+    /// tell that apart from looking the name up again - which is how every
+    /// report a rule sorted into Inbox\acme.com once went uncollected. Inbox
+    /// is the exception, as it is in Graph, which addresses it by name.
+    /// </remarks>
+    private readonly Dictionary<string, (string Name, string? ParentId)> _folders = new(StringComparer.Ordinal)
+    {
+        ["Inbox"] = ("Inbox", null),
+    };
+
+    /// <summary>
+    /// Adds a folder, at the top of the mailbox or inside a top-level one,
+    /// and returns its id. A message is put in it by setting its FolderName.
+    /// </summary>
+    public string AddFolder(string name, string? parent = null)
+    {
+        var parentId = parent is null ? null : TopLevel(parent)?.Id
+            ?? throw new InvalidOperationException($"No top-level folder '{parent}' to put '{name}' in.");
+
+        var id = $"folder-{_folders.Count}";
+        _folders[id] = (name, parentId);
+        return id;
+    }
+
+    private MailFolder? TopLevel(string name) => _folders
+        .Where(f => f.Value.ParentId is null && string.Equals(f.Value.Name, name, StringComparison.OrdinalIgnoreCase))
+        .Select(f => new MailFolder { Id = f.Key, Name = f.Value.Name })
+        .FirstOrDefault();
+
     public async IAsyncEnumerable<MailMessage> GetMessagesAsync(
-        string folder,
+        string folderId,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        foreach (var m in _messages.Where(m => !Moved.ContainsKey(m.Id) && FolderMatches(m, folder)).OrderBy(m => m.ReceivedAt))
+        // Loud, like Graph answering 404: a folder read by anything but the
+        // id it was given is a bug, not an empty folder.
+        if (!_folders.TryGetValue(folderId, out var folder))
+        {
+            throw new InvalidOperationException($"No folder has the id '{folderId}'.");
+        }
+
+        foreach (var m in _messages.Where(m => !Moved.ContainsKey(m.Id) && FolderMatches(m, folder.Name)).OrderBy(m => m.ReceivedAt))
         {
             cancellationToken.ThrowIfCancellationRequested();
             yield return m;
@@ -84,9 +126,9 @@ public sealed class FakeMailboxClient : IMailboxClient
         }
     }
 
-    /// <summary>A message with no folder set belongs to whatever folder is being read.</summary>
-    private static bool FolderMatches(MailMessage m, string folder) =>
-        string.IsNullOrEmpty(m.FolderName) || string.Equals(m.FolderName, folder, StringComparison.OrdinalIgnoreCase);
+    /// <summary>A message with no folder set is in Inbox.</summary>
+    private static bool FolderMatches(MailMessage m, string folderName) =>
+        string.Equals(string.IsNullOrEmpty(m.FolderName) ? "Inbox" : m.FolderName, folderName, StringComparison.OrdinalIgnoreCase);
 
     public Task<IReadOnlyList<MailAttachment>> GetAttachmentsAsync(string messageId, CancellationToken cancellationToken = default)
     {
@@ -129,18 +171,36 @@ public sealed class FakeMailboxClient : IMailboxClient
         return Task.CompletedTask;
     }
 
-    /// <summary>Folders inside a parent, keyed by parent name.</summary>
-    public Dictionary<string, List<MailFolder>> ChildFolders { get; } = new(StringComparer.OrdinalIgnoreCase);
-
-    public Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderName, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderId, CancellationToken cancellationToken = default)
     {
-        IReadOnlyList<MailFolder> result = ChildFolders.TryGetValue(folderName, out var list) ? list : [];
+        IReadOnlyList<MailFolder> result = _folders
+            .Where(f => string.Equals(f.Value.ParentId, folderId, StringComparison.Ordinal))
+            .Select(f => new MailFolder { Id = f.Key, Name = f.Value.Name })
+            .ToList();
         return Task.FromResult(result);
     }
 
+    /// <summary>Every name looked up to be read, found or not.</summary>
+    public List<string> FoldersLookedUp { get; } = [];
+
+    public Task<MailFolder?> FindFolderAsync(string folderName, CancellationToken cancellationToken = default)
+    {
+        FoldersLookedUp.Add(folderName);
+        return Task.FromResult(TopLevel(folderName));
+    }
+
+    /// <summary>
+    /// Records the folder as ensured and returns its id. One that is not there
+    /// yet is made at the top of the mailbox with its name for an id, which is
+    /// what the tests assert messages were moved to.
+    /// </summary>
     public Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default)
     {
         if (!FoldersCreated.Contains(folderName)) { FoldersCreated.Add(folderName); }
+
+        if (TopLevel(folderName) is { } existing) { return Task.FromResult(existing.Id); }
+
+        _folders[folderName] = (folderName, null);
         return Task.FromResult(folderName);
     }
 }

@@ -177,7 +177,9 @@ public static class Program
                 --schema <path>  Schema file. Default: db/schema.sql
 
               import             Import report files from a folder. Needs no mailbox, so it
-                                 works on an archive or on files somebody sent you.
+                                 works on an archive or on files somebody sent you. A file
+                                 that cannot be read is named and skipped, the rest are
+                                 imported, and the run exits 1.
                 --from <folder>  Folder to read, including subfolders.
                 --db <path>      Database file. Default: dmarc.db
 
@@ -426,6 +428,12 @@ public static class Program
                 --reporting-domain <d> Subdomain per-domain report addresses use.
                 --fallback <address>   Shared address, for domains not yet migrated.
                 --max <n>              Messages per run. Default: 500
+                --folder <name>        A folder to read, by its exact name; give it again
+                                     for each folder. Default: Inbox. Each is read with
+                                     the folders directly inside it. The name is matched
+                                     whole, so a backslash is part of it, as in
+                                     DMARC\example.org - quote it. Or DMARC_FOLDERS, with
+                                     the names separated by semicolons.
                 --delete <mode>        Delete a message once its reports are stored, rather
                                      than filing it. A reporting mailbox grows without
                                      limit, and the processed folder is the same quota.
