@@ -956,6 +956,7 @@ else
     // tried - the same confusion between absence and failure that the lookup
     // itself is careful to avoid.
     private bool _dnsPending = true;
+    private bool _dnsReading;
     private string? _error;
     private bool _loading = true;
     private bool _showAllClean;
@@ -972,25 +973,43 @@ else
     /// take seconds and sometimes never answers, so the reports appear
     /// immediately and this section fills itself in.
     /// </remarks>
+    /// <remarks>
+    /// After any render that finds it pending, not only the first. Changing
+    /// the window, moving the domain or checking again all clear it, and read
+    /// only on the first render it stayed "Reading DNS…" for good - on the
+    /// page an MSP opens in front of a client.
+    /// </remarks>
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (!firstRender || _detail is null || _dns is not null) { return; }
+        if (!_dnsPending || _dnsReading || _detail is null) { return; }
 
+        var domain = _detail.Domain;
+        PublishedRecords read;
+        _dnsReading = true;
         try
         {
-            _dns = await Dns.ReadAsync(_detail.Domain);
+            read = await Dns.ReadAsync(domain);
         }
         catch (Exception)
         {
             // Rendered as "could not read", never as "no record". The two mean
             // opposite things to somebody about to edit a customer's DNS.
-            _dns = new PublishedRecords { Domain = _detail.Domain, LookupFailed = true };
+            read = new PublishedRecords { Domain = domain, LookupFailed = true };
         }
         finally
         {
-            _dnsPending = false;
-            StateHasChanged();
+            _dnsReading = false;
         }
+
+        // The page may have moved to another domain while this was reading.
+        // Its answer is not this domain's; the render below reads again.
+        if (string.Equals(_detail?.Domain, domain, StringComparison.OrdinalIgnoreCase))
+        {
+            _dns = read;
+            _dnsPending = false;
+        }
+
+        StateHasChanged();
     }
 
     private OrganizationAccess? _access;
