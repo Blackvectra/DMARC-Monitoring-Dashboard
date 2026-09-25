@@ -83,11 +83,25 @@ public static class ReportCommand
         // or warn about, and a customer warned about the document their
         // security provider just sent them has learned the wrong lesson.
         //
-        // --html still writes the long on-screen version, which carries the
+        // --html also writes the long on-screen version, which carries the
         // full evidence tables; --pdf is accepted and does nothing, so a
-        // script written against the flag keeps working.
+        // script written against the flag keeps working. The PDF is written
+        // either way. It used to be switched off by --html, so asking for the
+        // extra copy quietly lost the one document the command exists for.
         var wantsHtml = Args.Flag(args, "--html");
-        var wantsPdf = !wantsHtml || Args.Flag(args, "--pdf");
+
+        // Said before writing, not after: a report built without names lists
+        // a client's own mail filter among the impersonators, which is right
+        // on what it knows and silent about knowing less than it could.
+        var unnamed = await new DmarcMonitor.Core.Intelligence.SourceNameStore(dbPath)
+            .UncheckedFailingSourcesAsync(period.Start, period.End, ct).ConfigureAwait(false);
+        if (unnamed > 0)
+        {
+            Console.WriteLine($"  Note: {unnamed} failing source(s) in {period.Label} have not had their names looked up,");
+            Console.WriteLine("  so these reports cannot recognize them as mail filters or known services. For that, first run:");
+            Console.WriteLine($"    dmarc intel --names --db {dbPath}");
+            Console.WriteLine();
+        }
 
         var written = 0;
         var empty = 0;
@@ -108,7 +122,7 @@ public static class ReportCommand
             // provider is indistinguishable from a provider that stopped.
             if (report.Messages == 0) { empty++; }
 
-            var stem = Path.Combine(outPath, $"{each}-{period.Start:yyyy-MM}");
+            var stem = Path.Combine(outPath, $"{each}-{report.PeriodFileTag}");
 
             if (wantsHtml)
             {
@@ -116,11 +130,8 @@ public static class ReportCommand
                 Console.WriteLine($"  {stem}.html  ({report.Messages:N0} message(s), {report.PassRate}% passing)");
             }
 
-            if (wantsPdf)
-            {
-                await File.WriteAllBytesAsync($"{stem}.pdf", ClientReportPdf.Render(report), ct).ConfigureAwait(false);
-                Console.WriteLine($"  {stem}.pdf   ({report.Messages:N0} message(s), {report.PassRate}% passing)");
-            }
+            await File.WriteAllBytesAsync($"{stem}.pdf", ClientReportPdf.Render(report), ct).ConfigureAwait(false);
+            Console.WriteLine($"  {stem}.pdf   ({report.Messages:N0} message(s), {report.PassRate}% passing)");
 
             written++;
         }

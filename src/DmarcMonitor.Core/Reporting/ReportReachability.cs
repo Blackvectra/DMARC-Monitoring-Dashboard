@@ -330,7 +330,7 @@ public static class ReportReachability
         {
             Severity = HygieneSeverity.Weakness,
             Record = "reporting",
-            Problem = $"{domain.Domain} has reported before - {domain.ReportsHeld} report(s) held - and "
+            Problem = $"{domain.Domain} has reported before - {Plural.Count(domain.ReportsHeld, "report")} held - and "
                     + $"nothing has arrived for {silent} days. Receivers send daily, so this is usually the "
                     + "rua address having changed or the collector having stopped rather than a quiet "
                     + "period."

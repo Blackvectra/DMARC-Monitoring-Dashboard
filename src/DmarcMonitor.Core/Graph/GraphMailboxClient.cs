@@ -25,8 +25,16 @@ public sealed class GraphMailboxClient : IMailboxClient
     private readonly HttpClient _http;
     private readonly string _mailbox;
 
-    /// <summary>Folder display name to id, so a folder is looked up once per run.</summary>
-    private readonly Dictionary<string, string> _folderCache = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Folders at the top of the mailbox by display name, so the list is read
+    /// once for a run's worth of lookups rather than once per folder.
+    /// </summary>
+    /// <remarks>
+    /// Top-level folders only. Folders inside another one used to go in here
+    /// by name too, where a child could take the place of a top-level folder
+    /// with the same name; they are read by id now and need no remembering.
+    /// </remarks>
+    private readonly Dictionary<string, MailFolder> _folderCache = new(StringComparer.OrdinalIgnoreCase);
 
     public GraphMailboxClient(HttpClient httpClient, string mailboxAddress)
     {
@@ -40,11 +48,16 @@ public sealed class GraphMailboxClient : IMailboxClient
     private string UserBase => $"{GraphBase}/users/{Uri.EscapeDataString(_mailbox)}";
 
     public async IAsyncEnumerable<MailMessage> GetMessagesAsync(
-        string folder,
+        string folderId,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var folderId = await EnsureFolderAsync(folder, cancellationToken).ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(folderId);
 
+        // The id as given, with no lookup. This used to take a name and pass
+        // it through EnsureFolderAsync, which creates what it cannot find - so
+        // reading a folder it looked for in the wrong place made an empty one
+        // and read that, and a --dry-run did it to the live mailbox.
+        //
         // Oldest first, matching the contract on IMailboxClient: a backlog has
         // to be worked through in a stable order rather than revisited.
         //
@@ -249,44 +262,85 @@ public sealed class GraphMailboxClient : IMailboxClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(folderName);
 
-        if (_folderCache.TryGetValue(folderName, out var cached)) { return cached; }
-
         // Inbox and friends are addressable by name, so they need no lookup
         // and must not be "created".
-        if (IsWellKnownFolder(folderName))
-        {
-            _folderCache[folderName] = folderName;
-            return folderName;
-        }
+        if (IsWellKnownFolder(folderName)) { return folderName; }
 
-        var existing = await FindFolderAsync(folderName, cancellationToken).ConfigureAwait(false);
-        if (existing is not null)
-        {
-            _folderCache[folderName] = existing;
-            return existing;
-        }
+        var existing = await LookUpFolderAsync(folderName, cancellationToken).ConfigureAwait(false);
+        if (existing is not null) { return existing.Id; }
 
         var created = await CreateFolderAsync(folderName, cancellationToken).ConfigureAwait(false);
-        _folderCache[folderName] = created;
+        _folderCache[folderName] = new MailFolder { Id = created, Name = folderName };
         return created;
     }
 
-    public async Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(
-        string folderName, CancellationToken cancellationToken = default)
+    /// <inheritdoc />
+    public async Task<MailFolder?> FindFolderAsync(string folderName, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(folderName);
 
-        var folderId = await EnsureFolderAsync(folderName, cancellationToken).ConfigureAwait(false);
-        var uri = $"{UserBase}/mailFolders/{Uri.EscapeDataString(folderId)}/childFolders"
-                + "?$select=id,displayName,childFolderCount,totalItemCount&$top=100";
+        // Addressable by name whatever the mailbox calls them on screen, which
+        // in a mailbox set up in German is not "Inbox".
+        if (IsWellKnownFolder(folderName)) { return new MailFolder { Id = folderName, Name = folderName }; }
 
+        return await LookUpFolderAsync(folderName, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(
+        string folderId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(folderId);
+
+        // Returned with their ids, and read by those ids. Remembering them by
+        // name instead, and finding them again by name among top-level folders
+        // where they are not, is how every report a rule had sorted into
+        // Inbox\acme.com once went uncollected.
+        return await ListFoldersAsync(
+            $"{UserBase}/mailFolders/{Uri.EscapeDataString(folderId)}/childFolders", cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A folder at the top of the mailbox with exactly this display name,
+    /// ignoring case, or null.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The folders are listed and the names compared here, rather than asked
+    /// for with a $filter on displayName. The match has to be exact: in the
+    /// mailbox this was built for, rules file reports into folders literally
+    /// named like <c>DMARC\example.org</c>, and a backslash in a string that a
+    /// server parses is one character nobody has checked it treats as itself.
+    /// A comparison made here is a promise this code can keep. It also ends
+    /// the escaping of apostrophes that the filter needed.
+    /// </para>
+    /// <para>
+    /// Everything listed is remembered, so the folders a run files into and
+    /// every folder it was asked to read cost one listing between them.
+    /// </para>
+    /// </remarks>
+    private async Task<MailFolder?> LookUpFolderAsync(string folderName, CancellationToken ct)
+    {
+        if (_folderCache.TryGetValue(folderName, out var cached)) { return cached; }
+
+        foreach (var folder in await ListFoldersAsync($"{UserBase}/mailFolders", ct).ConfigureAwait(false))
+        {
+            _folderCache.TryAdd(folder.Name, folder);
+        }
+
+        return _folderCache.GetValueOrDefault(folderName);
+    }
+
+    /// <summary>Every folder in a folder collection, following the pages.</summary>
+    private async Task<List<MailFolder>> ListFoldersAsync(string collection, CancellationToken ct)
+    {
+        var uri = collection + "?$select=id,displayName,childFolderCount,totalItemCount&$top=100";
         var results = new List<MailFolder>();
 
         while (!string.IsNullOrEmpty(uri))
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
 
-            using var doc = await GetJsonAsync(uri, cancellationToken).ConfigureAwait(false);
+            using var doc = await GetJsonAsync(uri, ct).ConfigureAwait(false);
             var root = doc.RootElement;
 
             if (root.TryGetProperty("value", out var values) && values.ValueKind == JsonValueKind.Array)
@@ -296,16 +350,6 @@ public sealed class GraphMailboxClient : IMailboxClient
                     var id = Str(item, "id");
                     var name = Str(item, "displayName");
                     if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name)) { continue; }
-
-                    // Remembered by id, so reading this folder next finds it.
-                    // The ingestor asks for a child by name, and the name was
-                    // looked up again among ROOT folders only - where a folder
-                    // one level down is not - found nothing, and then CREATED
-                    // an empty top-level folder of that name and read it. So
-                    // every report a mail rule had sorted into Inbox\acme.com
-                    // was never collected, silently, and a --dry-run wrote
-                    // folders into the live mailbox doing it.
-                    _folderCache[name] = id;
 
                     results.Add(new MailFolder
                     {
@@ -325,34 +369,6 @@ public sealed class GraphMailboxClient : IMailboxClient
         return results;
     }
 
-    private async Task<string?> FindFolderAsync(string folderName, CancellationToken ct)
-    {
-        // OData string literals escape a single quote by doubling it. Without
-        // this, a folder name containing an apostrophe produces a malformed
-        // filter that Graph rejects as a bad request.
-        var literal = folderName.Replace("'", "''", StringComparison.Ordinal);
-        var uri = $"{UserBase}/mailFolders?$filter=displayName%20eq%20'{Uri.EscapeDataString(literal)}'&$select=id,displayName&$top=10";
-
-        using var doc = await GetJsonAsync(uri, ct).ConfigureAwait(false);
-        if (!doc.RootElement.TryGetProperty("value", out var values) || values.ValueKind != JsonValueKind.Array)
-        {
-            return null;
-        }
-
-        foreach (var item in values.EnumerateArray())
-        {
-            // Compare the name back rather than trusting the filter: Graph's
-            // comparison is case-insensitive, and taking the first result
-            // could return a differently-cased folder.
-            if (string.Equals(Str(item, "displayName"), folderName, StringComparison.OrdinalIgnoreCase))
-            {
-                var id = Str(item, "id");
-                if (!string.IsNullOrEmpty(id)) { return id; }
-            }
-        }
-        return null;
-    }
-
     private async Task<string> CreateFolderAsync(string folderName, CancellationToken ct)
     {
         var uri = $"{UserBase}/mailFolders";
@@ -369,8 +385,8 @@ public sealed class GraphMailboxClient : IMailboxClient
             // normal when two runs overlap and is not worth failing over.
             if (response.StatusCode == HttpStatusCode.Conflict)
             {
-                var found = await FindFolderAsync(folderName, ct).ConfigureAwait(false);
-                if (found is not null) { return found; }
+                var found = await LookUpFolderAsync(folderName, ct).ConfigureAwait(false);
+                if (found is not null) { return found.Id; }
             }
             throw GraphError.Translate(response.StatusCode, body, _mailbox);
         }

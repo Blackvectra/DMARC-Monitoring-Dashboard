@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Forensic;
@@ -87,11 +88,8 @@ public sealed record FailureSummary(
 /// </summary>
 public sealed class ForensicReportService(string databasePath)
 {
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <summary>Most reports listed at once.</summary>
     /// <remarks>
@@ -107,8 +105,8 @@ public sealed class ForensicReportService(string databasePath)
         int days = 30, string? tenantId = null, string? clientSlug = null, string? domain = null,
         CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug, domain), ["forensic_reports"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         command.CommandText = """
@@ -166,8 +164,8 @@ public sealed class ForensicReportService(string databasePath)
     public async Task<FailureSummary> SummarizeAsync(
         int days = 30, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug), ["forensic_reports"], ct: ct).ConfigureAwait(false);
 
         int total = 0, delivered = 0, domains = 0;
 
@@ -238,24 +236,34 @@ public sealed class ForensicReportService(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
-        await using var command = db.CreateCommand();
+        // Asked of each client's file in the caller's scope until one holds
+        // the report, rather than of a union: the rows copied into a union
+        // would be every client's message headers, to read one of them. Ids
+        // are unique across files, so the first file that has it is the one.
+        string? headers = null;
+        await _files.FirstAsync(ClientScope.For(tenantId, clientSlug), write: false, async (db, _, token) =>
+        {
+            await using var command = db.CreateCommand();
+            command.CommandText = """
+                SELECT f.raw_headers
+                FROM forensic_reports f
+                JOIN clients c ON c.id = f.client_id
+                WHERE f.id = $id
+                  AND ($tenant IS NULL OR f.tenant_id = $tenant)
+                  AND ($client IS NULL OR c.slug = $client)
+                LIMIT 1
+                """;
+            command.Parameters.AddWithValue("$id", id);
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$client", (object?)Normalise(clientSlug) ?? DBNull.Value);
 
-        command.CommandText = """
-            SELECT f.raw_headers
-            FROM forensic_reports f
-            JOIN clients c ON c.id = f.client_id
-            WHERE f.id = $id
-              AND ($tenant IS NULL OR f.tenant_id = $tenant)
-              AND ($client IS NULL OR c.slug = $client)
-            LIMIT 1
-            """;
-        command.Parameters.AddWithValue("$id", id);
-        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
-        command.Parameters.AddWithValue("$client", (object?)Normalise(clientSlug) ?? DBNull.Value);
+            await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            if (!await reader.ReadAsync(token).ConfigureAwait(false)) { return false; }
 
-        var headers = await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+            headers = reader.IsDBNull(0) ? null : reader.GetString(0);
+            return true;
+        }, ct).ConfigureAwait(false);
+
         return string.IsNullOrWhiteSpace(headers) ? null : headers;
     }
 

@@ -2,6 +2,7 @@ using System.Globalization;
 using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Intelligence;
 using DmarcMonitor.Core.Rollout;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Domains;
@@ -31,6 +32,9 @@ public sealed record DomainSource
     /// <summary>What the address reverses to, or null when nothing has looked.</summary>
     public string? ReverseName { get; init; }
 
+    /// <summary>Whether the reverse name's own forward records point back at the address.</summary>
+    public bool NameConfirmed { get; init; }
+
     /// <summary>
     /// The source as it should be written down: the vendor the catalogue
     /// recognizes, else the reverse name, else the address.
@@ -44,10 +48,12 @@ public sealed record DomainSource
     ///
     /// For reading only. Whoever holds an address writes its PTR, so a name
     /// says who owns the wire and nothing about whether the mail is
-    /// legitimate; every verdict here still comes from what was signed.
+    /// legitimate; every verdict here still comes from what was signed. And
+    /// the vendor's name only for a confirmed PTR: an unconfirmed one is
+    /// printed as the hostname it claims, not vouched for as "INKY".
     /// </remarks>
     public string Display =>
-        DmarcMonitor.Core.Intelligence.SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        NameConfirmed && DmarcMonitor.Core.Intelligence.SourceCatalog.Identify(ReverseName) is { } known ? known.Name
         : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
         : SourceIp;
 
@@ -80,6 +86,21 @@ public sealed record DomainSource
 
     /// <summary>The envelope domains seen for this source, as SPF checked them.</summary>
     public IReadOnlyList<string> EnvelopeDomains { get; init; } = [];
+
+    /// <summary>
+    /// The envelope domains this source PASSED SPF for: the ones whose owners
+    /// authorize it.
+    /// </summary>
+    /// <remarks>
+    /// The only envelope domains that may identify it. The envelope sender is
+    /// whatever the sending server types into MAIL FROM, so a forger can claim
+    /// bounces@inkyphishfence.com as easily as INKY can; read as proof, that
+    /// claim filed the forgery under "a gateway broke this domain's mail" and
+    /// took it off the list of impersonators. Passing SPF for the domain is
+    /// the domain's own SPF record naming this address, which only INKY can
+    /// write.
+    /// </remarks>
+    public IReadOnlyList<string> VerifiedEnvelopeDomains { get; init; } = [];
 
     /// <summary>
     /// Signing domains this source used on mail that PASSED DMARC.
@@ -126,7 +147,8 @@ public sealed record DomainSource
     public FailureKind Kind => FailureClassifier.Classify(new FailingSourceFacts
     {
         SourceIp = SourceIp,
-        EnvelopeDomains = EnvelopeDomains,
+        EnvelopeDomains = VerifiedEnvelopeDomains,
+        ConfirmedName = NameConfirmed ? ReverseName : null,
         Authenticated = Authenticated,
         Passing = Passing,
         OtherClients = OtherClients,
@@ -145,7 +167,7 @@ public sealed record DomainSource
     public string Domain { get; init; } = "";
 
     /// <summary>The gateway this source is, when it is one anybody can name.</summary>
-    public string? GatewayName => FailureClassifier.GatewayName(EnvelopeDomains);
+    public string? GatewayName => FailureClassifier.GatewayName(VerifiedEnvelopeDomains, NameConfirmed ? ReverseName : null);
 
     /// <summary>What this most likely is, in one word, for the badge.</summary>
     public SourceVerdict Verdict =>
@@ -364,11 +386,8 @@ public sealed record DomainDetail
 /// </summary>
 public sealed class DomainDetailService(string databasePath)
 {
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="tenantId">
     /// The organization the caller may see, or null for any. A domain that
@@ -388,18 +407,16 @@ public sealed class DomainDetailService(string databasePath)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
-
-        string domainId, clientName, owningClient;
+        string domainId, clientName, owningClient, clientId, tenant;
         DateTimeOffset? baseline;
         int baselineDays;
         string target;
 
-        await using (var head = db.CreateCommand())
+        await using (var registry = await _files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false))
+        await using (var head = registry.CreateCommand())
         {
             head.CommandText = """
-                SELECT d.id, c.name, c.slug, d.baseline_started_at, d.baseline_days, d.policy_target
+                SELECT d.id, c.name, c.slug, d.baseline_started_at, d.baseline_days, d.policy_target, c.id, d.tenant_id
                 FROM domains d
                 JOIN clients c ON c.id = d.client_id
                 WHERE d.name = $name AND ($tenant IS NULL OR d.tenant_id = $tenant) AND ($client IS NULL OR c.slug = $client)
@@ -418,13 +435,25 @@ public sealed class DomainDetailService(string databasePath)
             baseline = reader.IsDBNull(3) ? null : ParseDate(reader.GetString(3));
             baselineDays = reader.IsDBNull(4) ? 14 : reader.GetInt32(4);
             target = reader.IsDBNull(5) ? "reject" : reader.GetString(5);
+            clientId = reader.GetString(6);
+            tenant = reader.GetString(7);
         }
+
+        // The domain's client's file, and no other.
+        await using var db = await _files.OpenAsync(ClientScope.Client(clientId), ct: ct).ConfigureAwait(false);
 
         var policyRow = await PolicyAsync(db, domainId, ct).ConfigureAwait(false);
         var (policy, subPolicy, pct, lastReport) = (policyRow.Policy, policyRow.Sub, policyRow.Pct, policyRow.Last);
         var (messages, passing, overridden) = await TotalsAsync(db, domainId, since, ct).ConfigureAwait(false);
         var sources = await SourcesAsync(db, domainId, name, since, ct).ConfigureAwait(false);
         var reporters = await ReportersAsync(db, domainId, since, ct).ConfigureAwait(false);
+
+        // Which unauthenticated senders also failed elsewhere in the
+        // organization, asked of each client's file; only counts come back.
+        var reach = await _files.ClientsFailingAsync(
+            tenant, [.. sources.Where(s => s.Failing > 0).Select(s => s.SourceIp)],
+            exceptDomainId: domainId, ct: ct).ConfigureAwait(false);
+        sources = [.. sources.Select(s => reach.TryGetValue(s.SourceIp, out var n) ? s with { OtherClients = n } : s)];
 
         sources = MarkTheUnaligned(sources, name, policyRow.StrictDkim);
 
@@ -568,11 +597,9 @@ public sealed class DomainDetailService(string databasePath)
                    COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
                      CASE WHEN r.dmarc_result = 'fail' AND r.dkim_auth_result = 'pass' THEN r.dkim_domain
                           WHEN r.dmarc_result = 'fail' AND r.spf_auth_result  = 'pass' THEN r.spf_domain END), ''), ''),
-                   (SELECT COUNT(DISTINCT o.client_id)
-                      FROM aggregate_records o
-                     WHERE o.source_ip = r.source_ip
-                       AND o.domain_id <> $domain
-                       AND o.dmarc_result = 'fail'),
+                   -- Other clients reached: filled in afterwards from their
+                   -- own files. See ClientDatabases.ClientsFailingAsync.
+                   0,
                    MAX(r.date_begin),
                    -- Kept apart from the column above, which merges the two
                    -- mechanisms into one "it proved something". Which one
@@ -610,7 +637,13 @@ public sealed class DomainDetailService(string databasePath)
                    -- per source against addresses chosen by whoever mailed the
                    -- reports would make the page wait on somebody else's dead
                    -- reverse zone.
-                   (SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip)
+                   (SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip),
+                   -- Whether that name points back at the address.
+                   (SELECT n.forward_confirmed FROM source_names n WHERE n.ip = r.source_ip),
+                   -- Envelope domains whose SPF record authorizes this address:
+                   -- the ones it can be identified by. See VerifiedEnvelopeDomains.
+                   COALESCE(NULLIF(GROUP_CONCAT(DISTINCT
+                     CASE WHEN r.spf_auth_result = 'pass' THEN NULLIF(r.spf_domain, '') END), ''), '')
             FROM aggregate_records r
             WHERE r.domain_id = $domain AND r.date_begin >= $since
               -- Overridden FAILURES only. A mailing list breaking
@@ -652,6 +685,8 @@ public sealed class DomainDetailService(string databasePath)
                 SignedAsOnFailure = [.. Split(reader.IsDBNull(9) ? "" : reader.GetString(9))],
                 DkimOnPassingMail = [.. Split(reader.IsDBNull(8) ? "" : reader.GetString(8))],
                 ReverseName = reader.IsDBNull(10) ? null : reader.GetString(10),
+                NameConfirmed = !reader.IsDBNull(11) && reader.GetInt64(11) == 1,
+                VerifiedEnvelopeDomains = [.. Split(reader.IsDBNull(12) ? "" : reader.GetString(12))],
             });
         }
         return results;

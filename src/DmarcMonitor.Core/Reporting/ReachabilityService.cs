@@ -1,5 +1,6 @@
 using System.Globalization;
 using DmarcMonitor.Core.Dns;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Reporting;
@@ -122,13 +123,9 @@ public sealed class ReachabilityService(string databasePath, DnsLookup? lookup =
     {
         var found = new List<(string Name, int Reports, DateTimeOffset? Last, int Organizations)>();
 
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = _databasePath,
-            Mode = SqliteOpenMode.ReadOnly,
-        }.ToString());
-
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The reports held for the domains in scope, from their clients' files.
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.For(_tenantId, domain: domain), ["aggregate_reports"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """

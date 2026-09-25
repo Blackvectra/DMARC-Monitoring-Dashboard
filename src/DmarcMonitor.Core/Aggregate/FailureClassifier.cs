@@ -58,8 +58,31 @@ public sealed record FailingSourceFacts
 {
     public required string SourceIp { get; init; }
 
-    /// <summary>Envelope domains SPF was checked against for this source.</summary>
+    /// <summary>
+    /// Envelope domains this source PASSED SPF for - never merely the ones it
+    /// claimed.
+    /// </summary>
+    /// <remarks>
+    /// A gateway is recognized by these, so they have to be the domains that
+    /// authorize the address rather than the ones typed into MAIL FROM. Anybody
+    /// can send from bounces@inkyphishfence.com; only INKY's SPF record can
+    /// name the address that sent it.
+    /// </remarks>
     public IReadOnlyList<string> EnvelopeDomains { get; init; } = [];
+
+    /// <summary>
+    /// The source's reverse name, only when its own forward records point back
+    /// at the address; null otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The other way a gateway is recognized, and the one INKY needs: its
+    /// relays send with an envelope domain that publishes no SPF, so nothing
+    /// verifies the envelope, while ipw-outbound.inkyphishfence.com is
+    /// confirmed by INKY's own DNS. The client report recognizes a gateway the
+    /// same way, and the two must not reach different verdicts about one
+    /// address.
+    /// </remarks>
+    public string? ConfirmedName { get; init; }
 
     /// <summary>True when something this source signed actually verified.</summary>
     public bool Authenticated { get; init; }
@@ -110,7 +133,7 @@ public static class FailureClassifier
         // First, because it is the only one resting on a name rather than on a
         // pattern, and because a gateway that also signs something would
         // otherwise be filed as a vendor and stay in the compliance figure.
-        if (GatewayName(facts.EnvelopeDomains) is not null) { return FailureKind.Forwarded; }
+        if (GatewayName(facts.EnvelopeDomains, facts.ConfirmedName) is not null) { return FailureKind.Forwarded; }
 
         // A verifying signature means a real sender that can be asked to sign
         // as the customer instead. Whoever it is, it is not forging: a forger
@@ -190,7 +213,11 @@ public static class FailureClassifier
     /// <para>
     /// Matched on the envelope domain rather than on an address, because the
     /// address list of a cloud gateway changes without notice and the domain
-    /// it puts in MAIL FROM does not.
+    /// it puts in MAIL FROM does not. Only envelope domains the source PASSED
+    /// SPF for, though, and a reverse name only once its forward records point
+    /// back: MAIL FROM and a PTR are both written by whoever sends, while SPF
+    /// and forward DNS are written by whoever owns the domain. Matching on the
+    /// claims let a forger file itself as a gateway.
     /// </para>
     /// <para>
     /// <c>protection.outlook.com</c> is still excluded, now by being a
@@ -201,11 +228,9 @@ public static class FailureClassifier
     /// figure.
     /// </para>
     /// </remarks>
-    public static string? GatewayName(IReadOnlyList<string>? envelopeDomains)
+    public static string? GatewayName(IReadOnlyList<string>? envelopeDomains, string? confirmedName = null)
     {
-        if (envelopeDomains is null) { return null; }
-
-        foreach (var envelope in envelopeDomains)
+        foreach (var envelope in envelopeDomains ?? [])
         {
             if (SourceCatalog.Identify(envelope) is { Kind: SourceKind.SecurityGateway } gateway)
             {
@@ -213,7 +238,9 @@ public static class FailureClassifier
             }
         }
 
-        return null;
+        return SourceCatalog.Identify(confirmedName) is { Kind: SourceKind.SecurityGateway } named
+            ? named.Name
+            : null;
     }
 
     /// <summary>One sentence saying what this kind of failure is, for a page or a report.</summary>

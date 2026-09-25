@@ -31,13 +31,10 @@ public sealed class HealthService(string databasePath)
     {
         var at = now ?? DateTimeOffset.UtcNow;
 
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = _databasePath,
-            Mode = SqliteOpenMode.ReadOnly,
-        }.ToString());
-
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // Every organization's clients: health is a question about the whole
+        // install, and only when reports last landed is read from the files.
+        await using var db = await new ClientDatabases(_databasePath)
+            .OpenAsync(ClientScope.Organization(null), ["aggregate_reports"], ct: ct).ConfigureAwait(false);
 
         return new HealthFacts
         {

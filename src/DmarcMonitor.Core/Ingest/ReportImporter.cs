@@ -9,10 +9,30 @@ namespace DmarcMonitor.Core.Ingest;
 public sealed record ImportResult
 {
     public int FilesSeen { get; init; }
+
+    /// <summary>Reports written to the database by this import.</summary>
     public int Stored { get; init; }
+
+    /// <summary>Reports the database already held. Never a report it declined.</summary>
     public int AlreadyStored { get; init; }
+
+    /// <summary>Files read in full that held nothing recognizable as a report.</summary>
     public int NotReports { get; init; }
+
+    /// <summary>
+    /// Things that went wrong, one for each line in <see cref="Errors"/>
+    /// before the cap: a file that could not be read in full, or a report
+    /// that could not be stored.
+    /// </summary>
     public int Failed { get; init; }
+
+    /// <summary>How many files <see cref="Failed"/> is spread across.</summary>
+    /// <remarks>
+    /// Separate, because one export can hold a dozen reports that would not
+    /// parse, and "12 failed" does not say whether that was one file or
+    /// twelve - which is the first thing somebody fixing it needs to know.
+    /// </remarks>
+    public int FailedFiles { get; init; }
 
     /// <summary>Why individual files failed, capped so one bad folder cannot fill a page.</summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
@@ -89,7 +109,7 @@ public sealed class ReportImporter(ReportStore store)
     {
         ArgumentNullException.ThrowIfNull(files);
 
-        int stored = 0, duplicates = 0, skipped = 0, failed = 0, seen = 0;
+        int stored = 0, duplicates = 0, skipped = 0, failed = 0, failedFiles = 0, seen = 0;
         var errors = new List<string>();
         var stoppedEarly = false;
 
@@ -106,12 +126,14 @@ public sealed class ReportImporter(ReportStore store)
             if (file.Error is not null)
             {
                 failed++;
+                failedFiles++;
                 Add(errors, $"{file.Name}: {file.Error}");
                 continue;
             }
 
             var budget = ExtractionBudget.ForOperator();
             var found = 0;
+            var failedBefore = failed;
 
             foreach (var report in ReportAttachment.ExtractAll(file.Name, file.Content, budget))
             {
@@ -120,9 +142,10 @@ public sealed class ReportImporter(ReportStore store)
 
                 try
                 {
-                    // A null id means the database refused it as a duplicate,
-                    // which is the expected outcome of importing the same
-                    // thing twice and is not an error.
+                    // A null id means the database already holds it, which is
+                    // the expected outcome of importing the same thing twice
+                    // and is not an error. SaveAsync makes sure that is all a
+                    // null can mean.
                     var id = await SaveAsync(report, ct).ConfigureAwait(false);
                     if (id is null) { duplicates++; } else { stored++; }
                 }
@@ -134,11 +157,21 @@ public sealed class ReportImporter(ReportStore store)
                 catch (Exception ex) when (ex is not OutOfMemoryException)
                 {
                     failed++;
-                    Add(errors, $"{report.FileName}: {ex.Message}");
+                    Add(errors, $"{Describe(file.Name, report.FileName)}: {ex.Message}");
                 }
             }
 
-            if (found == 0) { skipped++; }
+            // Each part of the file that could not be read is a failure of its
+            // own, named. A damaged zip used to come back as an empty list and
+            // be counted as "not a report", exactly like a holiday photo, and a
+            // damaged member inside an export vanished while the rest of it
+            // imported - two ways for a report to go missing with a summary
+            // that said nothing had.
+            foreach (var problem in budget.Unreadable)
+            {
+                failed++;
+                Add(errors, $"{file.Name}: {problem}");
+            }
 
             // Said out loud rather than left as a short count. An export that
             // was quietly cut off half way through looks exactly like an
@@ -150,6 +183,13 @@ public sealed class ReportImporter(ReportStore store)
                 Add(errors, $"{file.Name}: too large to read in full. {found:N0} report(s) were taken from it and "
                           + $"there may be more. Unpack it and import the folder instead.");
             }
+
+            // A file is one or the other. It used to be possible to be both:
+            // an export that ran out of room before its first report was
+            // counted as failed AND as not a report. And a file the run was
+            // stopped part way through is neither: it was never read in full.
+            if (failed > failedBefore) { failedFiles++; }
+            else if (found == 0 && !stoppedEarly) { skipped++; }
 
             if (stoppedEarly) { break; }
         }
@@ -163,12 +203,53 @@ public sealed class ReportImporter(ReportStore store)
             AlreadyStored = duplicates,
             NotReports = skipped,
             Failed = failed,
+            FailedFiles = failedFiles,
             Errors = errors,
             StoppedEarly = stoppedEarly,
         };
     }
 
+    /// <summary>
+    /// Names a report for an error line by the file it came in, so the line
+    /// points at something that exists on disk.
+    /// </summary>
+    /// <remarks>
+    /// A report inside an export is named for itself, which is no help finding
+    /// it among forty zips; a gzipped one is named without its .gz, which is a
+    /// file nobody has.
+    /// </remarks>
+    private static string Describe(string file, string report) =>
+        string.Equals(report, file, StringComparison.OrdinalIgnoreCase)
+        || (file.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(report, file[..^3], StringComparison.OrdinalIgnoreCase))
+            ? file
+            : $"{file}: {report}";
+
+    /// <summary>
+    /// Why a TLS report cannot be stored, or null when it can.
+    /// </summary>
+    /// <remarks>
+    /// The store files a TLS report under its first policy's domain, and when
+    /// there is none it declines the report with the same null it uses for "I
+    /// already have this". The importer counted that as already stored, so a
+    /// report nothing could be filed under was reported as one safely kept;
+    /// the mailbox collector counted it as ingested and never stored. Both ask
+    /// here first, so the null means one thing.
+    /// </remarks>
+    internal static string? WhyTlsCannotBeFiled(TlsReport report) =>
+        report.Policies.Count == 0 || string.IsNullOrWhiteSpace(report.Policies[0].Policy.Domain)
+            ? "The TLS report names no policy domain, so there is nothing to file it under."
+            : null;
+
     /// <summary>Stores one extracted report. Null when it was already stored.</summary>
+    /// <remarks>
+    /// Anything the store would decline for another reason throws here instead,
+    /// with the reason, so that a null reaching the caller really does mean the
+    /// report is already in the database. The other two report types need no
+    /// check of their own: an aggregate report is declined only as a duplicate,
+    /// and a failure report otherwise only when it names no domain, which its
+    /// parser has already refused.
+    /// </remarks>
     private async Task<string?> SaveAsync(ExtractedReport report, CancellationToken ct)
     {
         switch (report.Kind)
@@ -184,6 +265,7 @@ public sealed class ReportImporter(ReportStore store)
             {
                 var parsed = TlsReportParser.Parse(report.Content);
                 if (!parsed.Success) { throw new InvalidDataException(parsed.Error); }
+                if (WhyTlsCannotBeFiled(parsed.Report!) is { } why) { throw new InvalidDataException(why); }
                 return await _store.SaveTlsAsync(parsed.Report!, report.Content, null, arrivedAt: null, ct).ConfigureAwait(false);
             }
 

@@ -167,6 +167,14 @@ internal static class FirstRun
             {
                 FirstRunLog.UpgradeStep(logger, migration);
             }
+
+            if (result.Split is { } split)
+            {
+                var files = split.Files;
+                var folder = ClientDatabases.FolderFor(dbPath);
+                var backup = split.Backup;
+                FirstRunLog.Split(logger, files, folder, backup);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -192,6 +200,14 @@ internal static partial class FirstRunLog
         Message = "Created a new database at {Path}. Import reports to fill it: the Import page, "
                 + "or `dmarc import --from <folder>`.")]
     public static partial void Created(ILogger logger, string path);
+
+    [LoggerMessage(
+        EventId = 1019,
+        Level = LogLevel.Information,
+        Message = "Each client's reports are now in a file of their own: {Files} file(s) in {Folder}. "
+                + "The database as it was before that is kept at {Backup}; it can be deleted once "
+                + "the dashboard shows what it should.")]
+    public static partial void Split(ILogger logger, int files, string folder, string backup);
 
     [LoggerMessage(
         EventId = 1011,

@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
@@ -259,13 +260,9 @@ public sealed class ZoneAuditor(
 
     private async Task<int> WindowAsync(string domain, CancellationToken ct)
     {
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = _databasePath,
-            Mode = SqliteOpenMode.ReadOnly,
-        }.ToString());
-
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The reports are in the file of the client that owns the domain.
+        await using var db = await new ClientDatabases(_databasePath!).OpenAsync(
+            ClientScope.For(_tenantId, domain: domain), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """

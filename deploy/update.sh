@@ -9,16 +9,18 @@
 #
 # What it does, in order, and why that order:
 #
-#   1. Backs up the database with SQLite's own .backup, not cp. Copying a
-#      SQLite file while something has it open produces a file that looks
-#      fine and is not.
+#   1. Backs up the database - the organization's and every client's file -
+#      with SQLite's own .backup, not cp. Copying a SQLite file while
+#      something has it open produces a file that looks fine and is not.
 #   2. Keeps the old application directory rather than overwriting it, so
 #      rolling back is a move rather than a download.
 #   3. Applies schema migrations AFTER the new binary is in place and BEFORE
 #      the service starts, because it is the new build that knows what
 #      migrations exist.
 #   4. Checks the app actually answers before calling it done, and puts the
-#      old one back if it does not.
+#      old one back if it does not - with the database as it was, when the
+#      new one changed its schema, because the old application cannot read
+#      what the new one migrated it to.
 #
 # Usage:
 #   sudo ./update.sh v1.3.0                 public repository
@@ -82,6 +84,7 @@ done
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 WORK="$(mktemp -d)"
+DATA="${ROOT}/data"
 
 # ---- putting it back, whatever went wrong -----------------------------------
 #
@@ -97,6 +100,34 @@ WORK="$(mktemp -d)"
 # the script between the swap and the end.
 SWAPPED=false
 DONE=false
+MIGRATING=false
+SCHEMA_BEFORE=""
+
+schema_version() {
+    sudo -u "$USER_NAME" sqlite3 "${DATA}/dmarc.db" "SELECT COALESCE(MAX(version), '') FROM schema_migrations" 2>/dev/null
+}
+
+# The database as it was before this update, back in place. What the new
+# version wrote is moved aside beside it, never deleted - the organization's
+# database, its journal, and the folder of client files that goes with it.
+# Every step is checked: a copy made over a database that did not move aside
+# first would destroy it.
+put_database_back() {
+    local aside="${DATA}/dmarc-replaced-${STAMP}" sidecar
+    mv "${DATA}/dmarc.db" "${aside}.db" || return 1
+    for sidecar in wal shm; do
+        if [[ -f "${DATA}/dmarc.db-${sidecar}" ]]; then
+            mv "${DATA}/dmarc.db-${sidecar}" "${aside}.db-${sidecar}" || return 1
+        fi
+    done
+    if [[ -d "${DATA}/dmarc-clients" ]]; then
+        mv "${DATA}/dmarc-clients" "${aside}-clients" || return 1
+    fi
+    sudo -u "$USER_NAME" cp "${DATA}/dmarc-${STAMP}.db" "${DATA}/dmarc.db" || return 1
+    if [[ -d "${DATA}/dmarc-${STAMP}-clients" ]]; then
+        sudo -u "$USER_NAME" cp -a "${DATA}/dmarc-${STAMP}-clients" "${DATA}/dmarc-clients" || return 1
+    fi
+}
 
 restore() {
     [[ "$SWAPPED" == true && "$DONE" == false ]] || return 0
@@ -108,15 +139,33 @@ restore() {
     rm -rf "${ROOT}/app"
     mv "${ROOT}/app-${STAMP}" "${ROOT}/app"
     [[ -f "${WORK}/dmarc-previous" ]] && install -m 0755 "${WORK}/dmarc-previous" /usr/local/bin/dmarc
+
+    # The previous application cannot read a schema it has never heard of -
+    # and after the upgrade that gives every client a file of its own, it
+    # would find no client's reports at all. So a migration that ran is
+    # undone by putting back the copy taken before it, not left for somebody
+    # to discover from an empty dashboard.
+    local now=""
+    [[ "$MIGRATING" == true ]] && now="$(schema_version || true)"
+    if [[ "$MIGRATING" == true && "$now" != "$SCHEMA_BEFORE" ]]; then
+        if put_database_back; then
+            echo "The database was at schema ${SCHEMA_BEFORE:-unknown} and the new version moved it to ${now:-an unreadable state}," >&2
+            echo "so the copy taken before the update was put back. What the new version wrote is kept at" >&2
+            echo "  ${DATA}/dmarc-replaced-${STAMP}.db (and -clients/ beside it, if it made one)." >&2
+        else
+            echo "The database could NOT be put back automatically. With the service stopped:" >&2
+            echo "  move ${DATA}/dmarc.db and ${DATA}/dmarc-clients aside, then" >&2
+            echo "  sudo -u ${USER_NAME} cp ${DATA}/dmarc-${STAMP}.db ${DATA}/dmarc.db" >&2
+            echo "  sudo -u ${USER_NAME} cp -a ${DATA}/dmarc-${STAMP}-clients ${DATA}/dmarc-clients   (if it exists)" >&2
+        fi
+    else
+        echo "The database was left as it is: the update had not changed its schema." >&2
+    fi
+
     systemctl start "$SERVICE" || true
 
     echo >&2
     echo "Rolled back to the previous application." >&2
-    echo "The database was NOT rolled back: a migration that ran is still applied." >&2
-    echo "If the new version had one, restore the backup as well:" >&2
-    echo "  sudo systemctl stop ${SERVICE}" >&2
-    echo "  sudo -u ${USER_NAME} cp ${ROOT}/data/dmarc-${STAMP}.db ${ROOT}/data/dmarc.db" >&2
-    echo "  sudo systemctl start ${SERVICE}" >&2
 }
 
 trap 'restore; rm -rf "$WORK"' EXIT
@@ -210,9 +259,24 @@ if [[ -n "$needed" && -n "$dotnet_bin" ]] \
 fi
 
 # ---- back up ----------------------------------------------------------------
+# The organization's database and every client's file beside it (see
+# docs/CLIENT-FILES.md). The client files first: the organization's database
+# hands out the row ids the files use, so a copy of it taken after them is
+# never behind them.
+#
+# The copy of the folder is named for the copy of the database - dmarc-<stamp>.db
+# keeps its clients in dmarc-<stamp>-clients/ - which is where the application
+# looks for a database's clients, so the pair opens as it stands.
 echo "  backing up the database"
-sudo -u "$USER_NAME" sqlite3 "${ROOT}/data/dmarc.db" \
-    ".backup '${ROOT}/data/dmarc-${STAMP}.db'"
+if [[ -d "${DATA}/dmarc-clients" ]]; then
+    sudo -u "$USER_NAME" mkdir -m 0700 "${DATA}/dmarc-${STAMP}-clients"
+    for file in "${DATA}/dmarc-clients"/*.db; do
+        [[ -e "$file" ]] || continue
+        sudo -u "$USER_NAME" sqlite3 "$file" ".backup '${DATA}/dmarc-${STAMP}-clients/$(basename "$file")'"
+    done
+fi
+sudo -u "$USER_NAME" sqlite3 "${DATA}/dmarc.db" ".backup '${DATA}/dmarc-${STAMP}.db'"
+SCHEMA_BEFORE="$(schema_version || true)"
 
 # ---- swap -------------------------------------------------------------------
 echo "  stopping ${SERVICE}"
@@ -241,7 +305,8 @@ install -m 0755 "$WORK/dmarc" /usr/local/bin/dmarc
 # After the new binary, before the service: the new build is the one that
 # knows which migrations exist.
 echo "  applying any schema change"
-sudo -u "$USER_NAME" /usr/local/bin/dmarc init-db --db "${ROOT}/data/dmarc.db"
+MIGRATING=true
+sudo -u "$USER_NAME" /usr/local/bin/dmarc init-db --db "${DATA}/dmarc.db"
 
 # ---- start and prove it works ----------------------------------------------
 echo "  starting ${SERVICE}"
@@ -272,7 +337,10 @@ DONE=true
 echo
 echo "Updated to ${VERSION}."
 echo "  previous install: ${ROOT}/app-${STAMP}"
-echo "  database backup:  ${ROOT}/data/dmarc-${STAMP}.db"
+echo "  database backup:  ${DATA}/dmarc-${STAMP}.db"
+if [[ -d "${DATA}/dmarc-${STAMP}-clients" ]]; then
+    echo "                    ${DATA}/dmarc-${STAMP}-clients/  (every client's file)"
+fi
 echo
 echo "Keep both until you are happy. To roll back:"
 echo "  sudo ./rollback.sh ${STAMP}"

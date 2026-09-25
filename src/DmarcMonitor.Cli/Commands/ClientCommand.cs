@@ -491,6 +491,15 @@ public static class ClientCommand
         Console.WriteLine("  sync carries its own retention. Say that timeframe rather than \"it is gone\".");
         Console.WriteLine();
 
+        // These never age out: they are kept to be gone back to.
+        if (result.OtherCopies.Count > 0)
+        {
+            Console.WriteLine("  So do these whole copies of the database beside it, which nothing prunes.");
+            Console.WriteLine("  Delete them once you are sure you will not need to go back to them:");
+            foreach (var copy in result.OtherCopies) { Console.WriteLine($"    {copy}"); }
+            Console.WriteLine();
+        }
+
         return 0;
     }
 }

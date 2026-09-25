@@ -105,6 +105,25 @@ public sealed class ZoneFileTests
     }
 
     [Fact]
+    public void AnSoaWhoseOwnerIsTheAtSignDoesNotNameTheZone()
+    {
+        // The GoDaddy export pasted from "; SOA Record" down, which leaves the
+        // header and the $ORIGIN line behind - and the shape of the zone
+        // files Windows DNS Server writes. "@" means "the origin", whatever
+        // that is. Read as a name, it declared a zone called "@": the page
+        // refused the paste as a zone for some other domain, and without a
+        // domain every name in the file was placed under "@".
+        var body = GoDaddy[GoDaddy.IndexOf("; SOA Record", StringComparison.Ordinal)..];
+
+        var zone = ZoneFile.Parse(body, "example.com");
+
+        Assert.Equal("example.com", zone.Origin);
+        Assert.Equal("", zone.DeclaredOrigin);
+        Assert.Contains(zone.Records, r => r.Type == "SOA" && r.Name == "example.com");
+        Assert.Contains(zone.Records, r => r.Type == "CNAME" && r.Name == "www.example.com" && r.Target == "example.com");
+    }
+
+    [Fact]
     public void ACallerCanNameTheDomainWhenTheFileDoesNot()
     {
         var body = string.Join('\n', Cloudflare.Split('\n')

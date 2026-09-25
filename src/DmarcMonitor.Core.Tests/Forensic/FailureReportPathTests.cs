@@ -3,6 +3,7 @@ using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Forensic;
 using DmarcMonitor.Core.Ingest;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tests.Storage;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -29,14 +30,7 @@ public sealed class FailureReportPathTests : IDisposable
         _store.InitializeAsync(File.ReadAllText(FindSchema())).GetAwaiter().GetResult();
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     private static string FindSchema()
     {
@@ -324,33 +318,14 @@ public sealed class FailureReportPathTests : IDisposable
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM forensic_reports"));
     }
 
-    private async Task ExecuteAsync(string sql)
-    {
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString());
-        await db.OpenAsync();
-
-        await using var command = db.CreateCommand();
-        command.CommandText = sql;
-        await command.ExecuteNonQueryAsync();
-    }
+    /// <summary>SQL written for one database, split into client files afterwards.</summary>
+    private Task ExecuteAsync(string sql) => SingleDatabase.ExecuteAsync(_dbPath, sql);
 
     private async Task<long> CountAsync(string sql) =>
         Convert.ToInt64(await RawAsync(sql), System.Globalization.CultureInfo.InvariantCulture);
 
     private async Task<string> TextAsync(string sql) => await RawAsync(sql) as string ?? "";
 
-    private async Task<object?> RawAsync(string sql)
-    {
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = _dbPath,
-            Mode = SqliteOpenMode.ReadOnly,
-        }.ToString());
-        await db.OpenAsync();
-
-        await using var command = db.CreateCommand();
-        command.CommandText = sql;
-        return await command.ExecuteScalarAsync();
-    }
+    /// <summary>Read across the organization's database and every client's file.</summary>
+    private Task<object?> RawAsync(string sql) => SingleDatabase.ScalarAsync(_dbPath, sql);
 }

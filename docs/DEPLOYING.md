@@ -727,6 +727,14 @@ against GitHub itself rather than trusting the request. So the worst an
 attacker who owned the web app could achieve through this is installing a
 genuine release of this product.
 
+The spool the request arrives in is owned by that unprivileged account, so the
+agent treats the files there as hostile too: it reads the request only if it
+is a regular file owned by the app account, never follows a symlink when it
+reads, writes or removes anything in the spool, and creates its own status and
+log files rather than writing through a name the app could have pointed
+elsewhere. A root process that followed such a link could be made to read,
+overwrite or change the owner of any file on the machine; none of these do.
+
 Without the agent installed the page still lists releases and says plainly
 that it cannot install them. The command works either way:
 
@@ -734,11 +742,14 @@ that it cannot install them. The command works either way:
 sudo ./deploy/update.sh v1.3.0
 ```
 
-Both paths run the same script, which backs up the database with SQLite's own `.backup`, keeps the old install
-rather than overwriting it, carries `appsettings.Production.json` across,
-applies any schema migration *after* the new binary is in place and *before*
-the service starts, and checks the app answers afterwards - putting the old
-one back if it does not.
+Both paths run the same script, which backs up the database - the
+organization's and every client's file ([CLIENT-FILES.md](CLIENT-FILES.md)) -
+with SQLite's own `.backup`, keeps the old install rather than overwriting it,
+carries `appsettings.Production.json` across, applies any schema migration
+*after* the new binary is in place and *before* the service starts, and checks
+the app answers afterwards - putting the old one back if it does not, and the
+database as it was too when the update had migrated it, because the old
+version cannot read what the new one migrated it to.
 
 Rolling back is a move, not a download:
 
@@ -750,7 +761,10 @@ sudo ./deploy/rollback.sh 20260918-120000 --database   # and the database
 Those are two decisions on purpose. Swapping the application back is always
 safe. Restoring the database is not always wanted: if the version you are
 leaving applied no migration, the current database is fine and holds
-everything collected since the update, which restoring would discard.
+everything collected since the update, which restoring would discard. With
+`--database`, the organization's database and its client files go back
+together, and the ones replaced are moved aside to `dmarc-replaced-<time>.db`
+and `dmarc-replaced-<time>-clients/` rather than deleted.
 
 ## Before it is reachable by anybody else
 
@@ -788,11 +802,15 @@ What it sets up, and where:
 | | Linux | Windows |
 |---|---|---|
 | Runtime | the distribution's `aspnetcore-runtime-10.0`, or Microsoft's copy in `/opt/dotnet` | a private copy under `C:\dmarc\dotnet`, installed with Microsoft's `dotnet-install.ps1` |
-| The app | `dmarc-web.service`, user `dmarc`, sandboxed | Windows service `dmarc-web`, account `NT AUTHORITY\LocalService`, writable only under `C:\dmarc\data` |
+| The app | `dmarc-web.service`, user `dmarc`, sandboxed | Windows service `dmarc-web`, account `NT AUTHORITY\LocalService` |
+| Permissions | account owns `/opt/dmarc`, mode `0750` | inheritance broken on `C:\dmarc`, granted only to SYSTEM, Administrators and the service: it may write `data` and `backups` but only execute the code in `app`, `bin` and `dotnet` |
 | The proxy | Caddy as a systemd service | Caddy as a Windows service through WinSW, ports 80 and 443 opened in Windows Firewall |
 | Configuration | `/opt/dmarc/app/appsettings.Production.json` | `C:\dmarc\app\appsettings.Production.json` |
 | The collector | `dmarc-ingest.timer`, settings in `/etc/dmarc-ingest.env` | Task Scheduler task `DMARC ingest`, settings in `C:\dmarc\ingest.cmd` (readable by administrators and the service only) |
-| The DNS scan | `dmarc-dns.timer`, nightly, enabled from the start | Task Scheduler task `DMARC DNS scan`, nightly, runs `C:\dmarc\dns-scan.cmd`, log in `C:\dmarc\data\dns-scan.log` |
+| The DNS scan | `dmarc-dns.timer`, nightly (records **and** sender-name lookups), enabled from the start | Task Scheduler task `DMARC DNS scan`, nightly, runs `C:\dmarc\dns-scan.cmd` — the same `check --all --save` **and** `intel --names` the Linux unit runs — log in `C:\dmarc\data\dns-scan.log` |
+| The backup | `dmarc-backup.timer`, nightly, first taken at install | Task Scheduler task `DMARC backup`, nightly 03:20 into `C:\dmarc\backups`, 14 kept, first taken during setup |
+| Retention | `dmarc-prune.timer`, weekly | Task Scheduler task `DMARC prune`, Sunday 04:40, aggregate 400 days and forensic 30 |
+| Health | `dmarc-health.timer`, twice daily | Task Scheduler task `DMARC health`, 09:10 and 21:10; a broken run marks the task, shown in its Last Run Result |
 | The certificate | `--make-ingest-cert` via OpenSSL | `-MakeIngestCert` via `New-SelfSignedCertificate` |
 
 Same arguments, PowerShell spelling: `-TenantId`, `-ClientId`, `-Mailbox`,
@@ -800,8 +818,9 @@ Same arguments, PowerShell spelling: `-TenantId`, `-ClientId`, `-Mailbox`,
 
 ### A machine that only collects
 
-`-CollectorOnly` installs the two scheduled tasks and nothing else: no web
-service, no proxy, no certificate, no host name.
+`-CollectorOnly` installs the scheduled tasks — collection, the nightly DNS
+scan and sender-name lookup, the backup, the retention sweep and the health
+check — and nothing else: no web service, no proxy, no host name.
 
 ```powershell
 .\bootstrap.ps1 -CollectorOnly -MakeIngestCert -Mailbox DMARC@nrgtechservices.com `
@@ -811,7 +830,9 @@ service, no proxy, no certificate, no host name.
 The collector wakes hourly, reads the mailbox, stores what it finds and exits.
 `-StartWhenAvailable` is set, so a machine that was asleep or switched off
 catches up on the next opportunity rather than skipping the runs it missed.
-The DNS scan runs nightly. Between them nothing of this is running.
+The nightly DNS scan resolves records and sender names, the backup runs
+nightly, the retention sweep weekly and the health check twice a day. Between
+them nothing of this is running.
 
 Open the dashboard when you want to look at it — the script prints the exact
 command when it finishes, and it needs an elevated PowerShell because the
@@ -829,12 +850,15 @@ is to keep the reports coming in. It is **not** the shape for something other
 people need to reach: there is no sign-in and no TLS, and the app serves
 loopback only, which is what makes it safe to run this way.
 
-Two things a server would have and this does not: nothing restarts the
-collector if the machine is off at the scheduled minute beyond the catch-up
-above, and there is still no Windows backup task (see `docs/OPEN-ISSUES.md`
-10b). `dmarc backup --to <path>` run from the same elevated prompt is the
-manual equivalent, and worth a calendar reminder if the database is the only
-copy of a year of reports.
+The backup, retention and health tasks run here on the same schedules as their
+Linux timers, so a collector-only box is no longer the one shape with nothing
+protecting the reports: the backup is nightly into `C:\dmarc\backups` with the
+first taken during setup, and the health check twice a day marks its task when
+collection or backups have stopped — the Windows equivalent of a failed unit,
+visible in the task's Last Run Result. What a server still has and this does
+not is a reverse proxy and sign-in, and those are the point of `-CollectorOnly`
+being left off. Off-box backup is still worth setting up by hand: a copy in
+`C:\dmarc\backups` survives a bad change, not a dead machine.
 
 Caddy needs ports 80 and 443. On a machine with IIS installed they belong to
 `http.sys`, and the script stops before installing Caddy and says so; either

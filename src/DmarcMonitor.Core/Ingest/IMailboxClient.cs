@@ -70,7 +70,15 @@ public interface IMailboxClient
     /// chew through the backlog in a stable order. Newest-first would keep
     /// re-processing the same recent mail and never reach the bottom.
     /// </remarks>
-    IAsyncEnumerable<MailMessage> GetMessagesAsync(string folder, CancellationToken cancellationToken = default);
+    /// <param name="folderId">
+    /// The folder's id, as <see cref="FindFolderAsync"/> or
+    /// <see cref="GetChildFoldersAsync"/> gave it - never its display name.
+    /// Reading by name meant looking the name up again, and a lookup that
+    /// found nothing created an empty folder of that name and read that
+    /// instead, so a folder that was there but not where the lookup looked
+    /// was never collected, with nothing said.
+    /// </param>
+    IAsyncEnumerable<MailMessage> GetMessagesAsync(string folderId, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<MailAttachment>> GetAttachmentsAsync(string messageId, CancellationToken cancellationToken = default);
 
@@ -125,7 +133,32 @@ public interface IMailboxClient
     Task DeleteMessageAsync(string messageId, bool permanent, CancellationToken cancellationToken = default);
 
     /// <summary>Returns the id of a folder, creating it if it does not exist.</summary>
+    /// <remarks>
+    /// For the folders a run files mail into. Never for a folder to read:
+    /// see <see cref="FindFolderAsync"/>.
+    /// </remarks>
     Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// A folder at the top of the mailbox, beside Inbox, found by its exact
+    /// display name - or a well-known one such as Inbox - or null when there
+    /// is no such folder.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Never creates anything, which is the difference from
+    /// <see cref="EnsureFolderAsync"/> and the reason this exists. A folder
+    /// named to be read that is not there is a mistake to report: creating an
+    /// empty one and reading it looks exactly like a quiet mailbox, and a
+    /// --dry-run doing it writes into the live mailbox.
+    /// </para>
+    /// <para>
+    /// The name is matched whole. A backslash in it is part of the name and
+    /// not a path: the mailbox this was built for has Outlook rules filing
+    /// reports into folders literally called <c>DMARC\example.org</c>.
+    /// </para>
+    /// </remarks>
+    Task<MailFolder?> FindFolderAsync(string folderName, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The folders directly inside another one.
@@ -135,5 +168,6 @@ public interface IMailboxClient
     /// rule is the normal way an MSP organizes this. Reading only the parent
     /// would ignore every report, and would do it silently.
     /// </remarks>
-    Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderName, CancellationToken cancellationToken = default);
+    /// <param name="folderId">The parent's id, as <see cref="FindFolderAsync"/> gave it.</param>
+    Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderId, CancellationToken cancellationToken = default);
 }

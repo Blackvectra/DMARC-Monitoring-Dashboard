@@ -46,6 +46,16 @@
     </EmbeddedResource>
 
     <!--
+      The schema of one client's own file, and the changes to it after its
+      baseline, compiled in for the same reasons. Client files are versioned
+      apart from the organization's database; see ClientDatabases.
+    -->
+    <EmbeddedResource Include="..\..\db\client-schema.sql" LogicalName="client-schema.sql" />
+    <EmbeddedResource Include="..\..\db\client-migrations\*.sql">
+      <LogicalName>client-migration.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+
+    <!--
       The fonts the PDF is drawn with, compiled in for the same reason as the
       schema: a container has no fonts installed, and PDFsharp on anything but
       Windows has no system fonts to fall back on. Without these a client

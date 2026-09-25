@@ -119,7 +119,8 @@
         </details>
 
         @* What you set once, or when a client is onboarded. A customer's own
-           login gets none of it; there is nothing there for them. *@
+           login gets none of it; there is nothing there for them. Leaving the
+           links out is only tidiness: ProviderLayout is what shuts the pages. *@
         @if (_access is not { RestrictedClient: not null })
         {
             <details class="nav-fold" open="@In("clients", "settings", "updates")">

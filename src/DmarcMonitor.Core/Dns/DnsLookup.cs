@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using DnsClient;
 using DnsClient.Protocol;
 
@@ -516,5 +517,64 @@ public sealed class DnsLookup(ILookupClient? client = null)
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Whether a reverse name's own forward records point back at the address.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// What turns a PTR from a claim into evidence. The PTR is written by
+    /// whoever holds the address, so a server sending forged mail can reverse
+    /// to mail.inkyphishfence.com as easily as INKY's can. The A and AAAA
+    /// records of mail.inkyphishfence.com are written by whoever holds that
+    /// NAME - INKY - and only name INKY's servers. When both directions agree,
+    /// the name is the vendor's word and not the sender's.
+    /// </para>
+    /// <para>
+    /// False for anything that cannot be established: no records, a resolver
+    /// that fails, a name that points somewhere else. A name that cannot be
+    /// confirmed is still printed; it just decides nothing.
+    /// </para>
+    /// </remarks>
+    public async Task<bool> ForwardConfirmsAsync(string name, string address, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(name) || !IPAddress.TryParse(address?.Trim(), out var parsed)) { return false; }
+
+        var ip = parsed.IsIPv4MappedToIPv6 ? parsed.MapToIPv4() : parsed;
+
+        try
+        {
+            var result = await _client.QueryAsync(
+                name.Trim().TrimEnd('.'),
+                ip.AddressFamily == AddressFamily.InterNetworkV6 ? QueryType.AAAA : QueryType.A,
+                cancellationToken: ct).ConfigureAwait(false);
+
+            var forward = ip.AddressFamily == AddressFamily.InterNetworkV6
+                ? result.Answers.AaaaRecords().Select(r => r.Address)
+                : result.Answers.ARecords().Select(r => r.Address);
+
+            return PointsBack(ip, forward);
+        }
+        catch (Exception ex) when (ex is DnsResponseException or OperationCanceledException or TimeoutException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>True when one of the forward addresses is the address itself.</summary>
+    /// <remarks>
+    /// Compared as addresses rather than as text, because the same IPv6
+    /// address has several spellings and the reports and DNS need not agree
+    /// on which one to use.
+    /// </remarks>
+    internal static bool PointsBack(IPAddress address, IEnumerable<IPAddress> forward)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        ArgumentNullException.ThrowIfNull(forward);
+
+        var wanted = address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+        return forward.Any(f => (f.IsIPv4MappedToIPv6 ? f.MapToIPv4() : f).Equals(wanted));
     }
 }

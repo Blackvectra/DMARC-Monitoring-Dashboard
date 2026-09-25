@@ -139,25 +139,35 @@ jobs:
 
       # The schema checks used to be their own job. They take four seconds,
       # and a job is billed as a whole minute however short it is.
-      - name: Apply schema to an empty database
+      - name: Apply both schemas to empty databases
         run: |
-          # db/schema.sql is the contract the future EF Core migration is
-          # generated from. If it stops applying cleanly, everything built on
-          # it is built on sand.
-          sqlite3 /tmp/schema-check.db < db/schema.sql
-          echo "--- tables ---"
-          sqlite3 /tmp/schema-check.db \
+          # db/schema.sql is the organization's database and db/client-schema.sql
+          # each client's own file (docs/CLIENT-FILES.md). They are the contract
+          # the future EF Core migration is generated from. If either stops
+          # applying cleanly, everything built on it is built on sand.
+          mkdir -p /tmp/schema-check
+          sqlite3 /tmp/schema-check/org.db < db/schema.sql
+          for c in acme globex rival; do
+            sqlite3 "/tmp/schema-check/$c.db" < db/client-schema.sql
+          done
+          echo "--- the organization's tables ---"
+          sqlite3 /tmp/schema-check/org.db \
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+          echo "--- a client file's tables ---"
+          sqlite3 /tmp/schema-check/acme.db \
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
           echo "--- views ---"
-          sqlite3 /tmp/schema-check.db "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name;"
+          sqlite3 /tmp/schema-check/acme.db "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name;"
 
       - name: Run schema constraint checks
         run: |
           # Proves the constraints actually fire: report dedup, one-domain-one-
-          # client, FK integrity, CHECK enums, tenant isolation, cascade delete.
-          # The negative cases are expected to error, so this deliberately does
-          # not use "set -e" semantics for the whole file.
-          sqlite3 /tmp/schema-check.db < db/schema-verify.sql > /tmp/verify.out 2>&1 || true
+          # client, FK integrity, CHECK enums, tenant isolation, cascade delete -
+          # with the organization's database as main and three clients' files
+          # attached beside it, the way the application opens them. The
+          # negative cases are expected to error, so this deliberately does not
+          # use "set -e" semantics for the whole file.
+          (cd /tmp/schema-check && sqlite3 org.db < "$GITHUB_WORKSPACE/db/schema-verify.sql") > /tmp/verify.out 2>&1 || true
           cat /tmp/verify.out
 
           fail=0
@@ -175,6 +185,13 @@ jobs:
           check "CHECK constraint failed"                              "invalid enum rejected"
           check "orphan_domains=0"                                     "cascade delete removed client's domains"
           check "acme_survives=2"                                      "other client's data untouched"
+          # One file per client. The wall between customers is the file, so
+          # these are the ones that matter most: a file says whose it is, holds
+          # nobody else's rows, and the organization's database holds nobody's.
+          check "acme_file_owner=c-acme"                               "a client file records whose it is"
+          check "acme_file_foreign_rows=0"                             "a client file holds only that client's rows"
+          check "main_holds_client_tables=0"                           "the organization's database holds no client's mail"
+          check "next_record_id=5"                                     "row ids come from one sequence across files"
           # Tenant layer. These are the security boundary in a hosted
           # deployment, not a convenience: if a tenant-scoped read ever
           # returns another tenant's rows, one MSP is reading a competitor's
@@ -186,20 +203,19 @@ jobs:
           check "UNIQUE constraint failed: clients.tenant_id, clients.slug" "one tenant cannot reuse a client slug"
           check "rival_clients=0"                                      "tenant cascade removed its clients"
           check "rival_domains=0"                                      "tenant cascade removed its domains"
-          check "rival_records=0"                                      "tenant cascade removed its aggregate records"
+          check "rival_files_reachable=0"                              "tenant cascade left none of its clients' files reachable"
           check "nls_survives=2"                                       "deleting one tenant leaves the other intact"
           check "USING INDEX ix_agg_rec_tenant_date"                   "isolation filter uses a tenant-leading index"
           # Remediation tables: a refused plan is still recorded, an applied
           # change keeps its rollback target, secrets stay out of the database,
-          # and a client's remediation history dies with the client.
+          # and a client's remediation history is in its own file only - which
+          # is deleted with the client (ClientErasureTests).
           check "refused_plan_stored=1"                                "refused plan is still recorded"
           check "change_rollback_target=v=spf1 include:a -all"         "applied change keeps its rollback target"
           check "stores_only_ref=DnsToken_c-acme_cloudflare"           "provider config stores a credential ref, not a secret"
           check "UNIQUE constraint failed: spf_flatten_state.domain_id" "one flatten state per domain enforced"
-          check "orphan_plans=0"                                       "cascade removed change plans"
-          check "orphan_changes=0"                                     "cascade removed applied changes"
           check "orphan_provider=0"                                    "cascade removed provider configs"
-          check "orphan_flatten=0"                                     "cascade removed flatten state"
+          check "remediation_outside_its_file=0"                       "remediation history is in the client's file only"
           exit $fail
 
       - name: Restore
@@ -373,14 +389,22 @@ jobs:
           count=$(sudo sh -c 'ls -1 /opt/dmarc/backups/dmarc-*.bak' | wc -l)
           echo "$count backup(s) held"; test "$count" -ge 2
 
-          # The copy is a real database, not a truncated file that happens to
-          # exist - which is the failure a backup has when nobody checks.
-          # Copied out under this account, because a root-owned 0600 file is
-          # one sqlite3 here cannot open and the point is to open it.
-          sudo install -m 0644 -o "$(id -un)" -g "$(id -gn)" "$first" /tmp/restore-check.db
-          test "$(sqlite3 /tmp/restore-check.db 'PRAGMA integrity_check;')" = ok
-          sqlite3 /tmp/restore-check.db "SELECT count(*) FROM aggregate_reports;"
-          rm -f /tmp/restore-check.db
+          # The copy is a zip of the organization's database and every
+          # client's file (docs/CLIENT-FILES.md), and each one in it is a real
+          # database, not a truncated file that happens to exist - which is
+          # the failure a backup has when nobody checks. Copied out under this
+          # account, because a root-owned 0600 file is one this account cannot
+          # open and the point is to open it.
+          sudo install -m 0644 -o "$(id -un)" -g "$(id -gn)" "$first" /tmp/restore-check.bak
+          rm -rf /tmp/restore-check && mkdir /tmp/restore-check
+          unzip -q /tmp/restore-check.bak -d /tmp/restore-check
+          find /tmp/restore-check -type f | sort
+          test -f /tmp/restore-check/dmarc.db
+          find /tmp/restore-check -name '*.db' -print0 | while IFS= read -r -d '' db; do
+            test "$(sqlite3 "$db" 'PRAGMA integrity_check;')" = ok || { echo "not intact: $db"; exit 1; }
+          done
+          sqlite3 /tmp/restore-check/dmarc.db "SELECT count(*) FROM clients;"
+          rm -rf /tmp/restore-check /tmp/restore-check.bak
 
       - name: The health check runs, and is green on a fresh install
         run: |

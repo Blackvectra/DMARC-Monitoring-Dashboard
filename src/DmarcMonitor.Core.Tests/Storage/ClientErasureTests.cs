@@ -23,32 +23,16 @@ public sealed class ClientErasureTests : IDisposable
         SeedAsync().GetAwaiter().GetResult();
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
-    private async Task RunAsync(string sql)
-    {
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-        await using var command = db.CreateCommand();
-        command.CommandText = sql;
-        await command.ExecuteNonQueryAsync();
-    }
+    /// <summary>SQL written for one database, split into client files afterwards.</summary>
+    private Task RunAsync(string sql) => SingleDatabase.ExecuteAsync(_dbPath, sql);
 
-    private async Task<long> ScalarAsync(string sql)
-    {
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-        await using var command = db.CreateCommand();
-        command.CommandText = sql;
-        return Convert.ToInt64(await command.ExecuteScalarAsync() ?? 0L);
-    }
+    /// <summary>Read across the organization's database and every client's file.</summary>
+    private Task<long> ScalarAsync(string sql) => SingleDatabase.CountAsync(_dbPath, sql);
+
+    private string FileOf(string clientId, string slug, string tenantId) =>
+        new ClientDatabases(_dbPath).PathFor(new ClientFile(clientId, slug, tenantId));
 
     /// <summary>Two organizations, each with a client, each with reports.</summary>
     private async Task SeedAsync()
@@ -231,18 +215,43 @@ public sealed class ClientErasureTests : IDisposable
         // list written down once and gone stale.
         await Erasure().ApplyAsync("acme", null, "matthew", null);
 
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-
-        var tables = await ClientErasure.TablesWithClientIdAsync(db, default);
-        Assert.NotEmpty(tables);
-
-        foreach (var table in tables)
+        await using (var db = new SqliteConnection($"Data Source={_dbPath}"))
         {
-            await using var command = db.CreateCommand();
-            command.CommandText = $"SELECT COUNT(*) FROM {table} WHERE client_id = 'c-a'";
-            Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync() ?? 0L));
+            await db.OpenAsync();
+
+            var tables = await ClientErasure.TablesWithClientIdAsync(db, default);
+            Assert.NotEmpty(tables);
+
+            foreach (var table in tables)
+            {
+                await using var command = db.CreateCommand();
+                command.CommandText = $"SELECT COUNT(*) FROM {table} WHERE client_id = 'c-a'";
+                Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync() ?? 0L));
+            }
         }
+
+        // And every client table, across every file that is left.
+        foreach (var table in ClientDatabases.Tables)
+        {
+            Assert.Equal(0, await ScalarAsync($"SELECT COUNT(*) FROM {table} WHERE client_id = 'c-a'"));
+        }
+    }
+
+    [Fact]
+    public async Task TheClientsOwnFileIsDeletedAndNobodyElsesIs()
+    {
+        // Their reports are a file of their own, so erasing them is deleting
+        // it - and only it.
+        var theirs = FileOf("c-a", "acme", "t-a");
+        var others = new[] { FileOf("c-other", "beta", "t-a"), FileOf("c-b", "gamma", "t-b") };
+        Assert.True(File.Exists(theirs));
+        Assert.All(others, f => Assert.True(File.Exists(f)));
+
+        await Erasure().ApplyAsync("acme", null, "matthew", null);
+
+        Assert.False(File.Exists(theirs));
+        Assert.False(File.Exists(theirs + "-wal"));
+        Assert.All(others, f => Assert.True(File.Exists(f)));
     }
 
     [Fact]
@@ -257,11 +266,15 @@ public sealed class ClientErasureTests : IDisposable
 
         var tables = await ClientErasure.TablesWithClientIdAsync(db, default);
 
-        Assert.Contains("aggregate_records", tables);
-        Assert.Contains("aggregate_reports", tables);
         Assert.Contains("domains", tables);
+        Assert.Contains("dns_provider_configs", tables);
         Assert.DoesNotContain("tenants", tables);      // no client_id
         Assert.DoesNotContain("audit_log", tables);    // deliberately none, so it survives
+
+        // The reports themselves are in the client's own file, which goes
+        // whole rather than table by table.
+        Assert.Contains("aggregate_records", ClientDatabases.Tables);
+        Assert.Contains("forensic_reports", ClientDatabases.Tables);
     }
 
     [Fact]

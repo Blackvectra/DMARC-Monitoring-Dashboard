@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 
@@ -71,6 +72,30 @@ public sealed class ExtractionBudget
 
     /// <summary>Set once a read was refused, so there may be more that was not read.</summary>
     public bool Exhausted { get; private set; }
+
+    /// <summary>
+    /// What could not be read, one line each: an archive that would not open,
+    /// a member that would not decompress, a gzip file cut short.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Kept here for the same reason as <see cref="Exhausted"/>: the caller has
+    /// to be able to ask afterwards what was NOT read. A damaged archive used
+    /// to come back as an empty list - the same answer a zip of holiday photos
+    /// gets - so an import counted it as "not a report", and a damaged member
+    /// inside an export disappeared without a word while the rest imported.
+    /// </para>
+    /// <para>
+    /// Each line names the member it is about when the damage is inside the
+    /// file, and nothing when it is the file itself, so the caller prefixes
+    /// the file's own name.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> Unreadable => _unreadable;
+
+    private readonly List<string> _unreadable = [];
+
+    internal void NoteUnreadable(string what) => _unreadable.Add(what);
 
     /// <summary>
     /// Claims one archive member, or refuses when there are none left.
@@ -180,7 +205,9 @@ public static class ReportAttachment
     /// <remarks>
     /// Returns an empty list rather than throwing for anything it cannot
     /// make sense of. A single malformed attachment must not stop a run
-    /// working through a backlog of thousands.
+    /// working through a backlog of thousands. A caller that needs to know
+    /// what could not be read uses <see cref="ExtractAll"/> and asks the
+    /// budget afterwards.
     /// </remarks>
     public static IReadOnlyList<ExtractedReport> Extract(string fileName, byte[] content)
     {
@@ -206,8 +233,8 @@ public static class ReportAttachment
     /// </remarks>
     /// <param name="budget">
     /// How much this file may consume. The caller keeps it and can ask
-    /// afterwards whether it ran out, so truncation is reportable rather than
-    /// silent.
+    /// afterwards whether it ran out, and what could not be read at all, so
+    /// truncation and damage are reportable rather than silent.
     /// </param>
     public static IEnumerable<ExtractedReport> ExtractAll(
         string fileName, byte[] content, ExtractionBudget budget)
@@ -220,9 +247,19 @@ public static class ReportAttachment
             : Walk(fileName ?? "", content, budget, depth: 0);
     }
 
+    /// <summary>Said of anything bigger than one report can be.</summary>
+    private static readonly string TooLarge =
+        $"larger than the {MaxDecompressedBytes / (1024 * 1024)} MB a single report may be, so it was not read";
+
     private static IEnumerable<ExtractedReport> Walk(string fileName, byte[] content, ExtractionBudget budget, int depth)
     {
-        if (depth > MaxArchiveDepth) { yield break; }
+        if (depth > MaxArchiveDepth)
+        {
+            // Said rather than dropped. The bound is what stops an archive that
+            // contains itself, but whatever sat below it went unread.
+            Unreadable(budget, fileName, depth, $"nested inside more than {MaxArchiveDepth} archives, deeper than this reads");
+            yield break;
+        }
 
         if (LooksLikeZip(content))
         {
@@ -232,7 +269,7 @@ public static class ReportAttachment
 
         if (LooksLikeGzip(content))
         {
-            var expanded = Expand(content, budget);
+            var expanded = Expand(fileName, content, budget, depth);
             if (expanded is null) { yield break; }
 
             // Strip the .gz so the name reads as the report it contains.
@@ -245,7 +282,11 @@ public static class ReportAttachment
             yield break;
         }
 
-        if (content.Length > MaxDecompressedBytes) { yield break; }
+        if (content.Length > MaxDecompressedBytes)
+        {
+            Unreadable(budget, fileName, depth, TooLarge);
+            yield break;
+        }
 
         var text = Decode(content);
         var kind = Classify(text);
@@ -257,31 +298,39 @@ public static class ReportAttachment
 
     private static IEnumerable<ExtractedReport> FromZip(string fileName, byte[] content, ExtractionBudget budget, int depth)
     {
-        var zip = TryOpen(content);
-        if (zip is null) { yield break; }
+        var zip = TryOpen(content, out var entries, out var why);
+        if (zip is null)
+        {
+            Unreadable(budget, fileName, depth, $"could not be opened as a zip archive ({why})");
+            yield break;
+        }
 
         using (zip)
         {
-            foreach (var entry in zip.Entries)
+            foreach (var entry in entries)
             {
                 if (entry.Length == 0) { continue; }
-
-                // entry.Length is what the archive CLAIMS. It is attacker
-                // controlled, so it is used only to reject early; the real
-                // bound is enforced while reading.
-                if (entry.Length > MaxDecompressedBytes) { continue; }
-
-                var expanded = Expand(entry, budget);
-                if (expanded is null) { continue; }
-
-                // Charged once the member turned out to be readable, so an
-                // empty or corrupt one does not spend another's place.
-                if (!budget.TryTakeEntry()) { yield break; }
 
                 // entry.Name, never entry.FullName: FullName can contain
                 // traversal segments. Nothing here writes to disk, but the name
                 // reaches logs and reports, so it is kept harmless.
                 var inner = string.IsNullOrWhiteSpace(entry.Name) ? fileName : entry.Name;
+
+                // entry.Length is what the archive CLAIMS. It is attacker
+                // controlled, so it is used only to reject early; the real
+                // bound is enforced while reading.
+                if (entry.Length > MaxDecompressedBytes)
+                {
+                    Unreadable(budget, inner, depth + 1, TooLarge);
+                    continue;
+                }
+
+                var expanded = Expand(entry, inner, budget, depth + 1);
+                if (expanded is null) { continue; }
+
+                // Charged once the member turned out to be readable, so an
+                // empty or corrupt one does not spend another's place.
+                if (!budget.TryTakeEntry()) { yield break; }
 
                 // Recursed rather than classified here, because what comes out
                 // of an export zip is usually another archive: the attachments
@@ -291,18 +340,55 @@ public static class ReportAttachment
         }
     }
 
-    /// <summary>Opens an archive, or returns null when it is not one this can read.</summary>
-    private static ZipArchive? TryOpen(byte[] content)
+    /// <summary>
+    /// Opens an archive and reads its list of contents, or says why it could not.
+    /// </summary>
+    /// <remarks>
+    /// Both halves inside the one try. ZipArchive reads the archive's end
+    /// record when it is constructed, but the list of what is in it only when
+    /// <see cref="ZipArchive.Entries"/> is first touched - so an archive whose
+    /// list was damaged opened cleanly and then threw from the loop over its
+    /// entries, which sat outside any try. One such file ended a whole folder
+    /// import instead of being skipped, and the files after it were never read.
+    /// </remarks>
+    private static ZipArchive? TryOpen(byte[] content, out IReadOnlyList<ZipArchiveEntry> entries, out string why)
     {
+        ZipArchive? zip = null;
         try
         {
-            return new ZipArchive(new MemoryStream(content, writable: false), ZipArchiveMode.Read);
+            zip = new ZipArchive(new MemoryStream(content, writable: false), ZipArchiveMode.Read);
+            entries = [.. zip.Entries];
+            why = "";
+            return zip;
         }
-        catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+        catch (Exception ex) when (IsDamage(ex))
         {
+            zip?.Dispose();
+            entries = [];
+            why = ex.Message;
             return null;
         }
     }
+
+    /// <summary>
+    /// Whether an exception from reading an archive means "this input is
+    /// damaged", as opposed to something the process cannot carry on from.
+    /// </summary>
+    /// <remarks>
+    /// Wider than the exception types the documentation lists, on purpose. The
+    /// input is hostile, the documentation is not a promise about what a
+    /// crafted archive can provoke from the reader, and any exception escaping
+    /// from here ends an import of a thousand files over one of them.
+    /// </remarks>
+    private static bool IsDamage(Exception ex) => ex is not OutOfMemoryException;
+
+    /// <summary>
+    /// Records something that could not be read, named for the member it is
+    /// about - or for nothing when it is the file the caller handed over,
+    /// because the caller names that one itself.
+    /// </summary>
+    private static void Unreadable(ExtractionBudget budget, string name, int depth, string problem) =>
+        budget.NoteUnreadable(depth == 0 || string.IsNullOrWhiteSpace(name) ? problem : $"{name}: {problem}");
 
     // Magic numbers rather than the file extension: real attachments arrive
     // with extensions that disagree with their contents, and a .gz that is
@@ -314,32 +400,80 @@ public static class ReportAttachment
         b.Length >= 3 && b[0] == 0x1F && b[1] == 0x8B && b[2] == 0x08;
 
     /// <summary>Decompresses one archive entry within the budget.</summary>
-    private static byte[]? Expand(ZipArchiveEntry entry, ExtractionBudget budget)
+    private static byte[]? Expand(ZipArchiveEntry entry, string name, ExtractionBudget budget, int depth)
     {
         try
         {
             using var stream = entry.Open();
-            return ReadBounded(stream, budget);
+            return ReadBounded(stream, name, budget, depth);
         }
-        catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+        catch (Exception ex) when (IsDamage(ex))
         {
+            Unreadable(budget, name, depth, $"could not be decompressed ({ex.Message})");
             return null;
         }
     }
 
-    /// <summary>Decompresses a gzip member within the budget.</summary>
-    private static byte[]? Expand(byte[] content, ExtractionBudget budget)
+    /// <summary>Decompresses a gzip file within the budget.</summary>
+    private static byte[]? Expand(string name, byte[] content, ExtractionBudget budget, int depth)
     {
+        byte[]? expanded;
         try
         {
             using var source = new MemoryStream(content, writable: false);
             using var gz = new GZipStream(source, CompressionMode.Decompress);
-            return ReadBounded(gz, budget);
+            expanded = ReadBounded(gz, name, budget, depth);
         }
-        catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+        catch (Exception ex) when (IsDamage(ex))
         {
+            Unreadable(budget, name, depth, $"could not be decompressed ({ex.Message})");
             return null;
         }
+
+        if (expanded is not null && !ReachedItsEnd(content, expanded.Length))
+        {
+            Unreadable(budget, name, depth,
+                "cut short: it ends part way through its own compressed data, so what it holds is incomplete");
+            return null;
+        }
+
+        return expanded;
+    }
+
+    /// <summary>The three bytes every gzip member begins with.</summary>
+    private static ReadOnlySpan<byte> GzipMagic => [0x1F, 0x8B, 0x08];
+
+    /// <summary>
+    /// Whether a gzip file got as far as the end its own trailer describes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Needed because GZipStream does not complain about a file that stops
+    /// short: it hands back whatever it had decoded when the bytes ran out.
+    /// Cut in half, a report came out as its first half and failed to parse
+    /// as something it was not; cut early, it came out as nothing at all and
+    /// was counted as "not a report"; and a failure report, which is plain
+    /// text, would have been stored with half its headers.
+    /// </para>
+    /// <para>
+    /// RFC 1952 ends a gzip file with the length of what went into it, so a
+    /// whole file carries the length of what came out and one cut short does
+    /// not. It is looked for anywhere after the header rather than only in
+    /// the last four bytes, because a file with a newline or padding after it
+    /// is whole and decompresses whole. A file of several gzip members joined
+    /// together is legal too, decompresses to all of them, and carries only
+    /// the last one's length - so a second gzip header means this cannot tell,
+    /// and the file is read exactly as it always was rather than refused.
+    /// </para>
+    /// </remarks>
+    private static bool ReachedItsEnd(byte[] gzip, int expandedLength)
+    {
+        Span<byte> declared = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(declared, (uint)expandedLength);
+
+        // Past the fixed ten-byte header, which is no part of any trailer.
+        var rest = gzip.AsSpan(Math.Min(10, gzip.Length));
+        return rest.IndexOf(declared) >= 0 || rest.IndexOf(GzipMagic) >= 0;
     }
 
     /// <summary>
@@ -354,7 +488,7 @@ public static class ReportAttachment
     /// archive declares, because that number is written by whoever built the
     /// archive and a zip bomb declares whatever gets it past the check.
     /// </remarks>
-    private static byte[]? ReadBounded(Stream stream, ExtractionBudget budget)
+    private static byte[]? ReadBounded(Stream stream, string name, ExtractionBudget budget, int depth)
     {
         using var buffer = new MemoryStream();
         var chunk = new byte[81920];
@@ -362,7 +496,11 @@ public static class ReportAttachment
 
         while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
         {
-            if (buffer.Length + read > MaxDecompressedBytes) { return null; }
+            if (buffer.Length + read > MaxDecompressedBytes)
+            {
+                Unreadable(budget, name, depth, TooLarge);
+                return null;
+            }
             buffer.Write(chunk, 0, read);
         }
 

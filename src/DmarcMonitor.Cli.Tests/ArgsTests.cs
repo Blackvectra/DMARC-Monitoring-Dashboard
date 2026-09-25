@@ -153,4 +153,49 @@ public sealed class ArgsTests
         // second occurrence of the flag, and Reject already steps over it.
         Assert.Equal(0, Args.Reject(["--from", "reports", "--db", "--from"], "--db", "--from"));
     }
+
+    /// <summary>
+    /// The one kind of repetition that is meant: a flag the command declares
+    /// repeatable, written with a trailing "..." the way its usage text is.
+    /// <c>dmarc ingest --folder A --folder B</c> reads both folders.
+    /// </summary>
+    [Fact]
+    public void AFlagDeclaredRepeatableMayBeGivenMoreThanOnce()
+    {
+        Assert.Equal(0, Args.Reject(
+            ["--folder", @"DMARC\example.org", "--folder", @"DMARC\example.net", "--db", "x.db"],
+            "--db", "--folder..."));
+    }
+
+    [Fact]
+    public void DeclaringOneFlagRepeatableDoesNotExcuseAnother()
+    {
+        Assert.Equal(64, Args.Reject(
+            ["--folder", "a", "--folder", "b", "--db", "x.db", "--db", "y.db"],
+            "--db", "--folder..."));
+    }
+
+    [Fact]
+    public void ARepeatableFlagIsStillOnlyItsOwnName()
+    {
+        // The marker is not part of the name somebody types.
+        Assert.Equal(64, Args.Reject(["--folder...", "a"], "--folder..."));
+        Assert.Equal(64, Args.Reject(["--folders", "a"], "--folder..."));
+    }
+
+    [Fact]
+    public void ValuesReadsEveryOccurrenceInOrderAndKeepsBackslashes()
+    {
+        string[] args = ["--folder", @"DMARC\example.org", "--db", "x.db", "--folder", "Inbox"];
+
+        Assert.Equal([@"DMARC\example.org", "Inbox"], Args.Values(args, "--folder"));
+        Assert.Empty(Args.Values(args, "--absent"));
+    }
+
+    [Fact]
+    public void ValuesDoesNotMistakeAValueForAnotherOccurrence()
+    {
+        // A folder literally named "--folder" is somebody's, however unlikely.
+        Assert.Equal(["--folder", "Inbox"], Args.Values(["--folder", "--folder", "--folder", "Inbox"], "--folder"));
+    }
 }

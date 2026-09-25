@@ -21,6 +21,12 @@ public sealed record ErasureResult(
 {
     public long Total => Rows.Sum(r => r.Rows);
 
+    /// <summary>
+    /// Whole copies of the database left beside it, which still hold this
+    /// client's data and which nothing here prunes: see <see cref="ClientDatabases.CopiesBeside"/>.
+    /// </summary>
+    public IReadOnlyList<string> OtherCopies { get; init; } = [];
+
     public string Describe() =>
         $"{Name} ({Slug}) in {Organization}: {Domains.Count} domain(s), {Total:N0} row(s) across "
         + $"{Rows.Count} table(s)";
@@ -37,8 +43,10 @@ public sealed record ErasureResult(
 ///
 /// Three things separate this from DELETE FROM clients.
 ///
-///   It proves the erasure. Every table in the schema carrying a client_id is
-///   checked AFTER the delete, and anything left behind fails the whole
+///   It proves the erasure. A client's reports are a file of their own (see
+///   ClientDatabases), and the file is deleted and checked to be gone. Every
+///   table in the organization's database carrying a client_id is checked
+///   AFTER the delete as well, and anything left behind fails the whole
 ///   transaction. SQLite only cascades when foreign keys are enforced on the
 ///   connection, and a cascade that silently did not fire would leave the data
 ///   in place while the client row - and the operator's confidence - was gone.
@@ -110,59 +118,47 @@ public sealed class ClientErasure(string databasePath)
         if (apply) { ArgumentException.ThrowIfNullOrWhiteSpace(by); }
 
         var slug = clientSlug.Trim().ToLowerInvariant();
+        var files = new ClientDatabases(_databasePath);
 
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = _databasePath,
-        }.ToString());
+        await using var db = await files.OpenRegistryAsync(write: true, ct).ConfigureAwait(false);
 
-        await db.OpenAsync(ct).ConfigureAwait(false);
-
-        // The cascade is the whole mechanism, and it only fires when foreign
+        // The cascade is part of the mechanism, and it only fires when foreign
         // keys are enforced. Set explicitly rather than trusted to the client
-        // library's default: without it the client row would vanish and every
-        // report belonging to them would stay, orphaned and invisible.
+        // library's default: without it the client row would vanish and rows
+        // hanging off it would stay, orphaned and invisible.
         await Execute(db, "PRAGMA foreign_keys=ON", ct).ConfigureAwait(false);
 
         var client = await FindAsync(db, slug, tenantId, ct).ConfigureAwait(false);
         if (client is null) { return null; }
 
-        var (clientId, name, organization) = client.Value;
+        var (clientId, name, organization, tenant) = client.Value;
+        var file = files.PathFor(new ClientFile(clientId, slug, tenant));
 
         var domains = await DomainsAsync(db, clientId, ct).ConfigureAwait(false);
         var tables = await TablesWithClientIdAsync(db, ct).ConfigureAwait(false);
-        var counts = await CountAsync(db, tables, clientId, ct).ConfigureAwait(false);
+        var counts = (await CountAsync(db, tables, clientId, ct).ConfigureAwait(false))
+            .Concat(await CountFileAsync(files, clientId, file, ct).ConfigureAwait(false))
+            .OrderByDescending(c => c.Rows)
+            .ToList();
 
         if (!apply)
         {
-            return new ErasureResult(slug, name, organization, domains, counts, Applied: false);
+            return new ErasureResult(slug, name, organization, domains, counts, Applied: false)
+            {
+                OtherCopies = ClientDatabases.CopiesBeside(_databasePath),
+            };
         }
 
-        await using (var transaction = (SqliteTransaction)await db.BeginTransactionAsync(ct).ConfigureAwait(false))
+        // IMMEDIATE: the write lock is held from here until the commit, so no
+        // report can be filed for this client - which would make its file
+        // again - between the file going and the client going.
+        await using (var transaction = db.BeginTransaction(deferred: false))
         {
             // Every table carrying a client_id, explicitly, before the client
-            // row goes.
-            //
-            // Relying on the cascade alone was not enough, and the gap was
-            // silent. Most of these tables reach clients through a foreign
-            // key - directly, or through a parent that has one, as
-            // aggregate_records does via report_id. Two do not:
-            // forensic_reports and ingest_log carry a client_id and have NO
-            // foreign keys whatsoever, so nothing cascades to them at all.
-            //
-            // Both were empty when this was written - nothing parsed failure
-            // reports, and ingest_log fills only under the collector - so the
-            // cascade looked complete. Failure reports are parsed now, and
-            // forensic_reports really does hold rows, which is exactly the
-            // moment this was written for: without it, erasure would have left
-            // them behind and the verification below would have thrown, making
-            // erasure impossible for that client. Worse, had the verification
-            // been the thing relaxed instead, a customer's message headers
-            // would have quietly survived an erasure they asked for.
-            //
-            // Children first, parent last: deleting in this order never
-            // trips a constraint, and doing it explicitly makes the result
-            // the same whether or not a cascade exists.
+            // row goes. Children first, parent last: deleting in this order
+            // never trips a constraint, and doing it explicitly makes the
+            // result the same whether or not a cascade exists. ingest_log has
+            // a client_id and no foreign key, so nothing would cascade to it.
             foreach (var table in tables)
             {
                 await using var delete = db.CreateCommand();
@@ -195,6 +191,21 @@ public sealed class ClientErasure(string databasePath)
                     + "rather than a data problem.");
             }
 
+            // The client's file: every report, every DNS reading and change,
+            // every failure report's headers. Gone before the commit, so a
+            // file that will not go - held open on Windows, say - takes the
+            // whole erasure back rather than leaving the mail behind a client
+            // that no longer exists to be asked about.
+            SqliteConnection.ClearAllPools();
+            ClientDatabases.DeleteFileAndJournals(file);
+            if (File.Exists(file))
+            {
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                throw new IOException(
+                    $"{file} could not be deleted, so nothing was removed. It is probably open in another "
+                    + "program; close it and run the erasure again.");
+            }
+
             await transaction.CommitAsync(ct).ConfigureAwait(false);
         }
 
@@ -211,7 +222,32 @@ public sealed class ClientErasure(string databasePath)
                 ct).ConfigureAwait(false);
         }
 
-        return new ErasureResult(slug, name, organization, domains, counts, Applied: true);
+        return new ErasureResult(slug, name, organization, domains, counts, Applied: true)
+        {
+            OtherCopies = ClientDatabases.CopiesBeside(_databasePath),
+        };
+    }
+
+    /// <summary>
+    /// The rows in the client's own file, per table, labelled as the file's.
+    /// </summary>
+    private static async Task<IReadOnlyList<(string Table, long Rows)>> CountFileAsync(
+        ClientDatabases files, string clientId, string file, CancellationToken ct)
+    {
+        if (!File.Exists(file)) { return []; }
+
+        await using var db = await files.OpenAsync(ClientScope.Client(clientId), ct: ct).ConfigureAwait(false);
+        var counts = new List<(string, long)>();
+
+        foreach (var table in ClientDatabases.Tables)
+        {
+            await using var command = db.CreateCommand();
+            command.CommandText = $"SELECT COUNT(*) FROM {ClientDatabases.Attached}.{table}";
+            var n = Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture);
+            if (n > 0) { counts.Add((table, n)); }
+        }
+
+        return counts;
     }
 
     /// <summary>
@@ -223,7 +259,7 @@ public sealed class ClientErasure(string databasePath)
     /// one - erasure reaching across organizations would be the worst possible
     /// version of the cross-tenant bug.
     /// </remarks>
-    private static async Task<(string Id, string Name, string Organization)?> FindAsync(
+    private static async Task<(string Id, string Name, string Organization, string TenantId)?> FindAsync(
         SqliteConnection db, string slug, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
@@ -235,7 +271,7 @@ public sealed class ClientErasure(string databasePath)
         // permanently destroy a customer belonging to somebody else while
         // printing the organization it thought it was in.
         command.CommandText = """
-            SELECT c.id, c.name, t.slug
+            SELECT c.id, c.name, t.slug, t.id
             FROM clients c
             JOIN tenants t ON t.id = c.tenant_id
             WHERE c.slug = $slug AND ($tenant IS NULL OR c.tenant_id = $tenant)
@@ -244,13 +280,13 @@ public sealed class ClientErasure(string databasePath)
         command.Parameters.AddWithValue("$slug", slug);
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
-        var found = new List<(string Id, string Name, string Organization)>();
+        var found = new List<(string Id, string Name, string Organization, string TenantId)>();
 
         await using (var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false))
         {
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                found.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+                found.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
             }
         }
 
@@ -279,11 +315,10 @@ public sealed class ClientErasure(string databasePath)
     /// Every table in this database carrying a client_id.
     /// </summary>
     /// <remarks>
-    /// Read from the schema rather than listed here. Nineteen tables cascade
-    /// from clients today and the count only goes up; a hand-written list is a
+    /// Read from the schema rather than listed here. A hand-written list is a
     /// list that goes stale, and the failure mode of a stale list is a table
     /// full of an erased customer's data that nobody counted and nobody
-    /// checked.
+    /// checked. The client's own file is not in this list: it goes whole.
     /// </remarks>
     internal static async Task<IReadOnlyList<string>> TablesWithClientIdAsync(
         SqliteConnection db, CancellationToken ct)

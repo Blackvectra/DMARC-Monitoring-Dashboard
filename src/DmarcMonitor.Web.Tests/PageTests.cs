@@ -980,6 +980,11 @@ public class SeededApp : WebApplicationFactory<Program>
         await store.AssignDomainAsync("acme.com", slug!);
         await store.AssignDomainAsync("signed.example", slug!);
 
+        // The gateway above, named the way a real INKY relay is: a PTR under
+        // inkyphishfence.com whose forward records point back at it.
+        await new DmarcMonitor.Core.Intelligence.SourceNameStore(_dbPath)
+            .SaveAsync("198.51.100.77", "ipw-outbound.inkyphishfence.com", answered: true, forwardConfirmed: true);
+
         // A provider with a real-looking token, stored the way the settings
         // page stores one, so the pages can be checked for leaking it.
         var configs = new DnsProviderConfigs(_dbPath, new LocalSecretStore(_secretsDir));
@@ -1066,8 +1071,10 @@ public class SeededApp : WebApplicationFactory<Program>
               </record>
               <!-- A security gateway: it received this domain's mail, added
                    its banner and sent it on, so the domain's own signature is
-                   still named on the message and no longer verifies. The
-                   envelope is the gateway's, which is what names it. -->
+                   still named on the message and no longer verifies. What
+                   names it is its reverse name, confirmed by INKY's own
+                   forward DNS (stored below): the envelope failed SPF, and an
+                   envelope anybody can type proves nothing. -->
               <record>
                 <row>
                   <source_ip>198.51.100.77</source_ip><count>9</count>

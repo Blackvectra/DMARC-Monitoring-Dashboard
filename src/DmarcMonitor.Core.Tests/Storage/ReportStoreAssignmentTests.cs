@@ -24,14 +24,7 @@ public sealed class ReportStoreAssignmentTests : IDisposable
         _store.InitializeAsync(File.ReadAllText(FindSchema())).GetAwaiter().GetResult();
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     private static string FindSchema()
     {
@@ -55,27 +48,43 @@ public sealed class ReportStoreAssignmentTests : IDisposable
         return report;
     }
 
+    /// <summary>
+    /// Whose file holds the domain's records - and the client every one of them
+    /// says it belongs to, which must be the same client.
+    /// </summary>
     private async Task<string> ClientOfRecordsAsync(string domain)
     {
-        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString());
-        await connection.OpenAsync();
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT DISTINCT c.slug
-            FROM aggregate_records r
-            JOIN clients c ON c.id = r.client_id
-            JOIN domains d ON d.id = r.domain_id
-            WHERE d.name = $name
-            """;
-        command.Parameters.AddWithValue("$name", domain);
+        var files = new ClientDatabases(_dbPath);
+        var holders = new List<string>();
 
-        var slugs = new List<string>();
-        await using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync()) { slugs.Add(reader.GetString(0)); }
+        foreach (var client in await files.ListAsync())
+        {
+            if (!File.Exists(files.PathFor(client))) { continue; }
+
+            await using var connection = await files.OpenAsync(ClientScope.Client(client.Id));
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT DISTINCT c.slug
+                FROM aggregate_records r
+                JOIN clients c ON c.id = r.client_id
+                JOIN domains d ON d.id = r.domain_id
+                WHERE d.name = $name
+                """;
+            command.Parameters.AddWithValue("$name", domain);
+
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                // A row in one client's file saying it is another's is the
+                // move half done.
+                Assert.Equal(client.Slug, reader.GetString(0));
+                holders.Add(client.Slug);
+            }
+        }
 
         // More than one means the history was split across clients, which is
         // worse than not moving it at all.
-        return Assert.Single(slugs);
+        return Assert.Single(holders);
     }
 
     // ---- the case that matters ---------------------------------------------
@@ -113,34 +122,95 @@ public sealed class ReportStoreAssignmentTests : IDisposable
     {
         // The guard. A table added later with a denormalized client_id and a
         // domain_id would silently keep pointing at the old client, and the
-        // symptom — a client report missing a section — would look like a
+        // symptom - a client report missing a section - would look like a
         // reporting bug rather than an assignment one.
-        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString());
-        await connection.OpenAsync();
 
-        var tables = new List<string>();
-        await using (var list = connection.CreateCommand())
+        // In the organization's database: updated in place.
+        await using (var registry = new SqliteConnection($"Data Source={_dbPath};Pooling=False"))
         {
-            list.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name";
-            await using var reader = await list.ExecuteReaderAsync();
-            while (await reader.ReadAsync()) { tables.Add(reader.GetString(0)); }
+            await registry.OpenAsync();
+            var needBoth = new List<string>();
+            foreach (var table in await TablesAsync(registry))
+            {
+                var columns = await ColumnsAsync(registry, table);
+                if (columns.Contains("client_id") && columns.Contains("domain_id")) { needBoth.Add(table); }
+            }
+
+            Assert.Equal(
+                needBoth.OrderBy(t => t, StringComparer.Ordinal),
+                ReportStore.RegistryDomainTables.OrderBy(t => t, StringComparer.Ordinal));
         }
 
-        var needBoth = new List<string>();
+        // In a client's file: moved to the new client's. Everything with a
+        // domain_id, and whatever hangs off one of those by a key that deletes
+        // with it - a TLS report's failure details have no domain of their own.
+        await using var file = new SqliteConnection("Data Source=:memory:;Pooling=False");
+        await file.OpenAsync();
+        await using (var create = file.CreateCommand())
+        {
+            create.CommandText = DatabaseSchema.ClientSql;
+            await create.ExecuteNonQueryAsync();
+        }
+
+        var moves = new HashSet<string>(StringComparer.Ordinal);
+        var tables = await TablesAsync(file);
         foreach (var table in tables)
         {
-            var columns = new HashSet<string>(StringComparer.Ordinal);
-            await using var info = connection.CreateCommand();
-            info.CommandText = $"PRAGMA table_info({table})";
-            await using var reader = await info.ExecuteReaderAsync();
-            while (await reader.ReadAsync()) { columns.Add(reader.GetString(1)); }
+            if ((await ColumnsAsync(file, table)).Contains("domain_id")) { moves.Add(table); }
+        }
 
-            if (columns.Contains("client_id") && columns.Contains("domain_id")) { needBoth.Add(table); }
+        for (var added = true; added;)
+        {
+            added = false;
+            foreach (var table in tables.Where(t => !moves.Contains(t)))
+            {
+                await using var keys = file.CreateCommand();
+                keys.CommandText = $"SELECT \"table\", on_delete FROM pragma_foreign_key_list('{table}')";
+                await using var reader = await keys.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    if (moves.Contains(reader.GetString(0)) && reader.GetString(1) == "CASCADE")
+                    {
+                        added |= moves.Add(table);
+                    }
+                }
+            }
         }
 
         Assert.Equal(
-            needBoth.OrderBy(t => t, StringComparer.Ordinal),
+            moves.OrderBy(t => t, StringComparer.Ordinal),
             ReportStore.DomainScopedTables.OrderBy(t => t, StringComparer.Ordinal));
+
+        // And in the order a move needs: a row's parent is in place before it.
+        Assert.True(
+            ReportStore.DomainScopedTables.ToList().IndexOf("tls_reports")
+                < ReportStore.DomainScopedTables.ToList().IndexOf("tls_failure_details"));
+        Assert.True(
+            ReportStore.DomainScopedTables.ToList().IndexOf("aggregate_reports")
+                < ReportStore.DomainScopedTables.ToList().IndexOf("aggregate_records"));
+        Assert.True(
+            ReportStore.DomainScopedTables.ToList().IndexOf("dns_change_plans")
+                < ReportStore.DomainScopedTables.ToList().IndexOf("dns_changes"));
+    }
+
+    private static async Task<List<string>> TablesAsync(SqliteConnection db)
+    {
+        var tables = new List<string>();
+        await using var list = db.CreateCommand();
+        list.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
+        await using var reader = await list.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) { tables.Add(reader.GetString(0)); }
+        return tables;
+    }
+
+    private static async Task<HashSet<string>> ColumnsAsync(SqliteConnection db, string table)
+    {
+        var columns = new HashSet<string>(StringComparer.Ordinal);
+        await using var info = db.CreateCommand();
+        info.CommandText = $"SELECT name FROM pragma_table_info('{table}')";
+        await using var reader = await info.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) { columns.Add(reader.GetString(0)); }
+        return columns;
     }
 
     // ---- refusals ------------------------------------------------------------

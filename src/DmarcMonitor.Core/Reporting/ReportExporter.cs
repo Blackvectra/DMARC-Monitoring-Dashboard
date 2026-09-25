@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Reporting;
@@ -157,6 +158,7 @@ public sealed class ReportExporter(string databasePath)
           AND ($domain  IS NULL OR LOWER(d.name) = $domain)
           AND ($since   IS NULL OR r.date_begin >= $since)
           AND ($afterId IS NULL OR r.id > $afterId)
+          AND r.id < $before
           AND ($failuresOnly = 0 OR r.dmarc_result <> 'pass')
         ORDER BY r.id
         """;
@@ -191,16 +193,22 @@ public sealed class ReportExporter(string databasePath)
             await writer.WriteLineAsync(string.Join(',', Columns)).ConfigureAwait(false);
         }
 
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = _databasePath,
-            Mode = SqliteOpenMode.ReadOnly,
-        }.ToString());
+        // The records are in each client's own file, their ids handed out from
+        // one sequence so they are unique across all of them. Only ids below
+        // the sequence's position when this began are written: every one of
+        // those is already in its file (see ClientDatabases.OpenClientFirstAsync),
+        // so the last id written is a watermark nothing can arrive under
+        // later. Records stored while this runs go out with the next run.
+        var files = new ClientDatabases(_databasePath);
+        var before = await files.NextIdAsync("aggregate_records", ct).ConfigureAwait(false);
 
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await files.OpenAsync(
+            ClientScope.For(query.TenantId, query.ClientSlug, query.Domain),
+            ["aggregate_records", "aggregate_reports"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = Sql;
+        command.Parameters.AddWithValue("$before", before);
 
         command.Parameters.AddWithValue("$tenant", Or(query.TenantId));
         command.Parameters.AddWithValue("$org", Or(Lower(query.OrgSlug)));

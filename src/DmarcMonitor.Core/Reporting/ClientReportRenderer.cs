@@ -35,7 +35,7 @@ public static class ClientReportRenderer
             <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>{E(report.ClientName)} - Email Protection Report, {E(report.Period.Label)}</title>
+            <title>{E(report.ClientName)} - Email Protection Report, {E(report.PeriodTitle)}</title>
             <style>{Css}</style>
             </head>
             <body>
@@ -75,7 +75,7 @@ public static class ClientReportRenderer
             <header{Brand(report)}>
               {Logo(report)}<p class="eyebrow">Email Protection Report</p>
               <h1>{E(report.ClientName)}</h1>
-              <p class="period">{E(report.Period.Label)} &middot; prepared by {E(report.ProviderName)}</p>
+              <p class="period">{E(report.PeriodTitle)} &middot; prepared by {E(report.ProviderName)}</p>
             </header>
 
             """);
@@ -170,7 +170,7 @@ public static class ClientReportRenderer
             // know whether their mail stopped or the reporting did, and those
             // are very different conversations.
             html.Append(CultureInfo.InvariantCulture, $"""
-                  <p class="note">{missing} day(s) in this period have no reports at all, so the line
+                  <p class="note">{Plural.Count(missing, "day")} in this period {Plural.Of(missing, "has", "have")} no reports at all, so the line
                      breaks rather than dropping to zero. That usually means the receivers sent nothing,
                      not that your mail stopped.</p>
 
@@ -353,18 +353,18 @@ public static class ClientReportRenderer
                 <div class="fig">
                   <span class="fig-n {(report.PassRate >= ClientReport.HealthyPassRate ? "ok" : "bad")}">{N(report.PassRate)}%</span>
                   <span class="fig-l">of mail sent using your name was provably yours</span>
-                  <span class="fig-s">{N(report.Passing)} of {N(report.Messages)} message(s)</span>
+                  <span class="fig-s">{N(report.Passing)} of {Plural.Count(report.Messages, "message")}</span>
                 </div>
                 <div class="fig">
                   <span class="fig-n">{N(enforcing)} of {N(report.Domains.Count)}</span>
-                  <span class="fig-l">domain(s) enforcing a policy</span>
+                  <span class="fig-l">{Plural.Of(report.Domains.Count, "domain", "domains")} enforcing a policy</span>
                   <span class="fig-s">{(enforcing == report.Domains.Count
                       ? "Every domain asks receivers to act on mail that fails."
                       : $"The rest are being watched only. {N(ready)} could be raised now.")}</span>
                 </div>
                 <div class="fig">
                   <span class="fig-n {(unproven > 0 ? "bad" : "ok")}">{N(unproven)}</span>
-                  <span class="fig-l">message(s) nobody can account for</span>
+                  <span class="fig-l">{Plural.Of(unproven, "message", "messages")} nobody can account for</span>
                   <span class="fig-s">{(unproven > 0
                       ? "Sent using your domain name with no proof of entitlement."
                       : "Nothing sent as you without proving it.")}</span>
@@ -624,7 +624,7 @@ public static class ClientReportRenderer
         foreach (var s in sources)
         {
             var elsewhere = s.OtherClientsAffected > 0
-                ? $"Yes - {s.OtherClientsAffected} other customer(s)"
+                ? $"Yes - {Plural.Count(s.OtherClientsAffected, "other customer")}"
                 : "No";
 
             // Both figures again. An address that sent twelve messages and
@@ -720,7 +720,7 @@ public static class ClientReportRenderer
             // has to quote to anybody. An address with neither says nothing
             // extra: "1 address" beside an address is noise.
             var detail = s.IsService
-                ? $"""<br><span class="note">{N(s.Addresses)} address(es)</span>"""
+                ? $"""<br><span class="note">{Plural.Count(s.Addresses, "address", "addresses")}</span>"""
                 : s.IsNamed
                     ? $"""<span class="src-ip">{E(s.SourceIp)}</span>"""
                     : "";
@@ -740,8 +740,8 @@ public static class ClientReportRenderer
             var rest = senders.Skip(Shown).ToList();
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="rest">
-                      <td colspan="2">and {N(rest.Count)} more sender(s)</td>
-                      <td class="n">{N(rest.Sum(s => s.Messages))} message(s)</td>
+                      <td colspan="2">and {N(rest.Count)} more {Plural.Of(rest.Count, "sender", "senders")}</td>
+                      <td class="n">{Plural.Count(rest.Sum(s => s.Messages), "message")}</td>
                     </tr>
 
                 """);
@@ -811,7 +811,7 @@ public static class ClientReportRenderer
 
         html.Append(CultureInfo.InvariantCulture, $"""
             <section>
-              <p class="note">The tables above leave out {N(report.OverriddenMessages)} message(s) that the
+              <p class="note">The tables above leave out {Plural.Count(report.OverriddenMessages, "message")} that the
               receiving provider handled under its own rules - usually mail forwarded by a mailing list,
               which breaks the checks in a way that is expected and not worth acting on. They are counted
               in the {N(report.Messages)} at the top.</p>

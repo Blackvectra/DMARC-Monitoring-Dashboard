@@ -85,6 +85,32 @@ public sealed class ClientReportPdfTests
         return text.ToString();
     }
 
+    /// <summary>
+    /// A month still running says so on the cover, on every page and in the
+    /// file name.
+    /// </summary>
+    /// <remarks>
+    /// A copy sent on the 25th and the month's report both read "September
+    /// 2026" and saved as acme-2026-09.pdf, so the second overwrote the first
+    /// and a client comparing them could not tell which was the final one.
+    /// </remarks>
+    [Fact]
+    public void AMonthStillRunningSaysSoWhereverTheMonthIsNamed()
+    {
+        var running = Report() with { Through = new DateOnly(2026, 9, 24) };
+        var document = ClientReportPdf.Build(running);
+
+        Assert.Equal("September 2026 (so far)", running.PeriodTitle);
+        Assert.Equal("2026-09-so-far", running.PeriodFileTag);
+        Assert.Contains("September 2026 (so far) · prepared by", Text(document), StringComparison.Ordinal);
+        Assert.Contains("(so far)", document.Info.Title, StringComparison.Ordinal);
+
+        var over = Report();
+        Assert.Equal("September 2026", over.PeriodTitle);
+        Assert.Equal("2026-09", over.PeriodFileTag);
+        Assert.DoesNotContain("so far", Text(ClientReportPdf.Build(over)), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheClientAndThePeriodAreOnTheDocument()
     {
@@ -344,7 +370,7 @@ public sealed class ClientReportPdfTests
 
         // Unreported days are counted under it, not drawn as zero.
         var text = Text(document);
-        Assert.Contains("10 day(s) with no report", text, StringComparison.Ordinal);
+        Assert.Contains("10 days with no report", text, StringComparison.Ordinal);
         Assert.True(ClientReportPdf.Render(report).Length > 5000);
     }
 
@@ -358,7 +384,7 @@ public sealed class ClientReportPdfTests
     }
 
     /// <summary>
-    /// The list behind "message(s) nobody can account for", which is what the
+    /// The list behind "messages nobody can account for", which is what the
     /// brief calls threat findings and what a client can take to somebody.
     /// </summary>
     [Fact]
@@ -383,7 +409,7 @@ public sealed class ClientReportPdfTests
         Assert.Contains("outbound.gateway.example", text, StringComparison.Ordinal);
         Assert.Contains("3 addresses", text, StringComparison.Ordinal);
         Assert.Contains("30", text, StringComparison.Ordinal);                    // summed
-        Assert.Contains("Yes, 3 other customer(s)", text, StringComparison.Ordinal); // the max
+        Assert.Contains("Yes, 3 other customers", text, StringComparison.Ordinal); // the max
         Assert.Contains("203.0.113.200", text, StringComparison.Ordinal);
 
         // One grouped row, not three. Counted by the "N addresses" line rather

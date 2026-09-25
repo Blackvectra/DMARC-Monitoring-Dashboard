@@ -24,23 +24,10 @@ public sealed class HealthServiceTests : IDisposable
         new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
-    private async Task RunAsync(string sql)
-    {
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-        await using var command = db.CreateCommand();
-        command.CommandText = sql;
-        await command.ExecuteNonQueryAsync();
-    }
+    /// <summary>SQL written for one database, split into client files afterwards.</summary>
+    private Task RunAsync(string sql) => SingleDatabase.ExecuteAsync(_dbPath, sql);
 
     /// <summary>One organization, several domains, and reports spread across them.</summary>
     private async Task SeedAsync(string org, int domains, int reportsPerDomain, DateTimeOffset ingested)

@@ -63,13 +63,29 @@ public sealed record ReportSource
     /// recognizes an address; they recognize "a Comcast connection in Denver"
     /// or "one of our own servers".
     ///
-    /// Read for display and never for judgement. A PTR is written by whoever
-    /// holds the address, so it identifies a sender the way a return address
+    /// Read for display, and for judgement only through
+    /// <see cref="VerifiedName"/>. A PTR is written by whoever holds the
+    /// address, so on its own it identifies a sender the way a return address
     /// on an envelope does - enough to recognize a provider, nowhere near
-    /// enough to trust one. Nothing here feeds whether a source counts as
-    /// impersonating.
+    /// enough to trust one.
     /// </remarks>
     public string ReverseName { get; init; } = "";
+
+    /// <summary>
+    /// True when the reverse name's own forward records point back at this
+    /// address.
+    /// </summary>
+    /// <remarks>
+    /// The difference between a name and a claim. A server sending forged mail
+    /// can reverse to mail.inkyphishfence.com; it cannot make INKY's forward
+    /// DNS name it back. Unconfirmed, a name that the catalogue recognized as a
+    /// mail filter moved the forgery out of "who tried to send mail as you"
+    /// and described it as expected.
+    /// </remarks>
+    public bool NameConfirmed { get; init; }
+
+    /// <summary>The reverse name when it may decide something, else empty.</summary>
+    public string VerifiedName => NameConfirmed ? ReverseName : "";
 
     /// <summary>The name if there is one, otherwise the address.</summary>
     public string Display => ReverseName.Length > 0 ? ReverseName : SourceIp;
@@ -405,7 +421,7 @@ public sealed record ReportDomainHealth
         }
         : IsEnforcing ? "Nothing. Keep watching."
         : PassRate >= 99 ? $"Move from p={Policy} to p=quarantine."
-        : $"Account for the {Failing:N0} failing message(s), then move to p=quarantine.";
+        : $"Account for the {Plural.Count(Failing, "failing message")}, then move to p=quarantine.";
 
     public double PassRate => Messages == 0 ? 0 : Math.Round(Passing * 100.0 / Messages, 1);
     public bool IsEnforcing => Policy is "reject" or "quarantine";
@@ -448,12 +464,12 @@ public sealed record ReportDomainHealth
         Messages == 0
             ? "Nothing was reported for this domain, so nothing can be judged."
         : IsStruggling
-            ? $"{Failing:N0} of this domain's own message(s) are failing. Raising the policy would stop them."
+            ? $"{Failing:N0} of this domain's own messages {Plural.Of(Failing, "is", "are")} failing. Raising the policy would stop {Plural.Of(Failing, "it", "them")}."
         : IsEnforcing
             ? "Already enforcing, and its own mail is arriving."
         : PassRate >= 99
             ? "Its own mail authenticates. The policy can be raised."
-            : $"{Failing:N0} message(s) would be affected by enforcement. Worth naming them before the change.";
+            : $"{Plural.Count(Failing, "message")} would be affected by enforcement. Worth naming {Plural.Of(Failing, "it", "them")} before the change.";
 }
 
 /// <summary>
@@ -555,6 +571,26 @@ public sealed record ClientReport
         : string.Create(CultureInfo.InvariantCulture,
             $"Covers {Period.Start:MMM d, yyyy} to {Period.End:MMM d, yyyy}.");
 
+    /// <summary>
+    /// The period as a title: the month, with "(so far)" while it is still
+    /// running.
+    /// </summary>
+    /// <remarks>
+    /// A report on a month in progress is a different document from the
+    /// month's report, and nothing on its cover or in its file name said so:
+    /// a copy sent on the 25th and the one sent after the month closed both
+    /// read "September 2026".
+    /// </remarks>
+    public string PeriodTitle => Through is null ? Period.Label : $"{Period.Label} (so far)";
+
+    /// <summary>
+    /// The period as a file name: "2026-09", or "2026-09-so-far" while the
+    /// month is running, so the copy sent mid-month is never mistaken for, or
+    /// saved over, the month's report.
+    /// </summary>
+    public string PeriodFileTag => string.Create(CultureInfo.InvariantCulture,
+        $"{Period.Start:yyyy-MM}{(Through is null ? "" : "-so-far")}");
+
     /// <summary>" so far" while the month is still running.</summary>
     private string SoFar => Through is null ? "" : " so far";
 
@@ -647,7 +683,7 @@ public sealed record ClientReport
                             $"The month is not over. Every day to {through:MMMM d} was reported on by at least one receiver.",
                         _ when reported == days =>
                             "Every day of the period was reported on by at least one receiver.",
-                        _ => $"The figures above describe the {reported} day(s) that were reported on. A day with "
+                        _ => $"The figures above describe the {Plural.Count(reported, "day")} that {Plural.Of(reported, "was", "were")} reported on. A day with "
                            + "no report is not a day with no mail: receivers miss runs.",
                     },
                 });
@@ -849,9 +885,14 @@ public sealed record ClientReport
     /// Who operates a source: the catalogue's name for it, else the
     /// registrable part of its reverse name, else the bare address.
     /// </summary>
+    /// <remarks>
+    /// The vendor's name only for a confirmed reverse name. An unconfirmed one
+    /// is still grouped by the domain it claims, which is what the address says
+    /// about itself; "INKY" would be this report vouching for it.
+    /// </remarks>
     private static string Operator(ReportSource source) =>
         SenderCatalog.Identify(source.SourceIp) is not null ? SenderCatalog.Label(source.SourceIp)
-        : Intelligence.SourceCatalog.Identify(source.ReverseName) is { } known ? known.Name
+        : Intelligence.SourceCatalog.Identify(source.VerifiedName) is { } known ? known.Name
         : Intelligence.SourceCatalog.OrganizationalDomain(source.ReverseName) is { } org ? org
         : source.Display;
 
@@ -892,7 +933,7 @@ public sealed record ClientReport
     /// Microsoft 365 already can. The fix is in the gateway's own settings.
     /// </remarks>
     private static bool PassesMailOn(ReportSource source) =>
-        Intelligence.SourceCatalog.Identify(source.ReverseName)?.Kind
+        Intelligence.SourceCatalog.Identify(source.VerifiedName)?.Kind
             is Intelligence.SourceKind.SecurityGateway or Intelligence.SourceKind.MailProvider
         // Recognized by address rather than by name: Microsoft's and Google's
         // ranges are in the sender catalogue, and a client's own mailbox
@@ -900,6 +941,57 @@ public sealed record ClientReport
         // sign. Asked to "arrange custom DKIM signing with Microsoft 365",
         // an MSP would rightly wonder what the report thinks M365 is.
         || Operator(source) is "Microsoft 365" or "Google Workspace" or "Google";
+
+    /// <summary>
+    /// What fixes these services' mail, in the words a vendor or the client
+    /// can act on.
+    /// </summary>
+    /// <remarks>
+    /// One place for it, because two rows of the register used to carry the
+    /// same problem and only one of them the fix.
+    /// </remarks>
+    private string FixFor(IReadOnlyList<ReportSource> services)
+    {
+        var one = Operators(services) == 1;
+
+        return services.All(PassesMailOn)
+            ? (one
+                ? "This is a security gateway or your own mail platform, and it breaks the signature as it passes "
+                + "your mail on. Fix it in its settings: have the gateway sign after it scans, or send your "
+                + "outbound mail around it. Changing DNS does not fix this."
+                : "These are security gateways or your own mail platform, and they break the signature as they "
+                + "pass your mail on. Fix it in their settings: have the gateway sign after it scans, or send your "
+                + "outbound mail around it. Changing DNS does not fix this.")
+            : services.Any(PassesMailOn)
+            ? $"Two different fixes. {Name([.. services.Where(x => !PassesMailOn(x))])}: turn on custom DKIM "
+            + $"signing for {(Domains.Count == 1 ? Domains[0].Domain : "your domain")}, and a custom "
+            + $"return-path (bounce) domain under it if offered. {Name([.. services.Where(PassesMailOn)])}: "
+            + "validate the outbound mail flow, then set it to preserve DKIM signatures or re-sign as "
+            + "your domain after processing. Adding anything to SPF alone does not fix either."
+            : services.Any(s => s.Authenticated)
+            // DKIM first. Adding the vendor to SPF authorizes its servers, but
+            // SPF only counts for DMARC when the return-path domain is also
+            // yours - which it is not, by default, at any bulk sender. Told to
+            // "add it to SPF", a client does, and nothing changes.
+            ? (one
+                ? "It signs as its own domain rather than as yours. Turn on custom DKIM signing for your domain "
+                + "at the vendor. If the vendor also offers a custom return-path (bounce) domain under yours, set "
+                + "that up too. Adding the vendor to SPF alone does not fix this."
+                : "Each signs as its own domain rather than as yours. Turn on custom DKIM signing for your "
+                + "domain at each vendor. If the vendor also offers a custom return-path (bounce) domain under "
+                + "yours, set that up too. Adding the vendor to SPF alone does not fix this.")
+            : one
+            ? "Confirm which system this is, then authorize it properly rather than leaving it half-configured."
+            : "Confirm which systems these are, then authorize them properly rather than leaving them "
+            + "half-configured.";
+    }
+
+    /// <summary>Who fixes these services' mail: the vendors, with the provider.</summary>
+    private string VendorsNamed(IReadOnlyList<ReportSource> services) =>
+        $"The {Plural.Of(Operators(services), "vendor", "vendors")} named, with {(ProviderIsUnnamed ? "your IT provider" : ProviderName)}";
+
+    /// <summary>The provider as the owner of a finding.</summary>
+    private string Provider => ProviderIsUnnamed ? "Your IT provider" : ProviderName;
 
     /// <summary>
     /// A bare address: not in either catalogue, and no name to go on.
@@ -1075,12 +1167,12 @@ public sealed record ClientReport
                 var services = InventoryOf(SenderClass.Misconfigured)
                     .Where(x => x.Domains.Contains(worst.Domain, StringComparer.OrdinalIgnoreCase)).ToList();
                 var failed = services.Count > 0
-                    ? $"{services.Sum(x => x.Failing):N0} message(s) from {Operators(services)} of your sending "
-                      + $"service(s) did not pass DMARC"
+                    ? $"{Plural.Count(services.Sum(x => x.Failing), "message")} from {Operators(services)} of your sending "
+                      + $"services did not pass DMARC"
                       + (services.Sum(x => x.FailedBothNotAligned) is var vendor and > 0
                           ? $" ({vendor:N0} of them authenticated as the service's own domain rather than as {worst.Domain})"
                           : "")
-                    : $"{worst.OwnFailing:N0} message(s) from your own senders did not pass DMARC "
+                    : $"{Plural.Count(worst.OwnFailing, "message")} from your own senders did not pass DMARC "
                       + $"({worst.OwnPassRate:0.#}% did)";
                 var verdict = worst.Policy switch
                 {
@@ -1094,7 +1186,7 @@ public sealed record ClientReport
                 };
 
                 return Stopped > 0
-                    ? verdict + $" Separately, receivers reported quarantining or refusing {Stopped:N0} message(s) "
+                    ? verdict + $" Separately, receivers reported quarantining or refusing {Plural.Count(Stopped, "message")} "
                       + "under the current policy; that count includes forged mail, not only yours."
                     : verdict;
             }
@@ -1111,8 +1203,8 @@ public sealed record ClientReport
 
             if (watching > 0 && broken > 0)
             {
-                return $"Conditional readiness. {PassRate:0.#}% of the mail sent using your name was provably yours, and {broken} "
-                     + $"service(s) still need correcting before {(watching == 1 ? "the domain that is" : $"the {watching} domains")} "
+                return $"Conditional readiness. {PassRate:0.#}% of the mail sent using your name was provably yours, and "
+                     + $"{Plural.Count(broken, "service")} still {Plural.Of(broken, "needs", "need")} correcting before {(watching == 1 ? "the domain that is" : $"the {watching} domains")} "
                      + "only being watched can be protected.";
             }
 
@@ -1131,7 +1223,7 @@ public sealed record ClientReport
             // under a verdict that says it is not.
             return broken > 0
                 ? $"Protected, with work outstanding. Every domain is enforcing and {PassRate:0.#}% of the mail "
-                + $"sent using your name was provably yours; {broken} of your service(s) still {(broken == 1 ? "sends" : "send")} mail that "
+                + $"sent using your name was provably yours; {broken} of your services still {(broken == 1 ? "sends" : "send")} mail that "
                 + "cannot prove it."
                 : $"Protected. Every domain is enforcing, {PassRate:0.#}% of the mail sent using your name was "
                 + "provably yours, and no sender of yours needs correcting.";
@@ -1169,7 +1261,13 @@ public sealed record ClientReport
         // passing mail on - INKY and Proofpoint re-sending a message to the
         // recipient behind them - and it was printed in eleven of nineteen
         // September reports under "somebody pretending to be you".
-        if (Intelligence.SourceCatalog.Identify(source.ReverseName)?.Kind is Intelligence.SourceKind.SecurityGateway)
+        //
+        // Only on a confirmed name. This takes a source OUT of the list of
+        // impersonators, and a forger chooses its own PTR: reversing to
+        // mail.inkyphishfence.com was enough to have its forgeries described
+        // to the client as expected. INKY's forward DNS naming the address
+        // back is not something the forger can write.
+        if (Intelligence.SourceCatalog.Identify(source.VerifiedName)?.Kind is Intelligence.SourceKind.SecurityGateway)
         {
             return SenderClass.Relayed;
         }
@@ -1179,7 +1277,7 @@ public sealed record ClientReport
         // is keyed on host names: asked about the address, as it was, it
         // never matched anything.
         return SenderCatalog.Identify(source.SourceIp) is not null
-               || Intelligence.SourceCatalog.Identify(source.ReverseName) is not null
+               || Intelligence.SourceCatalog.Identify(source.VerifiedName) is not null
             ? SenderClass.Unidentified
             : SenderClass.Suspicious;
     }
@@ -1322,7 +1420,7 @@ public sealed record ClientReport
                     // means nothing is stopping anybody either.
                     Priority = watched.Count > 0 ? "High" : "Medium",
                     Finding = "No receiver reported on "
-                            + (Domains.Count == 1 ? Domains[0].Domain : $"{Domains.Count} domain(s)")
+                            + (Domains.Count == 1 ? Domains[0].Domain : Plural.Count(Domains.Count, "domain"))
                             + $" in {Period.Label}, so nothing about this period can be confirmed.",
                     Impact = "Either these domains sent no mail, or the reports are not reaching us. The two are "
                            + "indistinguishable from here, and only one of them is fine"
@@ -1343,27 +1441,43 @@ public sealed record ClientReport
 
             // Worst first: mail that is not arriving, because that is the one
             // with a cost the client can already feel.
+            //
+            // One row per problem. A struggling domain whose failures come
+            // from named services used to get two: a Critical row saying 36
+            // messages from Avanan did not pass, and a High row saying Avanan
+            // was not set up, 36 messages affected - two deadlines, two owners,
+            // and the fix only in the second. A client reads that as two
+            // problems. The Critical row now carries the fix itself, and the
+            // row after it is left for the services no Critical row named.
+            var broken = InventoryOf(SenderClass.Misconfigured);
+            var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var domain in StrugglingDomains)
             {
+                var svc = broken.Where(x => x.Domains.Contains(domain.Domain, StringComparer.OrdinalIgnoreCase)).ToList();
+                named.UnionWith(svc.Select(x => x.SourceIp));
+
                 items.Add(new RemediationItem
                 {
                     Priority = "Critical",
                     // The same count the headline gives, for the same reason.
-                    Finding = InventoryOf(SenderClass.Misconfigured)
-                        .Where(x => x.Domains.Contains(domain.Domain, StringComparer.OrdinalIgnoreCase)).ToList() is { Count: > 0 } svc
-                        ? $"{svc.Sum(x => x.Failing):N0} message(s) from "
+                    Finding = svc.Count > 0
+                        ? $"{Plural.Count(svc.Sum(x => x.Failing), "message")} from "
                           + (Operators(svc) <= 4 ? Name(svc) : $"{Operators(svc)} of {domain.Domain}'s sending services")
                           + $" did not pass DMARC. Do not move to p=reject until {(Operators(svc) == 1 ? "its fix is" : "their separate fixes are")} "
                           + "complete."
-                        : $"{domain.OwnFailing:N0} message(s) from {domain.Domain}'s own senders did not pass DMARC "
+                        : $"{Plural.Count(domain.OwnFailing, "message")} from {domain.Domain}'s own senders did not pass DMARC "
                           + $"({domain.OwnPassRate:0.#}% did).",
                     Impact = domain.IsEnforcing
                         ? "Real mail is being refused or filed as junk by the receiving provider right now."
                         : "Real mail would be refused the moment this domain's policy is raised.",
-                    Action = "Confirm the services named are yours, identify anything still unrecognized, and "
-                           + "complete the fix for each, set out in the next finding, before the policy changes.",
-                    Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
-                    Validation = $"{domain.Domain} above {HealthyPassRate:0}% for seven consecutive days.",
+                    Action = svc.Count > 0
+                        ? FixFor(svc)
+                        : "Find which of this domain's own senders are failing - the tables above list them - confirm "
+                        + "they are yours, and fix each before the policy changes.",
+                    Owner = svc.Count > 0 ? VendorsNamed(svc) : Provider,
+                    Validation = $"{domain.Domain} above {HealthyPassRate:0}% for seven consecutive days"
+                               + (svc.Count > 0 ? ", with aligned mail from each service named." : "."),
                 });
             }
 
@@ -1378,40 +1492,21 @@ public sealed record ClientReport
             // Grouped, named, and counted. The names are what somebody has to
             // quote to a vendor, so they are in the finding rather than left
             // to the table above.
-            if (InventoryOf(SenderClass.Misconfigured) is { Count: > 0 } broken)
+            if (broken.Where(x => !named.Contains(x.SourceIp)).ToList() is { Count: > 0 } rest)
             {
-                var atRisk = broken.Sum(s => s.Failing);
+                var atRisk = rest.Sum(s => s.Failing);
+                var operators = Operators(rest);
 
                 items.Add(new RemediationItem
                 {
                     Priority = atRisk >= MaterialMessages ? "High" : "Medium",
-                    Finding = $"{Operators(broken)} service(s) sending on your behalf are not set up to prove the mail "
-                            + $"is yours: {Name(broken)}. {atRisk:N0} message(s) affected.",
+                    Finding = $"{Plural.Count(operators, "service")} sending on your behalf {Plural.Of(operators, "is", "are")} "
+                            + $"not set up to prove the mail is yours: {Name(rest)}. {Plural.Count(atRisk, "message")} affected.",
                     Impact = "These are your own messages. They are at risk of being refused under an enforcing "
                            + "policy, and some are already being filed as junk.",
-                    Action = broken.All(PassesMailOn)
-                        ? "These are security gateways or your own mail platform, and they break the signature as "
-                        + "they pass your mail on. Fix it in their settings: have the gateway sign after it scans, "
-                        + "or send your outbound mail around it. Changing DNS does not fix this."
-                        : broken.Any(PassesMailOn)
-                        ? $"Two different fixes. {Name([.. broken.Where(x => !PassesMailOn(x))])}: turn on custom DKIM "
-                        + $"signing for {(Domains.Count == 1 ? Domains[0].Domain : "your domain")}, and a custom "
-                        + $"return-path (bounce) domain under it if offered. {Name([.. broken.Where(PassesMailOn)])}: "
-                        + "validate the outbound mail flow, then set it to preserve DKIM signatures or re-sign as "
-                        + "your domain after processing. Adding anything to SPF alone does not fix either."
-                        : broken.Any(s => s.Authenticated)
-                        // DKIM first. Adding the vendor to SPF authorizes its
-                        // servers, but SPF only counts for DMARC when the
-                        // return-path domain is also yours - which it is
-                        // not, by default, at any bulk sender. Told to "add
-                        // it to SPF", a client does, and nothing changes.
-                        ? "Each signs as its own domain rather than as yours. Turn on custom DKIM signing for your "
-                        + "domain at each vendor. If the vendor also offers a custom return-path (bounce) domain "
-                        + "under yours, set that up too. Adding the vendor to SPF alone does not fix this."
-                        : "Confirm which systems these are, then authorize them properly rather than leaving them "
-                        + "half-configured.",
-                    Owner = $"The vendors named, with {(ProviderIsUnnamed ? "your IT provider" : ProviderName)}",
-                    Validation = "Seven consecutive days of aligned mail from each.",
+                    Action = FixFor(rest),
+                    Owner = VendorsNamed(rest),
+                    Validation = $"Seven consecutive days of aligned mail from {Plural.Of(operators, "it", "each")}.",
                 });
             }
 
@@ -1420,8 +1515,8 @@ public sealed record ClientReport
                 items.Add(new RemediationItem
                 {
                     Priority = "Medium",
-                    Finding = $"{unknown.Count} source(s) at providers we recognize sent as you without proving "
-                            + $"entitlement: {Name(unknown)}. {unknown.Sum(s => s.Failing):N0} message(s).",
+                    Finding = $"{Plural.Count(unknown.Count, "source")} at providers we recognize sent as you without proving "
+                            + $"entitlement: {Name(unknown)}. {Plural.Count(unknown.Sum(s => s.Failing), "message")}.",
                     Impact = "Usually a tool somebody signed up for and nobody recorded. Until it is confirmed it "
                            + "cannot be told apart from somebody using the same provider to send as you.",
                     Action = "Confirm whether these are yours. If they are, authorize them; if not, they belong in "
@@ -1447,10 +1542,10 @@ public sealed record ClientReport
                 {
                     Priority = refused ? "Low"
                              : volume >= MaterialMessages ? "High" : "Medium",
-                    Finding = $"{strangers.Count} source(s) sent {volume:N0} message(s) as you and never "
+                    Finding = $"{Plural.Count(strangers.Count, "source")} sent {Plural.Count(volume, "message")} as you and never "
                             + $"authenticated once: {Name(strangers)}"
                             + (spread > 0
-                                ? $". The busiest was seen against {spread} unrelated organization(s), so this is "
+                                ? $". The busiest was seen against {Plural.Count(spread, "unrelated organization")}, so this is "
                                 + "broad activity rather than somebody targeting you."
                                 : "."),
                     Impact = refused
@@ -1505,7 +1600,7 @@ public sealed record ClientReport
                             ? "Correct the named services first, then move to p=quarantine."
                         : domain.Readiness == "Ready"
                             ? "Its own mail authenticates. Move to p=quarantine, then to p=reject."
-                            : $"Account for the {domain.OwnFailing:N0} failing message(s) first, then move to "
+                            : $"Account for the {Plural.Count(domain.OwnFailing, "failing message")} first, then move to "
                             + "p=quarantine.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
                     Validation = "The policy is published and the domain's own mail keeps arriving.",
@@ -1517,7 +1612,7 @@ public sealed record ClientReport
                 items.Add(new RemediationItem
                 {
                     Priority = "Low",
-                    Finding = $"{gone.Count} sender(s) sent as you last period and not at all this one: "
+                    Finding = $"{Plural.Count(gone.Count, "sender")} sent as you last period and not at all this one: "
                             + $"{Name(gone)}.",
                     Impact = "Either a service was retired and is still authorized to send as you, or something "
                            + "stopped working quietly.",

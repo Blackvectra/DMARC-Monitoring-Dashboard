@@ -79,7 +79,14 @@ public sealed class ConstraintFailureTests
         using var db = new TempDatabase();
         var store = new ReportStore(db.Path);
 
-        await using (var connection = new SqliteConnection($"Data Source={db.Path}"))
+        // A first report, so the client file the next one goes into exists
+        // to put the trigger in: a client's reports are in its own file.
+        var warmUp = Xml.Replace("test-report-0001", "test-report-0000", StringComparison.Ordinal);
+        Assert.NotNull(await store.SaveAggregateAsync(AggregateReportParser.Parse(warmUp).Report!, warmUp));
+
+        var file = Assert.Single(Directory.GetFiles(ClientDatabases.FolderFor(db.Path), "*.db"));
+
+        await using (var connection = new SqliteConnection($"Data Source={file};Pooling=False"))
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
@@ -97,12 +104,12 @@ public sealed class ConstraintFailureTests
         Assert.Equal(19, ex.SqliteErrorCode);
         Assert.NotEqual(2067, ex.SqliteExtendedErrorCode);   // not SQLITE_CONSTRAINT_UNIQUE
 
-        // And nothing was left behind by the attempt.
-        await using var check = new SqliteConnection($"Data Source={db.Path}");
+        // And nothing was left behind by the attempt: the warm-up is all there is.
+        await using var check = new SqliteConnection($"Data Source={file};Pooling=False");
         await check.OpenAsync();
         await using var count = check.CreateCommand();
         count.CommandText = "SELECT count(*) FROM aggregate_reports;";
-        Assert.Equal(0L, (long)(await count.ExecuteScalarAsync())!);
+        Assert.Equal(1L, (long)(await count.ExecuteScalarAsync())!);
     }
 
     private static AggregateReport Parse()

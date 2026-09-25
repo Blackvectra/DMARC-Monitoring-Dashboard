@@ -20,7 +20,7 @@ public static class IngestCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--mailbox", "--tenant", "--client-id", "--cert", "--cert-password", "--max", "--fallback", "--reporting-domain", "--org", "--delete", "!--dry-run") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--mailbox", "--tenant", "--client-id", "--cert", "--cert-password", "--max", "--fallback", "--reporting-domain", "--org", "--delete", "--folder...", "!--dry-run") is var bad and not 0) { return bad; }
 
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
         var mailbox = Args.Value(args, "--mailbox");
@@ -35,6 +35,12 @@ public static class IngestCommand
         var fallback = NonBlank(Args.Value(args, "--fallback")) ?? NonBlank(Environment.GetEnvironmentVariable("DMARC_FALLBACK_ADDRESS"));
         var maxMessages = Args.Int(args, "--max", 500);
         var dryRun = Args.Flag(args, "--dry-run");
+
+        // Which folders to read. Nothing named keeps what this has always
+        // done: Inbox, and the folders inside it. From the environment too,
+        // for the same reason as --delete: the scheduled run's command line is
+        // fixed, and it is the run that has to reach these folders.
+        var folders = SourceFolders(args, Environment.GetEnvironmentVariable("DMARC_FOLDERS"));
 
         // Spelled out rather than a bare flag. This throws a customer's mail
         // away, the two modes differ in whether the space actually comes back,
@@ -163,6 +169,7 @@ public static class IngestCommand
                 MaxMessages = maxMessages,
                 DeleteProcessed = deleteMode,
             };
+            if (folders.Count > 0) { options = options with { SourceFolders = folders }; }
 
             // Dry run reads and parses but writes nothing and moves nothing, so
             // the first run against a real mailbox can be inspected before it
@@ -170,7 +177,7 @@ public static class IngestCommand
             // Counted here rather than after the run, because the storing now
             // happens inside it: a message is only filed once its reports are
             // safely in the database.
-            var stored = 0;
+            var stored = new StoreOutcome(0, 0, 0);
 
             var ingestor = dryRun
                 ? new ReportIngestor(new ReadOnlyMailbox(mailboxClient), options, ResolveToken, _ => false)
@@ -178,16 +185,22 @@ public static class IngestCommand
                     key => IsStored(store, key, ct).GetAwaiter().GetResult(),
                     async (found, token) =>
                     {
-                        var (wrote, failed) = await StoreAsync(store, found, token).ConfigureAwait(false);
-                        stored += wrote;
+                        var outcome = await StoreAsync(store, found, token).ConfigureAwait(false);
+                        stored += outcome;
 
                         // False leaves the message in the source folder. A
                         // message read twice is caught by the duplicate check;
                         // a message filed and never stored is gone.
-                        return failed == 0;
+                        return outcome.NotStored == 0;
                     });
 
             Console.WriteLine($"Reading {mailbox}{(dryRun ? " (dry run: nothing will be written or moved)" : "")}");
+
+            // Said before anything is read. "Why did it not collect the reports
+            // in that folder" is usually answered by this line.
+            Console.WriteLine(folders.Count == 0
+                ? "Folders: Inbox, and the folders inside it (--folder or DMARC_FOLDERS names others)"
+                : $"Folders: {string.Join(", ", folders.Select(f => $"'{f}'"))}, and the folders inside each");
             Console.WriteLine($"Attributing reports by {attributedBy}");
             if (deleteMode != DeleteProcessed.Keep && !dryRun)
             {
@@ -265,6 +278,13 @@ public static class IngestCommand
         };
     }
 
+    /// <summary>What became of the reports handed to the store.</summary>
+    internal readonly record struct StoreOutcome(int Written, int AlreadyStored, int NotStored)
+    {
+        public static StoreOutcome operator +(StoreOutcome a, StoreOutcome b) =>
+            new(a.Written + b.Written, a.AlreadyStored + b.AlreadyStored, a.NotStored + b.NotStored);
+    }
+
     /// <summary>
     /// Writes one message's reports, and says how many did not make it.
     /// </summary>
@@ -274,10 +294,11 @@ public static class IngestCommand
     /// run tries again, which is why the failure count matters rather than
     /// just being printed.
     /// </remarks>
-    private static async Task<(int Written, int Failed)> StoreAsync(
+    internal static async Task<StoreOutcome> StoreAsync(
         ReportStore store, IReadOnlyList<IngestedReport> found, CancellationToken ct)
     {
         var written = 0;
+        var already = 0;
         var failed = 0;
 
         foreach (var report in found.Where(r => r.Outcome == IngestOutcome.Ingested))
@@ -301,7 +322,26 @@ public static class IngestCommand
                     _ => null,
                 };
 
-                if (id is not null) { written++; } else { failed++; }
+                if (id is not null) { written++; continue; }
+
+                // Null is the store's answer to two different things: "I already
+                // have this" and "there is nothing to file this under". Only the
+                // first makes it safe to file the message away, so the database
+                // is asked which one it meant instead of that being guessed.
+                // Taking every null as a failure left a message whose report was
+                // already stored in the source folder for good - read, refused
+                // and left again every run, with nothing said. A failure report
+                // whose message once failed to move did exactly that, because
+                // the check before the store never recognizes one as seen.
+                if (await IsAlreadyStoredAsync(store, report, ct).ConfigureAwait(false))
+                {
+                    already++;
+                }
+                else
+                {
+                    Console.Error.WriteLine($"Could not store {report.FileName} for {report.Domain}: the database declined it.");
+                    failed++;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -314,8 +354,37 @@ public static class IngestCommand
             }
         }
 
-        return (written, failed);
+        return new StoreOutcome(written, already, failed);
     }
+
+    /// <summary>
+    /// Whether the database already holds a report it has just declined to
+    /// store again.
+    /// </summary>
+    /// <remarks>
+    /// Looked up by the domain the store files under - the report's own - not
+    /// the domain it was attributed to, which for a subdomain's report sorted
+    /// into its parent's folder is a different name. A failure report has no
+    /// lookup and needs none: the store declines one only when it names no
+    /// domain, which its parser has already refused, or when one with the same
+    /// content is already there.
+    /// </remarks>
+    private static async Task<bool> IsAlreadyStoredAsync(ReportStore store, IngestedReport report, CancellationToken ct) =>
+        report.Kind switch
+        {
+            ReportKind.DmarcAggregate when report.Aggregate is { } a =>
+                await store.IsAggregateStoredAsync(
+                    a.Metadata.OrgName, a.Metadata.ReportId, DomainName(a.Policy.Domain), ct).ConfigureAwait(false),
+            ReportKind.TlsRpt when report.Tls is { Policies.Count: > 0 } t
+                && !string.IsNullOrWhiteSpace(t.Policies[0].Policy.Domain) =>
+                await store.IsTlsStoredAsync(
+                    t.OrganizationName, t.ReportId, DomainName(t.Policies[0].Policy.Domain), ct).ConfigureAwait(false),
+            ReportKind.DmarcFailure when report.Forensic is { } f => !string.IsNullOrWhiteSpace(f.Domain),
+            _ => false,
+        };
+
+    /// <summary>A domain as the store writes it into the domains table.</summary>
+    private static string DomainName(string domain) => domain.Trim().TrimEnd('.').ToLowerInvariant();
 
     /// <summary>
     /// Reads --delete, which must name which kind of delete is meant.
@@ -360,18 +429,35 @@ public static class IngestCommand
         }
     }
 
-    private static void Report(IngestRunResult result, int stored, bool dryRun)
+    private static void Report(IngestRunResult result, StoreOutcome stored, bool dryRun)
     {
         Console.WriteLine($"  messages read      {result.MessagesRead}");
+
+        // Every folder read, so a dry run shows it reached the ones it was
+        // pointed at. A count of messages cannot tell a quiet folder from one
+        // that was never opened.
+        Console.WriteLine($"  folders read       {result.FoldersRead.Count}{Listed(result.FoldersRead, 12)}");
         if (result.MessagesDeleted > 0)
         {
             Console.WriteLine($"  deleted            {result.MessagesDeleted} (reports stored first)");
         }
-        Console.WriteLine($"  reports ingested   {result.IngestedCount}{(dryRun ? " (not written)" : $", {stored} stored")}");
+
+        // Ingested means parsed, attributed and handed to the store; what the
+        // store then did with each is said on the same line, so the numbers
+        // add up and a report that was not stored cannot hide inside "ingested".
+        Console.WriteLine($"  reports ingested   {result.IngestedCount}"
+            + (dryRun
+                ? " (not written)"
+                : $", {stored.Written} stored"
+                  + (stored.AlreadyStored > 0 ? $", {stored.AlreadyStored} already stored" : "")
+                  + (stored.NotStored > 0 ? $", {stored.NotStored} NOT stored (left in the mailbox; see errors)" : "")));
         if (result.DuplicateCount > 0) { Console.WriteLine($"  already seen       {result.DuplicateCount}"); }
         if (result.UnrecognizedCount > 0)
         {
-            Console.WriteLine($"  not reports        {result.UnrecognizedCount}");
+            // Not "not reports": a report this version could not parse, or one
+            // that arrived damaged, is counted here too, and the reasons below
+            // say which. None of them was stored, and every one is kept.
+            Console.WriteLine($"  unrecognized       {result.UnrecognizedCount} (not stored; kept in the mailbox)");
             // Grouped by reason, so a mailbox full of one kind of thing is one
             // line rather than a page, and the reason points at the cause.
             foreach (var g in result.Reports.Where(r => r.Outcome == IngestOutcome.Unrecognized)
@@ -411,6 +497,35 @@ public static class IngestCommand
             Console.WriteLine("  next run continues from here rather than starting again.");
         }
 
+    }
+
+    /// <summary>": a, b, c", or ": a, b, and 4 more" past the limit; nothing for none.</summary>
+    private static string Listed(IReadOnlyList<string> items, int limit) =>
+        items.Count == 0 ? ""
+        : items.Count <= limit ? $": {string.Join(", ", items)}"
+        : $": {string.Join(", ", items.Take(limit))}, and {items.Count - limit} more";
+
+    /// <summary>
+    /// The folders named to be read: every --folder, or else DMARC_FOLDERS,
+    /// or else none - which leaves the default of Inbox and what is inside it.
+    /// </summary>
+    /// <remarks>
+    /// A semicolon between names in the environment rather than a comma,
+    /// because a comma is an ordinary thing to put in a folder name and a
+    /// semicolon is not. On the command line each name is a --folder of its
+    /// own, so nothing is split and a name needs no escaping - which matters
+    /// for names like DMARC\example.org, whose backslash is part of the name.
+    /// </remarks>
+    internal static IReadOnlyList<string> SourceFolders(string[] args, string? environment)
+    {
+        var named = Args.Values(args, "--folder")
+            .Select(f => f.Trim())
+            .Where(f => f.Length > 0)
+            .ToList();
+
+        return named.Count > 0
+            ? named
+            : (environment ?? "").Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
     }
 
     /// <summary>
@@ -464,8 +579,8 @@ internal sealed class ReadOnlyMailbox(IMailboxClient inner) : IMailboxClient
 {
     private readonly IMailboxClient _inner = inner;
 
-    public IAsyncEnumerable<MailMessage> GetMessagesAsync(string folder, CancellationToken cancellationToken = default) =>
-        _inner.GetMessagesAsync(folder, cancellationToken);
+    public IAsyncEnumerable<MailMessage> GetMessagesAsync(string folderId, CancellationToken cancellationToken = default) =>
+        _inner.GetMessagesAsync(folderId, cancellationToken);
 
     public Task<IReadOnlyList<MailAttachment>> GetAttachmentsAsync(string messageId, CancellationToken cancellationToken = default) =>
         _inner.GetAttachmentsAsync(messageId, cancellationToken);
@@ -488,10 +603,22 @@ internal sealed class ReadOnlyMailbox(IMailboxClient inner) : IMailboxClient
     public Task DeleteMessageAsync(string messageId, bool permanent, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 
-    /// <summary>Returns the name unchanged rather than creating anything.</summary>
-    public Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default) =>
-        Task.FromResult(folderName);
+    /// <summary>
+    /// The folder's real id when it exists, and its name when it does not,
+    /// rather than creating anything.
+    /// </summary>
+    /// <remarks>
+    /// The real id where there is one, so a dry run recognizes the folders a
+    /// run files into exactly as the real run will, and refuses to read them
+    /// in the same places.
+    /// </remarks>
+    public async Task<string> EnsureFolderAsync(string folderName, CancellationToken cancellationToken = default) =>
+        (await _inner.FindFolderAsync(folderName, cancellationToken).ConfigureAwait(false))?.Id ?? folderName;
 
-    public Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderName, CancellationToken cancellationToken = default) =>
-        _inner.GetChildFoldersAsync(folderName, cancellationToken);
+    /// <summary>Passed through: looking a folder up does not change the mailbox.</summary>
+    public Task<MailFolder?> FindFolderAsync(string folderName, CancellationToken cancellationToken = default) =>
+        _inner.FindFolderAsync(folderName, cancellationToken);
+
+    public Task<IReadOnlyList<MailFolder>> GetChildFoldersAsync(string folderId, CancellationToken cancellationToken = default) =>
+        _inner.GetChildFoldersAsync(folderId, cancellationToken);
 }

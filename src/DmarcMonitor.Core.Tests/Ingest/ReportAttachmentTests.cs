@@ -177,6 +177,7 @@ public sealed class ReportAttachmentTests
             Encoding.UTF8.GetBytes("<feedback"),                      // truncated xml
             [0x00, 0x00, 0x00, 0x00],
             Enumerable.Repeat((byte)0x41, 100_000).ToArray(),
+            DamagedListOfContents(Zip("r.xml", Report("r"))),       // opens, then throws on Entries
         ];
 
         foreach (var input in nasty)
@@ -463,4 +464,216 @@ public sealed class ReportAttachmentTests
 
         Assert.Equal(2, ReportAttachment.Extract("batch.zip", ms.ToArray()).Count);
     }
+
+    // ---- what could not be read is said, not dropped -------------------------
+    //
+    // An empty result used to be the answer to a zip of holiday photos and to a
+    // damaged export alike, so a caller could not tell "nothing here" from "a
+    // report here that could not be read". The budget now carries the second.
+
+    /// <summary>
+    /// A zip whose end record is intact and whose list of contents is not.
+    /// </summary>
+    /// <remarks>
+    /// ZipArchive opens this without complaint and throws only when the
+    /// entries are first read - which is exactly what escaped the old try and
+    /// ended a whole folder import.
+    /// </remarks>
+    private static byte[] DamagedListOfContents(byte[] zip) => SyntheticReports.WithDamagedListOfContents(zip);
+
+    /// <summary>
+    /// A zip whose named member's compressed data is damaged: its first
+    /// deflate block claims the reserved block type, which no reader accepts.
+    /// </summary>
+    private static byte[] DamageMember(byte[] zip, string name)
+    {
+        var copy = zip.ToArray();
+        var span = copy.AsSpan();
+        var from = 0;
+
+        while (true)
+        {
+            var at = span[from..].IndexOf([(byte)0x50, (byte)0x4B, (byte)0x03, (byte)0x04]);
+            Assert.True(at >= 0, $"no member named {name}");
+            at += from;
+
+            var nameLength = BitConverter.ToUInt16(copy, at + 26);
+            var extraLength = BitConverter.ToUInt16(copy, at + 28);
+            if (Encoding.UTF8.GetString(copy, at + 30, nameLength) == name)
+            {
+                copy[at + 30 + nameLength + extraLength] = 0xFF;
+                return copy;
+            }
+
+            from = at + 4;
+        }
+    }
+
+    /// <summary>An export of three reports, the middle one deflated so it can be damaged.</summary>
+    private static byte[] ExportOfThree()
+    {
+        using var outer = new MemoryStream();
+        using (var zip = new ZipArchive(outer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            Put(zip, "first.xml.gz", Gzip(Report("first")));
+            using (var s = zip.CreateEntry("broken.xml", CompressionLevel.Optimal).Open())
+            {
+                s.Write(Encoding.UTF8.GetBytes(Report("broken")));
+            }
+            Put(zip, "last.xml.gz", Gzip(Report("last")));
+        }
+        return outer.ToArray();
+    }
+
+    private static byte[] ZipOf(string name, byte[] content)
+    {
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            Put(zip, name, content);
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void AZipWhoseListOfContentsIsDamagedIsRecordedRatherThanThrown()
+    {
+        var budget = ExtractionBudget.ForOperator();
+
+        var reports = ReportAttachment.ExtractAll("export.zip", DamagedListOfContents(Zip("r.xml", Report("r"))), budget).ToList();
+
+        Assert.Empty(reports);
+        Assert.Contains("could not be opened as a zip archive", Assert.Single(budget.Unreadable), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AZipCutShortIsRecordedAsUnreadableNotAsNoReport()
+    {
+        var zip = Zip("r.xml", Report("r"));
+        var budget = ExtractionBudget.ForOperator();
+
+        Assert.Empty(ReportAttachment.ExtractAll("export.zip", zip[..(zip.Length / 2)], budget));
+        Assert.Single(budget.Unreadable);
+    }
+
+    [Theory]
+    [InlineData("in the header")]
+    [InlineData("half way")]
+    [InlineData("in the trailer")]
+    public void AGzipCutShortIsRecordedRatherThanReadAsAShorterReport(string where)
+    {
+        // GZipStream does not complain about any of these: it returns what it
+        // had decoded when the bytes ran out. Cut in half, that is the first
+        // half of a report; cut early, nothing at all, which used to read as
+        // "not a report". Cut in the trailer the report inside would read
+        // whole, but nothing can tell that from the file, so it is not what was
+        // sent and is said to be so.
+        var whole = Gzip(Report("cut"));
+        var cut = where switch
+        {
+            "in the header" => whole[..6],
+            "half way" => whole[..(whole.Length / 2)],
+            _ => whole[..^1],
+        };
+        var budget = ExtractionBudget.ForOperator();
+
+        Assert.Empty(ReportAttachment.ExtractAll("report.xml.gz", cut, budget));
+        Assert.Contains("cut short", Assert.Single(budget.Unreadable), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AGzipWithSomethingAfterItIsStillWhole()
+    {
+        // A newline or padding after the gzip data decompresses to the whole
+        // report, so the check for a file cut short must not refuse it.
+        var whole = Gzip(Report("padded"));
+
+        foreach (var trailing in new[] { Encoding.ASCII.GetBytes("\r\n"), new byte[16] })
+        {
+            var budget = ExtractionBudget.ForOperator();
+            var r = Assert.Single(ReportAttachment.ExtractAll("report.xml.gz", [.. whole, .. trailing], budget));
+            Assert.Contains("padded", r.Content, StringComparison.Ordinal);
+            Assert.Empty(budget.Unreadable);
+        }
+    }
+
+    [Fact]
+    public void AGzipOfSeveralMembersIsStillRead()
+    {
+        // Legal, and read as all of its members joined. Its trailer describes
+        // only the last one, so it must not be mistaken for a file cut short.
+        var text = Report("two-members");
+        var half = text.Length / 2;
+        var budget = ExtractionBudget.ForOperator();
+
+        var r = Assert.Single(ReportAttachment.ExtractAll(
+            "report.xml.gz", [.. Gzip(text[..half]), .. Gzip(text[half..])], budget));
+
+        Assert.Equal(text, r.Content);
+        Assert.Empty(budget.Unreadable);
+    }
+
+    [Fact]
+    public void ADamagedMemberIsNamedAndTheRestOfTheExportStillComesOut()
+    {
+        var budget = ExtractionBudget.ForOperator();
+        var reports = ReportAttachment.ExtractAll("export.zip", DamageMember(ExportOfThree(), "broken.xml"), budget).ToList();
+
+        Assert.Equal(["first.xml", "last.xml"], reports.Select(r => r.FileName));
+        Assert.StartsWith("broken.xml: could not be decompressed", Assert.Single(budget.Unreadable), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheSameExportUndamagedGivesUpAllThree()
+    {
+        // The control for the test above: without the damage, the member it
+        // names is read like the others.
+        var budget = ExtractionBudget.ForOperator();
+
+        Assert.Equal(3, ReportAttachment.ExtractAll("export.zip", ExportOfThree(), budget).Count());
+        Assert.Empty(budget.Unreadable);
+    }
+
+    [Fact]
+    public void AGzipCutShortInsideAnExportIsNamedForItself()
+    {
+        var gz = Gzip(Report("inner"));
+        var budget = ExtractionBudget.ForOperator();
+
+        var reports = ReportAttachment.ExtractAll("export.zip", ZipOf("inner.xml.gz", gz[..(gz.Length / 2)]), budget).ToList();
+
+        Assert.Empty(reports);
+        Assert.StartsWith("inner.xml.gz: cut short", Assert.Single(budget.Unreadable), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AReportTooLargeToReadIsRecordedRatherThanDropped()
+    {
+        var oversized = Encoding.UTF8.GetBytes(
+            "<feedback>" + new string('x', ReportAttachment.MaxDecompressedBytes + 1000) + "</feedback>");
+        var budget = ExtractionBudget.ForOperator();
+
+        Assert.Empty(ReportAttachment.ExtractAll("big.xml", oversized, budget));
+        Assert.Contains("larger than", Assert.Single(budget.Unreadable), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NothingIsRecordedForAFileThatIsSimplyNotAReport()
+    {
+        // The distinction the importer rests on: a readable file with no
+        // report in it is not a failure, and must not become one.
+        foreach (var (name, content) in new (string, byte[])[]
+                 {
+                     ("notes.txt", Encoding.UTF8.GetBytes("nothing to see")),
+                     ("readme.zip", Zip("readme.txt", "hello")),
+                     ("logo.jpg", [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
+                     ("empty.xml", []),
+                 })
+        {
+            var budget = ExtractionBudget.ForOperator();
+            Assert.Empty(ReportAttachment.ExtractAll(name, content, budget));
+            Assert.Empty(budget.Unreadable);
+        }
+    }
+
 }

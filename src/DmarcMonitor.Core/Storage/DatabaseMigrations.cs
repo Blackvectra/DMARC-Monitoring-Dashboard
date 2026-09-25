@@ -8,9 +8,12 @@ namespace DmarcMonitor.Core.Storage;
 public sealed record Migration(string Version, string Description, string Sql);
 
 /// <summary>What bringing a database up to date did.</summary>
-public sealed record MigrationResult(IReadOnlyList<string> Applied, string Version)
+/// <param name="Split">What 0019 did, when this run was the one that split the database into client files.</param>
+/// <param name="ClientFiles">Client files a client-schema migration changed.</param>
+public sealed record MigrationResult(
+    IReadOnlyList<string> Applied, string Version, SplitResult? Split = null, IReadOnlyList<string>? ClientFiles = null)
 {
-    public bool Changed => Applied.Count > 0;
+    public bool Changed => Applied.Count > 0 || ClientFiles is { Count: > 0 };
 }
 
 /// <summary>
@@ -33,7 +36,7 @@ public static class DatabaseMigrations
     /// Everything schema.sql creates in one go, so a database it built is
     /// already at this version and needs nothing replayed into it.
     /// </summary>
-    public const string BaselineVersion = "0017";
+    public const string BaselineVersion = "0019";
 
     /// <summary>
     /// The migrations, in order.
@@ -57,39 +60,94 @@ public static class DatabaseMigrations
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
 
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString());
+        SplitResult? split = null;
+        var ran = new List<string>();
+        string version;
+
+        await using (var db = Open(databasePath))
+        {
+            await db.OpenAsync(ct).ConfigureAwait(false);
+
+            var applied = await AppliedAsync(db, ct).ConfigureAwait(false);
+
+            foreach (var migration in All)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (applied.Contains(migration.Version)) { continue; }
+
+                // The split moves every client's rows into a file of its own
+                // before its SQL drops them here. A copy of the database is
+                // taken first, outside any transaction, as VACUUM INTO needs.
+                var splitting = migration.Version == ClientFileSplit.Version;
+                var backup = splitting
+                    ? await ClientFileSplit.BackUpAsync(databasePath, db, ct).ConfigureAwait(false)
+                    : null;
+
+                // IMMEDIATE, so the split's reads and its drop are one moment
+                // for every other writer: nothing can add a row between them.
+                await using var transaction = db.BeginTransaction(deferred: false);
+
+                if (splitting)
+                {
+                    split = await ClientFileSplit.RunAsync(databasePath, db, transaction, backup!, ct).ConfigureAwait(false);
+                }
+
+                await RunAsync(db, transaction, migration, ct).ConfigureAwait(false);
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
+                ran.Add($"{migration.Version} {migration.Description}");
+            }
+
+            version = await VersionAsync(db, ct).ConfigureAwait(false);
+        }
+
+        if (split is not null)
+        {
+            // The tables the split dropped leave their pages free; giving them
+            // back makes this file the few hundred kilobytes it now is rather
+            // than the size it was. Worth trying, not worth failing over.
+            try
+            {
+                await using var db = Open(databasePath);
+                await db.OpenAsync(ct).ConfigureAwait(false);
+                await using var vacuum = db.CreateCommand();
+                vacuum.CommandText = "VACUUM";
+                await vacuum.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (SqliteException) { }
+        }
+
+        // Client files have their own series. Only once the database is split
+        // is there anything to apply it to.
+        IReadOnlyList<string> clientFiles = [];
+        if (string.CompareOrdinal(version, ClientFileSplit.Version) >= 0)
+        {
+            clientFiles = await new ClientDatabases(databasePath).MigrateAllAsync(ct).ConfigureAwait(false);
+        }
+
+        return new MigrationResult(ran, version, split, clientFiles);
+    }
+
+    /// <summary>
+    /// Applies whatever of <paramref name="migrations"/> this database has
+    /// not had: the same bookkeeping, for a series other than the
+    /// organization's - a client file's.
+    /// </summary>
+    internal static async Task<MigrationResult> ApplyAsync(
+        string databasePath, IReadOnlyList<Migration> migrations, CancellationToken ct = default)
+    {
+        await using var db = Open(databasePath);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
         var applied = await AppliedAsync(db, ct).ConfigureAwait(false);
         var ran = new List<string>();
 
-        foreach (var migration in All)
+        foreach (var migration in migrations)
         {
             ct.ThrowIfCancellationRequested();
             if (applied.Contains(migration.Version)) { continue; }
 
             await using var transaction = (SqliteTransaction)await db.BeginTransactionAsync(ct).ConfigureAwait(false);
-
-            await using (var command = db.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = migration.Sql;
-                await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }
-
-            await using (var record = db.CreateCommand())
-            {
-                record.Transaction = transaction;
-                record.CommandText =
-                    "INSERT INTO schema_migrations (version, applied_at, description) VALUES ($v, $at, $d)";
-                record.Parameters.AddWithValue("$v", migration.Version);
-                record.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.UtcDateTime
-                    .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
-                record.Parameters.AddWithValue("$d", migration.Description);
-                await record.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }
-
+            await RunAsync(db, transaction, migration, ct).ConfigureAwait(false);
             await transaction.CommitAsync(ct).ConfigureAwait(false);
             ran.Add($"{migration.Version} {migration.Description}");
         }
@@ -97,11 +155,39 @@ public static class DatabaseMigrations
         return new MigrationResult(ran, await VersionAsync(db, ct).ConfigureAwait(false));
     }
 
+    /// <summary>One migration's SQL and the row recording it, in the caller's transaction.</summary>
+    private static async Task RunAsync(
+        SqliteConnection db, SqliteTransaction transaction, Migration migration, CancellationToken ct)
+    {
+        await using (var command = db.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = migration.Sql;
+            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await using var record = db.CreateCommand();
+        record.Transaction = transaction;
+        record.CommandText =
+            "INSERT INTO schema_migrations (version, applied_at, description) VALUES ($v, $at, $d)";
+        record.Parameters.AddWithValue("$v", migration.Version);
+        record.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.UtcDateTime
+            .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+        record.Parameters.AddWithValue("$d", migration.Description);
+        await record.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A connection that is not pooled, so nothing keeps the file open once it
+    /// is disposed: the split renames folders, and a backup is copied.
+    /// </summary>
+    private static SqliteConnection Open(string databasePath) =>
+        new(new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
+
     /// <summary>What the database has, without changing anything.</summary>
     public static async Task<string> VersionAsync(string databasePath, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString());
+        await using var db = Open(databasePath);
         await db.OpenAsync(ct).ConfigureAwait(false);
         return await VersionAsync(db, ct).ConfigureAwait(false);
     }
@@ -109,8 +195,7 @@ public static class DatabaseMigrations
     /// <summary>Migrations this database has not had, without applying them.</summary>
     public static async Task<IReadOnlyList<Migration>> PendingAsync(string databasePath, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString());
+        await using var db = Open(databasePath);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
         var applied = await AppliedAsync(db, ct).ConfigureAwait(false);
@@ -153,7 +238,8 @@ public static class DatabaseMigrations
 
         return [.. assembly
             .GetManifestResourceNames()
-            .Where(name => name.StartsWith("migration.", StringComparison.Ordinal))
+            .Where(name => name.StartsWith("migration.", StringComparison.Ordinal)
+                        && name.EndsWith(".sql", StringComparison.Ordinal))
             .OrderBy(name => name, StringComparer.Ordinal)
             .Select(name => Read(assembly, name))];
     }

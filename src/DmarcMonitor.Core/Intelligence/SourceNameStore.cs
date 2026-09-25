@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Intelligence;
@@ -8,19 +9,28 @@ namespace DmarcMonitor.Core.Intelligence;
 /// <param name="ReverseName">The PTR, or null for "asked, and there is none".</param>
 /// <param name="CheckedAt">When it was last asked.</param>
 /// <param name="Answered">Whether the reverse zone answered at all.</param>
-public sealed record SourceName(string Ip, string? ReverseName, DateTimeOffset CheckedAt, bool Answered)
+/// <param name="ForwardConfirmed">
+/// Whether the name's own forward records point back at the address: null
+/// until checked. See <see cref="Dns.DnsLookup.ForwardConfirmsAsync"/>.
+/// </param>
+public sealed record SourceName(
+    string Ip, string? ReverseName, DateTimeOffset CheckedAt, bool Answered, bool? ForwardConfirmed = null)
 {
     /// <summary>
-    /// The source as it should be written down: a name if the catalogue knows
-    /// one, else the reverse name, else the address itself.
+    /// The source as it should be written down: a vendor's name if the
+    /// catalogue knows it and the name is confirmed, else the reverse name as
+    /// the address claims it, else the address itself.
     /// </summary>
     /// <remarks>
     /// Never empty, and never a lie. An address nobody can name is printed as
     /// an address, which is exactly what the table did before any of this
-    /// existed - so the worst case is what used to be the only case.
+    /// existed - so the worst case is what used to be the only case. And an
+    /// unconfirmed name is printed as the hostname it claims rather than as
+    /// "INKY": the hostname is what the address says about itself, the vendor
+    /// name would be this product vouching for it.
     /// </remarks>
     public string Display =>
-        SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        ForwardConfirmed == true && SourceCatalog.Identify(ReverseName) is { } known ? known.Name
         : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
         : Ip;
 
@@ -49,6 +59,8 @@ public sealed record SourceName(string Ip, string? ReverseName, DateTimeOffset C
 /// </remarks>
 public sealed class SourceNameStore(string databasePath)
 {
+    private readonly string _databasePath = databasePath;
+
     private readonly string _connectionString = new SqliteConnectionStringBuilder
     {
         DataSource = databasePath,
@@ -91,7 +103,7 @@ public sealed class SourceNameStore(string databasePath)
             }
 
             command.CommandText =
-                $"SELECT ip, reverse_name, checked_at, answered FROM source_names WHERE ip IN ({string.Join(",", names)})";
+                $"SELECT ip, reverse_name, checked_at, answered, forward_confirmed FROM source_names WHERE ip IN ({string.Join(",", names)})";
 
             await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -105,8 +117,13 @@ public sealed class SourceNameStore(string databasePath)
     }
 
     /// <summary>Records what an address reverses to, replacing any earlier answer.</summary>
+    /// <param name="forwardConfirmed">
+    /// Whether the name points back at the address; null when that was not
+    /// checked, which leaves the name to decide nothing until it is.
+    /// </param>
     public async Task SaveAsync(
-        string ip, string? reverseName, bool answered, DateTimeOffset? checkedAt = null, CancellationToken ct = default)
+        string ip, string? reverseName, bool answered, DateTimeOffset? checkedAt = null,
+        bool? forwardConfirmed = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ip);
 
@@ -115,12 +132,13 @@ public sealed class SourceNameStore(string databasePath)
 
         await using var command = db.CreateCommand();
         command.CommandText = """
-            INSERT INTO source_names (ip, reverse_name, checked_at, answered)
-            VALUES ($ip, $name, $at, $answered)
+            INSERT INTO source_names (ip, reverse_name, checked_at, answered, forward_confirmed)
+            VALUES ($ip, $name, $at, $answered, $confirmed)
             ON CONFLICT(ip) DO UPDATE SET
-                reverse_name = excluded.reverse_name,
-                checked_at   = excluded.checked_at,
-                answered     = excluded.answered
+                reverse_name      = excluded.reverse_name,
+                checked_at        = excluded.checked_at,
+                answered          = excluded.answered,
+                forward_confirmed = excluded.forward_confirmed
             """;
 
         command.Parameters.AddWithValue("$ip", ip.Trim());
@@ -128,6 +146,9 @@ public sealed class SourceNameStore(string databasePath)
             "$name", string.IsNullOrWhiteSpace(reverseName) ? DBNull.Value : reverseName.Trim().TrimEnd('.').ToLowerInvariant());
         command.Parameters.AddWithValue("$at", Iso(checkedAt ?? DateTimeOffset.UtcNow));
         command.Parameters.AddWithValue("$answered", answered ? 1 : 0);
+        command.Parameters.AddWithValue(
+            "$confirmed",
+            string.IsNullOrWhiteSpace(reverseName) || forwardConfirmed is null ? DBNull.Value : forwardConfirmed.Value ? 1 : 0);
 
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
@@ -148,6 +169,11 @@ public sealed class SourceNameStore(string databasePath)
     /// that answered "no such name": the first is a failure worth retrying,
     /// the second is a fact that rarely changes.
     /// </para>
+    /// <para>
+    /// A name stored before forward confirmation existed is due at once. Until
+    /// it is checked it can decide nothing, so a source that used to be
+    /// recognized as a mail filter would be judged without its name.
+    /// </para>
     /// </remarks>
     public async Task<IReadOnlyList<string>> NeedingLookupAsync(
         int limit = 500,
@@ -158,8 +184,10 @@ public sealed class SourceNameStore(string databasePath)
         var age = maxAge ?? TimeSpan.FromDays(30);
         var retry = retryAfter ?? TimeSpan.FromDays(1);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // Names are the organization's; the addresses to name are in every
+        // client's file.
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -169,6 +197,7 @@ public sealed class SourceNameStore(string databasePath)
             WHERE n.ip IS NULL
                OR (n.answered = 1 AND n.checked_at < $stale)
                OR (n.answered = 0 AND n.checked_at < $retry)
+               OR (n.reverse_name IS NOT NULL AND n.forward_confirmed IS NULL)
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             LIMIT $limit
@@ -188,11 +217,53 @@ public sealed class SourceNameStore(string databasePath)
         return result;
     }
 
+    /// <summary>
+    /// Failing sources in a window whose names nothing has looked up yet, or
+    /// whose name was never checked against its forward records.
+    /// </summary>
+    /// <remarks>
+    /// What a report cannot recognize. A mail filter or a known service is
+    /// told apart from an impersonator by its confirmed name, so a report built
+    /// before the names are in lists INKY among the impersonators - correctly,
+    /// on what it knows, and without saying that it knows less than it could.
+    /// Zero for a database from before names existed, where there is nothing
+    /// to be done but upgrade.
+    /// </remarks>
+    public async Task<int> UncheckedFailingSourcesAsync(DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default)
+    {
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
+
+        await using (var probe = db.CreateCommand())
+        {
+            probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info('source_names') WHERE name = 'forward_confirmed'";
+            if (Convert.ToInt64(await probe.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture) == 0)
+            {
+                return 0;
+            }
+        }
+
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(DISTINCT r.source_ip)
+            FROM aggregate_records r
+            LEFT JOIN source_names n ON n.ip = r.source_ip
+            WHERE r.dmarc_result <> 'pass'
+              AND r.date_begin >= $from AND r.date_begin <= $to
+              AND (n.ip IS NULL OR (n.reverse_name IS NOT NULL AND n.forward_confirmed IS NULL))
+            """;
+        // aggregate_records keeps its dates in this form; see ReportStore.
+        command.Parameters.AddWithValue("$from", from.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$to", to.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0, CultureInfo.InvariantCulture);
+    }
+
     /// <summary>How many addresses have a name, out of how many are known at all.</summary>
     public async Task<(int Named, int Total)> CoverageAsync(CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -213,7 +284,8 @@ public sealed class SourceNameStore(string databasePath)
         DateTimeOffset.TryParse(
             r.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
             out var at) ? at : DateTimeOffset.MinValue,
-        r.GetInt32(3) != 0);
+        r.GetInt32(3) != 0,
+        r.IsDBNull(4) ? null : r.GetInt32(4) != 0);
 
     private static string Iso(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);

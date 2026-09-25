@@ -5,22 +5,54 @@
 # The web app runs as an unprivileged account and cannot replace its own
 # files. That is deliberate: it holds credentials that rewrite customers' DNS,
 # and a web application that can also install software is a far larger thing
-# to have compromised. So the app writes down a version it would like, and
-# this - started by a systemd path unit watching that file, running as root -
-# decides whether to act on it.
+# to have compromised. So the app writes down a version it would like into a
+# spool directory it owns, and this - started by a systemd path unit watching
+# that file, running as root - decides whether to act on it.
 #
-# What crosses the boundary is a version string and nothing else. This treats
-# that string as hostile anyway, because a file on disk is not a promise about
-# what wrote it:
+# TWO KINDS OF HOSTILE INPUT CROSS THIS BOUNDARY, AND BOTH ARE TREATED AS SUCH.
+#
+# The obvious one is the version string. A file on disk is not a promise about
+# what wrote it, so:
 #
 #   1. It must match a narrow version shape. No slashes, no spaces, nothing
 #      that could climb out of a directory or be interpreted rather than
 #      compared.
 #   2. It must be a release that actually exists on the configured channel,
 #      checked against GitHub here rather than trusted from the request. So
-#      the worst an attacker who owned the web app could achieve is
-#      installing a genuine release of this product.
+#      the worst an attacker who owned the web app could achieve is installing
+#      a genuine release of this product.
 #   3. A prerelease is refused unless this machine is on the preview channel.
+#
+# The less obvious one is the SPOOL DIRECTORY ITSELF. It is owned by the app
+# account, so that account can put anything at the names root touches here - a
+# symlink to a root-only file, a hardlink to one, a FIFO, or an entry it swaps
+# out mid-run. A root process that followed any of those could be made to
+# read, create, truncate, chown or delete a file of the app's choosing, which
+# is a straight local privilege escalation. So every read, write and remove
+# below:
+#
+#   - opens the spool directory once with O_NOFOLLOW and works RELATIVE to
+#     that descriptor, so the directory cannot be swapped under it;
+#   - opens the request with O_NOFOLLOW and checks the OPEN FILE (not the
+#     name) with fstat - a regular file, owned by the app account - so a
+#     symlink, a hardlink to a root-only file, or a FIFO is refused rather
+#     than followed, and a name swapped in after the check cannot matter
+#     because the check is on the descriptor already held;
+#   - creates every file root writes with O_CREAT|O_EXCL|O_NOFOLLOW and sets
+#     its owner on that descriptor, never through a name that could be a
+#     symlink, then renames it into place (which replaces the directory entry
+#     without following a symlink sitting there).
+#
+# The status file in particular is UNVALIDATED at the point the first refusal
+# is written - that is the whole point of the refusal - so its values are
+# encoded with json.dumps rather than pasted between quotes. Pasting a crafted
+# version raw once let it close the string and add its own keys:
+#
+#   Version: v1.0.0", "State": "Succeeded
+#
+# which produced a status file with State twice, and a last-key-wins reader
+# (which System.Text.Json is) showed the operator a green "Succeeded" for an
+# update that had just been refused.
 #
 # Installed by deploy/install-update-agent.sh. See DEPLOYING.md.
 
@@ -33,75 +65,228 @@ USER_NAME="${DMARC_USER:-dmarc}"
 
 SPOOL="${ROOT}/data/updates"
 REQUEST="${SPOOL}/requested.json"
-STATUS="${SPOOL}/status.json"
+# status.json and last-update.log are written by the helpers below, relative
+# to the spool descriptor they open; LOG is the path the failure message
+# points an operator at.
+LOG="${SPOOL}/last-update.log"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Every string that goes into the status file is encoded as JSON rather than
-# pasted between quotes. The version in particular is UNVALIDATED at the point
-# the first refusal is written - that is the whole point of the refusal - and
-# pasting it raw let a crafted version close the string and add its own keys:
-#
-#   Version: v1.0.0", "State": "Succeeded
-#
-# produced a status file with State twice, and a last-key-wins reader (which
-# System.Text.Json is) showed the operator a green "Succeeded" for an update
-# that had just been refused. The one component whose job is to report honestly
-# across a privilege boundary could be made to lie.
-j() { printf '%s' "${1-}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
+# update.sh writes its log through a shell redirection, which would follow a
+# symlink the app planted at the log's name. So it writes to a private temp
+# this unit alone can see (PrivateTmp=true in the unit hides it from every
+# other account), and the result is published into the spool through the same
+# no-follow create as the status. Declared here so the exit trap can remove it
+# whatever happens.
+LOGTMP=""
+cleanup() { [[ -n "$LOGTMP" ]] && rm -f -- "$LOGTMP"; return 0; }
+trap cleanup EXIT
 
-# Written as the app's user so the app can read it back; it only ever reads.
+# Writes the status the app reads back and the operator sees, into the
+# app-owned spool, WITHOUT writing through anything planted at status.json or
+# its temp: see the header. Encoding with json.dumps also closes the injection
+# in which a crafted version closed the JSON string and added its own keys.
 say() {
-    local state="$1" version="$2" message="$3" stamp="${4:-}"
-    local tmp="${STATUS}.tmp"
+    DMARC_SPOOL="$SPOOL" DMARC_USER="$USER_NAME" \
+    DMARC_STATE="${1-}" DMARC_VERSION="${2-}" DMARC_MESSAGE="${3-}" DMARC_STAMP="${4:-}" \
+    python3 <<'PY' || true
+import json, os, pwd, time
 
-    cat > "$tmp" <<JSON
-{
-  "State": $(j "$state"),
-  "Version": $(j "$version"),
-  "Message": $(j "$message"),
-  "At": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "Stamp": $(j "$stamp")
-}
-JSON
-    chown "${USER_NAME}:${USER_NAME}" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$STATUS"
-}
+spool = os.environ["DMARC_SPOOL"]
+user = os.environ["DMARC_USER"]
 
-[[ -f "$REQUEST" ]] || exit 0
-
-# Taken first, so a request cannot be processed twice if anything retriggers.
-WORK="$(mktemp)"
-mv "$REQUEST" "$WORK"
-trap 'rm -f "$WORK"' EXIT
-
-# A file on disk is not a promise about what wrote it, so reading it has to
-# survive anything: empty, truncated, not JSON, JSON that is not an object, a
-# Version that is a number or a list. This used to be two bare python
-# one-liners, and any of those cases threw a traceback which - under `set -e`,
-# and AFTER the request had already been moved aside above - killed the agent
-# without ever writing a status. The page was then left saying "Requested,
-# waiting for the update service to pick it up" for ever, with nothing left on
-# disk that would ever change it.
-FIELDS="$(python3 - "$WORK" <<'PY' || true
-import json, sys
-
-def clean(value, fallback=""):
-    if not isinstance(value, str):
-        return fallback
-    # Flattened, because these are carried back through a tab-separated line,
-    # and truncated so a megabyte of junk cannot become the status message.
-    return value.replace("\t", " ").replace("\n", " ").replace("\r", " ")[:200]
+payload = json.dumps({
+    "State":   os.environ.get("DMARC_STATE", ""),
+    "Version": os.environ.get("DMARC_VERSION", ""),
+    "Message": os.environ.get("DMARC_MESSAGE", ""),
+    "At":      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "Stamp":   os.environ.get("DMARC_STAMP", ""),
+}, indent=2) + "\n"
 
 try:
-    with open(sys.argv[1]) as handle:
-        request = json.load(handle)
-    if not isinstance(request, dict):
-        raise ValueError("not an object")
-except Exception:
-    print("\t\tunreadable")
-    sys.exit(0)
+    # O_NOFOLLOW: if the app turned the spool into a symlink, this fails rather
+    # than following it. Everything below is relative to this descriptor, so
+    # the directory cannot be swapped for another after it is opened.
+    dfd = os.open(spool, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as ex:
+    import sys
+    sys.stderr.write(f"update-agent: cannot write status: {ex}\n")
+    raise SystemExit(0)
 
-print(clean(request.get("Version")) + "\t" + clean(request.get("RequestedBy"), "unknown") + "\tok")
+try:
+    # Clear any leftover or planted temp first; O_EXCL then guarantees we
+    # create the file ourselves rather than open something already at the name.
+    try:
+        os.unlink("status.json.tmp", dir_fd=dfd)
+    except OSError:
+        pass
+    fd = os.open("status.json.tmp",
+                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+                 dir_fd=dfd)
+    try:
+        # The app reads this back, so it is owned by the app account - set on
+        # the descriptor we created, never on a name that could be a symlink.
+        try:
+            pw = pwd.getpwnam(user)
+            os.fchown(fd, pw.pw_uid, pw.pw_gid)
+        except KeyError:
+            pass
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # rename() replaces the target's directory entry - including a symlink the
+    # app may have planted there - with our file, and does not follow it.
+    os.replace("status.json.tmp", "status.json", src_dir_fd=dfd, dst_dir_fd=dfd)
+finally:
+    os.close(dfd)
+PY
+}
+
+# Publishes a root-owned temp into the spool as a file the operator (and the
+# app) can read, with the same no-follow, no-truncate-through create as say().
+publish_log() {
+    DMARC_SPOOL="$SPOOL" DMARC_USER="$USER_NAME" DMARC_SRC="$1" \
+    python3 <<'PY' || true
+import os, pwd, sys
+
+spool = os.environ["DMARC_SPOOL"]
+user = os.environ["DMARC_USER"]
+src = os.environ["DMARC_SRC"]
+
+try:
+    dfd = os.open(spool, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as ex:
+    sys.stderr.write(f"update-agent: cannot publish the log: {ex}\n")
+    raise SystemExit(0)
+
+try:
+    try:
+        os.unlink("last-update.log", dir_fd=dfd)
+    except OSError:
+        pass
+    fd = os.open("last-update.log",
+                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+                 dir_fd=dfd)
+    try:
+        try:
+            pw = pwd.getpwnam(user)
+            os.fchown(fd, pw.pw_uid, pw.pw_gid)
+        except KeyError:
+            pass
+        with open(src, "rb") as s:
+            while True:
+                chunk = s.read(65536)
+                if not chunk:
+                    break
+                os.write(fd, chunk)
+    finally:
+        os.close(fd)
+finally:
+    os.close(dfd)
+PY
+}
+
+# There must be something to act on. -e follows a symlink to its target; -L
+# catches a symlink whose target is missing, so a planted dangling link is
+# still consumed by the reader below rather than leaving the path unit firing
+# in a loop.
+[[ -e "$REQUEST" || -L "$REQUEST" ]] || exit 0
+
+# Reading the request as root, from the directory the app account owns. The
+# reader opens the spool with O_NOFOLLOW and the request relative to it, also
+# with O_NOFOLLOW, then judges the OPEN FILE by fstat: a regular file owned by
+# the app account, or nothing is read. A symlink (to any root-only file), a
+# hardlink to one (whose owner is not the app account), a FIFO or a device is
+# refused, not followed. Whatever is there is removed either way, so a refusal
+# does not leave the path unit retriggering forever. This also survives an
+# empty, truncated, or non-JSON body without a traceback that - under set -e,
+# and after the request had been consumed - once killed the agent with no
+# status written, leaving the page waiting for ever.
+FIELDS="$(DMARC_SPOOL="$SPOOL" DMARC_USER="$USER_NAME" python3 <<'PY' || true
+import json, os, pwd, stat, sys
+
+spool = os.environ["DMARC_SPOOL"]
+user = os.environ["DMARC_USER"]
+
+def emit(version, by, code):
+    # Tab-separated, flattened and truncated: the pieces are carried back on
+    # one line, and a megabyte of junk must not become the status message.
+    def clean(v, fallback=""):
+        if not isinstance(v, str):
+            return fallback
+        return v.replace("\t", " ").replace("\n", " ").replace("\r", " ")[:200]
+    sys.stdout.write(clean(version) + "\t" + clean(by, "unknown") + "\t" + code + "\n")
+
+# The expected owner has to resolve to a uid before an owner check means
+# anything. If the account is gone the machine is misconfigured, and acting on
+# a request that cannot be attributed to it is exactly what must not happen.
+try:
+    want_uid = pwd.getpwnam(user).pw_uid
+except KeyError:
+    emit("", "", "nouser")
+    raise SystemExit(0)
+
+try:
+    dfd = os.open(spool, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    # The spool is not a real directory (or is gone). Nothing safe to do, and
+    # deleting by a path whose parent is a symlink could remove a file
+    # elsewhere as root, so this leaves it alone.
+    emit("", "", "none")
+    raise SystemExit(0)
+
+def consume():
+    # Removes the request name whatever is now there. unlink() operates on the
+    # directory entry relative to the pinned spool, so a symlink is removed
+    # rather than followed.
+    try:
+        os.unlink("requested.json", dir_fd=dfd)
+    except OSError:
+        pass
+
+try:
+    try:
+        fd = os.open("requested.json",
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+    except FileNotFoundError:
+        emit("", "", "none")
+        raise SystemExit(0)
+    except OSError:
+        # ELOOP: a symlink at the name. Consume the link and refuse.
+        consume()
+        emit("", "", "notfile")
+        raise SystemExit(0)
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            consume()
+            emit("", "", "notfile")
+            raise SystemExit(0)
+        if st.st_uid != want_uid:
+            # A hardlink to a root-only file lands here: it is a regular file,
+            # but not owned by the app account, so it is not the app's request.
+            consume()
+            emit("", "", "notowner")
+            raise SystemExit(0)
+        # A request is a few hundred bytes; cap the read so a file that is
+        # large by accident or on purpose cannot be pulled in whole.
+        data = os.read(fd, 65536)
+    finally:
+        os.close(fd)
+
+    consume()
+
+    try:
+        request = json.loads(data.decode("utf-8", "replace"))
+        if not isinstance(request, dict):
+            raise ValueError("not an object")
+    except Exception:
+        emit("", "", "unreadable")
+        raise SystemExit(0)
+
+    emit(request.get("Version"), request.get("RequestedBy"), "ok")
+finally:
+    os.close(dfd)
 PY
 )"
 
@@ -109,11 +294,36 @@ VERSION="$(printf '%s' "$FIELDS" | cut -f1)"
 BY="$(printf '%s' "$FIELDS" | cut -f2)"
 READABLE="$(printf '%s' "$FIELDS" | cut -f3)"
 
-if [[ "$READABLE" != "ok" ]]; then
-    say Failed "" \
-        "The update request could not be read - it is not valid JSON. Nothing was installed. Press Install again."
-    exit 1
-fi
+case "$READABLE" in
+    ok)
+        ;;
+    none)
+        # Nothing to act on after all - consumed by a previous run, or never a
+        # real file. Silent: this is a normal race with the path unit, not a
+        # fault worth a status.
+        exit 0
+        ;;
+    notowner)
+        say Failed "" \
+            "The update request was ignored: it is not owned by the ${USER_NAME} account the app runs as, so it was not written by the app. Nothing was installed."
+        exit 1
+        ;;
+    notfile)
+        say Failed "" \
+            "The update request was ignored: it is not a regular file. Nothing was installed."
+        exit 1
+        ;;
+    nouser)
+        say Failed "" \
+            "Updates cannot be processed: the ${USER_NAME} account the app runs as does not exist on this machine. Nothing was installed."
+        exit 1
+        ;;
+    *)
+        say Failed "" \
+            "The update request could not be read - it is not valid JSON. Nothing was installed. Press Install again."
+        exit 1
+        ;;
+esac
 
 # ---- 1. shape ---------------------------------------------------------------
 if ! [[ "$VERSION" =~ ^v[0-9]{1,4}(\.[0-9]{1,4}){1,3}(-[A-Za-z0-9.]{1,32})?$ ]]; then
@@ -190,15 +400,20 @@ fi
 # ---- do it ------------------------------------------------------------------
 say Running "$VERSION" "Installing ${VERSION}, asked for by ${BY}. The service will restart."
 
-log="${SPOOL}/last-update.log"
+# update.sh writes to the private temp (see LOGTMP above), which is then
+# published into the spool safely. It is never handed a name in the app-owned
+# directory to open with a shell redirection.
+LOGTMP="$(mktemp)"
 if DMARC_ROOT="$ROOT" DMARC_REPO="$REPO" DMARC_USER="$USER_NAME" \
-   "${HERE}/update.sh" "$VERSION" > "$log" 2>&1; then
-    stamp="$(grep -oP 'app-\K[0-9]{8}-[0-9]{6}' "$log" | head -1 || true)"
+   "${HERE}/update.sh" "$VERSION" > "$LOGTMP" 2>&1; then
+    publish_log "$LOGTMP"
+    stamp="$(grep -oP 'app-\K[0-9]{8}-[0-9]{6}' "$LOGTMP" | head -1 || true)"
     say Succeeded "$VERSION" "Updated to ${VERSION}. The previous install was kept, for rolling back." "$stamp"
 else
+    publish_log "$LOGTMP"
     # update.sh puts the old application back itself before failing, so the
     # service is already running again by the time this is written.
     say Failed "$VERSION" \
-        "Installing ${VERSION} failed and the previous version was put back. See ${log}."
+        "Installing ${VERSION} failed and the previous version was put back. See ${LOG}."
     exit 1
 fi

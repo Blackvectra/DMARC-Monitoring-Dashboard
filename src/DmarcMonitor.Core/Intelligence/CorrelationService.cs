@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Intelligence;
@@ -64,9 +65,15 @@ public sealed record FailingSource
     /// </summary>
     public string? ReverseName { get; init; }
 
+    /// <summary>Whether the reverse name's own forward records point back at the address.</summary>
+    public bool NameConfirmed { get; init; }
+
+    /// <summary>The reverse name when it may decide something, else null.</summary>
+    public string? VerifiedName => NameConfirmed ? ReverseName : null;
+
     /// <summary>
     /// The source as it should be written down: the vendor if the catalogue
-    /// recognizes one, else the reverse name, else the address.
+    /// recognizes a confirmed name, else the reverse name, else the address.
     /// </summary>
     /// <remarks>
     /// Never empty and never a guess. An address nobody can name prints as an
@@ -80,7 +87,7 @@ public sealed record FailingSource
     /// many unrelated parties the address was seen against.
     /// </remarks>
     public string Display =>
-        SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        SourceCatalog.Identify(VerifiedName) is { } known ? known.Name
         : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
         : SourceIp;
 
@@ -200,11 +207,12 @@ public sealed class CorrelationService(string databasePath)
     // intelligence make, and the three disagreeing about one address is how
     // the worst bug of the day was found. A rule this load-bearing belongs
     // where it can be tested.
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>
+    /// The organization's database and each client's file. Seeing one source
+    /// across several clients means reading their files together; see
+    /// ClientDatabases.
+    /// </summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="tenantId">
     /// One organization's clients, or null for every organization's. Scoped
@@ -219,8 +227,8 @@ public sealed class CorrelationService(string databasePath)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug), ["aggregate_records"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         // Overrides are excluded. A mailing list or forwarder breaking
@@ -268,7 +276,10 @@ public sealed class CorrelationService(string databasePath)
               -- chosen by whoever mailed the reports. Absent is ordinary and
               -- means the nightly pass has not reached it yet, in which case
               -- the address is printed exactly as it always was.
-              n.reverse_name                                        AS reverse_name
+              n.reverse_name                                        AS reverse_name,
+              -- Whether that name points back at the address. Without it the
+              -- name is a claim the sender wrote, and decides nothing.
+              n.forward_confirmed                                   AS forward_confirmed
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             JOIN clients c ON c.id = r.client_id
@@ -314,6 +325,7 @@ public sealed class CorrelationService(string databasePath)
                 AuthenticatedFor = ParseAuthDomains(reader.IsDBNull(6) ? "" : reader.GetString(6)),
                 DomainsAlsoPassed = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
                 ReverseName = reader.IsDBNull(8) ? null : reader.GetString(8),
+                NameConfirmed = !reader.IsDBNull(9) && reader.GetInt64(9) == 1,
             });
         }
 
@@ -365,13 +377,23 @@ public sealed class CorrelationService(string databasePath)
             .Where(x => !string.IsNullOrWhiteSpace(x.Domain))
             .GroupBy(x => x.Domain!, StringComparer.OrdinalIgnoreCase))
         {
-            var members = group.Select(x => x.Source).ToList();
-            var identity = SourceCatalog.Identify(members[0].ReverseName);
-
-            // Infrastructure rather than an actor. See the remarks above.
-            if (identity is { Kind: SourceKind.MailProvider }) { continue; }
+            // Infrastructure rather than an actor, see the remarks above - but
+            // only where the name is confirmed. Grouping is by the domain each
+            // address CLAIMS, and a sender forging mail can reverse to
+            // something.outlook.com; dropping the whole group on that claim
+            // took a campaign off the page because it said it was Microsoft.
+            var members = group.Select(x => x.Source)
+                .Where(m => SourceCatalog.Identify(m.VerifiedName) is not { Kind: SourceKind.MailProvider })
+                .ToList();
 
             if (members.Count < 2) { continue; }
+
+            // Named for the vendor only when every address in it is confirmed
+            // as the vendor's. One unconfirmed member is a claim, and naming
+            // the row "INKY" would vouch for it.
+            var identity = members.All(m => m.NameConfirmed)
+                ? SourceCatalog.Identify(members[0].ReverseName)
+                : null;
 
             var operators = new FailingOperator
             {
@@ -446,8 +468,8 @@ public sealed class CorrelationService(string databasePath)
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
         var client = string.IsNullOrWhiteSpace(clientSlug) ? null : clientSlug.Trim().ToLowerInvariant();
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         var appearances = new List<SourceAppearance>();
 
@@ -509,6 +531,7 @@ public sealed class CorrelationService(string databasePath)
 
         string auth;
         string? reverseName;
+        bool confirmed;
 
         await using (var command = db.CreateCommand())
         {
@@ -518,7 +541,8 @@ public sealed class CorrelationService(string databasePath)
                     CASE WHEN r.spf_auth_result = 'pass' THEN COALESCE(r.spf_domain, '') ELSE '' END
                     || '|' ||
                     CASE WHEN r.dkim_auth_result = 'pass' THEN COALESCE(r.dkim_domain, '') ELSE '' END), ''),
-                  (SELECT n.reverse_name FROM source_names n WHERE n.ip = $ip)
+                  (SELECT n.reverse_name FROM source_names n WHERE n.ip = $ip),
+                  (SELECT n.forward_confirmed FROM source_names n WHERE n.ip = $ip)
                 FROM aggregate_records r
                 JOIN clients c ON c.id = r.client_id
                 WHERE r.source_ip = $ip
@@ -536,12 +560,14 @@ public sealed class CorrelationService(string databasePath)
             var read = await reader.ReadAsync(ct).ConfigureAwait(false);
             auth = read && !reader.IsDBNull(0) ? reader.GetString(0) : "";
             reverseName = read && !reader.IsDBNull(1) ? reader.GetString(1) : null;
+            confirmed = read && !reader.IsDBNull(2) && reader.GetInt64(2) == 1;
         }
 
         return new SourceDetail
         {
             SourceIp = ip,
             ReverseName = reverseName,
+            NameConfirmed = confirmed,
             Appearances = appearances,
             AuthenticatedFor = ParseAuthDomains(auth),
         };
@@ -582,6 +608,10 @@ public sealed record SourceDetail
 {
     public required string SourceIp { get; init; }
     public string? ReverseName { get; init; }
+
+    /// <summary>Whether the reverse name's own forward records point back at the address.</summary>
+    public bool NameConfirmed { get; init; }
+
     public IReadOnlyList<SourceAppearance> Appearances { get; init; } = [];
 
     /// <summary>Domains this source authenticated FOR, when it failed.</summary>
@@ -629,15 +659,18 @@ public sealed record SourceDetail
         : IsCrossClient ? SourceVerdict.CrossClientImpersonation
         : SourceVerdict.Unauthenticated;
 
-    /// <summary>The vendor the catalogue recognizes, else the reverse name, else the address.</summary>
+    /// <summary>
+    /// The vendor the catalogue recognizes in a confirmed name, else the
+    /// reverse name as claimed, else the address.
+    /// </summary>
     public string Display =>
-        SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        NameConfirmed && SourceCatalog.Identify(ReverseName) is { } known ? known.Name
         : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
         : SourceIp;
 
     public bool IsNamed => Display != SourceIp;
 
-    /// <summary>What kind of sender this is, when the catalogue knows.</summary>
+    /// <summary>What kind of sender this is, when the catalogue knows and the name is confirmed.</summary>
     public SourceKind Kind =>
-        SourceCatalog.Identify(ReverseName) is { } known ? known.Kind : SourceKind.Unknown;
+        NameConfirmed && SourceCatalog.Identify(ReverseName) is { } known ? known.Kind : SourceKind.Unknown;
 }

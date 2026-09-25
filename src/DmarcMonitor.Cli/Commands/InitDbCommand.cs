@@ -39,15 +39,72 @@ public static class InitDbCommand
                 // build meeting an old database and failing on a table that
                 // was added after it was created.
                 var result = await DatabaseMigrations.ApplyAsync(dbPath, ct).ConfigureAwait(false);
+                var files = new ClientDatabases(dbPath);
 
                 if (result.Changed)
                 {
                     Console.WriteLine($"{dbPath} was already a DMARC Monitor database. Brought it up to date:");
                     foreach (var applied in result.Applied) { Console.WriteLine($"  {applied}"); }
+                    if (result.ClientFiles is { Count: > 0 } changed)
+                    {
+                        Console.WriteLine($"  {changed.Count} client file(s) updated to the current client schema");
+                    }
                 }
                 else
                 {
                     Console.WriteLine($"{dbPath} already exists and is up to date (schema {result.Version}).");
+                }
+
+                if (result.Split is { } split)
+                {
+                    // The one upgrade that moves data. Said in full: where it
+                    // went, and where the copy of what it was is kept.
+                    Console.WriteLine();
+                    Console.WriteLine($"Each client's reports are now in a database file of its own, in {files.Folder}:");
+                    Console.WriteLine($"  {split.Files} client file(s), {split.Rows:N0} row(s) moved and counted in both places.");
+                    Console.WriteLine($"  The database as it was before is kept at {split.Backup}.");
+                    if (split.Unfiled > 0)
+                    {
+                        Console.WriteLine($"  {split.Unfiled:N0} row(s) belonged to clients that no longer exist; they were kept in "
+                                          + $"{Path.Combine(files.Folder, "unfiled-rows.db")} rather than dropped.");
+                    }
+                    if (split.SetAside is not null)
+                    {
+                        Console.WriteLine($"  An earlier, interrupted attempt left {split.SetAside}. It was moved aside, not deleted.");
+                    }
+                }
+
+                // Put the client files right against the organization's
+                // database: a domain filed under another client, or a client
+                // moved to another organization, when the process stopped
+                // part way. Nothing to do on an ordinary day.
+                if (string.CompareOrdinal(result.Version, "0019") >= 0)
+                {
+                    var repaired = await files.ReconcileAsync(ct).ConfigureAwait(false);
+                    if (repaired.Changed)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("Client files were put right against the organization's database:");
+                        foreach (var moved in repaired.MovedDomains) { Console.WriteLine($"  moved {moved}"); }
+                        if (repaired.RetaggedRows > 0)
+                        {
+                            Console.WriteLine($"  {repaired.RetaggedRows:N0} row(s) relabelled with their file's client and organization");
+                        }
+                        foreach (var raised in repaired.RaisedSequences)
+                        {
+                            // Only after the organization's database was put back
+                            // from a copy older than the client files.
+                            Console.WriteLine($"  row ids for {raised}, past the ones already in the client files");
+                        }
+                    }
+                    if (repaired.HomelessRows > 0)
+                    {
+                        Console.WriteLine($"  {repaired.HomelessRows:N0} row(s) are for domains this database no longer has. They were left where they are.");
+                    }
+                    foreach (var refused in repaired.Refused)
+                    {
+                        Console.Error.WriteLine($"  Not touched: {refused}");
+                    }
                 }
 
                 return 0;
@@ -121,6 +178,25 @@ internal static class Args
         return null;
     }
 
+    /// <summary>Every value given for a flag that may be repeated, in order.</summary>
+    /// <remarks>
+    /// Only for a flag the command declares repeatable (see <see cref="Reject"/>);
+    /// for any other, a second one is refused before this is reached.
+    /// </remarks>
+    public static IReadOnlyList<string> Values(string[] args, string name)
+    {
+        var values = new List<string>();
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+            {
+                values.Add(args[i + 1]);
+                i++;
+            }
+        }
+        return values;
+    }
+
     public static bool Flag(string[] args, string name) =>
         Array.Exists(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
 
@@ -157,15 +233,26 @@ internal static class Args
     /// - a command line pasted twice, which is an ordinary thing to do in a
     /// terminal - imported the executable itself, reported "files seen 1, not
     /// reports 1", and exited 0. Nothing on screen suggested the folder that
-    /// was actually wanted had never been looked at. No command here takes a
-    /// repeated flag, so there is no case where the second one is meant to be
-    /// discarded silently.
+    /// was actually wanted had never been looked at.
+    ///
+    /// So a flag may appear once unless the command says otherwise, by naming
+    /// it with a trailing "..." - "--folder..." - as the usage text does. Then
+    /// every occurrence is meant, and <see cref="Values"/> reads them all. A
+    /// leading "!" still marks a flag that takes no value.
     /// </remarks>
     public static int Reject(string[] args, params string[] known)
     {
-        var takesValue = new HashSet<string>(known.Where(k => !k.StartsWith('!')),
+        static string Bare(string flag)
+        {
+            var name = flag.TrimStart('!');
+            return name.EndsWith("...", StringComparison.Ordinal) ? name[..^3] : name;
+        }
+
+        var takesValue = new HashSet<string>(known.Where(k => !k.StartsWith('!')).Select(Bare),
                                              StringComparer.OrdinalIgnoreCase);
-        var all = new HashSet<string>(known.Select(k => k.TrimStart('!')), StringComparer.OrdinalIgnoreCase);
+        var repeatable = new HashSet<string>(known.Where(k => k.EndsWith("...", StringComparison.Ordinal)).Select(Bare),
+                                             StringComparer.OrdinalIgnoreCase);
+        var all = new HashSet<string>(known.Select(Bare), StringComparer.OrdinalIgnoreCase);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < args.Length; i++)
@@ -175,7 +262,7 @@ internal static class Args
 
             if (all.Contains(arg))
             {
-                if (!seen.Add(arg))
+                if (!seen.Add(arg) && !repeatable.Contains(arg))
                 {
                     Console.Error.WriteLine($"{arg} was given more than once.");
                     Console.Error.WriteLine("Only the first one would have been used, which is rarely what was meant.");

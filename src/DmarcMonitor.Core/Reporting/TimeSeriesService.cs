@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Reporting;
@@ -133,11 +134,16 @@ public sealed record SourceCompliance
 /// </remarks>
 public sealed class TimeSeriesService(string databasePath)
 {
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
+    private readonly ClientDatabases _files = new(databasePath);
+
+    /// <summary>
+    /// The clients' files these arguments reach: one domain's client, one
+    /// client, or an organization's clients read together.
+    /// </summary>
+    private Task<SqliteConnection> OpenAsync(
+        string? tenantId, string? clientSlug, string? domain, CancellationToken ct, params string[] tables) =>
+        _files.OpenAsync(ClientScope.For(tenantId, clientSlug, domain), tables, ct: ct);
 
     /// <summary>The whole estate, one point per day.</summary>
     /// <param name="tenantId">One organization, or null for all of them.</param>
@@ -179,8 +185,7 @@ public sealed class TimeSeriesService(string databasePath)
         var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
             .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, name, ct, "aggregate_records").ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
 
@@ -231,8 +236,7 @@ public sealed class TimeSeriesService(string databasePath)
         var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
             .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, name, ct, "aggregate_records").ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
 
@@ -297,8 +301,7 @@ public sealed class TimeSeriesService(string databasePath)
         var client = Slug(clientSlug);
         var since = Since(days);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, name, ct, "aggregate_records").ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = $"""
@@ -350,8 +353,7 @@ public sealed class TimeSeriesService(string databasePath)
         var client = Slug(clientSlug);
         var since = Since(days);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, name, ct, "aggregate_records").ConfigureAwait(false);
 
         var named = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false);
 
@@ -430,8 +432,7 @@ public sealed class TimeSeriesService(string databasePath)
         var client = Slug(clientSlug);
         var since = Since(days);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, name, ct, "aggregate_records").ConfigureAwait(false);
 
         var named = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false);
 
@@ -493,8 +494,7 @@ public sealed class TimeSeriesService(string databasePath)
         var client = Slug(clientSlug);
         var since = Since(days);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, name, ct, "aggregate_records", "aggregate_reports").ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = $"""
@@ -555,8 +555,7 @@ public sealed class TimeSeriesService(string databasePath)
         var client = Slug(clientSlug);
         var since = Since(days);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, name, ct, "aggregate_records", "aggregate_reports").ConfigureAwait(false);
 
         var named = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false);
 
@@ -624,7 +623,9 @@ public sealed class TimeSeriesService(string databasePath)
     private static async Task<bool> TableExistsAsync(SqliteConnection db, string table, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $name";
+        // pragma_table_list rather than sqlite_master, which lists only the
+        // organization's own tables: clients' are attached or copied in.
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_list WHERE type = 'table' AND name = $name";
         command.Parameters.AddWithValue("$name", table);
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) > 0;
     }
@@ -648,8 +649,7 @@ public sealed class TimeSeriesService(string databasePath)
         var since = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-(days - 1))
             .ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, null, ct, "aggregate_records").ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = $"""
@@ -698,8 +698,7 @@ public sealed class TimeSeriesService(string databasePath)
         var since = first.ToDateTime(TimeOnly.MinValue)
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, client, null, ct, "aggregate_records", "aggregate_reports").ConfigureAwait(false);
 
         var reported = new Dictionary<string, HashSet<DateOnly>>(StringComparer.OrdinalIgnoreCase);
         await using (var command = db.CreateCommand())
@@ -820,8 +819,7 @@ public sealed class TimeSeriesService(string databasePath)
         var since = first.ToDateTime(TimeOnly.MinValue)
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await OpenAsync(tenantId, clientSlug, domain, ct, "aggregate_records", "aggregate_reports").ConfigureAwait(false);
 
         // Counted from the records, but the days that EXIST come from the
         // reports: a report can arrive covering a day on which the domain sent
