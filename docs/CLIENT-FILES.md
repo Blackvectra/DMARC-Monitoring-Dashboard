@@ -15,6 +15,11 @@ A file is named for its client's slug, so a person can find it, and its id,
 so two organizations' `acme-corp` never share a name. Neither changes: a
 slug is printed on reports the client has already been sent.
 
+Beside a file there may be a `-wal` and a `-shm`: SQLite's journal for that
+file. A process that only read the file cannot remove them, so they stay
+until something next writes to it. They belong to the file beside them, and
+backups, restores and erasure treat them that way.
+
 ## What is where
 
 | The organization's database (`db/schema.sql`) | Each client's file (`db/client-schema.sql`) |
