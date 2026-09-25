@@ -1,3 +1,4 @@
+using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Intelligence;
 using DmarcMonitor.Core.Storage;
 
@@ -52,12 +53,90 @@ public sealed class SourceNameStoreTests : IAsyncLifetime
     [Fact]
     public async Task ACachedReverseNameBecomesAVendorName()
     {
-        await _store.SaveAsync("35.174.145.124", "us.cloud-sec-av.com", answered: true);
+        await _store.SaveAsync("35.174.145.124", "us.cloud-sec-av.com", answered: true, forwardConfirmed: true);
 
         var row = (await _store.GetAsync(["35.174.145.124"]))["35.174.145.124"];
 
         Assert.True(row.IsNamed);
-        Assert.DoesNotContain("35.174", row.Display, StringComparison.Ordinal);
+        Assert.Equal("Avanan (Check Point Harmony)", row.Display);
+    }
+
+    /// <summary>
+    /// Only once the name points back. A PTR is written by whoever holds the
+    /// address, so an unconfirmed one is printed as the hostname it claims:
+    /// "Avanan" would be this product vouching for it.
+    /// </summary>
+    [Fact]
+    public async Task AnUnconfirmedNameIsPrintedAsTheHostnameItClaims()
+    {
+        await _store.SaveAsync("203.0.113.66", "us.cloud-sec-av.com", answered: true, forwardConfirmed: false);
+
+        var row = (await _store.GetAsync(["203.0.113.66"]))["203.0.113.66"];
+
+        Assert.Equal("us.cloud-sec-av.com", row.Display);
+        Assert.False(row.ForwardConfirmed);
+    }
+
+    [Fact]
+    public async Task RemembersWhetherTheNameWasConfirmed()
+    {
+        await _store.SaveAsync("192.0.2.1", "a.example", answered: true, forwardConfirmed: true);
+        await _store.SaveAsync("192.0.2.2", "b.example", answered: true, forwardConfirmed: false);
+        await _store.SaveAsync("192.0.2.3", "c.example", answered: true);
+        await _store.SaveAsync("192.0.2.4", null, answered: true, forwardConfirmed: true);
+
+        var found = await _store.GetAsync(["192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"]);
+
+        Assert.True(found["192.0.2.1"].ForwardConfirmed);
+        Assert.False(found["192.0.2.2"].ForwardConfirmed);
+        Assert.Null(found["192.0.2.3"].ForwardConfirmed);
+        // Nothing to confirm without a name.
+        Assert.Null(found["192.0.2.4"].ForwardConfirmed);
+    }
+
+    /// <summary>
+    /// A name stored before confirmation existed is asked again at once, even
+    /// though it is fresh. Until it is confirmed it decides nothing, so a
+    /// gateway that used to be recognized would be judged without its name.
+    /// </summary>
+    [Fact]
+    public async Task ANameThatWasNeverCheckedIsLookedUpAgain()
+    {
+        await StoreRowsAsync("192.0.2.50", "192.0.2.51", "192.0.2.52");
+        await _store.SaveAsync("192.0.2.50", "never-checked.example", answered: true);
+        await _store.SaveAsync("192.0.2.51", "checked.example", answered: true, forwardConfirmed: false);
+        await _store.SaveAsync("192.0.2.52", null, answered: true);
+
+        var due = await _store.NeedingLookupAsync();
+
+        Assert.Equal(["192.0.2.50"], due);
+    }
+
+    private async Task StoreRowsAsync(params string[] addresses)
+    {
+        var begin = DateTimeOffset.UtcNow.AddDays(-2);
+        var rows = string.Concat(addresses.Select(ip => $"""
+            <record>
+              <row><source_ip>{ip}</source_ip><count>3</count>
+                <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf></policy_evaluated></row>
+              <identifiers><header_from>a.example</header_from></identifiers>
+              <auth_results><spf><domain>a.example</domain><result>fail</result></spf></auth_results>
+            </record>
+            """));
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata><org_name>google.com</org_name><report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin><end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range>
+              </report_metadata>
+              <policy_published><domain>a.example</domain><p>none</p><pct>100</pct></policy_published>
+              {rows}
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        Assert.True(parsed.Success, parsed.Error);
+        await new ReportStore(_dbPath).SaveAggregateAsync(parsed.Report!, xml, null);
     }
 
     /// <summary>

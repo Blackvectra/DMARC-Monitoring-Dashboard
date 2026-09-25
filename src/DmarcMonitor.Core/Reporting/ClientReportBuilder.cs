@@ -423,6 +423,13 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
             ? "(SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip)"
             : "NULL";
 
+        // Whether that name points back at the address. Absent before 0018,
+        // and then no name is confirmed: an unconfirmed name is printed and
+        // decides nothing, which is the safe way round.
+        var confirmed = await ColumnExistsAsync(db, "source_names", "forward_confirmed", ct).ConfigureAwait(false)
+            ? "(SELECT n.forward_confirmed FROM source_names n WHERE n.ip = r.source_ip)"
+            : "NULL";
+
         await using var command = db.CreateCommand();
 
         // The correlated subquery counts OTHER clients the same source was
@@ -484,7 +491,8 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
                    SUM(CASE WHEN r.dmarc_result <> 'pass'
                              AND COALESCE(r.spf_auth_result, '')  <> 'pass'
                              AND COALESCE(r.dkim_auth_result, '') <> 'pass'
-                            THEN r.message_count ELSE 0 END)
+                            THEN r.message_count ELSE 0 END),
+                   {{confirmed}}
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.client_id = $client AND r.date_begin >= $from AND r.date_begin <= $to
@@ -525,6 +533,7 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
                 FailedDkimNotAligned = reader.GetInt64(10),
                 FailedBothNotAligned = reader.GetInt64(11),
                 FailedBoth = reader.GetInt64(12),
+                NameConfirmed = !reader.IsDBNull(13) && reader.GetInt64(13) == 1,
             });
         }
         return results;
@@ -552,10 +561,13 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
         var name = await TableExistsAsync(db, "source_names", ct).ConfigureAwait(false)
             ? "(SELECT n.reverse_name FROM source_names n WHERE n.ip = r.source_ip)"
             : "NULL";
+        var confirmed = await ColumnExistsAsync(db, "source_names", "forward_confirmed", ct).ConfigureAwait(false)
+            ? "(SELECT n.forward_confirmed FROM source_names n WHERE n.ip = r.source_ip)"
+            : "NULL";
 
         await using var command = db.CreateCommand();
         command.CommandText = $$"""
-            SELECT r.source_ip, SUM(r.message_count), GROUP_CONCAT(DISTINCT d.name), {{name}}
+            SELECT r.source_ip, SUM(r.message_count), GROUP_CONCAT(DISTINCT d.name), {{name}}, {{confirmed}}
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.client_id = $client AND r.date_begin >= $from AND r.date_begin <= $to
@@ -585,6 +597,7 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
                 Retired = true,
                 Domains = reader.IsDBNull(2) ? [] : [.. reader.GetString(2).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)],
                 ReverseName = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                NameConfirmed = !reader.IsDBNull(4) && reader.GetInt64(4) == 1,
             });
         }
 
@@ -644,6 +657,17 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
             });
         }
         return results;
+    }
+
+    private static async Task<bool> ColumnExistsAsync(SqliteConnection db, string table, string column, CancellationToken ct)
+    {
+        if (!await TableExistsAsync(db, table, ct).ConfigureAwait(false)) { return false; }
+
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_info($table) WHERE name = $column";
+        command.Parameters.AddWithValue("$table", table);
+        command.Parameters.AddWithValue("$column", column);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture) > 0;
     }
 
     private static async Task<bool> TableExistsAsync(SqliteConnection db, string name, CancellationToken ct)

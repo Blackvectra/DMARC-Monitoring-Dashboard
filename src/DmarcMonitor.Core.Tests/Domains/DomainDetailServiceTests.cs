@@ -123,6 +123,92 @@ public sealed class DomainDetailServiceTests : IDisposable
     private Task<DomainDetail?> GetAsync(string domain) =>
         new DomainDetailService(_dbPath).GetAsync(domain);
 
+    // ---- what may name a gateway ----------------------------------------------
+    //
+    // A source filed as a gateway leaves the list of impersonators, so what
+    // names one has to be something the sender cannot write. MAIL FROM and a
+    // PTR are both written by whoever sends; the envelope domain's SPF record
+    // and the name's forward DNS are written by whoever owns the domain.
+
+    /// <summary>Mail signed as the domain and broken, sent with the given envelope.</summary>
+    private static string EnvelopeRow(string ip, int count, string headerFrom, string envelope, string spfResult) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf></policy_evaluated>
+            </row>
+            <identifiers><header_from>{headerFrom}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{headerFrom}</domain><selector>selector1</selector><result>fail</result></dkim>
+              <spf><domain>{envelope}</domain><result>{spfResult}</result></spf>
+            </auth_results>
+          </record>
+        """;
+
+    [Fact]
+    public async Task AGatewayIsRecognizedByAnEnvelopeItsSpfAuthorizes()
+    {
+        // shield.security's SPF names the address, so the envelope is proof.
+        await StoreAsync("acme.com", "reject",
+            EnvelopeRow("3.133.222.181", 7, "acme.com", "courier.shield.security", "pass"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.Equal("a hosted mail security gateway", Assert.Single(detail!.Forwarders).GatewayName);
+        Assert.Empty(detail.Impersonating);
+    }
+
+    [Fact]
+    public async Task ClaimingAGatewaysEnvelopeDoesNotHideAForgery()
+    {
+        // Anybody can send from bounces@inkyphishfence.com. This address is not
+        // in INKY's SPF, so the claim identifies nothing and the mail is what
+        // it looks like: sent as the domain by somebody who could not prove it.
+        await StoreAsync("acme.com", "reject",
+            EnvelopeRow("203.0.113.66", 7, "acme.com", "ipw.inkyphishfence.com", "fail"));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.Empty(detail!.Forwarders);
+        Assert.Equal("203.0.113.66", Assert.Single(detail.Impersonating).SourceIp);
+    }
+
+    [Fact]
+    public async Task AGatewayIsRecognizedByAConfirmedReverseName()
+    {
+        // How INKY actually arrives: its envelope domain publishes no SPF, so
+        // nothing verifies the envelope, and INKY's own forward DNS names the
+        // relay. The client report recognizes it the same way; the page and the
+        // report must not disagree about one address.
+        await StoreAsync("acme.com", "reject",
+            EnvelopeRow("100.24.129.5", 6, "acme.com", "ipw.inkyphishfence.com", "none"));
+        await new DmarcMonitor.Core.Intelligence.SourceNameStore(_dbPath)
+            .SaveAsync("100.24.129.5", "ipw-outbound.inkyphishfence.com", answered: true, forwardConfirmed: true);
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.Equal("INKY", Assert.Single(detail!.Forwarders).GatewayName);
+        Assert.Empty(detail.Impersonating);
+    }
+
+    [Fact]
+    public async Task AnUnconfirmedGatewayNameDoesNotHideAForgery()
+    {
+        // The forger's own PTR, which it chose. Printed as the hostname it
+        // claims, never as "INKY", and it stays an impersonator.
+        await StoreAsync("acme.com", "reject",
+            EnvelopeRow("203.0.113.67", 6, "acme.com", "acme.com", "fail"));
+        await new DmarcMonitor.Core.Intelligence.SourceNameStore(_dbPath)
+            .SaveAsync("203.0.113.67", "mail.inkyphishfence.com", answered: true, forwardConfirmed: false);
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.Empty(detail!.Forwarders);
+        var source = Assert.Single(detail.Impersonating);
+        Assert.Equal("mail.inkyphishfence.com", source.Display);
+    }
+
     // ---- the three buckets ---------------------------------------------------
 
     [Fact]

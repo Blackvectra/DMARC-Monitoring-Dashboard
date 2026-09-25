@@ -1078,7 +1078,10 @@ CREATE TABLE source_names (
     ip            TEXT PRIMARY KEY,
     reverse_name  TEXT,                              -- NULL: asked, there is none
     checked_at    TEXT NOT NULL,
-    answered      INTEGER NOT NULL DEFAULT 1         -- 0: the reverse zone did not answer
+    answered      INTEGER NOT NULL DEFAULT 1,        -- 0: the reverse zone did not answer
+    -- Whether the name's own A/AAAA records point back at the address. Only a
+    -- confirmed name may decide anything; see 0018-forward-confirmed-names.sql.
+    forward_confirmed INTEGER                        -- NULL: not checked yet
 );
 
 CREATE INDEX ix_source_names_checked ON source_names(checked_at);
@@ -1138,6 +1141,9 @@ VALUES ('0016', datetime('now'), 'mta_sts_mode on dns_snapshots: the mode of the
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0017', datetime('now'), 'forensic_reports gains delivery_result, reported_by and a unique raw_hash: the table had never been written to, and storing failure reports for the first time showed what it was missing');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0018', datetime('now'), 'forward_confirmed on source_names: a reverse name decides nothing unless its own forward records point back at the address, because whoever holds an address can write any name into its PTR');
 
 
 -- ============================================================================

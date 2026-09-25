@@ -38,12 +38,33 @@ public sealed class SenderInventoryTests
     [Fact]
     public void ASecurityGatewayThatNeverAuthenticatesIsRelayedNotAnImpersonator()
     {
-        var inky = Source(ip: "198.51.100.20", messages: 2, passing: 0) with { ReverseName = "ipw-outbound.inkyphishfence.com" };
+        var inky = Source(ip: "198.51.100.20", messages: 2, passing: 0)
+            with { ReverseName = "ipw-outbound.inkyphishfence.com", NameConfirmed = true };
         var stranger = Source(ip: "198.51.100.77", messages: 5, passing: 0);
         var report = Report(inky, stranger);
 
         Assert.Equal(SenderClass.Relayed, ClientReport.ClassOf(inky));
         Assert.Equal("198.51.100.77", Assert.Single(report.ImpersonatingSources).SourceIp);
+    }
+
+    /// <summary>
+    /// The same name, unconfirmed, is a claim the sender wrote.
+    /// </summary>
+    /// <remarks>
+    /// Taken at its word, reversing to mail.inkyphishfence.com was enough to
+    /// move a forger out of "who tried to send mail as you" and have its mail
+    /// described to the client as expected. A PTR is written by whoever holds
+    /// the address; only INKY's forward DNS naming it back makes it INKY's.
+    /// </remarks>
+    [Fact]
+    public void AnUnconfirmedGatewayNameDoesNotHideAForgery()
+    {
+        var forger = Source(ip: "203.0.113.66", messages: 40, passing: 0)
+            with { ReverseName = "mail.inkyphishfence.com", NameConfirmed = false };
+        var report = Report(forger);
+
+        Assert.Equal(SenderClass.Suspicious, ClientReport.ClassOf(forger));
+        Assert.Equal("203.0.113.66", Assert.Single(report.ImpersonatingSources).SourceIp);
     }
 
     /// <summary>
@@ -54,9 +75,23 @@ public sealed class SenderInventoryTests
     [Fact]
     public void AProviderIsRecognizedByItsReverseName()
     {
-        var zoho = Source(ip: "198.51.100.30", messages: 3, passing: 0) with { ReverseName = "mx.zoho.com" };
+        var zoho = Source(ip: "198.51.100.30", messages: 3, passing: 0)
+            with { ReverseName = "mx.zoho.com", NameConfirmed = true };
 
         Assert.Equal(SenderClass.Unidentified, ClientReport.ClassOf(zoho));
+    }
+
+    /// <summary>
+    /// Nor may a claimed provider name soften a finding from "nobody can
+    /// account for this" to "a tool somebody signed up for".
+    /// </summary>
+    [Fact]
+    public void AnUnconfirmedProviderNameIsNotRecognized()
+    {
+        var claimed = Source(ip: "198.51.100.31", messages: 3, passing: 0)
+            with { ReverseName = "mx.zoho.com", NameConfirmed = false };
+
+        Assert.Equal(SenderClass.Suspicious, ClientReport.ClassOf(claimed));
     }
 
     [Fact]
@@ -508,6 +543,9 @@ public sealed class EnforcementReadinessTests
         {
             SourceIp = "203.0.113." + Math.Abs(name.GetHashCode() % 200 + 1),
             ReverseName = name,
+            // A service that is the operator's own, looked up and confirmed:
+            // what a real one looks like once the names have been resolved.
+            NameConfirmed = true,
             Messages = failing,
             Passing = 0,
             Failing = failing,

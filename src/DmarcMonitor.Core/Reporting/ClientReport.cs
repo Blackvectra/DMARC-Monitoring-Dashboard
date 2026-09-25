@@ -63,13 +63,29 @@ public sealed record ReportSource
     /// recognizes an address; they recognize "a Comcast connection in Denver"
     /// or "one of our own servers".
     ///
-    /// Read for display and never for judgement. A PTR is written by whoever
-    /// holds the address, so it identifies a sender the way a return address
+    /// Read for display, and for judgement only through
+    /// <see cref="VerifiedName"/>. A PTR is written by whoever holds the
+    /// address, so on its own it identifies a sender the way a return address
     /// on an envelope does - enough to recognize a provider, nowhere near
-    /// enough to trust one. Nothing here feeds whether a source counts as
-    /// impersonating.
+    /// enough to trust one.
     /// </remarks>
     public string ReverseName { get; init; } = "";
+
+    /// <summary>
+    /// True when the reverse name's own forward records point back at this
+    /// address.
+    /// </summary>
+    /// <remarks>
+    /// The difference between a name and a claim. A server sending forged mail
+    /// can reverse to mail.inkyphishfence.com; it cannot make INKY's forward
+    /// DNS name it back. Unconfirmed, a name that the catalogue recognized as a
+    /// mail filter moved the forgery out of "who tried to send mail as you"
+    /// and described it as expected.
+    /// </remarks>
+    public bool NameConfirmed { get; init; }
+
+    /// <summary>The reverse name when it may decide something, else empty.</summary>
+    public string VerifiedName => NameConfirmed ? ReverseName : "";
 
     /// <summary>The name if there is one, otherwise the address.</summary>
     public string Display => ReverseName.Length > 0 ? ReverseName : SourceIp;
@@ -849,9 +865,14 @@ public sealed record ClientReport
     /// Who operates a source: the catalogue's name for it, else the
     /// registrable part of its reverse name, else the bare address.
     /// </summary>
+    /// <remarks>
+    /// The vendor's name only for a confirmed reverse name. An unconfirmed one
+    /// is still grouped by the domain it claims, which is what the address says
+    /// about itself; "INKY" would be this report vouching for it.
+    /// </remarks>
     private static string Operator(ReportSource source) =>
         SenderCatalog.Identify(source.SourceIp) is not null ? SenderCatalog.Label(source.SourceIp)
-        : Intelligence.SourceCatalog.Identify(source.ReverseName) is { } known ? known.Name
+        : Intelligence.SourceCatalog.Identify(source.VerifiedName) is { } known ? known.Name
         : Intelligence.SourceCatalog.OrganizationalDomain(source.ReverseName) is { } org ? org
         : source.Display;
 
@@ -892,7 +913,7 @@ public sealed record ClientReport
     /// Microsoft 365 already can. The fix is in the gateway's own settings.
     /// </remarks>
     private static bool PassesMailOn(ReportSource source) =>
-        Intelligence.SourceCatalog.Identify(source.ReverseName)?.Kind
+        Intelligence.SourceCatalog.Identify(source.VerifiedName)?.Kind
             is Intelligence.SourceKind.SecurityGateway or Intelligence.SourceKind.MailProvider
         // Recognized by address rather than by name: Microsoft's and Google's
         // ranges are in the sender catalogue, and a client's own mailbox
@@ -1169,7 +1190,13 @@ public sealed record ClientReport
         // passing mail on - INKY and Proofpoint re-sending a message to the
         // recipient behind them - and it was printed in eleven of nineteen
         // September reports under "somebody pretending to be you".
-        if (Intelligence.SourceCatalog.Identify(source.ReverseName)?.Kind is Intelligence.SourceKind.SecurityGateway)
+        //
+        // Only on a confirmed name. This takes a source OUT of the list of
+        // impersonators, and a forger chooses its own PTR: reversing to
+        // mail.inkyphishfence.com was enough to have its forgeries described
+        // to the client as expected. INKY's forward DNS naming the address
+        // back is not something the forger can write.
+        if (Intelligence.SourceCatalog.Identify(source.VerifiedName)?.Kind is Intelligence.SourceKind.SecurityGateway)
         {
             return SenderClass.Relayed;
         }
@@ -1179,7 +1206,7 @@ public sealed record ClientReport
         // is keyed on host names: asked about the address, as it was, it
         // never matched anything.
         return SenderCatalog.Identify(source.SourceIp) is not null
-               || Intelligence.SourceCatalog.Identify(source.ReverseName) is not null
+               || Intelligence.SourceCatalog.Identify(source.VerifiedName) is not null
             ? SenderClass.Unidentified
             : SenderClass.Suspicious;
     }
