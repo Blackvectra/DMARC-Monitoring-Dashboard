@@ -1135,6 +1135,45 @@ public sealed record ClientReport
         }
     }
 
+    /// <summary>
+    /// What the mail that failed was, when none of it was the client's own
+    /// sending going wrong.
+    /// </summary>
+    /// <remarks>
+    /// "Protected" over 79.6% reads as a fifth of the client's mail failing.
+    /// Forwarded mail a receiver allowed for is not the client's fault either,
+    /// and one such message kept this sentence off the report it was written
+    /// for.
+    /// </remarks>
+    private string ForgedRemainder
+    {
+        get
+        {
+            var own = Domains.Sum(d => d.OwnFailing);
+            if (PassRate >= 100 || own > OverriddenMessages) { return ""; }
+
+            // Said as what each part was, from the same groups the sender
+            // table shows. "Forged" alone was wrong for a domain whose only
+            // failures were a recipient's filter re-sending its mail.
+            var parts = new List<string>();
+            if (ImpersonatingSources.Sum(x => x.Failing) > 0)
+            {
+                parts.Add(EveryDomainFullyEnforcing
+                    ? "forged mail, which your policy asks receivers to refuse or send to junk"
+                    : "forged mail, not yours");
+            }
+
+            if (InventoryOf(SenderClass.Relayed).Sum(x => x.Failing) > 0)
+            {
+                parts.Add("your mail passed on by a recipient's mail filter");
+            }
+
+            if (own > 0 || OverriddenMessages > 0) { parts.Add("forwarded mail the receiver allowed for"); }
+
+            return parts.Count == 0 ? "" : " The rest was " + string.Join(", and ", parts) + ".";
+        }
+    }
+
     private string VerdictCore
     {
         get
@@ -1199,20 +1238,30 @@ public sealed record ClientReport
             // "Protected. Every domain is enforcing" over a domain anybody
             // could send as tomorrow. A policy is about what a domain
             // permits, not about what it did in a given month.
-            var watching = Domains.Count(d => !d.IsEnforcing);
+            var watching = Domains.Where(d => !d.IsEnforcing).ToList();
 
-            if (watching > 0 && broken > 0)
+            // Named, with the step: "the domain that is only being watched"
+            // was this product's vocabulary, not the client's. The client
+            // knows the domain and can look up p=none; they cannot look up
+            // what "watched" means.
+            var named = watching.Count == 1 ? watching[0].Domain : Plural.Count(watching.Count, "domain");
+
+            // "From p=none" only when that is known. A domain no receiver
+            // reported on this period carries a placeholder policy, and its
+            // row in the table already says "not known for this period".
+            var step = watching.All(d => d.PolicyKnown) ? "move from p=none to p=quarantine" : "move to p=quarantine";
+
+            if (watching.Count > 0 && broken > 0)
             {
-                return $"Conditional readiness. {PassRate:0.#}% of the mail sent using your name was provably yours, and "
-                     + $"{Plural.Count(broken, "service")} still {Plural.Of(broken, "needs", "need")} correcting before {(watching == 1 ? "the domain that is" : $"the {watching} domains")} "
-                     + "only being watched can be protected.";
+                return $"Not ready for p=quarantine. {PassRate:0.#}% of the mail sent using your name was provably yours, and "
+                     + $"{Plural.Count(broken, "service")} still {Plural.Of(broken, "needs", "need")} correcting before "
+                     + $"{named} can {step}.";
             }
 
-            if (watching > 0)
+            if (watching.Count > 0)
             {
-                return $"Ready for enforcement. {PassRate:0.#}% of the mail sent using your name was provably yours and no sender "
-                     + $"needs correcting, so {(watching == 1 ? "the domain" : $"the {watching} domains")} "
-                     + "only being watched can be moved to quarantine.";
+                return $"Ready for p=quarantine. {PassRate:0.#}% of the mail sent using your name was provably yours and no "
+                     + $"sender needs correcting, so {named} can {step}.";
             }
 
             // "Of the mail sent using your name", not "of your mail". The
@@ -1226,7 +1275,11 @@ public sealed record ClientReport
                 + $"sent using your name was provably yours; {broken} of your services still {(broken == 1 ? "sends" : "send")} mail that "
                 + "cannot prove it."
                 : $"Protected. Every domain is enforcing, {PassRate:0.#}% of the mail sent using your name was "
-                + "provably yours, and no sender of yours needs correcting.";
+                + "provably yours, and no sender of yours needs correcting."
+                // "Protected" over 79.6% reads as a fifth of the client's mail
+                // failing. When none of the failures was theirs, say what the
+                // rest was.
+                + ForgedRemainder;
         }
     }
 
@@ -1276,8 +1329,15 @@ public sealed record ClientReport
         // for the customer; anything else is a finding. The source catalogue
         // is keyed on host names: asked about the address, as it was, it
         // never matched anything.
+        //
+        // Only a service somebody signs up to send through - a mail platform
+        // or a marketing sender - makes it a question. Bulk hosting says who
+        // owns the wire, not who sent the mail: asking a client to "confirm
+        // and authorize" a ColoCrossing VPS that has sent as seven other
+        // customers too invites them to authorize a forger.
         return SenderCatalog.Identify(source.SourceIp) is not null
-               || Intelligence.SourceCatalog.Identify(source.VerifiedName) is not null
+               || Intelligence.SourceCatalog.Identify(source.VerifiedName)?.Kind
+                   is Intelligence.SourceKind.MailProvider or Intelligence.SourceKind.Marketing
             ? SenderClass.Unidentified
             : SenderClass.Suspicious;
     }
