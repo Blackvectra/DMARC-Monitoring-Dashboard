@@ -475,6 +475,81 @@ public sealed class ZoneAuditTests
     }
 
     [Fact]
+    public void AWildcardAuthorizationAcceptsReportsForAnyDomainAndIsNotBroken()
+    {
+        // RFC 7489 §7.1 offers this in so many words: a receiver willing to
+        // take reports for any domain publishes one record at
+        // *._report._dmarc instead of one per sender. The "*" has no dot in
+        // it because it is not a domain name, and reading it as a dropped
+        // suffix called a working record broken and offered
+        // "*.com._report._dmarc" as the fix.
+        var zone = ZoneFile.Parse("""
+            ; Domain: example.net
+            ; Exported (y-m-d hh:mm:ss): 2026-09-21 10:33:17
+            ;
+            ; Use at your own risk.
+
+            $ORIGIN example.net.
+
+            ; SOA Record
+            @	3600	 IN 	SOA	ns1.example.net.	hostmaster.example.net. (
+            					2026091600
+            					28800
+            					7200
+            					604800
+            					3600
+            					)
+
+            ; TXT Record
+            @	3600	 IN 	TXT	"v=spf1 include:spf.example.net -all"
+            _dmarc	3600	 IN 	TXT	"v=DMARC1; p=reject; rua=mailto:dmarc@example.net"
+            *._report._dmarc	3600	 IN 	TXT	"v=DMARC1"
+
+            ; NS Record
+            @	3600	 IN 	NS	ns1.example.net.
+            @	3600	 IN 	NS	ns2.example.net.
+
+            ; MX Record
+            @	3600	 IN 	MX	10	mail.example.net.
+            """);
+
+        var findings = ZoneAudit.Assess(zone, new ZoneEvidence { Monitored = ["client.example", "other.example"] });
+
+        Assert.Empty(findings);
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("*.example.net")]
+    public void AWildcardAuthorizationIsNotReadAsTheNameOfADomain(string wildcard)
+    {
+        // Neither "has no dot" nor "is not a domain this install monitors" is
+        // a sentence about a pattern: "*.example.net" stands for every name
+        // under example.net, one of which is monitored here.
+        var findings = Assess(
+            $"{wildcard}._report._dmarc\t1800\tIN\tTXT\t\"v=DMARC1;\"\n",
+            new ZoneEvidence { Monitored = ["news.example.net", "client.example"] });
+
+        Assert.DoesNotContain(findings, f => f.Record == "DMARC");
+    }
+
+    [Fact]
+    public void AWildcardAuthorizationWithTheVersionInLowerCaseStillAuthorizesNothing()
+    {
+        // The wildcard is legitimate; this one is still broken, and says so
+        // once, about the version rather than about the "*".
+        var findings = Assess("""
+            *._report._dmarc	1800	IN	TXT	"v=dmarc1;"
+            """);
+
+        var broken = Assert.Single(findings, f => f.Record == "DMARC");
+
+        Assert.Equal(HygieneSeverity.Breaking, broken.Severity);
+        Assert.Contains("authorizing any domain", broken.Problem, StringComparison.Ordinal);
+        Assert.Contains("capitals", broken.Problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void NothingIsSaidAboutAuthorizationsWhenTheBookWasNotConsulted()
     {
         // With no database every authorization would otherwise be reported as
@@ -566,6 +641,117 @@ public sealed class ZoneAuditTests
         var findings = Assess("mail\t3600\tIN\tCNAME\ttarget.example.\n");
 
         Assert.DoesNotContain(findings, f => f.Record == "zone");
+    }
+
+    /// <summary>
+    /// A Cloudflare export for a domain whose website is a hosted service
+    /// reached by a CNAME at the apex, with the domain's mail beside it.
+    /// </summary>
+    private const string CloudflareApexCname = """
+        ;;
+        ;; Domain:     example.com.
+        ;; Exported:   2026-09-21 17:40:08
+        ;;
+        ;; Use at your own risk.
+        ;; SOA Record
+        example.com	3600	IN	SOA	courtney.ns.cloudflare.com. dns.cloudflare.com. 2054167900 10000 2400 604800 3600
+
+        ;; NS Records
+        example.com.	86400	IN	NS	courtney.ns.cloudflare.com.
+        example.com.	86400	IN	NS	elmo.ns.cloudflare.com.
+
+        ;; CNAME Records
+        example.com.	1	IN	CNAME	example-com.sites.example.net. ; cf_tags=cf-proxied:true
+        www.example.com.	1	IN	CNAME	example.com. ; cf_tags=cf-proxied:true
+
+        ;; MX Records
+        example.com.	1	IN	MX	10 mail.example.net.
+
+        ;; TXT Records
+        example.com.	3600	IN	TXT	"v=spf1 include:spf.example.net -all"
+        _dmarc.example.com.	1	IN	TXT	"v=DMARC1; p=reject; rua=mailto:dmarc@example.com"
+        """;
+
+    [Fact]
+    public void ACnameAtTheApexOfAZoneCloudflareServesIsFlattenedRatherThanBroken()
+    {
+        // Cloudflare never hands out a CNAME at a zone's apex: it looks the
+        // target up itself and answers with the addresses. The record in its
+        // export is an instruction to Cloudflare, the MX and TXT beside it
+        // are served as written, and telling somebody to keep one or the
+        // other has them delete the domain's mail to make room for a website.
+        var findings = ZoneAudit.Assess(ZoneFile.Parse(CloudflareApexCname), new ZoneEvidence());
+
+        Assert.Empty(findings);
+    }
+
+    [Fact]
+    public void WhenTheFileListsNoNameServersTheLiveDelegationSaysWhoAnswers()
+    {
+        // The same zone pasted from the CNAME section down, so the file says
+        // nothing about where it is served. Live DNS does.
+        var partial = CloudflareApexCname[CloudflareApexCname.IndexOf(";; CNAME Records", StringComparison.Ordinal)..];
+
+        var findings = ZoneAudit.Assess(
+            ZoneFile.Parse(partial, "example.com"),
+            Live(delegation: ["courtney.ns.cloudflare.com", "elmo.ns.cloudflare.com"]));
+
+        Assert.DoesNotContain(findings, f => f.Record == "zone");
+    }
+
+    [Theory]
+    [InlineData("ns1.example.net", "ns2.example.net")]
+    [InlineData("courtney.ns.cloudflare.com", "ns1.example.net")]
+    public void AnApexCnameAnsweredForByAnythingButCloudflareKeepsItsFinding(string first, string second)
+    {
+        // A Cloudflare export loaded onto the operator's own name servers
+        // without the edit Cloudflare's header asks for, and a domain
+        // delegated to Cloudflare and somewhere else at once. Either way a
+        // server that flattens nothing is answering, and the CNAME at the
+        // apex is the fault it looks like.
+        var findings = ZoneAudit.Assess(ZoneFile.Parse(CloudflareApexCname), Live(delegation: [first, second]));
+
+        var clash = Assert.Single(findings, f => f.Record == "zone");
+
+        Assert.Equal(HygieneSeverity.Breaking, clash.Severity);
+        Assert.Equal("example.com", clash.Name);
+    }
+
+    [Fact]
+    public void ACnameAtTheApexOfAnyOtherZoneIsBreakingAndItIsTheCnameThatHasToGo()
+    {
+        // Genuinely broken: the apex always carries the SOA and NS, so a
+        // CNAME there always shares its name with something. BIND refuses to
+        // load a zone like this. What must not happen is advice to keep the
+        // CNAME and drop "the other records" - at the apex those are the
+        // zone's own SOA and NS, and the domain's mail.
+        var zone = ZoneFile.Parse("""
+            $ORIGIN example.com.
+            $TTL 1h
+            @	IN	SOA	ns1.example.net. hostmaster.example.com. (
+            		2026092501	; serial
+            		1d		; refresh
+            		2h		; retry
+            		4w		; expire
+            		1h )		; minimum
+            	IN	NS	ns1.example.net.
+            	IN	NS	ns2.example.net.
+            	IN	MX	10 mail.example.net.
+            	IN	TXT	"v=spf1 include:spf.example.net -all"
+            @	IN	CNAME	site.example.net.
+            www	IN	CNAME	@
+            _dmarc	IN	TXT	"v=DMARC1; p=reject"
+            """);
+
+        var findings = ZoneAudit.Assess(zone, new ZoneEvidence());
+
+        var clash = Assert.Single(findings, f => f.Record == "zone");
+
+        Assert.Equal(HygieneSeverity.Breaking, clash.Severity);
+        Assert.Equal("example.com", clash.Name);
+        Assert.Contains("MX, NS, SOA and TXT", clash.Problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("Keep the CNAME or the other record", clash.Fix, StringComparison.Ordinal);
+        Assert.Contains("A and AAAA", clash.Fix, StringComparison.Ordinal);
     }
 
     // ---- the file against DNS ---------------------------------------------------------
@@ -668,6 +854,39 @@ public sealed class ZoneAuditTests
         Assert.Equal(HygieneSeverity.Breaking, wrong.Severity);
         Assert.Contains("zone for other.example", wrong.Problem, StringComparison.Ordinal);
         Assert.Empty(report.Evidence.Selectors);
+    }
+
+    [Fact]
+    public async Task AZonePastedWithoutItsHeaderIsJudgedRatherThanRefusedAsAZoneForTheAtSign()
+    {
+        // Nothing above the SOA, whose owner is "@". That names no domain, so
+        // the one on the page is the zone's - it is not a different zone.
+        var report = await new ZoneAuditor().RunAsync(
+            """
+            ; SOA Record
+            @	3600	 IN 	SOA	ns1.example.net.	hostmaster.example.net. (
+            					2026091600
+            					28800
+            					7200
+            					604800
+            					3600
+            					)
+
+            ; TXT Record
+            @	3600	 IN 	TXT	"include:spf.example.net -all"
+
+            ; CNAME Record
+            www	3600	 IN 	CNAME	@
+            """,
+            "example.com",
+            offline: true);
+
+        Assert.Equal("example.com", report.Zone.Origin);
+        Assert.DoesNotContain(report.Findings, f => f.Problem.Contains("This file is a zone for", StringComparison.Ordinal));
+
+        // And it was actually judged: the inert SPF record is found at the apex.
+        var spf = Assert.Single(report.Findings, f => f.Record == "SPF");
+        Assert.Equal("example.com", spf.Name);
     }
 
     [Theory]
