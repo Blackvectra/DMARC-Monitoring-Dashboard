@@ -773,6 +773,16 @@ public sealed class PageTests : IClassFixture<SeededApp>
         Assert.Contains("href=\"failures\"", html, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task DnsChangesIsReachableAndSaysWhatItIsFor()
+    {
+        var home = await Client().GetStringAsync("/");
+        var html = await Client().GetStringAsync("/dns-changes");
+
+        Assert.Contains("href=\"dns-changes\"", home, StringComparison.Ordinal);
+        Assert.Contains("<h1>DNS changes</h1>", html, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("/settings")]
     [InlineData("/fix")]

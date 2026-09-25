@@ -121,6 +121,7 @@ builder.Services.AddScoped<RemediationUiService>();
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tls.TlsReportService(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Forensic.ForensicReportService(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Dns.DnsDriftStore(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());
 

@@ -251,6 +251,7 @@ else
         {
             <a href="#zone">Zone file</a>
         }
+        <a href="#changes">DNS changes</a>
         <a href="#reporting">
             Reporting
             @if (_detail.Reporters.Any(r => r.HasGoneQuiet))
@@ -847,6 +848,16 @@ else
             }
         </section>
     }
+
+    <section id="changes">
+        <h2>DNS changes</h2>
+        <p class="sub">What changed in this domain's records between scans, newest first.</p>
+        @if (_access is not null)
+        {
+            <DriftList Domain="@_detail.Domain" Access="_access" Limit="20"
+                       Empty="No change seen. Changes appear here after the second DNS scan of this domain." />
+        }
+    </section>
 
     <section id="reporting">
         <h2>Who is reporting</h2>
