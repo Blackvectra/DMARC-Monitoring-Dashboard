@@ -163,7 +163,7 @@ public sealed class ForensicReportService(string databasePath)
     }
 
     /// <summary>What arrived in the window, without reading any of the content.</summary>
-    public async Task<FailureSummary> SummariseAsync(
+    public async Task<FailureSummary> SummarizeAsync(
         int days = 30, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
         await using var db = new SqliteConnection(_connectionString);

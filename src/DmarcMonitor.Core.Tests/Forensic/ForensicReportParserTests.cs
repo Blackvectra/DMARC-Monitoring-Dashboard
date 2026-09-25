@@ -212,7 +212,7 @@ public sealed class ForensicReportParserTests
     /// <remarks>
     /// These are filed per customer and they carry real subjects, so a guess
     /// that lands wrong is one client reading another client's mail. Refusing
-    /// leaves it in the unrecognised folder for somebody to look at, which is
+    /// leaves it in the unrecognized folder for somebody to look at, which is
     /// the correct outcome for a report nobody can attribute.
     /// </remarks>
     [Fact]

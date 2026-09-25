@@ -1,0 +1,133 @@
+@using DmarcMonitor.Core.Dns
+@using DmarcMonitor.Core.Tenancy
+@inject DnsDriftStore Drift
+@inject AuditLog Audit
+
+@*
+    Changes seen in a domain's DNS between scans, newest first.
+
+    Used on the DNS changes page for the whole book and on a domain's own
+    page. Anybody who can see the domain sees its changes; acknowledging one -
+    saying "seen it, it was meant" - is for the people who run the service,
+    and is recorded with who did it.
+*@
+
+@if (_events is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_events.Count == 0)
+{
+    <p class="muted">@(OpenOnly ? "Nothing waiting: every change seen has been acknowledged." : Empty)</p>
+}
+else
+{
+    <table class="triage drift">
+        <thead>
+            <tr>
+                <th>Seen</th>
+                @if (Domain is null) { <th>Domain</th> }
+                <th>What changed</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var e in _events)
+            {
+                <tr>
+                    <td class="when">@e.DetectedAt.ToString("MMM d, yyyy HH:mm") UTC</td>
+                    @if (Domain is null)
+                    {
+                        <td>
+                            <a href="@($"domains/{Uri.EscapeDataString(e.Domain)}")">@e.Domain</a>
+                            @if (!string.Equals(e.ClientName, e.Domain, StringComparison.OrdinalIgnoreCase))
+                            {
+                                <br /><span class="muted">@e.ClientName</span>
+                            }
+                        </td>
+                    }
+                    <td>
+                        <span class="badge @Css(e.Severity)">@Label(e.Severity)</span>
+                        @e.Summary
+                        @if (e.WasExpected)
+                        {
+                            <br /><span class="muted">Made from this product in the two days before, so probably expected.</span>
+                        }
+                        @if (e.OldValue is not null || e.NewValue is not null)
+                        {
+                            <details>
+                                <summary class="muted">Records</summary>
+                                <p class="muted">Before: <code class="wrap">@(e.OldValue ?? "(none)")</code></p>
+                                <p class="muted">After: <code class="wrap">@(e.NewValue ?? "(none)")</code></p>
+                            </details>
+                        }
+                    </td>
+                    <td>
+                        @if (e.IsAcknowledged)
+                        {
+                            <span class="muted">Seen by @e.AcknowledgedBy</span>
+                        }
+                        else if (Access is { CanOperate: true })
+                        {
+                            <button @onclick="() => AcknowledgeAsync(e)">Mark as seen</button>
+                        }
+                        else
+                        {
+                            <span class="badge dim">New</span>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    /// <summary>Only this domain's changes, or every domain's when null.</summary>
+    [Parameter] public string? Domain { get; set; }
+
+    [Parameter, EditorRequired] public OrganizationAccess Access { get; set; } = default!;
+
+    [Parameter] public bool OpenOnly { get; set; }
+
+    [Parameter] public int Limit { get; set; } = 200;
+
+    [Parameter] public string Empty { get; set; } = "No change has been seen in these records since scanning began.";
+
+    private IReadOnlyList<DriftEvent>? _events;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _events = await Drift.ListAsync(Access.TenantId, Access.RestrictedClient, Domain, OpenOnly, Limit);
+    }
+
+    private async Task AcknowledgeAsync(DriftEvent e)
+    {
+        // Checked again here, not only by hiding the button: a circuit can be
+        // driven without the page's markup.
+        if (Access is not { CanOperate: true }) { return; }
+
+        if (await Drift.AcknowledgeAsync(e.Id, Access.User, null, Access.TenantId, Access.RestrictedClient))
+        {
+            await Audit.RecordAsync(Access.Current?.Id, Access.User, "dns.drift.acknowledged", $"{e.Domain}: {e.Summary}");
+        }
+
+        await LoadAsync();
+    }
+
+    private static string Css(string severity) => severity switch
+    {
+        "critical" => "urgent",
+        "warning" => "act",
+        _ => "dim",
+    };
+
+    private static string Label(string severity) => severity switch
+    {
+        "critical" => "Critical",
+        "warning" => "Check",
+        _ => "Info",
+    };
+}

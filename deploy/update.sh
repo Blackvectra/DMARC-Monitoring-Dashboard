@@ -185,6 +185,30 @@ test -f "$WORK/unpacked/dmarc-web/DmarcMonitor.Web.dll" \
 
 chmod +x "$WORK/dmarc"
 
+# ---- the runtime the new build needs ----------------------------------------
+# The web bundle is not self-contained, and moving from .NET 8 to .NET 10
+# means a release this script fetches may need a runtime the server does not
+# have. Swapped in regardless, the service would not start and the rollback
+# below would have to undo it; refused here, nothing has been touched yet.
+needed="$(python3 - "$WORK/unpacked/dmarc-web/DmarcMonitor.Web.runtimeconfig.json" <<'PY' 2>/dev/null || true
+import json, sys
+options = json.load(open(sys.argv[1]))["runtimeOptions"]
+for framework in options.get("frameworks") or [options.get("framework", {})]:
+    if framework.get("name") == "Microsoft.AspNetCore.App":
+        print(framework["version"].split(".")[0])
+PY
+)"
+dotnet_bin="$(systemctl cat "$SERVICE" 2>/dev/null | sed -n 's/^ExecStart=\([^ ]*dotnet\) .*/\1/p' | tail -1)"
+dotnet_bin="${dotnet_bin:-$(command -v dotnet || true)}"
+if [[ -n "$needed" && -n "$dotnet_bin" ]] \
+    && ! "$dotnet_bin" --list-runtimes 2>/dev/null | grep -q "^Microsoft.AspNetCore.App ${needed}\."; then
+    echo "this release needs the ASP.NET Core ${needed} runtime, and ${dotnet_bin} does not have it." >&2
+    echo "install it first - $(pkg_hint "aspnetcore-runtime-${needed}.0"), or re-run bootstrap.sh, which" >&2
+    echo "installs Microsoft's copy where the distribution has none - then run this again." >&2
+    echo "Nothing has been changed." >&2
+    exit 69
+fi
+
 # ---- back up ----------------------------------------------------------------
 echo "  backing up the database"
 sudo -u "$USER_NAME" sqlite3 "${ROOT}/data/dmarc.db" \

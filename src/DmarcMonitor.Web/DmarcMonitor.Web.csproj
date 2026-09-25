@@ -8,11 +8,11 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Identity.Web" Version="4.14.2" />
     <PackageReference Include="Microsoft.Identity.Web.UI" Version="4.14.2" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
   </ItemGroup>
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- CA1848 asks for LoggerMessage delegates. These are four lines that run

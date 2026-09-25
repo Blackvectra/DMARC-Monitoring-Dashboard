@@ -87,9 +87,10 @@ fi
 # The web bundle is not self-contained. Checked here, because the alternative
 # is a unit that fails to start with a message about a missing framework,
 # three steps from now.
-if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft.AspNetCore.App 8\.'; then
-    echo "the ASP.NET Core 8 runtime is not installed (dotnet --list-runtimes does not show Microsoft.AspNetCore.App 8.x)." >&2
-    echo "install it first:  $(pkg_hint aspnetcore-runtime-8.0)" >&2
+if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft.AspNetCore.App 10\.'; then
+    echo "the ASP.NET Core 10 runtime is not installed (dotnet --list-runtimes does not show Microsoft.AspNetCore.App 10.x)." >&2
+    echo "install it first:  $(pkg_hint aspnetcore-runtime-10.0)" >&2
+    echo "or, where the distribution has no such package: bootstrap.sh installs Microsoft's copy into /opt/dotnet" >&2
     echo "on Ubuntu without that package, add Microsoft's feed: https://learn.microsoft.com/dotnet/core/install/linux-ubuntu" >&2
     exit 69
 fi

@@ -166,7 +166,7 @@ public static class RolloutAssessment
             //
             // This said "Ready to move to p=reject" for a real domain sitting
             // at p=none and 100% authenticating. An operator who followed it
-            // got "[REFUSED] Refusing to move mortonnd.gov from p=none
+            // got "[REFUSED] Refusing to move acme.example from p=none
             // straight to p=reject" from the very next command. Advice the
             // product will not then carry out is worse than no advice: it
             // spends the operator's trust on the one screen whose whole job is

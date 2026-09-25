@@ -31,7 +31,7 @@
     <div class="head-actions">
         @* One client at a time, when there is more than one to choose from.
            The whole page follows it: the dial, the chart, the rows. An MSP is
-           asked "how is Morton doing", and the answer must not be the estate. *@
+           asked "how is Acme doing", and the answer must not be the estate. *@
         @if (_clients.Count > 1 && _access?.RestrictedClient is null)
         {
             <label>
@@ -209,7 +209,7 @@ else
                             <tr>
                                 <td>
                                     @* The name if there is one. Nobody
-                                       recognises an address. *@
+                                       recognizes an address. *@
                                     @if (h.IsNamed)
                                     {
                                         <a href="/sources/@h.SourceIp"><span class="src-name">@h.ReverseName</span></a>
@@ -565,7 +565,7 @@ else
     /// </remarks>
     private IReadOnlyList<(string Label, double Rate, string Note)> Checks() =>
     [
-        ("SPF", _rates.SpfRate, "the sending server was authorised by the envelope domain"),
+        ("SPF", _rates.SpfRate, "the sending server was authorized by the envelope domain"),
         ("DKIM", _rates.DkimRate, "the signature verified"),
         ("DMARC", _rates.DmarcRate, "one of those passed AND matched the domain recipients see"),
     ];

@@ -158,7 +158,7 @@ public sealed class HealthCheckTests
     }
 
     [Fact]
-    public void ALongListOfQuietDomainsIsSummarisedRatherThanPrinted()
+    public void ALongListOfQuietDomainsIsSummarizedRatherThanPrinted()
     {
         var quiet = Enumerable.Range(0, 9)
             .Select(i => new QuietDomain($"d{i}.example", Now.AddDays(-30), 5))

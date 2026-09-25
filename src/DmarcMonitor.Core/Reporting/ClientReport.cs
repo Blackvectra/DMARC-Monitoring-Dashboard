@@ -59,13 +59,13 @@ public sealed record ReportSource
     /// </summary>
     /// <remarks>
     /// The Sources page names these and the report did not, so a client was
-    /// handed a row of digits and asked whether they recognised it. Nobody
-    /// recognises an address; they recognise "a Comcast connection in Denver"
+    /// handed a row of digits and asked whether they recognized it. Nobody
+    /// recognizes an address; they recognize "a Comcast connection in Denver"
     /// or "one of our own servers".
     ///
     /// Read for display and never for judgement. A PTR is written by whoever
     /// holds the address, so it identifies a sender the way a return address
-    /// on an envelope does - enough to recognise a provider, nowhere near
+    /// on an envelope does - enough to recognize a provider, nowhere near
     /// enough to trust one. Nothing here feeds whether a source counts as
     /// impersonating.
     /// </remarks>
@@ -154,13 +154,19 @@ public enum SenderClass
     /// <summary>Known, authenticating, aligned. Nothing to do.</summary>
     Approved,
 
-    /// <summary>The client's own path, or a recognised service, losing some of its mail.</summary>
+    /// <summary>The client's own path, or a recognized service, losing some of its mail.</summary>
     Misconfigured,
 
-    /// <summary>Never authenticated, but operated by somebody the catalog recognises.</summary>
+    /// <summary>
+    /// Never authenticated, but a security gateway passing mail on - usually a
+    /// recipient's filter re-sending the client's own message. Not an attack.
+    /// </summary>
+    Relayed,
+
+    /// <summary>Never authenticated, but operated by somebody the catalog recognizes.</summary>
     Unidentified,
 
-    /// <summary>Never authenticated, and nothing recognises the operator.</summary>
+    /// <summary>Never authenticated, and nothing recognizes the operator.</summary>
     Suspicious,
 
     /// <summary>Sent in the previous period and not in this one.</summary>
@@ -257,7 +263,7 @@ public sealed record ReportSender
     /// </summary>
     /// <remarks>
     /// A service row gathers dozens of addresses and naming one of them would
-    /// be arbitrary. A single unrecognised sender has exactly one, and the
+    /// be arbitrary. A single unrecognized sender has exactly one, and the
     /// client cannot ask their hosting provider about a reverse name.
     /// </remarks>
     public string SourceIp { get; init; } = "";
@@ -545,9 +551,9 @@ public sealed record ClientReport
     /// <summary>The dates the report covers, said as a sentence.</summary>
     public string Covers => Through is { } through
         ? string.Create(CultureInfo.InvariantCulture,
-            $"Covers {Period.Start:d MMM yyyy} to {through:d MMM yyyy}; the month is still in progress.")
+            $"Covers {Period.Start:MMM d, yyyy} to {through:MMM d, yyyy}; the month is still in progress.")
         : string.Create(CultureInfo.InvariantCulture,
-            $"Covers {Period.Start:d MMM yyyy} to {Period.End:d MMM yyyy}.");
+            $"Covers {Period.Start:MMM d, yyyy} to {Period.End:MMM d, yyyy}.");
 
     /// <summary>" so far" while the month is still running.</summary>
     private string SoFar => Through is null ? "" : " so far";
@@ -638,7 +644,7 @@ public sealed record ClientReport
                         0 => "No receiver reported on any day of this period, so the figures above describe "
                            + "nothing that was observed.",
                         _ when reported == days && Through is { } through =>
-                            $"The month is not over. Every day to {through:d MMMM} was reported on by at least one receiver.",
+                            $"The month is not over. Every day to {through:MMMM d} was reported on by at least one receiver.",
                         _ when reported == days =>
                             "Every day of the period was reported on by at least one receiver.",
                         _ => $"The figures above describe the {reported} day(s) that were reported on. A day with "
@@ -671,7 +677,7 @@ public sealed record ClientReport
                     Label = "Sending services identified",
                     Value = senders.ToString("N0", CultureInfo.InvariantCulture),
                     Note = "Named rather than left as addresses, so an unfamiliar one is something you can "
-                         + "recognise or query.",
+                         + "recognize or query.",
                 });
             }
 
@@ -682,7 +688,7 @@ public sealed record ClientReport
                     Label = "Turned away on your behalf",
                     Value = Stopped.ToString("N0", CultureInfo.InvariantCulture),
                     // "The protection doing its job" only when it was: at
-                    // River City Boats 224 of 234 were the client's own
+                    // one client 224 of 234 were the client's own
                     // Mailchimp and Avanan mail, sent to junk.
                     Note = Domains.Sum(d => d.OwnFailing) > 0
                         ? "Refused or filed as junk by the receiving provider because your policy said to. This "
@@ -748,7 +754,7 @@ public sealed record ClientReport
                 {
                     // The catalog first, because "Microsoft 365" beats any
                     // reverse name its load balancers carry. Where it does not
-                    // recognise the sender, the reverse name is what turns a
+                    // recognize the sender, the reverse name is what turns a
                     // row of digits into something a client can say yes or no
                     // to - and a row they cannot read is a row they skip.
                     Name = service || only is not { IsNamed: true } ? g.Key : only.ReverseName,
@@ -774,7 +780,7 @@ public sealed record ClientReport
     /// own infrastructure. Passing even once is the thing a forger cannot do.
     /// </remarks>
     public IReadOnlyList<ReportSource> ImpersonatingSources =>
-        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated)
+        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated && ClassOf(s) != SenderClass.Relayed)
                    .OrderByDescending(s => s.Failing)];
 
     /// <summary>
@@ -888,7 +894,7 @@ public sealed record ClientReport
     private static bool PassesMailOn(ReportSource source) =>
         Intelligence.SourceCatalog.Identify(source.ReverseName)?.Kind
             is Intelligence.SourceKind.SecurityGateway or Intelligence.SourceKind.MailProvider
-        // Recognised by address rather than by name: Microsoft's and Google's
+        // Recognized by address rather than by name: Microsoft's and Google's
         // ranges are in the sender catalogue, and a client's own mailbox
         // provider failing is forwarding or a relay, not a vendor to ask to
         // sign. Asked to "arrange custom DKIM signing with Microsoft 365",
@@ -962,7 +968,7 @@ public sealed record ClientReport
             {
                 var one = Operators(vendors) == 1;
                 parts.Add((Name(vendors),
-                    $"Confirm {(one ? "it is an approved sender" : "they are approved senders")}, and authorise {who} "
+                    $"Confirm {(one ? "it is an approved sender" : "they are approved senders")}, and authorize {who} "
                   + $"to arrange custom DKIM signing for {domain} with {(one ? "it" : "each")}."));
             }
 
@@ -972,7 +978,7 @@ public sealed record ClientReport
                 // client can do is say whose it is.
                 var one = unnamed.Count == 1;
                 parts.Add((Name(unnamed),
-                    $"Tell {who} whether you recognise {(one ? "this address" : "these addresses")}. {(one ? "It" : "They")} "
+                    $"Tell {who} whether you recognize {(one ? "this address" : "these addresses")}. {(one ? "It" : "They")} "
                   + $"sent mail as {domain} that did not pass DMARC, and nothing on record names the operator. "
                   + "If it is a service of yours, it needs custom DKIM signing like any other; if not, somebody is "
                   + "sending as you."));
@@ -988,7 +994,7 @@ public sealed record ClientReport
                 // settled.
                 parts.Add((Name(gateways),
                     $"Confirm {(one ? "it handles" : "they handle")} your outbound mail. {(one ? "It" : "They")} may modify "
-                  + "or relay messages in a way that invalidates their DKIM signature; authorise "
+                  + "or relay messages in a way that invalidates their DKIM signature; authorize "
                   + $"{who} to validate the mail flow and set {(one ? "it" : "each")} to preserve the signature or "
                   + $"re-sign as {domain} after processing."));
             }
@@ -1146,8 +1152,8 @@ public sealed record ClientReport
     ///
     /// Only then does the catalog separate the two unproven cases, and it is
     /// separating "ask the customer whether they signed up for this" from
-    /// "nobody can account for this at all". A recognised operator is not
-    /// innocence: a shared ESP is where an unauthorised sender hides most
+    /// "nobody can account for this at all". A recognized operator is not
+    /// innocence: a shared ESP is where an unauthorized sender hides most
     /// comfortably. It is the difference between a question and an alarm.
     /// </remarks>
     public static SenderClass ClassOf(ReportSource source)
@@ -1159,10 +1165,21 @@ public sealed record ClientReport
         if (source.IsClean) { return SenderClass.Approved; }
         if (source.Passing > 0 || source.Authenticated) { return SenderClass.Misconfigured; }
 
+        // A security gateway that never authenticated is somebody's filter
+        // passing mail on - INKY and Proofpoint re-sending a message to the
+        // recipient behind them - and it was printed in eleven of nineteen
+        // September reports under "somebody pretending to be you".
+        if (Intelligence.SourceCatalog.Identify(source.ReverseName)?.Kind is Intelligence.SourceKind.SecurityGateway)
+        {
+            return SenderClass.Relayed;
+        }
+
         // Never authenticated. A name the catalog knows makes it a question
-        // for the customer; anything else is a finding.
+        // for the customer; anything else is a finding. The source catalogue
+        // is keyed on host names: asked about the address, as it was, it
+        // never matched anything.
         return SenderCatalog.Identify(source.SourceIp) is not null
-               || Intelligence.SourceCatalog.Identify(source.SourceIp) is not null
+               || Intelligence.SourceCatalog.Identify(source.ReverseName) is not null
             ? SenderClass.Unidentified
             : SenderClass.Suspicious;
     }
@@ -1172,6 +1189,52 @@ public sealed record ClientReport
         [.. Sources
             .GroupBy(ClassOf)
             .OrderBy(g => (int)g.Key)];
+
+    /// <summary>
+    /// The client's services that sent as this domain and are not set up to
+    /// prove it.
+    /// </summary>
+    public IReadOnlyList<ReportSource> BrokenSendersFor(ReportDomainHealth domain)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        return [.. InventoryOf(SenderClass.Misconfigured).Where(s =>
+            Domains.Count == 1 || s.Domains.Contains(domain.Domain, StringComparer.OrdinalIgnoreCase))];
+    }
+
+    /// <summary>
+    /// What to do about one domain, in one line, consistent with the verdict
+    /// and the decision requested.
+    /// </summary>
+    /// <remarks>
+    /// The domain's own <see cref="ReportDomainHealth.Recommended"/> cannot
+    /// see the sources, so it said "Nothing. Keep watching." beside a verdict
+    /// of "3 of your services still send mail that cannot prove it" - in
+    /// eleven of nineteen September reports, NRG's own among them - and "Move
+    /// from p=none to p=quarantine" beside a decision box saying to stay at
+    /// p=none until the services pass. The next step is the services.
+    /// </remarks>
+    public string WhatToDo(ReportDomainHealth domain)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        if (domain.Messages == 0 || domain.IsStruggling || BrokenSendersFor(domain).Count == 0)
+        {
+            return domain.Recommended;
+        }
+
+        return domain.Policy switch
+        {
+            "reject" => "Correct the named services: their failing mail is being refused now.",
+            "quarantine" => "Correct the named services before moving to p=reject.",
+            _ => "Correct the named services, then move to p=quarantine.",
+        };
+    }
+
+    /// <summary>The readiness word, with the same knowledge of the sources.</summary>
+    public string ReadinessOf(ReportDomainHealth domain)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        return domain.Readiness == "Ready" && BrokenSendersFor(domain).Count > 0 ? "Conditional" : domain.Readiness;
+    }
 
     /// <summary>Sources under one heading, busiest first.</summary>
     public IReadOnlyList<ReportSource> InventoryOf(SenderClass which) =>
@@ -1202,7 +1265,7 @@ public sealed record ClientReport
                 .. new (string, long, string)[]
                 {
                     ("SPF passed, did not align", spf,
-                     "The sending server was authorised by its own domain rather than yours. A service sending on "
+                     "The sending server was authorized by its own domain rather than yours. A service sending on "
                      + "your behalf without being set up to sign as you."),
                     ("DKIM verified, did not align", dkim,
                      "The signature was valid and belonged to the sender rather than to you. Usually the same "
@@ -1337,7 +1400,7 @@ public sealed record ClientReport
                         + "validate the outbound mail flow, then set it to preserve DKIM signatures or re-sign as "
                         + "your domain after processing. Adding anything to SPF alone does not fix either."
                         : broken.Any(s => s.Authenticated)
-                        // DKIM first. Adding the vendor to SPF authorises its
+                        // DKIM first. Adding the vendor to SPF authorizes its
                         // servers, but SPF only counts for DMARC when the
                         // return-path domain is also yours - which it is
                         // not, by default, at any bulk sender. Told to "add
@@ -1345,7 +1408,7 @@ public sealed record ClientReport
                         ? "Each signs as its own domain rather than as yours. Turn on custom DKIM signing for your "
                         + "domain at each vendor. If the vendor also offers a custom return-path (bounce) domain "
                         + "under yours, set that up too. Adding the vendor to SPF alone does not fix this."
-                        : "Confirm which systems these are, then authorise them properly rather than leaving them "
+                        : "Confirm which systems these are, then authorize them properly rather than leaving them "
                         + "half-configured.",
                     Owner = $"The vendors named, with {(ProviderIsUnnamed ? "your IT provider" : ProviderName)}",
                     Validation = "Seven consecutive days of aligned mail from each.",
@@ -1357,14 +1420,14 @@ public sealed record ClientReport
                 items.Add(new RemediationItem
                 {
                     Priority = "Medium",
-                    Finding = $"{unknown.Count} source(s) at providers we recognise sent as you without proving "
+                    Finding = $"{unknown.Count} source(s) at providers we recognize sent as you without proving "
                             + $"entitlement: {Name(unknown)}. {unknown.Sum(s => s.Failing):N0} message(s).",
                     Impact = "Usually a tool somebody signed up for and nobody recorded. Until it is confirmed it "
                            + "cannot be told apart from somebody using the same provider to send as you.",
-                    Action = "Confirm whether these are yours. If they are, authorise them; if not, they belong in "
+                    Action = "Confirm whether these are yours. If they are, authorize them; if not, they belong in "
                            + "the list below.",
                     Owner = "You, with whoever manages the tools your teams buy",
-                    Validation = "Each one is either authorised and aligning, or gone.",
+                    Validation = "Each one is either authorized and aligning, or gone.",
                 });
             }
 
@@ -1401,7 +1464,15 @@ public sealed record ClientReport
                         ? "No action needed. Recorded so the pattern is visible if it grows."
                         : EveryDomainEnforcing
                             ? "Close the gap: set sp= to match p=, and take pct to 100."
-                            : "Raise the policy so receivers are asked to refuse it.",
+                            // Not "raise the policy" on its own while the
+                            // client's own services still fail: the decision
+                            // box says to hold until they pass, and a
+                            // register that says both is one the client
+                            // stops trusting.
+                            : InventoryOf(SenderClass.Misconfigured).Count > 0
+                                ? "Once the named services authenticate, raise the policy so receivers are asked to "
+                                + "refuse it."
+                                : "Raise the policy so receivers are asked to refuse it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
                     Validation = refused
                         ? "The volume stops, or stays refused."
@@ -1430,6 +1501,8 @@ public sealed record ClientReport
                     Action = domain.Messages == 0
                         ? "Confirm whether this domain sends mail at all. If it does not, publish p=reject "
                         + "and it is closed."
+                        : BrokenSendersFor(domain).Count > 0
+                            ? "Correct the named services first, then move to p=quarantine."
                         : domain.Readiness == "Ready"
                             ? "Its own mail authenticates. Move to p=quarantine, then to p=reject."
                             : $"Account for the {domain.OwnFailing:N0} failing message(s) first, then move to "
@@ -1446,11 +1519,11 @@ public sealed record ClientReport
                     Priority = "Low",
                     Finding = $"{gone.Count} sender(s) sent as you last period and not at all this one: "
                             + $"{Name(gone)}.",
-                    Impact = "Either a service was retired and is still authorised to send as you, or something "
+                    Impact = "Either a service was retired and is still authorized to send as you, or something "
                            + "stopped working quietly.",
-                    Action = "Confirm which. If retired, remove it from SPF so the authorisation goes with it.",
+                    Action = "Confirm which. If retired, remove it from SPF so the authorization goes with it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
-                    Validation = "Either mail resumes, or the authorisation is removed.",
+                    Validation = "Either mail resumes, or the authorization is removed.",
                 });
             }
 

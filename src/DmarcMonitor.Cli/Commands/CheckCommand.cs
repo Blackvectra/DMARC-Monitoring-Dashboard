@@ -151,6 +151,15 @@ public static class CheckCommand
             // looks them up, so this is where it gets reported.
             if (stored is not null) { Console.WriteLine("    " + SaveNote(stored)); }
 
+            // What changed since the last reading, each line as the drift
+            // record stores it: this is the line an MSP wants to see the
+            // morning after a client's registrar "tidied up" their DNS.
+            foreach (var change in stored?.Drift ?? [])
+            {
+                var mark = change.Severity switch { "critical" => "CHANGED!", "warning" => "changed ", _ => "changed " };
+                Console.WriteLine($"    [{mark}] {change.Summary}");
+            }
+
             if (findings.Count == 0)
             {
                 Console.WriteLine("    nothing to change");

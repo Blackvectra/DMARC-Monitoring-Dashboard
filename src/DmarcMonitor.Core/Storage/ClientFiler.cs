@@ -36,7 +36,7 @@ public sealed record FilingResult(IReadOnlyList<FilingPlan> Planned)
 /// could do itself: the domain IS the grouping until a person says otherwise.
 /// </para>
 /// <para>
-/// The name is the domain, deliberately. Deriving "BMCEDC" from bmcedc.com is
+/// The name is the domain, deliberately. Deriving "CLIENT-A" from client-a.example is
 /// a guess that reads as confident, and the one thing that must not be guessed
 /// is the name on a client's report - so it starts as the domain, which is
 /// true, and gets renamed by somebody who knows. The slug is permanent because

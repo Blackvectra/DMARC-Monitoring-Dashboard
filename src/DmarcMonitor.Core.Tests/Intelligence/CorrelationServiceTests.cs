@@ -332,7 +332,7 @@ public sealed class CorrelationServiceTests : IDisposable
     /// is a domain somebody can search for, where an address is not.
     /// </summary>
     [Fact]
-    public async Task AnUnrecognisedReverseNameIsShownRatherThanDiscarded()
+    public async Task AnUnrecognizedReverseNameIsShownRatherThanDiscarded()
     {
         await StoreUnassignedAsync("a.example", Row("198.51.100.4", 5, "fail", "a.example", "fail"));
         await new SourceNameStore(_dbPath).SaveAsync("198.51.100.4", "smtp3.some-isp.example", answered: true);

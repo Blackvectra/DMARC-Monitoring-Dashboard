@@ -116,9 +116,11 @@ public static class IngestCommand
         X509Certificate2 certificate;
         try
         {
-            certificate = string.IsNullOrEmpty(certPassword)
-                ? new X509Certificate2(certPath!)
-                : new X509Certificate2(certPath!, certPassword);
+            // Always a .pfx: the collector signs in with the private key, and
+            // a bare certificate file could not. The loader replaces the
+            // constructor, which .NET 9 made obsolete.
+            certificate = X509CertificateLoader.LoadPkcs12FromFile(
+                certPath!, string.IsNullOrEmpty(certPassword) ? null : certPassword);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

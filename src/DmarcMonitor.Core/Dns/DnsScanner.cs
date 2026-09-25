@@ -14,7 +14,11 @@ namespace DmarcMonitor.Core.Dns;
 /// <param name="Changed">True when the records differ from the last stored reading.</param>
 /// <param name="Selectors">How many DKIM selectors were looked up.</param>
 public sealed record ScanResult(
-    string Domain, DnsCheckStatus Status, bool Stored, bool Changed, int Selectors);
+    string Domain, DnsCheckStatus Status, bool Stored, bool Changed, int Selectors)
+{
+    /// <summary>What changed, record by record, when <see cref="Changed"/> is true.</summary>
+    public IReadOnlyList<DriftChange> Drift { get; init; } = [];
+}
 
 /// <summary>What a whole run produced.</summary>
 /// <param name="Results">One entry per domain read.</param>
@@ -187,7 +191,7 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, Mt
             _ => DnsCheckStatus.Ok,
         };
 
-        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count);
+        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count) { Drift = save.Drift };
     }
 
     private async Task<List<string>> TargetsAsync(

@@ -321,7 +321,7 @@ public static class ClientReportPdf
         small.Format.Font.Color = Muted;
     }
 
-    /// <summary>How many rows a list in a client's copy carries before it summarises.</summary>
+    /// <summary>How many rows a list in a client's copy carries before it summarizes.</summary>
     private const int Rows = 12;
 
     /// <summary>
@@ -392,7 +392,7 @@ public static class ClientReportPdf
         var peak = report.Daily.Where(d => d.Reported).Select(d => d.Messages).DefaultIfEmpty(0).Max();
 
         var axis = section.AddParagraph(
-            $"{first:d MMM} to {last:d MMM} · peak {peak:N0} in a day"
+            $"{first:MMM d} to {last:MMM d} · peak {peak:N0} in a day"
             + (missing > 0
                 ? $" · {missing} day(s) with no report, left blank rather than drawn as zero: that usually "
                 + "means the receivers sent nothing, not that your mail stopped."
@@ -436,7 +436,7 @@ public static class ClientReportPdf
             Value(row[3], domain.Messages == 0 ? "—" : $"{domain.SpfAlignedRate:0.#}%");
             Value(row[4], domain.Messages == 0 ? "—" : $"{domain.DkimAlignedRate:0.#}%");
 
-            var todo = row[5].AddParagraph(domain.Recommended);
+            var todo = row[5].AddParagraph(report.WhatToDo(domain));
             todo.Format.Font.Size = 8;
         }
 
@@ -448,7 +448,7 @@ public static class ClientReportPdf
         if (report.Sources.Count == 0) { return; }
 
         Heading(section, "Everything sending as you");
-        Note(section, "Each row is a group of senders. If you do not recognise something in the second or "
+        Note(section, "Each row is a group of senders. If you do not recognize something in the second or "
                    + "third row, that is the thing to tell us about.");
 
         var table = Grid(section, [6.0, 2.2, 2.6, 6.2]);
@@ -681,7 +681,7 @@ public static class ClientReportPdf
 
         var explainer = section.AddParagraph(
             "Every mail provider that received mail claiming to come from your domains reports back on what "
-            + $"it saw. This summarises those reports for {report.Period.Label}. It covers mail sent using "
+            + $"it saw. This summarizes those reports for {report.Period.Label}. It covers mail sent using "
             + "your domain name, by you and by anybody else, which is why the totals can be larger than the "
             + "mail your staff sent.");
         explainer.Format.Font.Size = 8;
@@ -699,7 +699,7 @@ public static class ClientReportPdf
         }
 
         var generated = section.AddParagraph(
-            $"Generated {report.GeneratedAt:d MMMM yyyy} by {report.ProviderName}. "
+            $"Generated {report.GeneratedAt:MMMM d, yyyy} by {report.ProviderName}. "
             + report.Covers);
         generated.Format.Font.Size = 8;
         generated.Format.Font.Color = Muted;
@@ -778,8 +778,9 @@ public static class ClientReportPdf
     {
         SenderClass.Approved => "Yours, and correct",
         SenderClass.Misconfigured => "Yours, and needs correcting",
-        SenderClass.Unidentified => "Unrecognised, at a known provider",
-        SenderClass.Suspicious => "Unrecognised entirely",
+        SenderClass.Relayed => "Passed on by a mail filter",
+        SenderClass.Unidentified => "Unrecognized, at a known provider",
+        SenderClass.Suspicious => "Unrecognized entirely",
         _ => "Stopped sending",
     };
 
@@ -787,7 +788,8 @@ public static class ClientReportPdf
     [
         (SenderClass.Approved, "Authenticating correctly. Nothing to do."),
         (SenderClass.Misconfigured, "Real mail of yours, set up in a way that does not prove it. The mail most likely to go missing."),
-        (SenderClass.Unidentified, "Never proved entitled, but run by a provider we recognise. Usually a tool somebody signed up for."),
+        (SenderClass.Relayed, "A security service passing mail on, usually a recipient's filter re-sending your message. Expected, and not an attack."),
+        (SenderClass.Unidentified, "Never proved entitled, but run by a provider we recognize. Usually a tool somebody signed up for."),
         (SenderClass.Suspicious, "Never proved entitled, and nothing identifies the operator."),
         (SenderClass.Retired, "Sent last month and not this one. Either retired, or it stopped working quietly."),
     ];

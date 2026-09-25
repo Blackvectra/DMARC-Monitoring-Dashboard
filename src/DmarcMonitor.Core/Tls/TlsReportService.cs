@@ -157,7 +157,7 @@ public sealed record TlsFailure
           + "policy served over a certificate they cannot verify.",
         "tlsa-invalid" or "dnssec-invalid" or "dane-required" =>
             "A DANE failure. Relevant only if this domain publishes TLSA records.",
-        _ => "An unrecognised failure type. The raw report has the detail.",
+        _ => "An unrecognized failure type. The raw report has the detail.",
     };
 
     /// <summary>Whether this is the reporting domain's own fault to fix.</summary>

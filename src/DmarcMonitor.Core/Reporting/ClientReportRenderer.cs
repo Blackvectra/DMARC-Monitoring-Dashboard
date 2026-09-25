@@ -49,7 +49,7 @@ public static class ClientReportRenderer
         Trend(html, report);
         Domains(html, report);
 
-        // The classified overview, then the three tables it summarises. A
+        // The classified overview, then the three tables it summarizes. A
         // reader who wants the answer stops at the first; one who disbelieves
         // it reads the rest, and that is the order those two arrive in.
         Inventory(html, report);
@@ -158,9 +158,9 @@ public static class ClientReportRenderer
                 <path d="{Chart.Line(totals, w, h, ceiling)}" class="t-line" />
                 {Dots(totals, w, h, ceiling)}
               </svg>
-              <p class="axis"><span>{E(report.Daily[0].Day.ToString("d MMM", CultureInfo.InvariantCulture))}</span>
+              <p class="axis"><span>{E(report.Daily[0].Day.ToString("MMM d", CultureInfo.InvariantCulture))}</span>
                  <span>peak {peak:N0} a day</span>
-                 <span>{E(report.Daily[^1].Day.ToString("d MMM", CultureInfo.InvariantCulture))}</span></p>
+                 <span>{E(report.Daily[^1].Day.ToString("MMM d", CultureInfo.InvariantCulture))}</span></p>
 
             """);
 
@@ -186,7 +186,7 @@ public static class ClientReportRenderer
     /// <remarks>
     /// Without these a client heard from on exactly one day of the month gets
     /// an empty rectangle where the chart should be. Found on the real data:
-    /// mcleanelectric.com had one reported day in August, so the line was a
+    /// client-f.example had one reported day in August, so the line was a
     /// single move with nothing to join to and the area had no width. A blank
     /// box in a report going to a customer reads as broken software.
     /// </remarks>
@@ -263,7 +263,7 @@ public static class ClientReportRenderer
                       <td class="n">{E(dkim)}</td>
                       <td class="n">{E(failing)}</td>
                       <td class="n">{(d.Messages == 0 ? "-" : N(d.FailingSources))}</td>
-                      <td>{E(d.Recommended)}<br><span class="note">{E(d.Readiness)}</span></td>
+                      <td>{E(report.WhatToDo(d))}<br><span class="note">{E(report.ReadinessOf(d))}</span></td>
                     </tr>
 
                 """);
@@ -336,7 +336,7 @@ public static class ClientReportRenderer
         if (report.Messages == 0) { return; }
 
         var enforcing = report.Domains.Count(d => d.IsEnforcing);
-        var ready = report.Domains.Count(d => d.Readiness is "Ready");
+        var ready = report.Domains.Count(d => report.ReadinessOf(d) is "Ready");
         var unproven = report.ImpersonatingSources.Sum(s => s.Failing);
 
         // Stated as a direction rather than a delta where there is nothing to
@@ -427,8 +427,9 @@ public static class ClientReportRenderer
     {
         SenderClass.Approved => "Yours, and correct",
         SenderClass.Misconfigured => "Yours, and needs correcting",
-        SenderClass.Unidentified => "Unrecognised, at a known provider",
-        SenderClass.Suspicious => "Unrecognised entirely",
+        SenderClass.Relayed => "Passed on by a mail filter",
+        SenderClass.Unidentified => "Unrecognized, at a known provider",
+        SenderClass.Suspicious => "Unrecognized entirely",
         _ => "Stopped sending",
     };
 
@@ -436,7 +437,8 @@ public static class ClientReportRenderer
     [
         (SenderClass.Approved, "Authenticating correctly. Nothing to do.", "ok"),
         (SenderClass.Misconfigured, "Real mail of yours, set up in a way that does not prove it. This is the mail most likely to go missing.", "warn"),
-        (SenderClass.Unidentified, "Never proved entitled, but run by a service provider we recognise. Usually a tool somebody signed up for. Worth confirming.", "warn"),
+        (SenderClass.Relayed, "A security service passing mail on, usually a recipient's filter re-sending your message. Expected, and not an attack.", "rest"),
+        (SenderClass.Unidentified, "Never proved entitled, but run by a service provider we recognize. Usually a tool somebody signed up for. Worth confirming.", "warn"),
         (SenderClass.Suspicious, "Never proved entitled, and nothing identifies the operator.", "bad"),
         (SenderClass.Retired, "Sent last month and not this one. Either retired, or it stopped working quietly.", "rest"),
     ];
@@ -453,7 +455,7 @@ public static class ClientReportRenderer
             <section>
               <h2>Stopped sending since last month</h2>
               <p class="note">Not a fault, and worth a look. Either one of these was retired and is still
-              authorised to send as you, or it stopped working and nothing failed loudly enough to notice.</p>
+              authorized to send as you, or it stopped working and nothing failed loudly enough to notice.</p>
               <table>
                 <thead><tr><th>Sender</th><th>Was sending as</th></tr></thead>
                 <tbody>
@@ -542,7 +544,7 @@ public static class ClientReportRenderer
               <table class="register">
                 <!-- Fixed, because six columns of prose left to themselves give
                      the last two about forty pixels each and break words down
-                     the middle: "consecu tive", "authoris ed". A reader takes
+                     the middle: "consecu tive", "authoriz ed". A reader takes
                      that as a broken document rather than a narrow column. -->
                 <colgroup>
                   <col style="width:9%"><col style="width:25%"><col style="width:18%">
@@ -781,7 +783,7 @@ public static class ClientReportRenderer
 
             html.Append(CultureInfo.InvariantCulture, $"""
                     <tr class="{(c.WasRolledBack ? "warn" : "ok")}">
-                      <td>{E(c.AppliedAt.ToString("d MMM yyyy", CultureInfo.InvariantCulture))}</td>
+                      <td>{E(c.AppliedAt.ToString("MMM d, yyyy", CultureInfo.InvariantCulture))}</td>
                       <td class="mono">{E(c.RecordType)} {E(c.RecordName)}</td>
                       <td>{E(c.Reason)}</td>
                       <td>{E(outcome)}</td>
@@ -828,7 +830,7 @@ public static class ClientReportRenderer
               can be larger than the mail your staff sent.</p>
             </section>
             <footer>
-              <p>Generated {E(report.GeneratedAt.ToString("d MMMM yyyy", CultureInfo.InvariantCulture))}
+              <p>Generated {E(report.GeneratedAt.ToString("MMMM d, yyyy", CultureInfo.InvariantCulture))}
               by {E(report.ProviderName)}. {E(report.Covers)}</p>
               {Contact(report)}
             </footer>
@@ -850,8 +852,8 @@ public static class ClientReportRenderer
     /// <remarks>
     /// The Sources page has named these since reverse lookups were stored, and
     /// the report did not - so a client was handed a row of digits and asked
-    /// whether they recognised it. Nobody recognises an address. They
-    /// recognise "a Comcast connection" or "one of our own servers", and the
+    /// whether they recognized it. Nobody recognizes an address. They
+    /// recognize "a Comcast connection" or "one of our own servers", and the
     /// name is the only part of that row they can act on.
     ///
     /// Both, never one. The name is what a person reads; the address is what
@@ -918,7 +920,7 @@ public static class ClientReportRenderer
            allows"; the first column then takes whatever is left. */
         td.n, th.n { text-align:right; white-space:nowrap; width:1%; }
         .mono { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; }
-        /* A domain is one word. Wrapped, "bmcedc" over ".com" reads as two. */
+        /* A domain is one word. Wrapped, "client-a" over ".example" reads as two. */
         td.mono { white-space:nowrap; }
 
         /* A named source: the name is what a person reads, the address is what

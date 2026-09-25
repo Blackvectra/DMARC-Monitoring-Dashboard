@@ -1,0 +1,92 @@
+@page "/dns-changes"
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
+@inject OrgContext Org
+@inject DnsStatusService DnsStatus
+@rendermode InteractiveServer
+
+@*
+    What changed in the clients' DNS, and whether anybody has looked.
+
+    Every scan compares each domain's records with the last reading, and a
+    difference is recorded here. The point is the MSP hearing about a dropped
+    SPF include or a "tidied" DMARC record the next morning, rather than from
+    the reports weeks later - or from the client, when invoices bounce.
+*@
+
+<PageTitle>DNS changes — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>DNS changes</h1>
+        <p class="sub">What changed in your domains' SPF, DMARC, MTA-STS and TLS-RPT records since the last
+           scan. A change made from this product is marked as probably expected; anything else is worth a look.</p>
+    </div>
+    <div class="head-actions">
+        @if (_access is { CanOperate: true })
+        {
+            <button class="quiet" disabled="@_scanning" @onclick="ScanAsync">@(_scanning ? "Reading DNS…" : "Read DNS now")</button>
+        }
+        <label>
+            Show
+            <select @bind="_show">
+                <option value="open">Not yet seen</option>
+                <option value="all">Everything</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (_scanNote is not null)
+{
+    <p class="muted">@_scanNote</p>
+}
+
+@if (_access is not null)
+{
+    <section>
+        <DriftList @key="_generation" Access="_access" OpenOnly="@(_show == "open")"
+                   Empty="No change has been seen yet. Changes appear here after the second DNS scan of a domain." />
+    </section>
+}
+
+@code {
+    private OrganizationAccess? _access;
+    // A string, not a bool: bool renders as "True", which matches neither
+    // option, and the select showed blank.
+    private string _show = "open";
+    private bool _scanning;
+    private string? _scanNote;
+    private int _generation;
+
+    protected override async Task OnInitializedAsync() => _access = await Org.GetAsync();
+
+    /// <summary>
+    /// Reads every domain's DNS now and records what changed.
+    /// </summary>
+    /// <remarks>
+    /// A server does this nightly on a timer; the Windows trial has no
+    /// scheduler, so without a button its changes would appear only when
+    /// somebody remembered to run <c>dmarc check --all --save</c>.
+    /// </remarks>
+    private async Task ScanAsync()
+    {
+        if (_access is not { CanOperate: true } || _scanning) { return; }
+
+        _scanning = true;
+        try
+        {
+            var summary = await DnsStatus.RefreshAsync(_access.TenantId, _access.RestrictedClient, _access.User);
+            _scanNote = summary is null
+                ? "There is no database to store readings in yet."
+                : $"Read {summary.Read} domain(s); {summary.Changed} changed since the last reading"
+                  + (summary.Failed > 0 ? $", {summary.Failed} could not be read" : "")
+                  + (summary.Skipped > 0 ? $", {summary.Skipped} not reached this time" : "") + ".";
+        }
+        finally
+        {
+            _scanning = false;
+            _generation++;
+        }
+    }
+}

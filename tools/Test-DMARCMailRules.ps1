@@ -30,7 +30,7 @@
 
 .EXAMPLE
     .\Test-DMARCMailRules.ps1 -Mailbox dmarc@nrgtechservices.com `
-        -ExpectedDomains bmcedc.com,ndaco.org,mcleanelectric.com,bmcvb.com
+        -ExpectedDomains client-a.example,client-d.example,client-f.example,client-g.example
 
 .NOTES
     Needs the ExchangeOnlineManagement module:
