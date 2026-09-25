@@ -18,6 +18,9 @@ public sealed record ScanResult(
 {
     /// <summary>What changed, record by record, when <see cref="Changed"/> is true.</summary>
     public IReadOnlyList<DriftChange> Drift { get; init; } = [];
+
+    /// <summary>True when this was the first reading on record for the domain.</summary>
+    public bool First { get; init; }
 }
 
 /// <summary>What a whole run produced.</summary>
@@ -191,7 +194,7 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, Mt
             _ => DnsCheckStatus.Ok,
         };
 
-        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count) { Drift = save.Drift };
+        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count) { Drift = save.Drift, First = save.First };
     }
 
     private async Task<List<string>> TargetsAsync(

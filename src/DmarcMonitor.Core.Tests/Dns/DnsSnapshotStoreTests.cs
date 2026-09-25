@@ -113,6 +113,20 @@ public sealed class DnsSnapshotStoreTests : IDisposable
         Assert.Equal("client moved registrar", seen.Note);
     }
 
+    /// <summary>
+    /// A first reading is a first reading, not "nothing changed": a fresh
+    /// install scanning its domains was told nothing had changed since
+    /// readings that did not exist.
+    /// </summary>
+    [Fact]
+    public async Task AFirstReadingSaysSo()
+    {
+        var domain = await DomainAsync();
+
+        Assert.True((await _store.SaveAsync(domain, Good(domain))).First);
+        Assert.False((await _store.SaveAsync(domain, Good(domain))).First);
+    }
+
     [Fact]
     public async Task AnUnchangedReadingRecordsNoDrift()
     {
@@ -131,7 +145,7 @@ public sealed class DnsSnapshotStoreTests : IDisposable
         // Not a change: there was nothing to differ from. Calling the first
         // reading of a domain a change would fire "this domain's DNS was
         // edited" at every newly onboarded customer.
-        Assert.Equal(new SnapshotSave(Stored: true, Changed: false), await _store.SaveAsync(domain, Good(domain)));
+        Assert.Equal(new SnapshotSave(Stored: true, Changed: false) { First = true }, await _store.SaveAsync(domain, Good(domain)));
 
         var all = await _store.LatestAsync();
         var dns = all[domain];

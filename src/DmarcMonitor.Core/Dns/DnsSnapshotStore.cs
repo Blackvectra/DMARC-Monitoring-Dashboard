@@ -121,6 +121,16 @@ public sealed record SnapshotSave(bool Stored, bool Changed)
 {
     /// <summary>What changed, record by record, when <see cref="Changed"/> is true.</summary>
     public IReadOnlyList<DriftChange> Drift { get; init; } = [];
+
+    /// <summary>
+    /// True when this was the first reading on record for the domain.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from "nothing changed", which is what a first reading was
+    /// reported as: a fresh install scanning nineteen domains was told nothing
+    /// had changed since readings that did not exist.
+    /// </remarks>
+    public bool First { get; init; }
 }
 
 /// <summary>A selector seen signing, and the key found at it.</summary>
@@ -348,9 +358,12 @@ public sealed class DnsSnapshotStore(string databasePath)
         }
 
         IReadOnlyList<DriftChange>? drift = null;
+        var first = false;
 
         if (status == DnsCheckStatus.Ok)
         {
+            first = await LatestAsync(db, transaction, domainId, ct).ConfigureAwait(false) is null;
+
             drift = await WriteSnapshotAsync(
                 db, transaction, domainId, tenantId!, clientId!, published, now, ct).ConfigureAwait(false);
 
@@ -360,7 +373,7 @@ public sealed class DnsSnapshotStore(string databasePath)
 
         await transaction.CommitAsync(ct).ConfigureAwait(false);
         return drift is null
-            ? new SnapshotSave(Stored: true, Changed: false)
+            ? new SnapshotSave(Stored: true, Changed: false) { First = first }
             : new SnapshotSave(Stored: true, Changed: true) { Drift = drift };
     }
 

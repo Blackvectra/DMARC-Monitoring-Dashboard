@@ -212,6 +212,48 @@ public sealed class SourceNameStore(string databasePath)
         return result;
     }
 
+    /// <summary>
+    /// Failing sources in a window whose names nothing has looked up yet, or
+    /// whose name was never checked against its forward records.
+    /// </summary>
+    /// <remarks>
+    /// What a report cannot recognize. A mail filter or a known service is
+    /// told apart from an impersonator by its confirmed name, so a report built
+    /// before the names are in lists INKY among the impersonators - correctly,
+    /// on what it knows, and without saying that it knows less than it could.
+    /// Zero for a database from before names existed, where there is nothing
+    /// to be done but upgrade.
+    /// </remarks>
+    public async Task<int> UncheckedFailingSourcesAsync(DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default)
+    {
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using (var probe = db.CreateCommand())
+        {
+            probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info('source_names') WHERE name = 'forward_confirmed'";
+            if (Convert.ToInt64(await probe.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture) == 0)
+            {
+                return 0;
+            }
+        }
+
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(DISTINCT r.source_ip)
+            FROM aggregate_records r
+            LEFT JOIN source_names n ON n.ip = r.source_ip
+            WHERE r.dmarc_result <> 'pass'
+              AND r.date_begin >= $from AND r.date_begin <= $to
+              AND (n.ip IS NULL OR (n.reverse_name IS NOT NULL AND n.forward_confirmed IS NULL))
+            """;
+        // aggregate_records keeps its dates in this form; see ReportStore.
+        command.Parameters.AddWithValue("$from", from.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$to", to.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0, CultureInfo.InvariantCulture);
+    }
+
     /// <summary>How many addresses have a name, out of how many are known at all.</summary>
     public async Task<(int Named, int Total)> CoverageAsync(CancellationToken ct = default)
     {

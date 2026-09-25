@@ -112,6 +112,26 @@ public sealed class SourceNameStoreTests : IAsyncLifetime
         Assert.Equal(["192.0.2.50"], due);
     }
 
+    /// <summary>
+    /// What a report cannot recognize yet: failing sources never looked up,
+    /// or named but never checked. A report built before the names are in
+    /// says so rather than quietly knowing less.
+    /// </summary>
+    [Fact]
+    public async Task CountsTheFailingSourcesNobodyHasCheckedYet()
+    {
+        await StoreRowsAsync("192.0.2.60", "192.0.2.61", "192.0.2.62", "192.0.2.63");
+        await _store.SaveAsync("192.0.2.61", "never-checked.example", answered: true);
+        await _store.SaveAsync("192.0.2.62", "checked.example", answered: true, forwardConfirmed: true);
+        await _store.SaveAsync("192.0.2.63", null, answered: true);
+
+        var count = await _store.UncheckedFailingSourcesAsync(
+            DateTimeOffset.UtcNow.AddDays(-7), DateTimeOffset.UtcNow);
+
+        // 192.0.2.60 was never looked up; 192.0.2.61 has a name nobody checked.
+        Assert.Equal(2, count);
+    }
+
     private async Task StoreRowsAsync(params string[] addresses)
     {
         var begin = DateTimeOffset.UtcNow.AddDays(-2);

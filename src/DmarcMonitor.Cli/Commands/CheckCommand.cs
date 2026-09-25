@@ -93,6 +93,7 @@ public static class CheckCommand
         var saved = 0;
         var skipped = 0;
         var changed = 0;
+        var first = 0;
 
         foreach (var domain in domains)
         {
@@ -127,6 +128,7 @@ public static class CheckCommand
                     .ConfigureAwait(false);
                 if (stored.Stored) { saved++; } else { skipped++; }
                 if (stored.Changed) { changed++; }
+                if (stored.First) { first++; }
             }
 
             // Resolve each include to the addresses it authorizes and match
@@ -189,9 +191,11 @@ public static class CheckCommand
         {
             if (saved > 0)
             {
-                Console.WriteLine(changed == 0
-                    ? $"  Stored {saved} reading(s). Nothing had changed since the last one."
-                    : $"  Stored {saved} reading(s); {changed} domain(s) publish something different than before.");
+                Console.WriteLine(
+                    changed > 0 ? $"  Stored {saved} reading(s); {changed} domain(s) publish something different than before."
+                    : first == saved ? $"  Stored {saved} reading(s), the first on record for each, so there is nothing to compare against yet."
+                    : first > 0 ? $"  Stored {saved} reading(s): the first on record for {first} domain(s), and nothing had changed for the rest."
+                    : $"  Stored {saved} reading(s). Nothing had changed since the last one.");
             }
 
             if (skipped > 0)
