@@ -406,7 +406,15 @@ public static class Program
                                  impersonating clients, across every domain watched.
                 --db <path>      Database file. Default: dmarc.db
                 --export         Print confirmed and high-confidence indicators only,
-                                 one per line, for a firewall or SIEM.
+                                 one per line, for a firewall or SIEM. Anything not
+                                 safe to block - a shared platform, or an address
+                                 that also delivered a client's authenticated mail -
+                                 is withheld and listed underneath with the reason.
+                --names          Look up what each source's address reverses to, and
+                                 check the name points back. Reports and pages use
+                                 these names to recognize mail filters and services;
+                                 run it after an import. Server installs run it nightly.
+                --names-limit <n> Look up at most n sources, busiest first. Default: 500
 
               ingest             Read the reporting mailbox and store what arrives.
                 --db <path>            Database file. Default: dmarc.db

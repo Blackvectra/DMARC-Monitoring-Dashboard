@@ -152,6 +152,55 @@ public sealed class AggregateReportParserTests
         Assert.Equal("", rec.HeaderFrom);
     }
 
+    /// <summary>
+    /// A row whose address is not an address is dropped, like one with none.
+    /// </summary>
+    /// <remarks>
+    /// Anybody can mail a report to an rua address, and the source address
+    /// is what every page, the client report and the indicator export hang
+    /// off. Stored as typed, "0.0.0.0/0" reached the file a firewall reads.
+    /// </remarks>
+    [Theory]
+    [InlineData("0.0.0.0/0")]
+    [InlineData("203.0.113.9&#10;198.51.100.1")]
+    [InlineData("127.1")]
+    [InlineData("010.0.0.1")]
+    [InlineData("256.1.1.1")]
+    [InlineData("fe80::1%eth0")]
+    [InlineData("mail.example.com")]
+    public void DropsARowWhoseAddressIsNotAnAddress(string sourceIp)
+    {
+        var xml = $"""
+            <feedback>
+              <report_metadata><org_name>tiny.example</org_name><report_id>1</report_id></report_metadata>
+              <policy_published><domain>acme.com</domain><p>none</p></policy_published>
+              <record>
+                <row><source_ip>{sourceIp}</source_ip><count>3</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf></policy_evaluated></row>
+              </record>
+              <record>
+                <row><source_ip>198.51.100.7</source_ip><count>2</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>fail</spf></policy_evaluated></row>
+              </record>
+            </feedback>
+            """;
+
+        var result = AggregateReportParser.Parse(xml);
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal("198.51.100.7", Assert.Single(result.Report!.Records).SourceIp);
+    }
+
+    [Theory]
+    [InlineData("198.51.100.7")]
+    [InlineData("2a01:111:f403:c112::5")]
+    [InlineData("2603:10B6:408:10A::22")]
+    [InlineData("::ffff:35.174.145.124")]
+    public void KeepsEveryFormAReceiverActuallyWrites(string sourceIp)
+    {
+        Assert.True(IpText.TryParse(sourceIp, out _));
+    }
+
     [Fact]
     public void DefaultsPctTo100WhenAbsent()
     {

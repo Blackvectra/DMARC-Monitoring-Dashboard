@@ -1,4 +1,8 @@
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using DmarcMonitor.Core.Aggregate;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Intelligence;
@@ -22,6 +26,19 @@ public enum IndicatorClassification
 public sealed record ThreatIndicator
 {
     public required string Value { get; init; }
+
+    /// <summary>
+    /// <see cref="Value"/> with anything that is not printable taken out, for
+    /// a terminal or a file.
+    /// </summary>
+    /// <remarks>
+    /// The value came out of a report, and reports are whatever their sender
+    /// typed. Stored before addresses were checked, a value could carry a
+    /// newline or an escape sequence into an operator's terminal. The raw
+    /// value stays the key a verdict is recorded against.
+    /// </remarks>
+    public string DisplayValue => ThreatIntelligenceService.Printable(Value);
+
     public string IndicatorType { get; init; } = "ip";
 
     public DateTimeOffset FirstSeen { get; init; }
@@ -56,6 +73,40 @@ public sealed record ThreatIndicator
     public IndicatorClassification Classification { get; init; } = IndicatorClassification.Suspected;
     public string Notes { get; init; } = "";
 
+    /// <summary>
+    /// The address's reverse name, only when its own forward records point
+    /// back at it; otherwise null.
+    /// </summary>
+    public string? ConfirmedName { get; init; }
+
+    /// <summary>What a confirmed name says this is, when the catalogue knows it.</summary>
+    public SourceIdentity? VerifiedIdentity => SourceCatalog.Identify(ConfirmedName);
+
+    /// <summary>
+    /// A mail security gateway or a mail platform, by a name its owner's DNS
+    /// confirms.
+    /// </summary>
+    /// <remarks>
+    /// Passes mail on rather than sending it, so whatever failed through it
+    /// started somewhere else. Forward-confirmed because the PTR alone is the
+    /// sender's own word: a forger can reverse to a gateway's hostname, and
+    /// cannot make the gateway's DNS name it back.
+    /// </remarks>
+    public bool IsVerifiedRelay =>
+        VerifiedIdentity is { Kind: SourceKind.SecurityGateway or SourceKind.MailProvider };
+
+    /// <summary>
+    /// Domains of this organization the address delivered DMARC-passing mail
+    /// for in the same window.
+    /// </summary>
+    /// <remarks>
+    /// Not an excuse - a success for one domain does not excuse forging
+    /// another, and the rating ignores it. It is what makes an address unsafe
+    /// to BLOCK: a firewall that drops it drops that client's own mail with
+    /// the rest. The export reads it for exactly that.
+    /// </remarks>
+    public IReadOnlyList<string> DomainsItDeliveredFor { get; init; } = [];
+
     /// <summary>Seen against several unrelated clients.</summary>
     public bool IsCrossClient => ClientCount > 1;
 
@@ -79,6 +130,7 @@ public sealed record ThreatIndicator
     public IndicatorConfidence Confidence =>
         Classification == IndicatorClassification.ConfirmedMalicious ? IndicatorConfidence.Confirmed
         : Classification is IndicatorClassification.KnownGood or IndicatorClassification.Ignored ? IndicatorConfidence.NotAThreat
+        : IsVerifiedRelay ? IndicatorConfidence.NotAThreat
         : AttemptedForgery ? IndicatorConfidence.High
         : IsMultiTarget && !EverAuthenticated ? IndicatorConfidence.High
         : !EverAuthenticated ? IndicatorConfidence.Medium
@@ -98,12 +150,16 @@ public sealed record ThreatIndicator
         // detects. Found on a real estate: 35.174.145.124 against two clients,
         // rated High with that sentence, reversing to us.cloud-sec-av.com.
         //
-        // The RATING is deliberately unchanged. A PTR is written by whoever
-        // holds the address and is not forward-confirmed, so a friendly name
-        // is not evidence and must never soften a verdict. What changes is
-        // that the sentence now states both explanations and says which
-        // question separates them, which is the thing an operator can
-        // actually answer.
+        // A PTR on its own is written by whoever holds the address, so a
+        // friendly name is not evidence and never softens a verdict; the
+        // sentence below states both explanations and the question that
+        // separates them. A FORWARD-CONFIRMED name is different: the gateway's
+        // own DNS naming the address back is not something a forger can
+        // write, and that one is taken as what it is.
+        _ when IsVerifiedRelay =>
+            $"{VerifiedIdentity!.Value.Name}, confirmed by its own forward DNS ({ConfirmedName}). It passes mail on "
+          + "rather than sending it: whatever failed through it started somewhere else, and blocking it would "
+          + "stop every message it carries, your clients' own included.",
         _ when AttemptedForgery =>
             $"Signed as a client domain using selector {string.Join(", ", ForgedSelectors)}, and the "
           + "signature failed. A third-party service normally signs as itself, so this is either "
@@ -209,7 +265,10 @@ public sealed class ThreatIntelligenceService(string databasePath)
     /// actually say. A human's classification survives the refresh, because
     /// that is the one part not recoverable from data.
     /// </remarks>
-    public async Task<int> RefreshAsync(int days = 90, CancellationToken ct = default)
+    /// <summary>How far back indicators are derived from, unless a caller says otherwise.</summary>
+    public const int WindowDays = 90;
+
+    public async Task<int> RefreshAsync(int days = WindowDays, CancellationToken ct = default)
     {
         var since = Iso(DateTimeOffset.UtcNow.AddDays(-days));
 
@@ -304,16 +363,35 @@ public sealed class ThreatIntelligenceService(string databasePath)
         await using var db = new SqliteConnection(_readOnly);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
+        // Before 0018 no name is confirmed, and an unconfirmed name decides
+        // nothing - the safe way round for a database not yet upgraded.
+        var confirmedName = await HasColumnAsync(db, "source_names", "forward_confirmed", ct).ConfigureAwait(false)
+            ? "(SELECT n.reverse_name FROM source_names n WHERE n.ip = i.value AND n.forward_confirmed = 1)"
+            : "NULL";
+
         await using var command = db.CreateCommand();
         command.CommandText = $"""
             SELECT i.value, i.indicator_type, i.first_seen, i.last_seen,
                    i.client_count, i.domain_count, i.message_count,
                    i.ever_authenticated, i.attempted_forgery, i.forged_selectors,
-                   i.classification, COALESCE(i.notes, ''), i.domains
+                   i.classification, COALESCE(i.notes, ''), i.domains,
+                   {confirmedName},
+                   -- The organization's domains this address delivered
+                   -- authenticated mail for, in the window a refresh reads.
+                   -- Not evidence of innocence; evidence that blocking it
+                   -- blocks a client. See ThreatIndicator.DomainsItDeliveredFor.
+                   (SELECT GROUP_CONCAT(DISTINCT d.name)
+                      FROM aggregate_records ok
+                      JOIN domains d ON d.id = ok.domain_id
+                     WHERE ok.tenant_id = i.tenant_id
+                       AND ok.source_ip = i.value
+                       AND ok.dmarc_result = 'pass'
+                       AND ok.date_begin >= $since)
             FROM threat_indicators i
             {(includeDismissed ? "" : "WHERE i.classification NOT IN ('known_good','ignored')")}
             ORDER BY i.attempted_forgery DESC, i.client_count DESC, i.message_count DESC
             """;
+        command.Parameters.AddWithValue("$since", Iso(DateTimeOffset.UtcNow.AddDays(-WindowDays)));
 
         var results = new List<ThreatIndicator>();
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -334,6 +412,8 @@ public sealed class ThreatIntelligenceService(string databasePath)
                 Classification = ParseClassification(reader.GetString(10)),
                 Notes = reader.GetString(11),
                 Domains = Split(reader.IsDBNull(12) ? "" : reader.GetString(12)),
+                ConfirmedName = reader.IsDBNull(13) ? null : reader.GetString(13),
+                DomainsItDeliveredFor = Split(reader.IsDBNull(14) ? "" : reader.GetString(14)),
             });
         }
         return results;
@@ -447,6 +527,16 @@ public sealed class ThreatIntelligenceService(string databasePath)
     /// Only confirmed and high-confidence entries are exported. Shipping
     /// "suspected" into a blocking device is how a client's own mail server
     /// ends up on a deny list.
+    ///
+    /// And only what is safe to BLOCK, which is a second question. Rated on
+    /// its own, the list carried a customer's own Avanan gateway, INKY's
+    /// relays and two Microsoft addresses - each suspicious by the letter of
+    /// the rating and each a way to take a client's mail down if a firewall
+    /// obeyed it. So an entry is withheld when it is not a public address,
+    /// when it belongs to a platform everybody shares, or when it delivered
+    /// authenticated mail for one of this organization's domains in the same
+    /// window. Withheld entries are listed underneath as comments, with the
+    /// reason, so nothing disappears without saying so.
     /// </remarks>
     public async Task<string> ExportAsync(CancellationToken ct = default)
     {
@@ -461,19 +551,113 @@ public sealed class ThreatIntelligenceService(string databasePath)
             "",
         };
 
+        var withheld = new List<string>();
+
         foreach (var i in indicators.Where(i =>
             i.Confidence is IndicatorConfidence.Confirmed or IndicatorConfidence.High))
         {
-            lines.Add($"{i.Value}    # {i.Confidence}, {i.DomainCount} domain(s), {i.MessageCount} message(s). {i.Rationale}");
+            if (!IpText.TryParse(i.Value, out var address) || !IsPublic(address))
+            {
+                withheld.Add($"{i.DisplayValue}: not a public address");
+                continue;
+            }
+
+            if (SenderCatalog.Identify(address.ToString()) is { } platform)
+            {
+                withheld.Add($"{address}: an address of {platform}, which every customer of it shares - yours included");
+                continue;
+            }
+
+            if (i.DomainsItDeliveredFor.Count > 0)
+            {
+                withheld.Add($"{address}: delivered authenticated mail for {string.Join(", ", i.DomainsItDeliveredFor)} "
+                    + "in the same period, so blocking it would stop that mail too");
+                continue;
+            }
+
+            lines.Add($"{address}    # {i.Confidence}, {i.DomainCount} domain(s), {i.MessageCount} message(s). "
+                + Printable(i.Rationale));
+        }
+
+        if (withheld.Count > 0)
+        {
+            lines.Add("");
+            lines.Add($"# Withheld: {withheld.Count} rated high but not safe to block.");
+            lines.AddRange(withheld.Select(w => "#   " + Printable(w)));
         }
 
         return string.Join('\n', lines);
     }
 
+    /// <summary>
+    /// Text fit for one line of a terminal or a file.
+    /// </summary>
+    /// <remarks>
+    /// Selectors, domain names and addresses in an indicator come out of
+    /// reports, which are unauthenticated: a selector with a newline in it
+    /// wrote a second, uncommented line into the blocklist, and one with an
+    /// escape sequence wrote to the operator's terminal. Control characters,
+    /// line and paragraph separators and bidirectional overrides become
+    /// spaces.
+    /// </remarks>
+    internal static string Printable(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) { return ""; }
+
+        var clean = new StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            clean.Append(char.IsControl(c) || c is '\u2028' or '\u2029' or (>= '\u202A' and <= '\u202E') or (>= '\u2066' and <= '\u2069')
+                ? ' '
+                : c);
+        }
+
+        return string.Join(' ', clean.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    /// <summary>
+    /// An address a firewall rule could mean: not private, loopback,
+    /// link-local, shared address space, multicast or reserved.
+    /// </summary>
+    private static bool IsPublic(IPAddress address)
+    {
+        var ip = address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+        if (ip.AddressFamily == AddressFamily.InterNetwork)
+        {
+            var b = ip.GetAddressBytes();
+            return b[0] switch
+            {
+                0 or 10 or 127 => false,
+                100 when b[1] >= 64 && b[1] <= 127 => false,   // 100.64.0.0/10, carrier-grade NAT
+                169 when b[1] == 254 => false,
+                172 when b[1] >= 16 && b[1] <= 31 => false,
+                192 when b[1] == 168 => false,
+                >= 224 => false,                                  // multicast, reserved, broadcast
+                _ => true,
+            };
+        }
+
+        return !(ip.Equals(IPAddress.IPv6None) || ip.Equals(IPAddress.IPv6Loopback)
+                 || ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6Multicast
+                 || (ip.GetAddressBytes()[0] & 0xFE) == 0xFC);    // fc00::/7, unique local
+    }
+
     private static List<string> Split(string value) =>
         [.. value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                 .Select(Printable)
+                 .Where(v => v.Length > 0)
                  .Distinct(StringComparer.OrdinalIgnoreCase)
                  .OrderBy(v => v, StringComparer.Ordinal)];
+
+    private static async Task<bool> HasColumnAsync(SqliteConnection db, string table, string column, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_info($table) WHERE name = $column";
+        command.Parameters.AddWithValue("$table", table);
+        command.Parameters.AddWithValue("$column", column);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture) > 0;
+    }
 
     private static DateTimeOffset ParseDate(string raw) =>
         DateTime.TryParse(raw, CultureInfo.InvariantCulture,
