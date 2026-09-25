@@ -41,6 +41,11 @@ Re-running it is safe: on an installed machine it only applies configuration.
       -IngestTenantId <id> -IngestClientId <id>
   Creates the collector's certificate, prints the .cer to upload, registers the task.
 
+.EXAMPLE
+  .\bootstrap.ps1 -HostName dmarc.example.com -Folders 'DMARC\client-a.example', 'Inbox'
+  Collects from those folders, and the folders inside each, instead of Inbox
+  and the folders inside it.
+
 .NOTES
 Secrets entered on the Settings page are encrypted with DPAPI as LocalService,
 the account the service runs as. A provider token stored from an admin console
@@ -69,6 +74,10 @@ param(
     [string]$ReportingDomain,
     [string]$MasterGroupId,
     [string]$Organization,
+    # The mailbox folders the collector reads, in place of Inbox and the
+    # folders inside it: -Folders 'DMARC\client-a.example', 'Inbox'. Kept in
+    # ingest.cmd as DMARC_FOLDERS, and changed only by giving -Folders again.
+    [string[]]$Folders,
     [switch]$MakeIngestCert,
     [switch]$NoProxy,
     [switch]$NoIngestTask,
@@ -208,6 +217,12 @@ if ($CollectorOnly) { $NoProxy = $true }
 if (-not $NoProxy -and -not $HostName) { Fail '-HostName is required (it is what the certificate is for). Use -NoProxy to skip Caddy, or -CollectorOnly for a machine that only collects.' 64 }
 if ($HostName -and $HostName -notmatch '^[A-Za-z0-9.-]+$') { Fail '-HostName must be a bare hostname, e.g. dmarc.example.com' 64 }
 if ([bool]$TenantId -ne [bool]$ClientId) { Fail '-TenantId and -ClientId go together; the app treats sign-in as configured only when both are set' 64 }
+# -Folders as the collector reads DMARC_FOLDERS: the names separated by
+# semicolons, so -Folders 'a', 'b' and -Folders 'a;b' come to the same thing.
+# It is written inside set "..." in ingest.cmd, where a double quote would end
+# the quoting early and a line break would start a command of its own.
+$FolderList = (@($Folders) -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ';'
+if ($FolderList -match '["\r\n]') { Fail '-Folders: a folder name with a double quote or a line break in it cannot be written into ingest.cmd' 64 }
 if ([Environment]::Is64BitOperatingSystem -eq $false) { Fail 'a 64-bit Windows is required' 69 }
 
 Say "DMARC Monitor bootstrap on $([Environment]::OSVersion.VersionString)"
@@ -411,12 +426,15 @@ try {
         }
     }
 
-    if ($Mailbox -or $IngestTenantId -or $IngestClientId -or $CertPath -or $CertPassword -or $FallbackAddress -or $ReportingDomain) {
+    if ($Mailbox -or $IngestTenantId -or $IngestClientId -or $CertPath -or $CertPassword -or $FallbackAddress -or $ReportingDomain -or $Organization -or $FolderList) {
         Say '== collector'
-        # The task runs this file; its values persist across runs of this script.
-        # The last two are optional: reports are attributed by the mailbox
-        # itself being the one shared address unless one of them is set.
-        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = ''; DMARC_ORGANIZATION = '' }
+        # The task runs this file; its values persist across runs of this script,
+        # and so does a line added to it by hand for any key listed here. Only
+        # the first four are required: reports are attributed by the mailbox
+        # itself being the one shared address unless the fallback address or the
+        # reporting domain is set, and with no folders named the collector reads
+        # Inbox and the folders inside it.
+        $values = [ordered]@{ DMARC_MAILBOX = ''; DMARC_TENANT_ID = ''; DMARC_CLIENT_ID = ''; DMARC_CERT_PATH = ''; DMARC_CERT_PASSWORD = ''; DMARC_FALLBACK_ADDRESS = ''; DMARC_REPORTING_DOMAIN = ''; DMARC_ORGANIZATION = ''; DMARC_FOLDERS = '' }
         if (Test-Path $IngestCmd) {
             foreach ($line in Get-Content $IngestCmd) {
                 if ($line -match '^set "([A-Z_]+)=(.*)"$' -and $values.Contains($Matches[1])) { $values[$Matches[1]] = $Matches[2] }
@@ -430,14 +448,24 @@ try {
         if ($FallbackAddress) { $values['DMARC_FALLBACK_ADDRESS'] = $FallbackAddress }
         if ($ReportingDomain) { $values['DMARC_REPORTING_DOMAIN'] = $ReportingDomain }
         if ($Organization)    { $values['DMARC_ORGANIZATION'] = $Organization }
+        # A % is doubled because cmd reads one inside set "..." as the start of
+        # a variable. A value kept from the file is already written that way.
+        if ($FolderList)      { $values['DMARC_FOLDERS'] = $FolderList.Replace('%', '%%') }
 
         $lines = @('@echo off', ':: Written by bootstrap.ps1. Runs as LocalService from the "DMARC ingest" task; pass --dry-run to test.')
-        foreach ($k in $values.Keys) { $lines += "set `"$k=$($values[$k])`"" }
+        foreach ($k in $values.Keys) {
+            # Left out rather than written empty: set "DMARC_FOLDERS=" would
+            # unset a DMARC_FOLDERS set as a system environment variable, which
+            # the docs once suggested instead of this file, and collection would
+            # quietly go back to reading Inbox alone.
+            if ($k -eq 'DMARC_FOLDERS' -and -not $values[$k]) { continue }
+            $lines += "set `"$k=$($values[$k])`""
+        }
         $lines += "`"$Cli`" ingest --db `"$db`" --mailbox `"%DMARC_MAILBOX%`" %* >> `"$(Join-Path $DataDir 'ingest.log')`" 2>&1"
         [IO.File]::WriteAllLines($IngestCmd, $lines, (New-Object Text.UTF8Encoding $false))
         Set-RestrictedAcl $IngestCmd "${ServiceSid}:RX"
 
-        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN', 'DMARC_ORGANIZATION')
+        $optional = @('DMARC_CERT_PASSWORD', 'DMARC_FALLBACK_ADDRESS', 'DMARC_REPORTING_DOMAIN', 'DMARC_ORGANIZATION', 'DMARC_FOLDERS')
         $missing = @($values.Keys | Where-Object { $optional -notcontains $_ -and -not $values[$_] })
         if ($missing.Count -eq 0 -and -not $NoIngestTask) {
             $action = New-ScheduledTaskAction -Execute $IngestCmd

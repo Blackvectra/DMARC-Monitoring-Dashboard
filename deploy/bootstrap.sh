@@ -60,6 +60,10 @@
 #                               to; defaults to the mailbox itself.
 #   --reporting-domain <d>      Optional. Per-domain report addresses live under
 #                               this domain, e.g. rua.example.com.
+#   --folder <name>             Optional. A mailbox folder to read instead of Inbox
+#                               and the folders inside it; give it once per folder.
+#                               The name is exact, backslash and all, as in
+#                               DMARC\client-a.example - quote it.
 #   --make-ingest-cert          Create the collector's certificate here: the .pfx
 #                               goes to /opt/dmarc/data, the .cer to upload to Entra
 #                               is printed, the password goes in /etc/dmarc-ingest.env.
@@ -78,7 +82,7 @@ HOST=""; EMAIL=""; RELEASE="latest"; FROM_DIR=""
 PROVIDER_NAME=""; TLS_REPORT_ADDRESS=""
 TENANT_ID=""; CLIENT_ID=""; MASTER_GROUP_ID=""; ORGANIZATION=""
 MAILBOX=""; INGEST_TENANT_ID=""; INGEST_CLIENT_ID=""; CERT=""; CERT_PASSWORD="${DMARC_CERT_PASSWORD:-}"
-FALLBACK_ADDRESS=""; REPORTING_DOMAIN=""
+FALLBACK_ADDRESS=""; REPORTING_DOMAIN=""; FOLDERS=()
 MAKE_CERT=false; PROXY=true; UPDATE_AGENT=true
 
 usage() {
@@ -136,6 +140,7 @@ while (( $# )); do
                               IFS= read -r CERT_PASSWORD < "$2" || true; shift 2 ;;
         --fallback-address)   need_value "$1" "${2:-}"; FALLBACK_ADDRESS="$2"; shift 2 ;;
         --reporting-domain)   need_value "$1" "${2:-}"; REPORTING_DOMAIN="$2"; shift 2 ;;
+        --folder)             need_value "$1" "${2:-}"; FOLDERS+=("$2"); shift 2 ;;
         --make-ingest-cert)   MAKE_CERT=true; shift ;;
         --no-proxy)           PROXY=false; shift ;;
         --no-update-agent)    UPDATE_AGENT=false; shift ;;
@@ -330,18 +335,25 @@ with open(path, "w") as f:
 PY
 }
 
-env_set() {        # env_set KEY value  (in /etc/dmarc-ingest.env, created 0600 if missing)
+env_set() {        # env_set KEY value [single]  (in /etc/dmarc-ingest.env, created 0600 if missing)
     # The value goes in through the environment, not python's argv: one of
     # them is the certificate password, and argv is readable in `ps` by every
     # account on the machine for as long as the interpreter runs.
-    ENV_FILE="$INGEST_ENV" ENV_KEY="$1" ENV_VALUE="$2" python3 - <<'PY'
+    ENV_FILE="$INGEST_ENV" ENV_KEY="$1" ENV_VALUE="$2" ENV_QUOTE="${3:-double}" python3 - <<'PY'
 import os, re, sys
 path, key, value = os.environ["ENV_FILE"], os.environ["ENV_KEY"], os.environ["ENV_VALUE"]
 if "\n" in value or "\r" in value:
     sys.exit(f"{key}: a value with a line break cannot be stored")
-# Double-quoted, with the characters both systemd's EnvironmentFile= parser
-# and bash treat specially escaped, so both read back exactly what was given.
-quoted = '"' + re.sub(r'([\\"$`])', r'\\\1', value) + '"'
+if os.environ["ENV_QUOTE"] == "single":
+    # Single-quoted, where systemd and bash both take every character as it
+    # is, so the file shows the value exactly. Neither has an escape inside
+    # single quotes, so a quote in the value closes them, goes in
+    # double-quoted, and opens them again: '"'"'.
+    quoted = "'" + value.replace("'", "'\"'\"'") + "'"
+else:
+    # Double-quoted, with the characters both systemd's EnvironmentFile= parser
+    # and bash treat specially escaped, so both read back exactly what was given.
+    quoted = '"' + re.sub(r'([\\"$`])', r'\\\1', value) + '"'
 lines = open(path).read().splitlines() if os.path.exists(path) else []
 out, done = [], False
 for line in lines:
@@ -446,7 +458,7 @@ if [[ -n "$CERT" && "$CERT" != "${ROOT}/data/ingest.pfx" ]]; then
     CERT="${ROOT}/data/ingest.pfx"
 fi
 
-if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK_ADDRESS$REPORTING_DOMAIN$ORGANIZATION" ]]; then
+if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK_ADDRESS$REPORTING_DOMAIN$ORGANIZATION${FOLDERS[*]}" ]]; then
     echo "== collector"
     [[ -n "$MAILBOX" ]]          && env_set DMARC_MAILBOX "$MAILBOX"
     [[ -n "$INGEST_TENANT_ID" ]] && env_set DMARC_TENANT_ID "$INGEST_TENANT_ID"
@@ -456,6 +468,11 @@ if [[ -n "$MAILBOX$INGEST_TENANT_ID$INGEST_CLIENT_ID$CERT$CERT_PASSWORD$FALLBACK
     [[ -n "$FALLBACK_ADDRESS" ]] && env_set DMARC_FALLBACK_ADDRESS "$FALLBACK_ADDRESS"
     [[ -n "$REPORTING_DOMAIN" ]] && env_set DMARC_REPORTING_DOMAIN "$REPORTING_DOMAIN"
     [[ -n "$ORGANIZATION" ]]     && env_set DMARC_ORGANIZATION "$ORGANIZATION"
+    # One value, the names separated by semicolons, as the collector reads
+    # DMARC_FOLDERS. Single-quoted, unlike the lines above, so the file shows
+    # each name exactly - DMARC\client-a.example, not DMARC\\client-a.example -
+    # the way docs/INGEST-SETUP.md tells somebody editing it by hand to write it.
+    (( ${#FOLDERS[@]} ))         && env_set DMARC_FOLDERS "$(IFS=';'; printf '%s' "${FOLDERS[*]}")" single
     chmod 0600 "$INGEST_ENV"
 
     # Enabled only when everything it needs is known; a timer firing a
