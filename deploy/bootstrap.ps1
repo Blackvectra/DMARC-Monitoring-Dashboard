@@ -181,14 +181,14 @@ foreach ($dir in @($Root, $AppDir, $DataDir, $BinDir, $DotnetDir)) {
 # are fine too, but a private one means this script's result does not depend
 # on what else is on the box, and the service's path to it is fixed.
 Say '== runtime'
-$haveRuntime = (Test-Path $Dotnet) -and ((& $Dotnet --list-runtimes 2>$null) -match '^Microsoft\.AspNetCore\.App 8\.')
+$haveRuntime = (Test-Path $Dotnet) -and ((& $Dotnet --list-runtimes 2>$null) -match '^Microsoft\.AspNetCore\.App 10\.')
 if (-not $haveRuntime) {
     $installer = Join-Path $env:TEMP 'dotnet-install.ps1'
     Get-File 'https://dot.net/v1/dotnet-install.ps1' $installer
-    & $installer -Runtime aspnetcore -Channel 8.0 -InstallDir $DotnetDir -NoPath | Out-Null
+    & $installer -Runtime aspnetcore -Channel 10.0 -InstallDir $DotnetDir -NoPath | Out-Null
 }
-$runtimeLine = (& $Dotnet --list-runtimes) -match '^Microsoft\.AspNetCore\.App 8\.' | Select-Object -First 1
-if (-not $runtimeLine) { Fail "the ASP.NET Core 8 runtime did not install under $DotnetDir" 69 }
+$runtimeLine = (& $Dotnet --list-runtimes) -match '^Microsoft\.AspNetCore\.App 10\.' | Select-Object -First 1
+if (-not $runtimeLine) { Fail "the ASP.NET Core 10 runtime did not install under $DotnetDir" 69 }
 Say "   $runtimeLine"
 
 # ---- 2. the release ------------------------------------------------------------
