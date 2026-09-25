@@ -18,4 +18,21 @@
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+
+  <!--
+    What a build nobody stamped calls itself.
+
+    release.yml publishes with -p:Version=<the tag>, and a property passed on
+    the command line always wins over one set here. Anything built without it
+    is a working tree, and says so in words. Left to the SDK it would say
+    1.0.0 - a real version number - so BuildInfo used to treat "1.0.0" as
+    "not stamped", and a genuine v1.0.0 release reported itself as a
+    development build and never offered an update.
+
+    Tested here because this file is read before the SDK fills in its
+    defaults: at this point $(Version) is empty unless somebody passed one.
+  -->
+  <PropertyGroup Condition="'$(Version)' == '' and '$(VersionPrefix)' == '' and '$(InformationalVersion)' == ''">
+    <InformationalVersion>development</InformationalVersion>
+  </PropertyGroup>
 </Project>
