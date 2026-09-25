@@ -66,8 +66,8 @@ public static class ReportNarrative
         // How much mail, and how much of it was really the client. The first
         // figure anybody asks about.
         points.Add(
-            $"{Count(report.Messages)} message(s) were sent using your domain name during {report.Period.Label}, "
-            + $"and {report.PassRate}% of them were genuinely yours.");
+            $"{Plural.Count(report.Messages, "message")} {Plural.Of(report.Messages, "was", "were")} sent using your domain name during {report.Period.Label}, "
+            + $"and {report.PassRate}% of {Plural.Of(report.Messages, "it was", "them were")} genuinely yours.");
 
         if (report.HasComparison)
         {
@@ -95,16 +95,19 @@ public static class ReportNarrative
             var open = targeted.Where(d => d is null || !d.IsFullyEnforcing).Select(d => d?.Domain).OfType<string>().ToList();
             var allRefused = targeted.Count > 0 && targeted.All(d => d is { IsFullyEnforcing: true });
 
+            var forged = impersonating.Sum(s => s.Failing);
             points.Add(
-                $"{Count(impersonating.Sum(s => s.Failing))} message(s) from {impersonating.Count} source(s) "
-                + "were sent by someone who is not you and could not prove otherwise"
+                $"{Plural.Count(forged, "message")} from {Plural.Count(impersonating.Count, "source")} "
+                + $"{Plural.Of(forged, "was", "were")} sent by someone who is not you and could not prove otherwise"
                 + (allRefused
-                    ? ". Because your domains enforce DMARC, they were refused or sent to junk by the "
+                    ? $". Because your domains enforce DMARC, {Plural.Of(forged, "it was", "they were")} refused or sent to junk by the "
                       + "receiving mail provider rather than landing in an inbox."
                     : open.Count > 0 && open.Count < targeted.Count
-                        ? $". Those sent as {string.Join(", ", open)} were delivered normally, because that "
-                          + "domain's policy does not yet refuse them; the rest were refused or sent to junk."
-                        : ". Your domains are not yet enforcing against them, so these were delivered normally."));
+                        ? $". Those sent as {string.Join(", ", open)} were delivered normally, because "
+                          + $"{Plural.Of(open.Count, "that domain's policy does", "those domains' policies do")} not yet "
+                          + "refuse them; the rest were refused or sent to junk."
+                        : $". Your domains are not yet enforcing against {Plural.Of(forged, "it, so it was", "them, so these were")} "
+                          + "delivered normally."));
 
             var shared = impersonating.Where(s => s.OtherClientsAffected > 0).ToList();
             if (shared.Count > 0)
@@ -115,7 +118,7 @@ public static class ReportNarrative
                 // attacker also hit "other organizations we protect" would
                 // reasonably read it as the wrong noun entirely.
                 points.Add(
-                    $"{shared.Count} of those source(s) {Was(shared.Count)} also seen sending as other customers "
+                    $"{shared.Count} of those sources {Was(shared.Count)} also seen sending as other customers "
                     + $"{report.ProviderName} protects, which means this is broad activity rather than "
                     + "someone targeting you specifically.");
             }
@@ -131,26 +134,27 @@ public static class ReportNarrative
             points.Add(
                 (struggling.Count == 1
                     ? $"{struggling[0].Domain} is the exception: {struggling[0].OwnPassRate}% of its own mail "
-                      + $"authenticated, so {Count(struggling[0].OwnFailing)} message(s) may not "
+                      + $"authenticated, so {Plural.Count(struggling[0].OwnFailing, "message")} may not "
                       + "have arrived."
                     : $"{struggling.Count} of your domains are doing worse than the total above - "
                       + $"{string.Join(", ", struggling.Select(d => $"{d.Domain} at {d.OwnPassRate}%"))} - "
-                      + $"so {Count(report.StrugglingMessages)} message(s) may not have arrived.")
+                      + $"so {Plural.Count(report.StrugglingMessages, "message")} may not have arrived.")
                 + $" {Opening(report.ProviderName)} is looking at this.");
         }
 
         if (misconfigured.Count > 0)
         {
             points.Add(
-                $"{misconfigured.Count} service(s) you use {Is(misconfigured.Count)} sending on your behalf without "
+                $"{Plural.Count(misconfigured.Count, "service")} you use {Is(misconfigured.Count)} sending on your behalf without "
                 + $"being set up correctly, which put {Count(misconfigured.Sum(s => s.Failing))} of your own "
-                + $"message(s) at risk of being rejected. {Opening(report.ProviderName)} is correcting this.");
+                + $"messages at risk of being rejected. {Opening(report.ProviderName)} is correcting this.");
         }
 
         if (report.Changes.Count > 0)
         {
             var applied = report.Changes.Count(c => !c.WasRolledBack);
-            points.Add($"{applied} change(s) were made to your DNS records this month. They are listed below.");
+            points.Add($"{Plural.Count(applied, "change")} {Plural.Of(applied, "was", "were")} made to your DNS records this month. "
+                + $"{Plural.Of(applied, "It is", "They are")} listed below.");
         }
 
         return new ReportSummary
@@ -241,9 +245,8 @@ public static class ReportNarrative
 
     private static string Count(long value) => value.ToString("N0", CultureInfo.InvariantCulture);
 
-    // The "(s)" convention keeps the counts honest without branching on every
-    // noun, but a verb cannot be fudged that way: "1 source(s) were" is the
-    // kind of thing a client notices and mentions.
+    // Nouns go through Plural; so must the verbs that agree with them. "1
+    // source were" is the kind of thing a client notices and mentions.
     private static string Was(int count) => count == 1 ? "was" : "were";
 
     private static string Is(int count) => count == 1 ? "is" : "are";
@@ -253,7 +256,7 @@ public static class ReportNarrative
     /// </summary>
     /// <remarks>
     /// The default reads "your IT provider", which is right mid-sentence and
-    /// wrong as the first word. A real company name is already capitalised, so
+    /// wrong as the first word. A real company name is already capitalized, so
     /// this is a no-op for it.
     /// </remarks>
     private static string Opening(string providerName) =>

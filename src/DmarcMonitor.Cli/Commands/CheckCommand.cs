@@ -93,6 +93,7 @@ public static class CheckCommand
         var saved = 0;
         var skipped = 0;
         var changed = 0;
+        var first = 0;
 
         foreach (var domain in domains)
         {
@@ -127,6 +128,7 @@ public static class CheckCommand
                     .ConfigureAwait(false);
                 if (stored.Stored) { saved++; } else { skipped++; }
                 if (stored.Changed) { changed++; }
+                if (stored.First) { first++; }
             }
 
             // Resolve each include to the addresses it authorizes and match
@@ -189,9 +191,11 @@ public static class CheckCommand
         {
             if (saved > 0)
             {
-                Console.WriteLine(changed == 0
-                    ? $"  Stored {saved} reading(s). Nothing had changed since the last one."
-                    : $"  Stored {saved} reading(s); {changed} domain(s) publish something different than before.");
+                Console.WriteLine(
+                    changed > 0 ? $"  Stored {saved} reading(s); {changed} domain(s) publish something different than before."
+                    : first == saved ? $"  Stored {saved} reading(s), the first on record for each, so there is nothing to compare against yet."
+                    : first > 0 ? $"  Stored {saved} reading(s): the first on record for {first} domain(s), and nothing had changed for the rest."
+                    : $"  Stored {saved} reading(s). Nothing had changed since the last one.");
             }
 
             if (skipped > 0)
@@ -301,9 +305,9 @@ public static class CheckCommand
     {
         var sources = new List<(IPAddress, long, DateTimeOffset)>();
 
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ToString());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The reports are in the file of the client that owns the domain.
+        await using var db = await new ClientDatabases(dbPath).OpenAsync(
+            ClientScope.For(null, domain: domain), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = "SELECT r.source_ip, SUM(r.message_count), MAX(r.date_begin) "
@@ -341,9 +345,9 @@ public static class CheckCommand
         var domains = new List<string>();
         var observed = new Dictionary<string, ObservedSending>(StringComparer.OrdinalIgnoreCase);
 
-        await using var db = new SqliteConnection(
-            new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ToString());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // Every client's domains, so every client's file.
+        await using var db = await new ClientDatabases(dbPath).OpenAsync(
+            ClientScope.Organization(null), ["tls_reports", "aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """

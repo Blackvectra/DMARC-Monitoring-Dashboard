@@ -36,4 +36,13 @@
     <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!--
+    The single database as it was at 0018, before each client had a file of
+    its own. Tests seed rows with SQL written against it and let migration
+    0019 split the result, exactly as an upgrade does; see SingleDatabase.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\db\history\0018-single-database.sql" LogicalName="single-database.sql" />
+  </ItemGroup>
+
 </Project>

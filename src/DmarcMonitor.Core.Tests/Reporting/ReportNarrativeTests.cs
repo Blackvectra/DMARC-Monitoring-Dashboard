@@ -193,8 +193,8 @@ public sealed class ReportNarrativeTests
             messages: 1000, passing: 960));
 
         var text = AllText(summary);
-        Assert.Contains("service(s) you use", text, StringComparison.Ordinal);
-        Assert.Contains("your own message(s) at risk", text, StringComparison.Ordinal);
+        Assert.Contains("1 service you use is sending", text, StringComparison.Ordinal);
+        Assert.Contains("your own messages at risk", text, StringComparison.Ordinal);
         Assert.True(summary.NeedsAttention);
 
         // And the headline must not contradict it. A month with mail at risk

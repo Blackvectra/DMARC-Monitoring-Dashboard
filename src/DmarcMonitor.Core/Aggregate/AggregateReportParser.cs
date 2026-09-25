@@ -128,7 +128,13 @@ public static class AggregateReportParser
         // A row with no source IP describes mail from nowhere. It cannot be
         // attributed, acted on, or explained, so it is dropped rather than
         // shown to an operator as a mystery.
-        if (string.IsNullOrWhiteSpace(sourceIp)) { return null; }
+        //
+        // Nor one whose address is not an address. Reports are
+        // unauthenticated - anybody can mail one to an rua address - and
+        // stored as typed, "0.0.0.0/0" or two addresses with a newline between
+        // them went everywhere a source goes, including the indicator export a
+        // firewall reads. See IpText.
+        if (string.IsNullOrWhiteSpace(sourceIp) || !IpText.TryParse(sourceIp, out _)) { return null; }
 
         var evalEl = Child(rowEl, "policy_evaluated");
         var identEl = Child(recEl, "identifiers");

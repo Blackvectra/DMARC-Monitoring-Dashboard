@@ -317,4 +317,120 @@ public sealed class ThreatIntelligenceTests : IDisposable
 
         Assert.Equal(IndicatorConfidence.High, indicator!.Confidence);
     }
+
+    // ---- what a confirmed name may change -----------------------------------
+
+    /// <summary>
+    /// A gateway named by its own forward DNS is what it says it is. It passes
+    /// mail on; rated High, it was 35.174.145.124 - a customer's own Avanan -
+    /// at the top of the list and first into the blocklist.
+    /// </summary>
+    [Fact]
+    public async Task AGatewayConfirmedByItsOwnDnsIsNotAThreat()
+    {
+        await StoreAsync("acme.com", Row("35.174.145.124", 6, "fail", "acme.com", "acme.com", "fail", "selector1"));
+        await new SourceNameStore(_dbPath).SaveAsync("35.174.145.124", "us.cloud-sec-av.com", answered: true, forwardConfirmed: true);
+
+        var indicator = await IndicatorAsync("35.174.145.124");
+
+        Assert.Equal(IndicatorConfidence.NotAThreat, indicator!.Confidence);
+        Assert.Contains("Avanan", indicator.Rationale, StringComparison.Ordinal);
+        Assert.Contains("confirmed by its own forward DNS", indicator.Rationale, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same name unconfirmed is the sender's own word, and changes nothing.</summary>
+    [Fact]
+    public async Task AnUnconfirmedGatewayNameChangesNothing()
+    {
+        await StoreAsync("acme.com", Row("203.0.113.46", 6, "fail", "acme.com", "acme.com", "fail", "selector1"));
+        await new SourceNameStore(_dbPath).SaveAsync("203.0.113.46", "us.cloud-sec-av.com", answered: true, forwardConfirmed: false);
+
+        var indicator = await IndicatorAsync("203.0.113.46");
+
+        Assert.Equal(IndicatorConfidence.High, indicator!.Confidence);
+    }
+
+    // ---- what the export will put in front of a firewall ---------------------
+
+    private async Task<string> ExportAsync()
+    {
+        var service = new ThreatIntelligenceService(_dbPath);
+        await service.RefreshAsync();
+        return await service.ExportAsync();
+    }
+
+    /// <summary>Every line a firewall would read, without the comments.</summary>
+    private static List<string> Entries(string export) =>
+        [.. export.Split('\n').Where(l => l.Length > 0 && !l.StartsWith('#'))];
+
+    [Fact]
+    public async Task AnOrdinaryForgerIsExported()
+    {
+        await StoreAsync("acme.com", Row("203.0.113.9", 40, "fail", "acme.com", "acme.com", "fail", "selector2"));
+
+        var entry = Assert.Single(Entries(await ExportAsync()));
+
+        Assert.StartsWith("203.0.113.9 ", entry, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Still rated High - a success for one domain does not excuse forging
+    /// another - and still not blocked: a firewall that drops it drops that
+    /// client's own mail with the rest.
+    /// </summary>
+    [Fact]
+    public async Task AnAddressThatAlsoDeliveredAClientsMailIsWithheld()
+    {
+        await StoreAsync("good.example", Row("198.51.100.20", 30, "pass", "good.example", "good.example", "pass"));
+        await StoreAsync("acme.com", Row("198.51.100.20", 5, "fail", "acme.com", "acme.com", "fail", "selector1"));
+
+        var export = await ExportAsync();
+
+        Assert.Empty(Entries(export));
+        Assert.Contains("#   198.51.100.20: delivered authenticated mail for good.example", export, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A shared platform's address is every one of its customers, the clients
+    /// included. Two Microsoft addresses were in the list this replaced.
+    /// </summary>
+    [Fact]
+    public async Task AnAddressOfASharedPlatformIsWithheld()
+    {
+        await StoreAsync("acme.com", Row("40.107.1.20", 5, "fail", "acme.com", "acme.com", "fail", "selector1"));
+
+        var export = await ExportAsync();
+
+        Assert.Empty(Entries(export));
+        Assert.Contains("an address of Microsoft 365", export, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnAddressThatIsNotPublicIsWithheld()
+    {
+        await StoreAsync("acme.com", Row("10.1.2.3", 5, "fail", "acme.com", "acme.com", "fail", "selector1"));
+
+        var export = await ExportAsync();
+
+        Assert.Empty(Entries(export));
+        Assert.Contains("10.1.2.3: not a public address", export, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A selector is whatever the report's sender typed. One carrying a
+    /// newline wrote a second, uncommented line into the blocklist - and a
+    /// firewall would have read "0.0.0.0/0" as a rule.
+    /// </summary>
+    [Fact]
+    public async Task AForgedSelectorCannotWriteALineOfItsOwn()
+    {
+        await StoreAsync("acme.com",
+            Row("203.0.113.50", 5, "fail", "acme.com", "acme.com", "fail", "s1&#10;0.0.0.0/0&#10;"));
+
+        var entries = Entries(await ExportAsync());
+
+        var entry = Assert.Single(entries);
+        Assert.StartsWith("203.0.113.50 ", entry, StringComparison.Ordinal);
+        Assert.DoesNotContain('\r', entry);
+    }
 }

@@ -657,36 +657,38 @@ how.
 
 ### Restoring
 
-A backup is an ordinary SQLite database. Stop the services, put it in place,
-and start them — **and delete the `-wal` and `-shm` files first:**
+A backup is a zip of the organization's database and every client's file
+([CLIENT-FILES.md](CLIENT-FILES.md)). `dmarc restore` puts it back. Stop the
+services first, so nothing writes into a file while it is being replaced:
 
     sudo systemctl stop dmarc-web 'dmarc-ingest*.timer' dmarc-backup.timer
-
-    # THIS LINE IS NOT OPTIONAL
-    sudo -u dmarc rm -f /opt/dmarc/data/dmarc.db-wal /opt/dmarc/data/dmarc.db-shm
-
-    sudo -u dmarc cp /opt/dmarc/backups/dmarc-20260922-032000.bak /opt/dmarc/data/dmarc.db
-    sudo -u dmarc dmarc init-db --db /opt/dmarc/data/dmarc.db    # applies any newer migrations
-    sudo -u dmarc dmarc backup --db /opt/dmarc/data/dmarc.db --to /tmp/verify --keep 1   # integrity-checks it
+    sudo -u dmarc dmarc restore --from /opt/dmarc/backups/dmarc-20260922-032000.bak --db /opt/dmarc/data/dmarc.db
     sudo systemctl start dmarc-web 'dmarc-ingest*.timer' dmarc-backup.timer
 
-**Why the `rm` matters.** The database runs in WAL mode, so recent writes live
-in `dmarc.db-wal` rather than in `dmarc.db`. Copy a backup over `dmarc.db` and
-leave the old `-wal` beside it, and SQLite replays that write-ahead log onto
-the file you just restored.
+It checks every file in the backup before it touches anything live: the names
+inside the zip are where a backup keeps things and nowhere else, each file
+passes an integrity check, and each is one of this product's databases. Only
+then does it move the database in place aside - to
+`dmarc-replaced-<time>.db`, with its client folder beside it - and put the
+backup in its place. What it moved aside is never deleted: everything that
+arrived since the backup is in it and nowhere else. Then it brings what it
+restored up to date, and prints the counts, so you find out now rather than
+when the collector writes to it. A backup from before each client had a file
+of its own is a single database, and restores the same way.
+
+**Why not copy the file back by hand.** The database runs in WAL mode, so
+recent writes live in `dmarc.db-wal` rather than in `dmarc.db`. Copy a backup
+over `dmarc.db` and leave the old `-wal` beside it, and SQLite replays that
+write-ahead log onto the file you just restored.
 
 Reproduced: a backup taken at 200 rows, restored with the old `-wal` left in
 place, opened showing **500 rows — 300 of them written after the backup was
 taken.** A clean shutdown checkpoints the WAL away and hides this, which is
-exactly why it bites: restores happen after crashes, where it survives.
-
-In the case this section exists for — a database that failed its integrity
-check — the damage is as likely to be in the WAL as anywhere, and this lands
-it on top of the clean copy.
-
-The `dmarc backup` line before starting the services is not ceremony: it
-integrity-checks the restored file and tells you the row counts, so you find
-out now rather than when the collector writes to it.
+exactly why it bites: restores happen after crashes, where it survives. The
+`-wal` and `-shm` belong to the database being replaced, and `restore` moves
+them aside with it. Copying files by hand also leaves the client folder out,
+and a database put back with another day's client files disagrees with them
+about who owns what.
 
 Nothing is lost in the gap: reports stay in the mailbox until a run stores
 them, so the next collection picks up whatever arrived meanwhile.
@@ -697,13 +699,14 @@ them, so the next collection picks up whatever arrived meanwhile.
 
 | | |
 |---|---|
-| database | wherever `--db` / `Database:Path` says. One file, plus `-wal` and `-shm` while it is open. |
+| database | wherever `--db` / `Database:Path` says, plus `-wal` and `-shm` while it is open. |
+| client files | a folder beside it named after it - `dmarc.db` keeps them in `dmarc-clients/`, one file per client. See [CLIENT-FILES.md](CLIENT-FILES.md). |
 | reports | `--out`, default `reports/` |
 | certificate | not in the repository. The ingest one needs its private key. |
 
-The database is the only state. Back it up and everything else is
-reproducible; lose it and the reports are gone, because receivers do not
-re-send.
+The database and its client files are the only state. Back them up - `dmarc
+backup` takes both - and everything else is reproducible; lose them and the
+reports are gone, because receivers do not re-send.
 
 ---
 

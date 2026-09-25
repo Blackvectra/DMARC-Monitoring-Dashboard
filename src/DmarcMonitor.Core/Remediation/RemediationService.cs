@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using DmarcMonitor.Core.Dns;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Remediation;
@@ -70,7 +71,11 @@ public sealed record AppliedChange(
 /// </summary>
 public sealed class RemediationService(string databasePath, DnsLookup? lookup = null)
 {
-    private readonly string _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
+    /// <summary>
+    /// The organization's database and each client's file. Plans and changes
+    /// are a client's history and live in its file; see ClientDatabases.
+    /// </summary>
+    private readonly ClientDatabases _files = new(databasePath);
 
     // Its own resolver, with no cache. The page's shared lookup caches for
     // the record's TTL, which is exactly the window this polls across: one
@@ -92,10 +97,11 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(provider);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
-
-        var ids = await DomainIdsAsync(db, plan.Domain, ct).ConfigureAwait(false);
+        DomainIds? ids;
+        await using (var registry = await _files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false))
+        {
+            ids = await DomainIdsAsync(registry, plan.Domain, ct).ConfigureAwait(false);
+        }
 
         // Stored first, whatever happens next. The domain has to be known to
         // store anything, and a domain reports have never arrived for is one
@@ -112,6 +118,13 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
                 Message = $"Not applied: {plan.Domain} is not a domain this has reports for.",
             };
         }
+
+        // The plan and anything applied from it go into the file of the client
+        // that owns the domain. No transaction is held across what follows:
+        // the provider calls in between are network calls, and nothing else
+        // should wait on them.
+        await using var db = await _files.OpenAsync(
+            ClientScope.Client(ids.Value.ClientId), write: true, ct: ct).ConfigureAwait(false);
 
         var planId = await StorePlanAsync(db, ids.Value, plan, appliedBy, ct).ConfigureAwait(false);
 
@@ -292,14 +305,26 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(changeId);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        var visible = false;
+        var found = await _files.FirstAsync(ClientScope.Organization(null), write: true, async (db, _, token) =>
+        {
+            var change = await GetChangeAsync(db, changeId, token).ConfigureAwait(false);
+            if (change is null) { return false; }
 
-        var change = await GetChangeAsync(db, changeId, ct).ConfigureAwait(false)
-            ?? throw new ArgumentException($"No change with id {changeId}.", nameof(changeId));
+            visible = await VerifyAsync(db, change, timeout, poll, token).ConfigureAwait(false);
+            return true;
+        }, ct).ConfigureAwait(false);
 
+        return found ? visible : throw new ArgumentException($"No change with id {changeId}.", nameof(changeId));
+    }
+
+    /// <summary>Polls DNS for one change, in the file that holds it.</summary>
+    private async Task<bool> VerifyAsync(
+        SqliteConnection db, AppliedChange change, TimeSpan? timeout, TimeSpan? poll, CancellationToken ct)
+    {
         if (change.IsPropagated) { return true; }
 
+        var changeId = change.Id;
         var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromMinutes(2));
         var wait = poll ?? TimeSpan.FromSeconds(10);
         string? error = null;
@@ -352,12 +377,24 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         ArgumentException.ThrowIfNullOrWhiteSpace(changeId);
         ArgumentNullException.ThrowIfNull(provider);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        ApplyOutcome? outcome = null;
+        var found = await _files.FirstAsync(ClientScope.Organization(null), write: true, async (db, _, token) =>
+        {
+            var change = await GetChangeAsync(db, changeId, token).ConfigureAwait(false);
+            if (change is null) { return false; }
 
-        var change = await GetChangeAsync(db, changeId, ct).ConfigureAwait(false)
-            ?? throw new ArgumentException($"No change with id {changeId}.", nameof(changeId));
+            outcome = await RollBackAsync(db, change, provider, by, reason, token).ConfigureAwait(false);
+            return true;
+        }, ct).ConfigureAwait(false);
 
+        return found ? outcome! : throw new ArgumentException($"No change with id {changeId}.", nameof(changeId));
+    }
+
+    /// <summary>Rolls one change back, in the file that holds it.</summary>
+    private static async Task<ApplyOutcome> RollBackAsync(
+        SqliteConnection db, AppliedChange change, IDnsProvider provider, string by, string reason, CancellationToken ct)
+    {
+        var changeId = change.Id;
         var plan = new ChangePlan
         {
             Domain = change.Domain,
@@ -439,8 +476,8 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     public async Task<IReadOnlyList<AppliedChange>> HistoryAsync(
         string? domain = null, int limit = 100, string? tenantId = null, string? clientSlug = null, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug, domain), ["dns_changes"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = ChangeSelect
@@ -460,9 +497,13 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
 
     public async Task<AppliedChange?> GetChangeAsync(string changeId, CancellationToken ct = default)
     {
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
-        return await GetChangeAsync(db, changeId, ct).ConfigureAwait(false);
+        AppliedChange? change = null;
+        await _files.FirstAsync(ClientScope.Organization(null), write: false, async (db, _, token) =>
+        {
+            change = await GetChangeAsync(db, changeId, token).ConfigureAwait(false);
+            return change is not null;
+        }, ct).ConfigureAwait(false);
+        return change;
     }
 
     // ---- storage ---------------------------------------------------------------

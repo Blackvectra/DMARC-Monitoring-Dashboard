@@ -131,6 +131,12 @@ public sealed class FirstRunTests
         Assert.Equal("Carried across", await TheTenantAsync(dbPath));
 
         Assert.Contains(logger.Messages, m => m.Contains("brought up to date", StringComparison.Ordinal));
+
+        // The upgrade that moves every client's rows into files of their own
+        // keeps the database as it was, and says where.
+        var kept = Path.Combine(dir.Path, "dmarc.pre-0019.db");
+        Assert.True(File.Exists(kept));
+        Assert.Contains(logger.Messages, m => m.Contains(kept, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -219,42 +225,30 @@ public sealed class FirstRunTests
     }
 
     /// <summary>
-    /// A database as the previous release left it: the current schema, with
-    /// the last migration undone so it is genuinely one that never had it.
+    /// A database as the previous release left it: one file, built by the
+    /// schema as it stood before each client got a file of its own.
     /// </summary>
     /// <remarks>
-    /// The thorough version of this - every migration, in order, with the
-    /// reasons each undo is shaped the way it is - lives in
+    /// Built from the frozen schema rather than by undoing the last migration,
+    /// because the last migration moved every client's rows out and dropped
+    /// their tables - there is no undoing that in place. The thorough version
+    /// of this - every migration, in order - lives in
     /// <c>DatabaseMigrationTests</c> in Core. This needs only "one release
     /// behind", which is the case a person upgrading actually has.
     /// </remarks>
     private static async Task<string> AnOlderDatabaseAsync(string dbPath)
     {
-        await new ReportStore(dbPath).InitializeAsync(DatabaseSchema.Sql);
+        await using var stream = typeof(FirstRunTests).Assembly.GetManifestResourceStream("single-database.sql")
+            ?? throw new InvalidOperationException("db/history/0018-single-database.sql is not embedded in the tests.");
+        using var reader = new StreamReader(stream);
 
-        var last = DatabaseMigrations.All[^1];
-        await using var db = Open(dbPath);
-
-        // Indexes first: SQLite refuses to drop a column an index still
-        // mentions, and names the index rather than the migration when it does.
-        foreach (var index in Matches(last.Sql, @"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)"))
+        await using (var db = Open(dbPath))
         {
-            await ExecuteAsync(db, $"DROP INDEX IF EXISTS {index[0]}");
+            await ExecuteAsync(db, await reader.ReadToEndAsync());
         }
 
-        foreach (var added in Matches(last.Sql, @"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)"))
-        {
-            await ExecuteAsync(db, $"ALTER TABLE {added[0]} DROP COLUMN {added[1]}");
-        }
-
-        foreach (var table in Matches(last.Sql, @"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)"))
-        {
-            await ExecuteAsync(db, $"DROP TABLE IF EXISTS {table[0]}");
-        }
-
-        await ExecuteAsync(db, $"DELETE FROM schema_migrations WHERE version = '{last.Version}'");
-
-        return DatabaseMigrations.All[^2].Version;
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        return "0018";
     }
 
     private static List<string[]> Matches(string sql, string pattern) =>

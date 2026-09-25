@@ -79,6 +79,7 @@ public static class Program
                 "prune" => await PruneCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "export" => await ExportCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "backup" => await BackupCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "restore" => await RestoreCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "health" => await HealthCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "intel" => await IntelCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
@@ -177,7 +178,9 @@ public static class Program
                 --schema <path>  Schema file. Default: db/schema.sql
 
               import             Import report files from a folder. Needs no mailbox, so it
-                                 works on an archive or on files somebody sent you.
+                                 works on an archive or on files somebody sent you. A file
+                                 that cannot be read is named and skipped, the rest are
+                                 imported, and the run exits 1.
                 --from <folder>  Folder to read, including subfolders.
                 --db <path>      Database file. Default: dmarc.db
 
@@ -348,6 +351,15 @@ public static class Program
                                  this is for much later than you think.
                 --db <path>      Database file. Default: dmarc.db
 
+              restore            Put a backup back: the organization's database and every
+                                 client's file. Stop the dashboard and the collector first.
+                                 Every file in the backup is checked before anything live is
+                                 touched; what was in place is moved aside, never deleted,
+                                 with its -wal and -shm, which belong to it. A backup from an
+                                 older build is brought up to date afterwards.
+                --from <file>    The .bak to restore.
+                --db <path>      Where it goes. Default: dmarc.db
+
               health             Whether this install is still doing its job. Everything it
                                  looks at fails silently: a collector whose certificate
                                  expired stops storing reports and says nothing, while every
@@ -406,7 +418,15 @@ public static class Program
                                  impersonating clients, across every domain watched.
                 --db <path>      Database file. Default: dmarc.db
                 --export         Print confirmed and high-confidence indicators only,
-                                 one per line, for a firewall or SIEM.
+                                 one per line, for a firewall or SIEM. Anything not
+                                 safe to block - a shared platform, or an address
+                                 that also delivered a client's authenticated mail -
+                                 is withheld and listed underneath with the reason.
+                --names          Look up what each source's address reverses to, and
+                                 check the name points back. Reports and pages use
+                                 these names to recognize mail filters and services;
+                                 run it after an import. Server installs run it nightly.
+                --names-limit <n> Look up at most n sources, busiest first. Default: 500
 
               ingest             Read the reporting mailbox and store what arrives.
                 --db <path>            Database file. Default: dmarc.db
@@ -418,6 +438,12 @@ public static class Program
                 --reporting-domain <d> Subdomain per-domain report addresses use.
                 --fallback <address>   Shared address, for domains not yet migrated.
                 --max <n>              Messages per run. Default: 500
+                --folder <name>        A folder to read, by its exact name; give it again
+                                     for each folder. Default: Inbox. Each is read with
+                                     the folders directly inside it. The name is matched
+                                     whole, so a backslash is part of it, as in
+                                     DMARC\example.org - quote it. Or DMARC_FOLDERS, with
+                                     the names separated by semicolons.
                 --delete <mode>        Delete a message once its reports are stored, rather
                                      than filing it. A reporting mailbox grows without
                                      limit, and the processed folder is the same quota.

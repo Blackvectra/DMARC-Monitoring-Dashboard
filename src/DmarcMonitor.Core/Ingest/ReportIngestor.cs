@@ -7,8 +7,24 @@ namespace DmarcMonitor.Core.Ingest;
 /// <summary>Settings for one ingest run.</summary>
 public sealed record IngestOptions
 {
-    /// <summary>Folder to read from.</summary>
-    public string SourceFolder { get; init; } = "Inbox";
+    /// <summary>
+    /// The folders to read, by display name, in the order they are read.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Inbox unless somebody says otherwise, which is how it has always been.
+    /// It became a list because the mailbox this was built for has Outlook
+    /// rules filing most of its reports into folders BESIDE Inbox, not inside
+    /// it - nine of them, literally named like <c>DMARC\example.org</c> - and
+    /// a collector that could only read Inbox never saw them.
+    /// </para>
+    /// <para>
+    /// Each is a folder at the top of the mailbox (or a well-known name such as
+    /// Inbox), matched by its whole name: a backslash is part of the name, not
+    /// a path. One that is not there is reported, never created.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> SourceFolders { get; init; } = ["Inbox"];
 
     /// <summary>Where a successfully ingested report is filed.</summary>
     public string ProcessedFolder { get; init; } = "DMARC-Processed";
@@ -41,7 +57,7 @@ public sealed record IngestOptions
     public string ReportingDomain { get; init; } = "";
 
     /// <summary>
-    /// Also read folders inside the source folder.
+    /// Also read the folders directly inside each source folder.
     /// </summary>
     /// <remarks>
     /// Sorting reports into a folder per domain with a mail rule is how an MSP
@@ -200,10 +216,20 @@ public sealed record IngestRunResult
     public IReadOnlyList<IngestedReport> Reports { get; init; } = [];
 
     /// <summary>
-    /// Messages that threw. Kept per-message so one failure is visible
-    /// without having taken the run down.
+    /// Messages that threw, or whose reports could not all be stored, and
+    /// folders that could not be read. Kept per item so one failure is
+    /// visible without having taken the run down.
     /// </summary>
     public IReadOnlyList<string> Errors { get; init; } = [];
+
+    /// <summary>
+    /// Every folder the run read, by display name, in the order it read them.
+    /// </summary>
+    /// <remarks>
+    /// So a dry run shows which folders it actually reached. "Messages read"
+    /// alone cannot tell a quiet folder from one that was never opened.
+    /// </remarks>
+    public IReadOnlyList<string> FoldersRead { get; init; } = [];
 
     /// <summary>True when the message cap was reached and a backlog remains.</summary>
     public bool StoppedEarly { get; init; }
@@ -288,6 +314,7 @@ public sealed class ReportIngestor
     {
         var reports = new List<IngestedReport>();
         var errors = new List<string>();
+        var foldersRead = new List<string>();
         var read = 0;
         var moved = 0;
         var deleted = 0;
@@ -297,41 +324,37 @@ public sealed class ReportIngestor
         var unrecognizedId = await _mailbox.EnsureFolderAsync(_options.UnrecognizedFolder, cancellationToken).ConfigureAwait(false);
         var quarantineId = await _mailbox.EnsureFolderAsync(_options.QuarantineFolder, cancellationToken).ConfigureAwait(false);
 
+        // The source folders, each followed by the folders inside it. A mail
+        // rule sorting by domain puts everything one level down, so reading
+        // only the parent would find nothing and say nothing.
+        List<MailFolder> folders;
+        try
+        {
+            folders = await FoldersToReadAsync(
+                new HashSet<string>(StringComparer.Ordinal) { processedId, unrecognizedId, quarantineId },
+                errors, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            folders = [];
+            stoppedEarly = true;
+        }
+
         // The enumeration itself can throw on cancellation, so the whole loop
         // is wrapped. A canceled run has to RETURN what it already did: the
         // scheduled task is time-limited, so being cut off mid-backlog is the
         // normal case, not an exceptional one. Throwing here would discard
         // every report processed before the deadline and leave their messages
         // moved out of the source folder, so they would never be seen again.
-        // The source folder, plus any folder inside it. A mail rule sorting by
-        // domain puts everything one level down, so reading only the parent
-        // would find nothing and say nothing.
-        var folders = new List<string> { _options.SourceFolder };
-        if (_options.IncludeChildFolders)
-        {
-            try
-            {
-                foreach (var child in await _mailbox.GetChildFoldersAsync(_options.SourceFolder, cancellationToken).ConfigureAwait(false))
-                {
-                    folders.Add(child.Name);
-                }
-            }
-            catch (OperationCanceledException) { stoppedEarly = true; }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                // Not fatal: the parent folder is still read. But it is
-                // recorded, because silently reading one folder when there are
-                // twelve is exactly the failure this option exists to prevent.
-                errors.Add($"Could not list folders inside '{_options.SourceFolder}': {ex.Message}");
-            }
-        }
-
         try
         {
         foreach (var folder in folders)
         {
         if (read >= _options.MaxMessages || stoppedEarly) { break; }
-        await foreach (var message in _mailbox.GetMessagesAsync(folder, cancellationToken).ConfigureAwait(false))
+        foldersRead.Add(folder.Name);
+
+        // By id, never by name again: see IMailboxClient.GetMessagesAsync.
+        await foreach (var message in _mailbox.GetMessagesAsync(folder.Id, cancellationToken).ConfigureAwait(false))
         {
             if (cancellationToken.IsCancellationRequested) { stoppedEarly = true; break; }
             if (read >= _options.MaxMessages) { stoppedEarly = true; break; }
@@ -341,7 +364,7 @@ public sealed class ReportIngestor
             // knows which folder it came from even when the client did not
             // set it.
             var located = string.IsNullOrEmpty(message.FolderName)
-                ? message with { FolderName = folder }
+                ? message with { FolderName = folder.Name }
                 : message;
 
             List<IngestedReport> fromThisMessage;
@@ -382,6 +405,7 @@ public sealed class ReportIngestor
             if (_persist is not null && fromThisMessage.Count > 0)
             {
                 bool saved;
+                string? why = null;
                 try
                 {
                     saved = await _persist(fromThisMessage, cancellationToken).ConfigureAwait(false);
@@ -393,11 +417,21 @@ public sealed class ReportIngestor
                 }
                 catch (Exception ex) when (ex is not OutOfMemoryException)
                 {
-                    errors.Add($"{message.Id}: could not be stored, so it was left in place: {ex.Message}");
                     saved = false;
+                    why = ex.Message;
                 }
 
-                if (!saved) { continue; }
+                // Recorded whether the store threw or simply said no. Saying no
+                // used to leave the message in place with nothing recorded at
+                // all, so a run that had stored none of a message's reports
+                // finished with no error and exited 0, and the next run did the
+                // same again.
+                if (!saved)
+                {
+                    errors.Add($"{message.Id}: {NotStored(fromThisMessage)} could not be stored, so it was left in place"
+                             + (why is null ? "" : $": {why}"));
+                    continue;
+                }
             }
 
             var destination = ChooseDestination(fromThisMessage, processedId, unrecognizedId, quarantineId);
@@ -455,7 +489,101 @@ public sealed class ReportIngestor
             MessagesDeleted = deleted,
             Reports = reports,
             Errors = errors,
+            FoldersRead = foldersRead,
             StoppedEarly = stoppedEarly,
+        };
+    }
+
+    /// <summary>
+    /// The folders to read, each followed by the folders directly inside it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every name is found once, up front, and read by id from then on. A
+    /// name that is not there is recorded and skipped, never created, and the
+    /// rest are still read: nine folders collected and one reported missing
+    /// beats a run that stops at the first typo, and it beats a run that makes
+    /// an empty folder of that name and reads it happily every hour.
+    /// </para>
+    /// <para>
+    /// The folders this run files into are never read, even when named. Every
+    /// message in them is one already dealt with, so reading one would file
+    /// each of them again on every run - and spend the per-run message cap
+    /// doing it while new reports waited.
+    /// </para>
+    /// </remarks>
+    private async Task<List<MailFolder>> FoldersToReadAsync(
+        HashSet<string> filedInto, List<string> errors, CancellationToken ct)
+    {
+        var folders = new List<MailFolder>();
+        var taken = new HashSet<string>(StringComparer.Ordinal);
+
+        var names = _options.SourceFolders
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var name in names)
+        {
+            var folder = await _mailbox.FindFolderAsync(name, ct).ConfigureAwait(false);
+            if (folder is null)
+            {
+                errors.Add($"There is no folder named '{name}' at the top of the mailbox, so it was not read. "
+                         + "The name has to match exactly, backslashes and all; a shell or an environment file "
+                         + "that treats a backslash as an escape will have removed it, so quote the name.");
+                continue;
+            }
+
+            if (filedInto.Contains(folder.Id))
+            {
+                errors.Add($"'{name}' is where this run files mail, so it was not read as well: every message "
+                         + "in it would be filed again on every run.");
+                continue;
+            }
+
+            if (!taken.Add(folder.Id)) { continue; }
+            folders.Add(folder);
+
+            if (!_options.IncludeChildFolders) { continue; }
+
+            try
+            {
+                foreach (var child in await _mailbox.GetChildFoldersAsync(folder.Id, ct).ConfigureAwait(false))
+                {
+                    if (filedInto.Contains(child.Id) || !taken.Add(child.Id)) { continue; }
+                    folders.Add(child);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // Not fatal: the parent folder is still read. But it is
+                // recorded, because silently reading one folder when there are
+                // twelve is exactly the failure this option exists to prevent.
+                errors.Add($"Could not list folders inside '{name}': {ex.Message}");
+            }
+        }
+
+        return folders;
+    }
+
+    /// <summary>Names the reports of one message that were due to be stored.</summary>
+    private static string NotStored(List<IngestedReport> fromThisMessage)
+    {
+        var names = fromThisMessage
+            .Where(r => r.Outcome == IngestOutcome.Ingested)
+            .Select(r => r.FileName)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        return names.Count switch
+        {
+            0 => "its reports",
+            1 => names[0],
+            _ => string.Join(", ", names),
         };
     }
 
@@ -467,13 +595,22 @@ public sealed class ReportIngestor
     /// it to the unrecognized folder would make a configuration mistake
     /// permanent, because nothing reads that folder again.
     /// </summary>
+    /// <remarks>
+    /// One unreadable report is enough to make the message unrecognized, not
+    /// every one of them. A message with one good report and one this version
+    /// could not read used to be filed as processed - which with --delete
+    /// meant deleted, taking the only copy of the one that could not be read,
+    /// and that is the one kind of mail the delete setting promises to keep.
+    /// The good report is already stored by then, so nothing is lost by
+    /// keeping the message where a person will look at it.
+    /// </remarks>
     private static string? ChooseDestination(
         List<IngestedReport> reports, string processed, string unrecognized, string quarantine)
     {
         if (reports.Exists(r => r.Outcome == IngestOutcome.Quarantined)) { return quarantine; }
         if (reports.Exists(r => r.Outcome == IngestOutcome.Unattributed)) { return null; }
         if (reports.Count == 0) { return unrecognized; }
-        if (reports.TrueForAll(r => r.Outcome == IngestOutcome.Unrecognized)) { return unrecognized; }
+        if (reports.Exists(r => r.Outcome == IngestOutcome.Unrecognized)) { return unrecognized; }
         return processed;
     }
 
@@ -481,18 +618,46 @@ public sealed class ReportIngestor
     {
         var results = new List<IngestedReport>();
         var attachments = await _mailbox.GetAttachmentsAsync(message.Id, ct).ConfigureAwait(false);
+        var found = 0;
 
         foreach (var attachment in attachments)
         {
             ct.ThrowIfCancellationRequested();
 
-            foreach (var extracted in ReportAttachment.Extract(attachment.Name, attachment.Content))
+            var budget = ExtractionBudget.ForMail();
+            var fromThisAttachment = 0;
+
+            foreach (var extracted in ReportAttachment.ExtractAll(attachment.Name, attachment.Content, budget))
             {
+                fromThisAttachment++;
                 results.Add(Handle(message, extracted));
+            }
+
+            found += fromThisAttachment;
+
+            // What could not be read is recorded as unrecognized, with the
+            // reason, rather than skipped. Skipped, a damaged attachment beside
+            // a good report left the message looking fully processed - so it
+            // was filed, or with --delete deleted, and the one copy of the
+            // damaged report went with it. Reports cut off by the size limit
+            // are the same case: taken as far as the limit, and the rest lost.
+            foreach (var problem in budget.Unreadable)
+            {
+                results.Add(Unrecognized(message, attachment.Name, $"{attachment.Name}: {problem}"));
+            }
+
+            if (budget.Exhausted)
+            {
+                results.Add(Unrecognized(message, attachment.Name,
+                    $"{attachment.Name}: too large to read in full. {fromThisAttachment} report(s) were taken from it "
+                    + "and there may be more."));
             }
         }
 
-        if (results.Count == 0)
+        // Counted in reports found, not in results: an attachment that could
+        // not be read adds a result, and says nothing about whether the report
+        // is in the body instead.
+        if (found == 0)
         {
             // Nothing in the attachments. For one report type that is the
             // normal case rather than a dead end: a DMARC failure report is a
@@ -643,6 +808,16 @@ public sealed class ReportIngestor
         if (!attribution.ShouldIngest)
         {
             return Unrecognized(message, extracted.FileName, attribution.Reason);
+        }
+
+        // Only reachable through the shared address, which takes the domain
+        // from the report and so accepts an empty one. Counted as ingested, a
+        // report like this was handed to a store that declines it, left its
+        // message in place, and was read, counted and declined again on every
+        // run.
+        if (ReportImporter.WhyTlsCannotBeFiled(report) is { } why)
+        {
+            return Unrecognized(message, extracted.FileName, why);
         }
 
         var key = $"tls|{attribution.Domain}|{report.OrganizationName}|{report.ReportId}";

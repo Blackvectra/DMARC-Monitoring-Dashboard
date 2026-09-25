@@ -8,10 +8,10 @@ namespace DmarcMonitor.Core.Storage;
 ///
 /// The only thing in this product that deletes a customer's history, so it is
 /// built to be the opposite of a background tidy-up: it counts before it
-/// deletes, it does nothing without being asked, it deletes inside one
-/// transaction so a failure halfway leaves nothing half-removed, and every run
-/// that removes anything writes a line to the audit log saying what and under
-/// which policy.
+/// deletes, it does nothing without being asked, it deletes each client's file
+/// inside one transaction so a failure halfway leaves no file half-pruned, and
+/// every run that removes anything writes a line to the audit log saying what
+/// and under which policy.
 ///
 /// Nothing here deletes a domain, a client or an organization. A customer who
 /// sends no mail for a year still exists; only the reports age out.
@@ -68,40 +68,49 @@ public sealed class RetentionService(string databasePath)
         var aggregateCutoff = policy.AggregateCutoff(now);
         var forensicCutoff = policy.ForensicCutoff(now);
 
-        await using var db = new SqliteConnection(new SqliteConnectionStringBuilder
+        // One client's file at a time: the reports are in each client's own
+        // file, and each file is pruned in a transaction of its own. Counted
+        // first, and counted the same way whether or not anything is then
+        // removed, so the dry run and the real run cannot disagree.
+        var files = new ClientDatabases(_databasePath);
+        var result = new PruneResult(0, 0, 0, 0, apply);
+
+        foreach (var client in await files.ListAsync(ct: ct).ConfigureAwait(false))
         {
-            DataSource = _databasePath,
-            Mode = apply ? SqliteOpenMode.ReadWrite : SqliteOpenMode.ReadOnly,
-        }.ToString());
+            ct.ThrowIfCancellationRequested();
+            if (!File.Exists(files.PathFor(client))) { continue; }
 
-        await db.OpenAsync(ct).ConfigureAwait(false);
+            await using var db = await files.OpenAsync(ClientScope.Client(client.Id), write: apply, ct: ct)
+                .ConfigureAwait(false);
 
-        // Counted first, and counted the same way whether or not anything is
-        // then removed, so the dry run and the real run cannot disagree.
-        var aggregateReports = await CountAsync(
-            db, "SELECT COUNT(*) FROM aggregate_reports WHERE date_end < $cutoff", aggregateCutoff, ct)
-            .ConfigureAwait(false);
+            var here = new PruneResult(
+                await CountAsync(
+                    db, "SELECT COUNT(*) FROM aggregate_reports WHERE date_end < $cutoff", aggregateCutoff, ct)
+                    .ConfigureAwait(false),
+                await CountAsync(
+                    db,
+                    "SELECT COUNT(*) FROM aggregate_records WHERE report_id IN "
+                    + "(SELECT id FROM aggregate_reports WHERE date_end < $cutoff)",
+                    aggregateCutoff, ct).ConfigureAwait(false),
+                await CountAsync(
+                    db, "SELECT COUNT(*) FROM forensic_reports WHERE received_at < $cutoff", forensicCutoff, ct)
+                    .ConfigureAwait(false),
+                await CountAsync(
+                    db, "SELECT COUNT(*) FROM tls_reports WHERE date_end < $cutoff", aggregateCutoff, ct)
+                    .ConfigureAwait(false),
+                apply);
 
-        var aggregateRecords = await CountAsync(
-            db,
-            "SELECT COUNT(*) FROM aggregate_records WHERE report_id IN "
-            + "(SELECT id FROM aggregate_reports WHERE date_end < $cutoff)",
-            aggregateCutoff, ct).ConfigureAwait(false);
+            result = new PruneResult(
+                result.AggregateReports + here.AggregateReports,
+                result.AggregateRecords + here.AggregateRecords,
+                result.ForensicReports + here.ForensicReports,
+                result.TlsReports + here.TlsReports,
+                apply);
 
-        var forensic = await CountAsync(
-            db, "SELECT COUNT(*) FROM forensic_reports WHERE received_at < $cutoff", forensicCutoff, ct)
-            .ConfigureAwait(false);
+            if (!apply || here.NothingToDo) { continue; }
 
-        var tls = await CountAsync(
-            db, "SELECT COUNT(*) FROM tls_reports WHERE date_end < $cutoff", aggregateCutoff, ct)
-            .ConfigureAwait(false);
+            await using var transaction = db.BeginTransaction(deferred: false);
 
-        var result = new PruneResult(aggregateReports, aggregateRecords, forensic, tls, apply);
-
-        if (!apply || result.NothingToDo) { return result with { Applied = apply && !result.NothingToDo }; }
-
-        await using (var transaction = (SqliteTransaction)await db.BeginTransactionAsync(ct).ConfigureAwait(false))
-        {
             // Records before their reports, because the rows are the bulk and
             // a foreign key would otherwise decide the order for us on some
             // builds and not others.
@@ -125,6 +134,8 @@ public sealed class RetentionService(string databasePath)
 
             await transaction.CommitAsync(ct).ConfigureAwait(false);
         }
+
+        if (!apply || result.NothingToDo) { return result with { Applied = apply && !result.NothingToDo }; }
 
         // After the commit, so the log never claims a deletion that rolled
         // back. Platform-wide rather than per-organization: one run covers

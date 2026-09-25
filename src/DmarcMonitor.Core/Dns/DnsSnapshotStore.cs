@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
@@ -121,6 +122,16 @@ public sealed record SnapshotSave(bool Stored, bool Changed)
 {
     /// <summary>What changed, record by record, when <see cref="Changed"/> is true.</summary>
     public IReadOnlyList<DriftChange> Drift { get; init; } = [];
+
+    /// <summary>
+    /// True when this was the first reading on record for the domain.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from "nothing changed", which is what a first reading was
+    /// reported as: a fresh install scanning nineteen domains was told nothing
+    /// had changed since readings that did not exist.
+    /// </remarks>
+    public bool First { get; init; }
 }
 
 /// <summary>A selector seen signing, and the key found at it.</summary>
@@ -158,17 +169,8 @@ public sealed class DnsSnapshotStore(string databasePath)
         return value;
     }
 
-    private string ReadOnlyConnection => new SqliteConnectionStringBuilder
-    {
-        DataSource = _databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
-
-    private string WritableConnection => new SqliteConnectionStringBuilder
-    {
-        DataSource = _databasePath,
-        ForeignKeys = true,
-    }.ToString();
+    /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
+    private ClientDatabases Files => new(_databasePath);
 
     /// <summary>
     /// The current DNS state of every domain in scope, keyed by domain name.
@@ -186,8 +188,8 @@ public sealed class DnsSnapshotStore(string databasePath)
     {
         var results = new Dictionary<string, DomainDns>(StringComparer.OrdinalIgnoreCase);
 
-        await using var db = new SqliteConnection(ReadOnlyConnection);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await Files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug), ["dns_snapshots", "dkim_selectors"], ct: ct).ConfigureAwait(false);
 
         var ids = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -328,14 +330,59 @@ public sealed class DnsSnapshotStore(string databasePath)
             _ => DnsCheckStatus.Ok,
         };
 
-        await using var db = new SqliteConnection(WritableConnection);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        var files = Files;
 
-        var (domainId, tenantId, clientId) = await IdsAsync(db, name, scopeTenantId, ct).ConfigureAwait(false);
-        if (domainId is null) { return new SnapshotSave(Stored: false, Changed: false); }
+        // The reading goes into the file of the client that owns the domain,
+        // and the domain's check status into the organization's database, in
+        // one transaction. Found first, then confirmed under the lock: the
+        // domain could be filed under another client in between, and a
+        // reading written into the file it just left would never be read.
+        string? domainId = null, tenantId = null, clientId = null;
+        SqliteConnection? db = null;
+        SqliteTransaction? transaction = null;
 
-        await using var transaction = (SqliteTransaction)await db.BeginTransactionAsync(ct).ConfigureAwait(false);
+        for (var attempt = 1; db is null; attempt++)
+        {
+            await using (var registry = await files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false))
+            {
+                (domainId, tenantId, clientId) = await IdsAsync(registry, name, scopeTenantId, ct).ConfigureAwait(false);
+            }
+            if (domainId is null) { return new SnapshotSave(Stored: false, Changed: false); }
 
+            var open = await files.OpenAsync(ClientScope.Client(clientId!), write: true, ct: ct).ConfigureAwait(false);
+            var tx = open.BeginTransaction(deferred: false);
+
+            await using (var owner = open.CreateCommand())
+            {
+                owner.Transaction = tx;
+                owner.CommandText = "SELECT client_id FROM main.domains WHERE id = $id";
+                owner.Parameters.AddWithValue("$id", domainId);
+                if (await owner.ExecuteScalarAsync(ct).ConfigureAwait(false) as string == clientId)
+                {
+                    (db, transaction) = (open, tx);
+                    break;
+                }
+            }
+
+            await tx.DisposeAsync().ConfigureAwait(false);
+            await open.DisposeAsync().ConfigureAwait(false);
+            if (attempt >= 5)
+            {
+                throw new InvalidOperationException($"{name} kept changing client while its reading was being stored.");
+            }
+        }
+
+        await using var connection = db;
+        await using var inTransaction = transaction!;
+        return await SaveAsync(db, inTransaction, domainId!, tenantId!, clientId!, published, dkim, status, now, ct)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<SnapshotSave> SaveAsync(
+        SqliteConnection db, SqliteTransaction transaction, string domainId, string tenantId, string clientId,
+        PublishedRecords published, IReadOnlyList<SelectorReading>? dkim, DnsCheckStatus status, DateTimeOffset now,
+        CancellationToken ct)
+    {
         await using (var command = db.CreateCommand())
         {
             command.Transaction = transaction;
@@ -348,19 +395,22 @@ public sealed class DnsSnapshotStore(string databasePath)
         }
 
         IReadOnlyList<DriftChange>? drift = null;
+        var first = false;
 
         if (status == DnsCheckStatus.Ok)
         {
+            first = await LatestAsync(db, transaction, domainId, ct).ConfigureAwait(false) is null;
+
             drift = await WriteSnapshotAsync(
-                db, transaction, domainId, tenantId!, clientId!, published, now, ct).ConfigureAwait(false);
+                db, transaction, domainId, tenantId, clientId, published, now, ct).ConfigureAwait(false);
 
             await WriteDkimAsync(
-                db, transaction, domainId, tenantId!, clientId!, dkim ?? [], ct).ConfigureAwait(false);
+                db, transaction, domainId, tenantId, clientId, dkim ?? [], ct).ConfigureAwait(false);
         }
 
         await transaction.CommitAsync(ct).ConfigureAwait(false);
         return drift is null
-            ? new SnapshotSave(Stored: true, Changed: false)
+            ? new SnapshotSave(Stored: true, Changed: false) { First = first }
             : new SnapshotSave(Stored: true, Changed: true) { Drift = drift };
     }
 

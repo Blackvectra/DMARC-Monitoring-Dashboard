@@ -97,6 +97,7 @@ $Repo = 'Blackvectra/DMARC-Monitoring-Dashboard'
 $ServiceAccount = 'NT AUTHORITY\LocalService'
 $AppDir = Join-Path $Root 'app'
 $DataDir = Join-Path $Root 'data'
+$BackupDir = Join-Path $Root 'backups'
 $BinDir = Join-Path $Root 'bin'
 $DotnetDir = Join-Path $Root 'dotnet'
 $Dotnet = Join-Path $DotnetDir 'dotnet.exe'
@@ -154,14 +155,53 @@ function Get-File([string]$Uri, [string]$OutFile, [hashtable]$Headers = @{}) {
 $ServiceSid = '*S-1-5-19'      # NT AUTHORITY\LocalService
 $SystemSid = '*S-1-5-18'       # SYSTEM
 $AdminsSid = '*S-1-5-32-544'   # BUILTIN\Administrators
-function Grant-Acl([string]$Path, [string]$Grant) {
-    & icacls.exe $Path /grant $Grant /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "icacls could not grant '$Grant' on $Path" 70 }
-}
 # Only SYSTEM, administrators and the service account (with the given rights) see the file.
 function Set-RestrictedAcl([string]$Path, [string]$ServiceGrant) {
     & icacls.exe $Path /inheritance:r /grant:r "${SystemSid}:F" "${AdminsSid}:F" $ServiceGrant /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not restrict $Path" 70 }
+}
+
+# Locks the whole install tree down to SYSTEM, Administrators and the service
+# account. New-Item created these folders inheriting C:\'s ACL, which grants
+# Users read and Authenticated Users modify: any local account could read the
+# database, the cookie-signing keys and the stored secrets, and - worse -
+# replace a DLL or the dotnet host that the service executes as LocalService,
+# a local privilege escalation (OPEN-ISSUES.md #15).
+#
+# So inheritance is broken and every folder's ACL is stated outright. The
+# service account may READ AND EXECUTE the code it runs (app, bin, dotnet) but
+# not write it, and MODIFY only its data and its backups. Nobody else is
+# named. icacls /grant:r replaces the listed principals rather than adding to
+# them, and /inheritance:r drops the inherited entries, so a second run
+# produces the same ACL rather than piling entries up - and repairs an install
+# left world-writable by an earlier version of this script.
+function Set-TreeAcl {
+    # The code the service runs: read and execute for it, never write. The
+    # inheritable (OI)(CI) entries replace what these folders held and, because
+    # the folders no longer inherit from C:\, propagate down to the files
+    # already inside - so an install left world-writable by an earlier version
+    # of this script is repaired, not just new files protected. No /T is needed
+    # for that (nor wanted: it would reset the per-file ACLs set later, such as
+    # ingest.pfx's, on a re-run), because setting a parent's inheritable ACEs
+    # re-propagates to every child that still inherits.
+    foreach ($dir in @($AppDir, $BinDir, $DotnetDir)) {
+        & icacls.exe $dir /inheritance:r /grant:r "${SystemSid}:(OI)(CI)F" "${AdminsSid}:(OI)(CI)F" "${ServiceSid}:(OI)(CI)RX" /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "icacls could not secure $dir" 70 }
+    }
+    # The data the service owns: the database, the keys, the secrets and the
+    # backup copies. Modify, so it can write and prune them; still nobody else.
+    # Set before the database is created so the database inherits it.
+    foreach ($dir in @($DataDir, $BackupDir)) {
+        & icacls.exe $dir /inheritance:r /grant:r "${SystemSid}:(OI)(CI)F" "${AdminsSid}:(OI)(CI)F" "${ServiceSid}:(OI)(CI)M" /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "icacls could not secure $dir" 70 }
+    }
+    # The root itself, set last and without /T so it leaves the folders above
+    # alone: the service needs only to traverse it to reach them. Files written
+    # directly under it (the .cmd wrappers, the public certificate) inherit
+    # SYSTEM and Administrators but not the service, which the per-file
+    # Set-RestrictedAcl grants back on the few that the service must run.
+    & icacls.exe $Root /inheritance:r /grant:r "${SystemSid}:(OI)(CI)F" "${AdminsSid}:(OI)(CI)F" "${ServiceSid}:(RX)" /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "icacls could not secure $Root" 70 }
 }
 
 if ($CollectorOnly) { $NoProxy = $true }
@@ -172,7 +212,7 @@ if ([Environment]::Is64BitOperatingSystem -eq $false) { Fail 'a 64-bit Windows i
 
 Say "DMARC Monitor bootstrap on $([Environment]::OSVersion.VersionString)"
 
-foreach ($dir in @($Root, $AppDir, $DataDir, $BinDir, $DotnetDir)) {
+foreach ($dir in @($Root, $AppDir, $DataDir, $BackupDir, $BinDir, $DotnetDir)) {
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
 }
 
@@ -250,10 +290,9 @@ try {
         Say "   files under $Root"
     }
 
-    # The service account may write data and read everything else. Done before
-    # the database is created, so the file inherits it.
-    Grant-Acl $DataDir "${ServiceSid}:(OI)(CI)M"
-    foreach ($dir in @($AppDir, $BinDir, $DotnetDir)) { Grant-Acl $dir "${ServiceSid}:(OI)(CI)RX" }
+    # Lock the tree down before the database, keys and secrets are created, so
+    # every one of them inherits the restricted ACL rather than C:\'s open one.
+    Set-TreeAcl
 
     $db = Join-Path $DataDir 'dmarc.db'
     if (-not (Test-Path $db)) {
@@ -412,37 +451,142 @@ try {
         }
     }
 
+    # A scheduled task registered as LocalService, running a .cmd wrapper that
+    # logs into the data directory. The wrapper pattern (and the exit-code
+    # massaging in it) matches the ingest task above and the dmarc-* units on
+    # Linux: a command's real failure marks the task failed, and its ordinary
+    # "nothing to do" answers do not.
+    function Register-DmarcTask {
+        param([string]$Name, [string]$CmdPath, [string[]]$Body, $Trigger, [int]$LimitHours = 1)
+        [IO.File]::WriteAllLines($CmdPath, (@('@echo off') + $Body), (New-Object Text.UTF8Encoding $false))
+        Set-RestrictedAcl $CmdPath "${ServiceSid}:RX"
+        $action = New-ScheduledTaskAction -Execute $CmdPath
+        $principal = New-ScheduledTaskPrincipal -UserId $ServiceAccount -LogonType ServiceAccount -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours $LimitHours) -StartWhenAvailable -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $Name -Action $action -Trigger $Trigger -Principal $principal -Settings $settings -Force | Out-Null
+    }
+
     # ---- 6b. the nightly DNS scan ----------------------------------------------
     #
-    # What fills the SPF, DKIM and DMARC columns on the domains page. Unlike
-    # the collector this is registered unconditionally: it needs no mailbox,
-    # no app registration and no certificate, only the database and public
-    # DNS. Left for somebody to switch on later it would be a feature that
-    # shows three dashes forever with nothing on screen explaining why.
-    Say '== nightly DNS scan'
+    # What fills the SPF, DKIM and DMARC columns on the domains page, AND what
+    # turns the Sending sources page from a list of addresses into a list of
+    # names. Both are the same job - reading public DNS and writing the answers
+    # down - on the same nightly schedule, which is exactly how Linux runs them:
+    # dmarc-dns.service has `check --all --save` and `dmarc intel --names` as
+    # its two ExecStart lines. Windows ran only the first, so a server here
+    # never looked up who a sender was and the sources page stayed all digits.
+    #
+    # Registered unconditionally: it needs no mailbox, no app registration and
+    # no certificate, only the database and public DNS. Left for somebody to
+    # switch on later it would be a feature that shows dashes forever with
+    # nothing on screen explaining why.
+    Say '== nightly DNS scan and sender-name lookup'
     $DnsCmd = Join-Path $Root 'dns-scan.cmd'
-    $dnsLines = @(
-        '@echo off',
-        ':: Written by bootstrap.ps1. Reads each domain''s published DNS and stores it.',
+    $dnsLog = Join-Path $DataDir 'dns-scan.log'
+    $dnsBody = @(
+        ':: Written by bootstrap.ps1. Reads each domain''s published DNS and stores',
+        ':: it, then looks up what each sending address reverse-resolves to so the',
+        ':: pages can name a sender instead of printing an address. The two jobs',
+        ':: dmarc-dns.service runs on Linux, on the same nightly schedule.',
         ':: Run it by hand any time; it needs no configuration.',
-        "`"$Cli`" check --all --save --db `"$db`" >> `"$(Join-Path $DataDir 'dns-scan.log')`" 2>&1",
-        ':: check exits 1 when it finds a breaking fault in somebody else''s records,',
-        ':: which is the command doing its job. Only a real failure should mark the',
-        ':: task failed, so anything below 2 is reported as success.',
-        'if %ERRORLEVEL% LEQ 1 exit /b 0',
-        'exit /b %ERRORLEVEL%')
-    [IO.File]::WriteAllLines($DnsCmd, $dnsLines, (New-Object Text.UTF8Encoding $false))
-    Set-RestrictedAcl $DnsCmd "${ServiceSid}:RX"
-
+        "`"$Cli`" check --all --save --db `"$db`" >> `"$dnsLog`" 2>&1",
+        'set "DNS_RC=%ERRORLEVEL%"',
+        ':: The reverse-DNS names, exactly as the Linux unit''s second ExecStart.',
+        ':: An address with no reverse record is an ordinary answer, so this only',
+        ':: fails the task on a real error, never on an address it could not name.',
+        "`"$Cli`" intel --names --db `"$db`" >> `"$dnsLog`" 2>&1",
+        'set "INTEL_RC=%ERRORLEVEL%"',
+        ':: Mirror dmarc-dns.service SuccessExitStatus=0 1 66: 0 is fine, 1 is a',
+        ':: breaking fault found in somebody''s records (the command working), and',
+        ':: 66 is "no domains yet" on a box the collector has not filled. Anything',
+        ':: worse from either command is a genuine failure and marks the task.',
+        'if %DNS_RC% GEQ 2 if not "%DNS_RC%"=="66" exit /b %DNS_RC%',
+        'if %INTEL_RC% GEQ 2 if not "%INTEL_RC%"=="66" exit /b %INTEL_RC%',
+        'exit /b 0')
     # Nightly, at an hour nobody is looking, with the window spread so a room
-    # full of these installs does not hit the same resolver on the same
-    # minute. StartWhenAvailable catches up a machine that was switched off.
-    $dnsAction = New-ScheduledTaskAction -Execute $DnsCmd
-    $dnsTrigger = New-ScheduledTaskTrigger -Daily -At '03:20' -RandomDelay (New-TimeSpan -Minutes 30)
-    $dnsPrincipal = New-ScheduledTaskPrincipal -UserId $ServiceAccount -LogonType ServiceAccount -RunLevel Limited
-    $dnsSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1) -StartWhenAvailable -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName 'DMARC DNS scan' -Action $dnsAction -Trigger $dnsTrigger -Principal $dnsPrincipal -Settings $dnsSettings -Force | Out-Null
-    Say "   task 'DMARC DNS scan' registered (nightly). Run it now with: Start-ScheduledTask -TaskName 'DMARC DNS scan'"
+    # full of these installs does not hit the same resolver on the same minute.
+    Register-DmarcTask 'DMARC DNS scan' $DnsCmd $dnsBody `
+        (New-ScheduledTaskTrigger -Daily -At '03:20' -RandomDelay (New-TimeSpan -Minutes 30))
+    Say "   task 'DMARC DNS scan' registered (nightly, DNS records and sender names). Run it now with: Start-ScheduledTask -TaskName 'DMARC DNS scan'"
+
+    # ---- 6c. backup, retention and health --------------------------------------
+    #
+    # The three things a Linux install switches on during setup and a Windows
+    # one used to lack entirely (OPEN-ISSUES.md 10b): nothing was protecting the
+    # reports, nothing was applying the retention window, and nothing would tell
+    # anybody the collector had quietly stopped. The commands are cross-platform;
+    # only the scheduling was missing. Registered unconditionally, for the same
+    # reason as the DNS scan and mirroring the dmarc-backup/prune/health timers.
+    Say '== backup, retention and health'
+
+    # Nightly 03:20, 14 kept, into a directory only the service and admins can
+    # read - matching dmarc-backup.timer. The command verifies the live database
+    # before copying it, so a database that has begun to corrupt stops the run.
+    $BackupCmd = Join-Path $Root 'backup.cmd'
+    $backupLog = Join-Path $DataDir 'backup.log'
+    $backupBody = @(
+        ':: Written by bootstrap.ps1. A verified copy of the database; keeps 14.',
+        ':: Real failures (a corrupt database, an unwritable target) mark the task.',
+        "`"$Cli`" backup --to `"$BackupDir`" --keep 14 --db `"$db`" >> `"$backupLog`" 2>&1",
+        'exit /b %ERRORLEVEL%')
+    Register-DmarcTask 'DMARC backup' $BackupCmd $backupBody `
+        (New-ScheduledTaskTrigger -Daily -At '03:20' -RandomDelay (New-TimeSpan -Minutes 5))
+
+    # Weekly, Sunday 04:40 - after the nightly backup's slot - matching
+    # dmarc-prune.timer. The window is written here where an operator can read
+    # and change it, aggregate 400 days and forensic 30, and the command refuses
+    # a policy where the forensic window is the longer of the two.
+    $PruneCmd = Join-Path $Root 'prune.cmd'
+    $pruneLog = Join-Path $DataDir 'prune.log'
+    $pruneBody = @(
+        ':: Written by bootstrap.ps1. Applies the retention window: aggregate 400',
+        ':: days, forensic 30. Forensic reports hold real message headers, so that',
+        ':: window is deliberately the shortest. Edit these two numbers only.',
+        "`"$Cli`" prune --apply --by `"DMARC prune`" --aggregate-days 400 --forensic-days 30 --db `"$db`" >> `"$pruneLog`" 2>&1",
+        'exit /b %ERRORLEVEL%')
+    Register-DmarcTask 'DMARC prune' $PruneCmd $pruneBody `
+        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '04:40' -RandomDelay (New-TimeSpan -Minutes 30))
+
+    # 09:10 and 21:10 - matching dmarc-health.timer. --quiet, so a healthy run
+    # says nothing; when it finds the collector or the backups have stopped it
+    # exits non-zero, which marks the task failed. Windows has no OnFailure= to
+    # hang an alert on, but a failed task shows in Task Scheduler's Last Run
+    # Result and is what a monitoring agent watching the task reports.
+    $HealthCmd = Join-Path $Root 'health.cmd'
+    $healthLog = Join-Path $DataDir 'health.log'
+    $healthBody = @(
+        ':: Written by bootstrap.ps1. Asks whether collection and backups are',
+        ':: still happening; a non-zero exit (something actually broken) marks',
+        ':: the task failed. See it by hand: schtasks /query /tn "DMARC health" /v',
+        "`"$Cli`" health --db `"$db`" --backups `"$BackupDir`" --quiet >> `"$healthLog`" 2>&1",
+        'exit /b %ERRORLEVEL%')
+    Register-DmarcTask 'DMARC health' $HealthCmd $healthBody @(
+        (New-ScheduledTaskTrigger -Daily -At '09:10' -RandomDelay (New-TimeSpan -Minutes 5)),
+        (New-ScheduledTaskTrigger -Daily -At '21:10' -RandomDelay (New-TimeSpan -Minutes 5)))
+    Say "   tasks 'DMARC backup' (nightly), 'DMARC prune' (weekly) and 'DMARC health' (twice daily) registered"
+
+    # And take the first backup now, rather than leaving the first until 03:20
+    # tomorrow - the same reason install.sh does on Linux. It seeds a copy so
+    # the health task does not report "no backups" on its first evening, and it
+    # proves the backup works on this machine while somebody is watching.
+    # Never fatal: everything above is installed, and a backup problem must not
+    # make a working install look like a failed one.
+    try {
+        & $Cli backup --to $BackupDir --keep 14 --db $db 2>&1 |
+            Out-File -FilePath (Join-Path $DataDir 'backup.log') -Append -Encoding utf8
+        if ($LASTEXITCODE -eq 0) {
+            $newest = Get-ChildItem -Path $BackupDir -Filter 'dmarc-*.bak' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($newest) { Say "   first backup taken: $($newest.Name)" }
+            else { Say '   backup reported success but wrote nothing to the backups folder' }
+        } else {
+            Say "   the first backup did not succeed (exit $LASTEXITCODE); the nightly task will retry. See $(Join-Path $DataDir 'backup.log')"
+        }
+    } catch {
+        Say "   the first backup could not run: $($_.Exception.Message)"
+    }
+    # A non-zero from the backup above must not leak into a later step's check.
+    $global:LASTEXITCODE = 0
 
     # ---- 7. Caddy in front -----------------------------------------------------
     if (-not $NoProxy) {

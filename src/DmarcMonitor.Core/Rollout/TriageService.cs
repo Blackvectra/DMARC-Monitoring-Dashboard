@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Rollout;
@@ -63,11 +64,7 @@ public sealed class TriageService(string databasePath)
     // Its own read-only connection, like the rest of Core. Ranking the fleet
     // is domain logic, not presentation: it decides what an operator looks at
     // first, which is too load-bearing to sit where it cannot be tested.
-    private readonly string _connectionString = new SqliteConnectionStringBuilder
-    {
-        DataSource = databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
+    private readonly ClientDatabases _files = new(databasePath);
 
     /// <param name="days">Window to judge on. Long enough to be stable, short enough to be current.</param>
     /// <param name="tenantId">One organization's domains, or null for every organization's.</param>
@@ -78,8 +75,9 @@ public sealed class TriageService(string databasePath)
         var since = DateTimeOffset.UtcNow.AddDays(-days).UtcDateTime
             .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        await using var db = new SqliteConnection(_connectionString);
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The clients in scope, their files read together.
+        await using var db = await _files.OpenAsync(
+            ClientScope.For(tenantId, clientSlug), ["aggregate_records", "aggregate_reports"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
         // Left join so a domain with no reports still appears. A domain that

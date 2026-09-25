@@ -453,12 +453,31 @@ public sealed class CorrelationServiceTests : IDisposable
     public async Task NamesTheSourceWhenSomethingHasResolvedIt()
     {
         await StoreAsync("a.example", "alpha", Row("192.0.2.14", 5, "fail", "a.example", "fail"));
-        await new SourceNameStore(_dbPath).SaveAsync("192.0.2.14", "us.cloud-sec-av.com", answered: true);
+        await new SourceNameStore(_dbPath).SaveAsync("192.0.2.14", "us.cloud-sec-av.com", answered: true, forwardConfirmed: true);
 
         var source = await DetailAsync("192.0.2.14");
 
         Assert.True(source!.IsNamed);
         Assert.Equal(SourceKind.SecurityGateway, source.Kind);
+        Assert.Equal("Avanan (Check Point Harmony)", source.Display);
+    }
+
+    /// <summary>
+    /// An unconfirmed name is printed as the hostname it claims and decides
+    /// nothing: calling it "Avanan" would be this product vouching for a PTR
+    /// the sender wrote.
+    /// </summary>
+    [Fact]
+    public async Task AnUnconfirmedNameIsShownButNotBelieved()
+    {
+        await StoreAsync("a.example", "alpha", Row("192.0.2.15", 5, "fail", "a.example", "fail"));
+        await new SourceNameStore(_dbPath).SaveAsync("192.0.2.15", "us.cloud-sec-av.com", answered: true, forwardConfirmed: false);
+
+        var source = await DetailAsync("192.0.2.15");
+
+        Assert.True(source!.IsNamed);
+        Assert.Equal("us.cloud-sec-av.com", source.Display);
+        Assert.Equal(SourceKind.Unknown, source.Kind);
     }
 
     /// <summary>

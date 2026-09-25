@@ -292,7 +292,7 @@ public static class ZoneAudit
         Dkim(findings, zone, evidence);
         ReportAuthorizations(findings, zone, evidence);
         Delegation(findings, zone, evidence);
-        Cnames(findings, zone);
+        Cnames(findings, zone, evidence);
         Disagreements(findings, zone, evidence);
 
         return [.. findings.OrderByDescending(f => f.Severity)];
@@ -710,6 +710,18 @@ public static class ZoneAudit
 
             var authorized = record.Name[..^marker.Length];
 
+            // A wildcard is the receiver saying it takes reports for any
+            // domain at all, which RFC 7489 §7.1 offers as the way to do it.
+            // It names no domain, so the two checks below that read the name
+            // as one do not apply: "*" has no dot in it because it is not a
+            // domain, and it is not one this install monitors for the same
+            // reason. Only a "*" as the leftmost label is a wildcard (RFC 4592
+            // §2.1.1); anywhere else it is an ordinary character.
+            var wildcard = authorized == "*" || authorized.StartsWith("*.", StringComparison.Ordinal);
+            var who = !wildcard ? authorized
+                : authorized.Length == 1 ? "any domain"
+                : $"any domain under {authorized[2..]}";
+
             if (!IsDmarcVersion(record.Value, exact: true))
             {
                 var casing = IsDmarcVersion(record.Value, exact: false);
@@ -721,11 +733,11 @@ public static class ZoneAudit
                     Name = record.Name,
                     Line = record.Line,
                     Problem = casing
-                        ? $"The record authorizing {authorized} to send its reports here is "
+                        ? $"The record authorizing {who} to send its reports here is "
                           + $"\"{record.Value.Trim()}\". The version has to be DMARC1 in capitals - the "
                           + "standard spells it out character by character - so this does not authorize "
                           + "anything, and the reports are never sent."
-                        : $"The record authorizing {authorized} to send its reports here is "
+                        : $"The record authorizing {who} to send its reports here is "
                           + $"\"{record.Value.Trim()}\", which is not a DMARC record, so it authorizes "
                           + "nothing and the reports are never sent.",
                     Fix = $"Publish \"v=DMARC1\" at {record.Name}.",
@@ -740,6 +752,7 @@ public static class ZoneAudit
             // that shows a column of near-identical rows. Only ever said when
             // the book was actually consulted.
             if (evidence.Monitored.Count > 0
+                && !wildcard
                 && authorized.Length > 0
                 && authorized.Contains('.', StringComparison.Ordinal)
                 && !evidence.Monitored.Contains(authorized, StringComparer.OrdinalIgnoreCase))
@@ -767,7 +780,7 @@ public static class ZoneAudit
             // "client-f.example" was meant - and it is invisible in a
             // provider's panel, where the zone's own name is added on the end
             // and the whole row reads as a sensible hostname.
-            if (authorized.Length > 0 && !authorized.Contains('.', StringComparison.Ordinal))
+            if (!wildcard && authorized.Length > 0 && !authorized.Contains('.', StringComparison.Ordinal))
             {
                 findings.Add(new ZoneFinding
                 {
@@ -858,7 +871,7 @@ public static class ZoneAudit
     /// queried for one type returns one answer, so whichever record loses is
     /// simply never seen, and which one loses depends on the server.
     /// </remarks>
-    private static void Cnames(List<ZoneFinding> findings, ParsedZone zone)
+    private static void Cnames(List<ZoneFinding> findings, ParsedZone zone, ZoneEvidence evidence)
     {
         foreach (var group in zone.Records
                      .Where(r => r.Type is not ("RRSIG" or "NSEC" or "NSEC3"))
@@ -872,6 +885,21 @@ public static class ZoneAudit
 
             if (others.Count == 0) { continue; }
 
+            // The apex is the one name that is never free: every zone keeps
+            // its SOA and NS there, so a CNAME at the apex always shares.
+            var apex = group.Key.Equals(zone.Origin, StringComparison.OrdinalIgnoreCase);
+
+            // Except on Cloudflare, which never hands anybody a CNAME at the
+            // apex. It looks the target up itself and answers with the
+            // addresses behind it - what it calls CNAME flattening, which it
+            // always does at the apex - so the CNAME its export shows there is
+            // an instruction to Cloudflare rather than a record in DNS, and
+            // the SOA, NS, MX and TXT beside it are all served as written.
+            // Nothing is hidden, and told to keep one or the other, an
+            // operator deletes the domain's mail records to make room for its
+            // website.
+            if (apex && CloudflareAnswers(zone, evidence)) { continue; }
+
             findings.Add(new ZoneFinding
             {
                 Severity = HygieneSeverity.Breaking,
@@ -881,12 +909,44 @@ public static class ZoneAudit
                 Problem = $"{group.Key} has a CNAME and also {Join(others)}. A name with a CNAME on it may "
                         + "have nothing else, and which record a resolver returns is up to the server - so "
                         + "one of these is invisible, and which one can change.",
-                Fix = "Keep the CNAME or the other record(s), not both. Where a service needs a CNAME at a "
-                    + "name that must also carry something else, it usually offers an A record instead.",
+
+                // At the apex "the other records" are the zone's own SOA and
+                // NS, which cannot go, and the domain's MX and SPF, which must
+                // not - so there is only one way to resolve it.
+                Fix = apex
+                    ? "The apex has to keep its SOA and NS records, so it is the CNAME that goes, never the "
+                      + "records beside it. Publish the A and AAAA records the service gives for a bare "
+                      + "domain instead, or the DNS host's own answer to this: an ALIAS or ANAME record, or "
+                      + "a CNAME it flattens, as Cloudflare does."
+                    : "Keep the CNAME or the other record(s), not both. Where a service needs a CNAME at a "
+                      + "name that must also carry something else, it usually offers an A record instead.",
                 Source = FindingSource.Zone,
                 Reference = "RFC 1034 §3.6.2; RFC 2181 §10.1",
             });
         }
+    }
+
+    /// <summary>
+    /// True when Cloudflare is who answers for this zone.
+    /// </summary>
+    /// <remarks>
+    /// The live delegation when it was read, because that is who actually
+    /// answers - a Cloudflare export loaded onto somebody's own name servers
+    /// is exactly the broken zone the finding describes. The name servers the
+    /// file lists at its apex otherwise, which in a Cloudflare export are
+    /// Cloudflare's own. Every one of them has to be Cloudflare's: a domain
+    /// also delegated somewhere else is partly answered by a server that
+    /// flattens nothing. A Cloudflare zone on name servers of its own naming
+    /// cannot be told from anybody else's here, and keeps the finding.
+    /// </remarks>
+    private static bool CloudflareAnswers(ParsedZone zone, ZoneEvidence evidence)
+    {
+        IReadOnlyList<string> servers = evidence.Delegation.Count > 0
+            ? evidence.Delegation
+            : [.. zone.At(zone.Origin, "NS").Select(r => r.Target).Where(t => t.Length > 0)];
+
+        return servers.Count > 0
+            && servers.All(s => s.EndsWith(".ns.cloudflare.com", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

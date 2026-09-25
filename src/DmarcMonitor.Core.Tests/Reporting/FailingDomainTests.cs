@@ -83,7 +83,7 @@ public sealed class FailingDomainTests
     /// The count, not only the percentage.
     /// </summary>
     /// <remarks>
-    /// "45.5%" is a number to scroll past. "6 message(s) may not have
+    /// "45.5%" is a number to scroll past. "6 messages may not have
     /// arrived" is a thing that happened to somebody, and it is what a client
     /// reads back to their own staff.
     /// </remarks>
@@ -95,7 +95,7 @@ public sealed class FailingDomainTests
 
         Assert.Contains("mcleanelectric.com", text, StringComparison.Ordinal);
         Assert.Contains("45.5%", text, StringComparison.Ordinal);
-        Assert.Contains("6 message(s) may not have arrived", text, StringComparison.Ordinal);
+        Assert.Contains("6 messages may not have arrived", text, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
@@ -18,6 +19,9 @@ public sealed record ScanResult(
 {
     /// <summary>What changed, record by record, when <see cref="Changed"/> is true.</summary>
     public IReadOnlyList<DriftChange> Drift { get; init; } = [];
+
+    /// <summary>True when this was the first reading on record for the domain.</summary>
+    public bool First { get; init; }
 }
 
 /// <summary>What a whole run produced.</summary>
@@ -191,7 +195,7 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, Mt
             _ => DnsCheckStatus.Ok,
         };
 
-        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count) { Drift = save.Drift };
+        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count) { Drift = save.Drift, First = save.First };
     }
 
     private async Task<List<string>> TargetsAsync(
@@ -255,8 +259,9 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, Mt
 
         var found = new List<(string, DateTimeOffset)>();
 
-        await using var db = new SqliteConnection(ReadOnly());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The reports are in the file of the client that owns the domain.
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.For(tenantId, domain: domain), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """

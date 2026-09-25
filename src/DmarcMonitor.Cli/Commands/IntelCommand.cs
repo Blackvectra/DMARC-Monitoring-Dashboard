@@ -62,7 +62,7 @@ public static class IntelCommand
         Console.WriteLine();
         foreach (var i in indicators.Take(12))
         {
-            Console.WriteLine($"    [{i.Confidence,-9}] {i.Value,-16} {i.MessageCount,5:N0} msg  {i.DomainCount} domain(s)  {string.Join(", ", i.Domains)}");
+            Console.WriteLine($"    [{i.Confidence,-9}] {i.DisplayValue,-16} {i.MessageCount,5:N0} msg  {i.DomainCount} domain(s)  {string.Join(", ", i.Domains)}");
             Console.WriteLine($"                  {i.Rationale}");
         }
         Console.WriteLine();

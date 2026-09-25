@@ -441,7 +441,14 @@ public static class ZoneFile
             if (fromSoa is null && line.Length > 0 && !char.IsWhiteSpace(line[0]))
             {
                 var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length > 1 && Array.Exists(parts, p => p.Equals("SOA", StringComparison.OrdinalIgnoreCase)))
+
+                // An owner of "@" is the origin itself and names nothing - it
+                // is how the SOA reads in a GoDaddy export pasted without the
+                // header above it, and in the zone files Windows DNS Server
+                // writes. Taken as a name it declared a zone called "@", and
+                // the domain the caller asked about was refused as another's.
+                if (parts.Length > 1 && parts[0] != "@"
+                    && Array.Exists(parts, p => p.Equals("SOA", StringComparison.OrdinalIgnoreCase)))
                 {
                     fromSoa = Normalize(parts[0]);
                 }

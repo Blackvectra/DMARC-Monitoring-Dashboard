@@ -17,6 +17,13 @@ namespace DmarcMonitor.Core.Storage;
 /// for domains before anybody gets round to onboarding them, and discarding
 /// those loses data that cannot be recovered afterwards. Unassigned is then a
 /// visible list of unbilled work rather than a silent gap.
+///
+/// Two kinds of file. Who the organization, its clients and their domains are
+/// lives in the organization's database - the path this is given. What was
+/// reported about a client's mail lives in that client's own file, beside it
+/// (see <see cref="ClientDatabases"/>): a report is filed by writing its
+/// domain into the organization's database first and the report into the
+/// file of whichever client owns the domain second.
 /// </summary>
 public sealed class ReportStore
 {
@@ -44,6 +51,7 @@ public sealed class ReportStore
 
         _databasePath = databasePath;
         _organization = organization.Trim().ToLowerInvariant();
+        _files = new Lazy<ClientDatabases>(() => new ClientDatabases(databasePath));
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
@@ -53,6 +61,10 @@ public sealed class ReportStore
 
     private readonly string _databasePath;
     private readonly string _organization;
+    private readonly Lazy<ClientDatabases> _files;
+
+    /// <summary>Where each client's own file is.</summary>
+    private ClientDatabases Files => _files.Value;
 
     /// <summary>The organization slug new domains are filed under.</summary>
     public string Organization => _organization;
@@ -108,7 +120,7 @@ public sealed class ReportStore
             await using var connection = await OpenAsync(ct).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
             command.CommandText =
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('aggregate_reports','tls_reports','domains')";
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('tenants','clients','domains')";
             var count = Convert.ToInt64(await command.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture);
             return count == 3;
         }
@@ -134,7 +146,8 @@ public sealed class ReportStore
     /// </remarks>
     public async Task<bool> IsAggregateStoredAsync(string orgName, string externalReportId, string domain, CancellationToken ct = default)
     {
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var connection = await Files.OpenAsync(
+            ClientScope.For(null, domain: domain), ["aggregate_reports"], ct: ct).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT COUNT(*) FROM aggregate_reports r
@@ -149,7 +162,8 @@ public sealed class ReportStore
 
     public async Task<bool> IsTlsStoredAsync(string orgName, string externalReportId, string domain, CancellationToken ct = default)
     {
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
+        await using var connection = await Files.OpenAsync(
+            ClientScope.For(null, domain: domain), ["tls_reports"], ct: ct).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT COUNT(*) FROM tls_reports r
@@ -179,18 +193,14 @@ public sealed class ReportStore
     {
         ArgumentNullException.ThrowIfNull(report);
 
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
-        var tx = (SqliteTransaction)transaction;
-
-        var ids = await EnsureDomainAsync(connection, tx, report.Policy.Domain, _organization, ct).ConfigureAwait(false);
-        var reportId = Guid.NewGuid().ToString("N");
-        var now = Iso(DateTimeOffset.UtcNow);
-
-        try
+        return await InClientFileAsync(report.Policy.Domain, async (connection, tx, ids) =>
         {
-            await using (var command = connection.CreateCommand())
+            var reportId = Guid.NewGuid().ToString("N");
+            var now = Iso(DateTimeOffset.UtcNow);
+
+            try
             {
+                await using var command = connection.CreateCommand();
                 command.Transaction = tx;
                 command.CommandText = """
                     INSERT INTO aggregate_reports
@@ -224,83 +234,86 @@ public sealed class ReportStore
 
                 await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
-        }
-        catch (SqliteException ex) when (IsAlreadyStored(ex))
-        {
-            // UNIQUE(org_name, external_report_id, domain_id). The database is
-            // the last line of defense against double-counting, behind the
-            // ingestor's own check: a crash between the two must not inflate a
-            // customer's volume when the message is read again.
-            await transaction.RollbackAsync(ct).ConfigureAwait(false);
-            return null;
-        }
+            catch (SqliteException ex) when (IsAlreadyStored(ex))
+            {
+                // UNIQUE(org_name, external_report_id, domain_id). The database is
+                // the last line of defense against double-counting, behind the
+                // ingestor's own check: a crash between the two must not inflate a
+                // customer's volume when the message is read again.
+                return null;
+            }
 
-        foreach (var record in report.Records)
-        {
-            await using var command = connection.CreateCommand();
-            command.Transaction = tx;
-            command.CommandText = """
-                INSERT INTO aggregate_records
-                  (report_id, tenant_id, client_id, domain_id, date_begin,
-                   source_ip, source_ip_version, message_count,
-                   disposition, dkim_result, spf_result, dmarc_result, fail_reason,
-                   override_reason, override_comment,
-                   header_from, envelope_from, envelope_to, is_subdomain,
-                   dkim_domain, dkim_selector, dkim_auth_result, spf_domain, spf_auth_result)
-                VALUES
-                  ($report, $tenant, $client, $domain, $begin,
-                   $ip, $ipv, $count,
-                   $disp, $dkim, $spf, $dmarc, $fail,
-                   $orType, $orComment,
-                   $hfrom, $efrom, $eto, $isSub,
-                   $dkimDomain, $dkimSelector, $dkimAuth, $spfDomain, $spfAuth)
-                """;
-            command.Parameters.AddWithValue("$report", reportId);
-            command.Parameters.AddWithValue("$tenant", ids.TenantId);
-            command.Parameters.AddWithValue("$client", ids.ClientId);
-            command.Parameters.AddWithValue("$domain", ids.DomainId);
-            command.Parameters.AddWithValue("$begin", Iso(report.Metadata.Begin));
-            command.Parameters.AddWithValue("$ip", record.SourceIp);
-            command.Parameters.AddWithValue("$ipv", record.SourceIp.Contains(':', StringComparison.Ordinal) ? 6 : 4);
-            command.Parameters.AddWithValue("$count", record.Count);
-            command.Parameters.AddWithValue("$disp", record.Disposition.ToString().ToLowerInvariant());
-            command.Parameters.AddWithValue("$dkim", record.Dkim.ToString().ToLowerInvariant());
-            command.Parameters.AddWithValue("$spf", record.Spf.ToString().ToLowerInvariant());
-            command.Parameters.AddWithValue("$dmarc", record.IsDmarcPass ? "pass" : "fail");
-            command.Parameters.AddWithValue("$fail", FailReason(record));
-            command.Parameters.AddWithValue("$orType", record.Overrides.Count > 0
-                ? string.Join(';', record.Overrides.Select(o => o.Type.ToString().ToLowerInvariant()))
-                : (object)DBNull.Value);
-            command.Parameters.AddWithValue("$orComment", record.Overrides.Count > 0
-                ? Nullable(record.Overrides[0].Comment)
-                : DBNull.Value);
-            command.Parameters.AddWithValue("$hfrom", Nullable(record.HeaderFrom));
-            command.Parameters.AddWithValue("$efrom", Nullable(record.EnvelopeFrom));
-            command.Parameters.AddWithValue("$eto", Nullable(record.EnvelopeTo));
-            command.Parameters.AddWithValue("$isSub", IsSubdomain(record.HeaderFrom, report.Policy.Domain) ? 1 : 0);
+            // Ids unique across every client's file, not just this one.
+            var nextId = await ClientDatabases.AllocateIdsAsync(
+                connection, tx, "aggregate_records", report.Records.Count, ct).ConfigureAwait(false);
 
-            // Prefer an auth result that PASSED, falling back to the first.
-            // A record can carry several, and taking index zero would report a
-            // failed check while a successful one sat beside it.
-            var dkim = PreferPassing(record.DkimResults);
-            var spf = PreferPassing(record.SpfResults);
+            foreach (var record in report.Records)
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = tx;
+                command.CommandText = """
+                    INSERT INTO aggregate_records
+                      (id, report_id, tenant_id, client_id, domain_id, date_begin,
+                       source_ip, source_ip_version, message_count,
+                       disposition, dkim_result, spf_result, dmarc_result, fail_reason,
+                       override_reason, override_comment,
+                       header_from, envelope_from, envelope_to, is_subdomain,
+                       dkim_domain, dkim_selector, dkim_auth_result, spf_domain, spf_auth_result)
+                    VALUES
+                      ($id, $report, $tenant, $client, $domain, $begin,
+                       $ip, $ipv, $count,
+                       $disp, $dkim, $spf, $dmarc, $fail,
+                       $orType, $orComment,
+                       $hfrom, $efrom, $eto, $isSub,
+                       $dkimDomain, $dkimSelector, $dkimAuth, $spfDomain, $spfAuth)
+                    """;
+                command.Parameters.AddWithValue("$id", nextId++);
+                command.Parameters.AddWithValue("$report", reportId);
+                command.Parameters.AddWithValue("$tenant", ids.TenantId);
+                command.Parameters.AddWithValue("$client", ids.ClientId);
+                command.Parameters.AddWithValue("$domain", ids.DomainId);
+                command.Parameters.AddWithValue("$begin", Iso(report.Metadata.Begin));
+                command.Parameters.AddWithValue("$ip", record.SourceIp);
+                command.Parameters.AddWithValue("$ipv", record.SourceIp.Contains(':', StringComparison.Ordinal) ? 6 : 4);
+                command.Parameters.AddWithValue("$count", record.Count);
+                command.Parameters.AddWithValue("$disp", record.Disposition.ToString().ToLowerInvariant());
+                command.Parameters.AddWithValue("$dkim", record.Dkim.ToString().ToLowerInvariant());
+                command.Parameters.AddWithValue("$spf", record.Spf.ToString().ToLowerInvariant());
+                command.Parameters.AddWithValue("$dmarc", record.IsDmarcPass ? "pass" : "fail");
+                command.Parameters.AddWithValue("$fail", FailReason(record));
+                command.Parameters.AddWithValue("$orType", record.Overrides.Count > 0
+                    ? string.Join(';', record.Overrides.Select(o => o.Type.ToString().ToLowerInvariant()))
+                    : (object)DBNull.Value);
+                command.Parameters.AddWithValue("$orComment", record.Overrides.Count > 0
+                    ? Nullable(record.Overrides[0].Comment)
+                    : DBNull.Value);
+                command.Parameters.AddWithValue("$hfrom", Nullable(record.HeaderFrom));
+                command.Parameters.AddWithValue("$efrom", Nullable(record.EnvelopeFrom));
+                command.Parameters.AddWithValue("$eto", Nullable(record.EnvelopeTo));
+                command.Parameters.AddWithValue("$isSub", IsSubdomain(record.HeaderFrom, report.Policy.Domain) ? 1 : 0);
 
-            // The RESULT travels with the domain. A source forging a signature
-            // as its victim produces domain=victim.com with result=fail, so
-            // storing only the domain makes a forgery indistinguishable from
-            // the victim's own misconfigured service, which inverts the advice
-            // an operator is given.
-            command.Parameters.AddWithValue("$dkimDomain", dkim is null ? DBNull.Value : dkim.Domain);
-            command.Parameters.AddWithValue("$dkimSelector", dkim is null ? DBNull.Value : Nullable(dkim.Selector));
-            command.Parameters.AddWithValue("$dkimAuth", dkim is null ? DBNull.Value : Nullable(dkim.Result));
-            command.Parameters.AddWithValue("$spfDomain", spf is null ? DBNull.Value : spf.Domain);
-            command.Parameters.AddWithValue("$spfAuth", spf is null ? DBNull.Value : Nullable(spf.Result));
+                // Prefer an auth result that PASSED, falling back to the first.
+                // A record can carry several, and taking index zero would report a
+                // failed check while a successful one sat beside it.
+                var dkim = PreferPassing(record.DkimResults);
+                var spf = PreferPassing(record.SpfResults);
 
-            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
+                // The RESULT travels with the domain. A source forging a signature
+                // as its victim produces domain=victim.com with result=fail, so
+                // storing only the domain makes a forgery indistinguishable from
+                // the victim's own misconfigured service, which inverts the advice
+                // an operator is given.
+                command.Parameters.AddWithValue("$dkimDomain", dkim is null ? DBNull.Value : dkim.Domain);
+                command.Parameters.AddWithValue("$dkimSelector", dkim is null ? DBNull.Value : Nullable(dkim.Selector));
+                command.Parameters.AddWithValue("$dkimAuth", dkim is null ? DBNull.Value : Nullable(dkim.Result));
+                command.Parameters.AddWithValue("$spfDomain", spf is null ? DBNull.Value : spf.Domain);
+                command.Parameters.AddWithValue("$spfAuth", spf is null ? DBNull.Value : Nullable(spf.Result));
 
-        await transaction.CommitAsync(ct).ConfigureAwait(false);
-        return reportId;
+                await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            return reportId;
+        }, ct).ConfigureAwait(false);
     }
 
     /// <summary>Saves a TLS report. Returns the id, or null when already present.</summary>
@@ -318,58 +331,54 @@ public sealed class ReportStore
         var domain = report.Policies[0].Policy.Domain;
         if (string.IsNullOrWhiteSpace(domain)) { return null; }
 
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
-        var tx = (SqliteTransaction)transaction;
-
-        var ids = await EnsureDomainAsync(connection, tx, domain, _organization, ct).ConfigureAwait(false);
-        var reportId = Guid.NewGuid().ToString("N");
-
-        try
+        return await InClientFileAsync(domain, async (connection, tx, ids) =>
         {
-            await using var command = connection.CreateCommand();
-            command.Transaction = tx;
-            command.CommandText = """
-                INSERT INTO tls_reports
-                  (id, tenant_id, client_id, domain_id, org_name, external_report_id,
-                   date_begin, date_end, policy_type, policy_domain, policy_mode,
-                   total_success, total_failure,
-                   source_message_id, raw_hash, received_at, ingested_at)
-                VALUES
-                  ($id, $tenant, $client, $domain, $org, $rid,
-                   $begin, $end, $ptype, $pdomain, $pmode,
-                   $ok, $fail,
-                   $msg, $hash, $received, $ingested)
-                """;
-            command.Parameters.AddWithValue("$id", reportId);
-            command.Parameters.AddWithValue("$tenant", ids.TenantId);
-            command.Parameters.AddWithValue("$client", ids.ClientId);
-            command.Parameters.AddWithValue("$domain", ids.DomainId);
-            command.Parameters.AddWithValue("$org", report.OrganizationName);
-            command.Parameters.AddWithValue("$rid", report.ReportId);
-            command.Parameters.AddWithValue("$begin", Iso(report.Begin));
-            command.Parameters.AddWithValue("$end", Iso(report.End));
-            command.Parameters.AddWithValue("$ptype", report.Policies[0].Policy.Type.ToString().ToLowerInvariant());
-            command.Parameters.AddWithValue("$pdomain", domain);
-            command.Parameters.AddWithValue("$pmode", report.Policies[0].Policy.Mode.ToString().ToLowerInvariant());
-            command.Parameters.AddWithValue("$ok", report.SuccessfulSessions);
-            command.Parameters.AddWithValue("$fail", report.FailedSessions);
-            command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
-            command.Parameters.AddWithValue("$hash", Sha256(rawContent));
-            command.Parameters.AddWithValue(
-                "$received", arrivedAt is { } at ? Iso(at) : (object)DBNull.Value);
-            command.Parameters.AddWithValue("$ingested", Iso(DateTimeOffset.UtcNow));
+            var reportId = Guid.NewGuid().ToString("N");
 
-            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
-        catch (SqliteException ex) when (IsAlreadyStored(ex))
-        {
-            await transaction.RollbackAsync(ct).ConfigureAwait(false);
-            return null;
-        }
+            try
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = tx;
+                command.CommandText = """
+                    INSERT INTO tls_reports
+                      (id, tenant_id, client_id, domain_id, org_name, external_report_id,
+                       date_begin, date_end, policy_type, policy_domain, policy_mode,
+                       total_success, total_failure,
+                       source_message_id, raw_hash, received_at, ingested_at)
+                    VALUES
+                      ($id, $tenant, $client, $domain, $org, $rid,
+                       $begin, $end, $ptype, $pdomain, $pmode,
+                       $ok, $fail,
+                       $msg, $hash, $received, $ingested)
+                    """;
+                command.Parameters.AddWithValue("$id", reportId);
+                command.Parameters.AddWithValue("$tenant", ids.TenantId);
+                command.Parameters.AddWithValue("$client", ids.ClientId);
+                command.Parameters.AddWithValue("$domain", ids.DomainId);
+                command.Parameters.AddWithValue("$org", report.OrganizationName);
+                command.Parameters.AddWithValue("$rid", report.ReportId);
+                command.Parameters.AddWithValue("$begin", Iso(report.Begin));
+                command.Parameters.AddWithValue("$end", Iso(report.End));
+                command.Parameters.AddWithValue("$ptype", report.Policies[0].Policy.Type.ToString().ToLowerInvariant());
+                command.Parameters.AddWithValue("$pdomain", domain);
+                command.Parameters.AddWithValue("$pmode", report.Policies[0].Policy.Mode.ToString().ToLowerInvariant());
+                command.Parameters.AddWithValue("$ok", report.SuccessfulSessions);
+                command.Parameters.AddWithValue("$fail", report.FailedSessions);
+                command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
+                command.Parameters.AddWithValue("$hash", Sha256(rawContent));
+                command.Parameters.AddWithValue(
+                    "$received", arrivedAt is { } at ? Iso(at) : (object)DBNull.Value);
+                command.Parameters.AddWithValue("$ingested", Iso(DateTimeOffset.UtcNow));
 
-        await transaction.CommitAsync(ct).ConfigureAwait(false);
-        return reportId;
+                await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (SqliteException ex) when (IsAlreadyStored(ex))
+            {
+                return null;
+            }
+
+            return reportId;
+        }, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -402,79 +411,145 @@ public sealed class ReportStore
         ArgumentNullException.ThrowIfNull(report);
         if (string.IsNullOrWhiteSpace(report.Domain)) { return null; }
 
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
-        var tx = (SqliteTransaction)transaction;
-
-        var ids = await EnsureDomainAsync(connection, tx, report.Domain, _organization, ct).ConfigureAwait(false);
-
-        try
+        return await InClientFileAsync(report.Domain, async (connection, tx, ids) =>
         {
-            await using var command = connection.CreateCommand();
-            command.Transaction = tx;
-            command.CommandText = """
-                INSERT INTO forensic_reports
-                  (tenant_id, client_id, domain_id,
-                   arrival_date, source_ip, return_path, header_from, subject, message_id,
-                   dkim_result, spf_result, dkim_domain, auth_failure_type,
-                   delivery_result, reported_by,
-                   raw_headers, source_message_id, received_at, ingested_at, raw_hash)
-                VALUES
-                  ($tenant, $client, $domain,
-                   $arrival, $ip, $return, $from, $subject, $mid,
-                   $dkim, $spf, $dkimDomain, $failure,
-                   $delivery, $by,
-                   $headers, $msg, $received, $ingested, $hash)
-                """;
-            command.Parameters.AddWithValue("$tenant", ids.TenantId);
-            command.Parameters.AddWithValue("$client", ids.ClientId);
-            command.Parameters.AddWithValue("$domain", ids.DomainId);
-            command.Parameters.AddWithValue(
-                "$arrival", report.ArrivalDate is { } at ? Iso(at) : (object)DBNull.Value);
-            command.Parameters.AddWithValue("$ip", Nullable(report.SourceIp));
-            command.Parameters.AddWithValue("$return", Nullable(report.ReturnPath));
-            command.Parameters.AddWithValue("$from", Nullable(report.HeaderFrom));
-            command.Parameters.AddWithValue("$subject", Nullable(report.Subject));
-            command.Parameters.AddWithValue("$mid", Nullable(report.MessageId));
-            command.Parameters.AddWithValue("$dkim", Nullable(report.DkimResult));
-            command.Parameters.AddWithValue("$spf", Nullable(report.SpfResult));
-            command.Parameters.AddWithValue("$dkimDomain", Nullable(report.DkimDomain));
-            command.Parameters.AddWithValue("$failure", Nullable(report.AuthFailureType));
-            command.Parameters.AddWithValue("$delivery", Nullable(report.DeliveryResult));
-            command.Parameters.AddWithValue("$by", Nullable(report.ReportedBy));
-            command.Parameters.AddWithValue("$headers", Nullable(report.ReportedHeaders));
-            command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
+            // One id, unique across every client's file: the page that shows a
+            // failure report's headers is asked for them by this id.
+            var id = await ClientDatabases.AllocateIdsAsync(
+                connection, tx, "forensic_reports", 1, ct).ConfigureAwait(false);
 
-            // received_at is NOT NULL here, unlike the other two tables, and
-            // the arrival the receiver stated is the best answer there is:
-            // these are individual messages, so it is a real timestamp for a
-            // real event rather than the end of a reporting window.
-            command.Parameters.AddWithValue(
-                "$received", Iso(arrivedAt ?? report.ArrivalDate ?? DateTimeOffset.UtcNow));
-            command.Parameters.AddWithValue("$ingested", Iso(DateTimeOffset.UtcNow));
-            command.Parameters.AddWithValue("$hash", Sha256(rawContent));
+            try
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = tx;
+                command.CommandText = """
+                    INSERT INTO forensic_reports
+                      (id, tenant_id, client_id, domain_id,
+                       arrival_date, source_ip, return_path, header_from, subject, message_id,
+                       dkim_result, spf_result, dkim_domain, auth_failure_type,
+                       delivery_result, reported_by,
+                       raw_headers, source_message_id, received_at, ingested_at, raw_hash)
+                    VALUES
+                      ($id, $tenant, $client, $domain,
+                       $arrival, $ip, $return, $from, $subject, $mid,
+                       $dkim, $spf, $dkimDomain, $failure,
+                       $delivery, $by,
+                       $headers, $msg, $received, $ingested, $hash)
+                    """;
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$tenant", ids.TenantId);
+                command.Parameters.AddWithValue("$client", ids.ClientId);
+                command.Parameters.AddWithValue("$domain", ids.DomainId);
+                command.Parameters.AddWithValue(
+                    "$arrival", report.ArrivalDate is { } at ? Iso(at) : (object)DBNull.Value);
+                command.Parameters.AddWithValue("$ip", Nullable(report.SourceIp));
+                command.Parameters.AddWithValue("$return", Nullable(report.ReturnPath));
+                command.Parameters.AddWithValue("$from", Nullable(report.HeaderFrom));
+                command.Parameters.AddWithValue("$subject", Nullable(report.Subject));
+                command.Parameters.AddWithValue("$mid", Nullable(report.MessageId));
+                command.Parameters.AddWithValue("$dkim", Nullable(report.DkimResult));
+                command.Parameters.AddWithValue("$spf", Nullable(report.SpfResult));
+                command.Parameters.AddWithValue("$dkimDomain", Nullable(report.DkimDomain));
+                command.Parameters.AddWithValue("$failure", Nullable(report.AuthFailureType));
+                command.Parameters.AddWithValue("$delivery", Nullable(report.DeliveryResult));
+                command.Parameters.AddWithValue("$by", Nullable(report.ReportedBy));
+                command.Parameters.AddWithValue("$headers", Nullable(report.ReportedHeaders));
+                command.Parameters.AddWithValue("$msg", Nullable(sourceMessageId));
 
-            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
-        catch (SqliteException ex) when (IsAlreadyStored(ex))
+                // received_at is NOT NULL here, unlike the other two tables, and
+                // the arrival the receiver stated is the best answer there is:
+                // these are individual messages, so it is a real timestamp for a
+                // real event rather than the end of a reporting window.
+                command.Parameters.AddWithValue(
+                    "$received", Iso(arrivedAt ?? report.ArrivalDate ?? DateTimeOffset.UtcNow));
+                command.Parameters.AddWithValue("$ingested", Iso(DateTimeOffset.UtcNow));
+                command.Parameters.AddWithValue("$hash", Sha256(rawContent));
+
+                await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (SqliteException ex) when (IsAlreadyStored(ex))
+            {
+                return null;
+            }
+
+            return id.ToString(CultureInfo.InvariantCulture);
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes into the file of whichever client owns <paramref name="domain"/>,
+    /// registering the domain (under Unassigned) first when it is new.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two steps, two files. The domain goes into the organization's database
+    /// in a transaction of its own, committed before the report is written:
+    /// a report can then never be stored for a domain the organization's
+    /// database does not have, and a crash between the two leaves a domain
+    /// with nothing reported yet, which is an ordinary state.
+    /// </para>
+    /// <para>
+    /// The write takes the organization's database's write lock as well as the
+    /// file's - SQLite's BEGIN IMMEDIATE covers every file on the connection -
+    /// and checks inside it that the domain still belongs to the client it
+    /// was looked up under. Row ids for records and failure reports are handed
+    /// out from the organization's database in the same transaction, so they
+    /// are unique across every client's file. Filing a domain under another client moves its
+    /// rows between files under the same lock, so without the check a report
+    /// arriving mid-move would land in the file the domain had just left,
+    /// where nobody would look for it.
+    /// </para>
+    /// </remarks>
+    /// <param name="write">Returns the stored id, or null to roll back (the report was already there).</param>
+    private async Task<string?> InClientFileAsync(
+        string domain, Func<SqliteConnection, SqliteTransaction, DomainIds, Task<string?>> write, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
         {
-            await transaction.RollbackAsync(ct).ConfigureAwait(false);
-            return null;
-        }
+            DomainIds ids;
+            await using (var registry = await OpenAsync(ct).ConfigureAwait(false))
+            await using (var registering = (SqliteTransaction)await registry.BeginTransactionAsync(ct).ConfigureAwait(false))
+            {
+                ids = await EnsureDomainAsync(registry, registering, domain, _organization, ct).ConfigureAwait(false);
+                await registering.CommitAsync(ct).ConfigureAwait(false);
+            }
 
-        // The row id, read back rather than generated: this table keys on the
-        // rowid that every other index here hangs off, which the schema chose
-        // long before anything wrote to it.
-        string id;
-        await using (var last = connection.CreateCommand())
-        {
-            last.Transaction = tx;
-            last.CommandText = "SELECT CAST(last_insert_rowid() AS TEXT)";
-            id = (string)(await last.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
-        }
+            // The client's file as main and the organization's database
+            // attached: see ClientDatabases.OpenClientFirstAsync for why the
+            // order matters to the row ids handed out below.
+            await using var connection = await Files.OpenClientFirstAsync(
+                new ClientFile(ids.ClientId, ids.ClientSlug, ids.TenantId), ct).ConfigureAwait(false);
+            await using var tx = connection.BeginTransaction(deferred: false);
 
-        await transaction.CommitAsync(ct).ConfigureAwait(false);
-        return id;
+            var owner = await ScalarAsync(connection, tx,
+                $"SELECT client_id || '|' || tenant_id FROM {ClientDatabases.Organization}.domains WHERE id = $id",
+                [("$id", ids.DomainId)], ct).ConfigureAwait(false);
+
+            if (owner != $"{ids.ClientId}|{ids.TenantId}")
+            {
+                // Moved, or removed, since it was looked up. Look it up again.
+                await tx.RollbackAsync(ct).ConfigureAwait(false);
+                if (attempt >= 5)
+                {
+                    throw new InvalidOperationException(
+                        $"{domain} kept changing client while a report for it was being stored; nothing was stored.");
+                }
+                continue;
+            }
+
+            var stored = await write(connection, tx, ids).ConfigureAwait(false);
+
+            if (stored is null)
+            {
+                await tx.RollbackAsync(ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await tx.CommitAsync(ct).ConfigureAwait(false);
+            }
+
+            return stored;
+        }
     }
 
     /// <summary>
@@ -598,46 +673,48 @@ public sealed class ReportStore
     }
 
     /// <summary>
-    /// Every table that carries a denormalized client_id alongside a domain_id.
+    /// The tables in a client's file that move with a domain, in the order
+    /// they are copied: parents before the rows that refer to them.
     ///
-    /// Moving a domain to a client has to move its history too. Updating only
-    /// the domains row would leave every report still filed under Unassigned,
-    /// so the client's own report would come back empty and look like a domain
-    /// that has never sent mail.
+    /// Filing a domain under another client has to take its history too.
+    /// Updating only the domains row would leave every report in the old
+    /// client's file, so the new client's report would come back empty and
+    /// look like a domain that has never sent mail.
+    ///
+    /// tls_failure_details has no domain_id of its own and moves with its
+    /// report. senders does not move at all: it is a client's inventory of
+    /// who sends for it, not a fact about one domain, and a record that
+    /// pointed at an entry of the old client's loses the pointer (as ON DELETE
+    /// SET NULL would) rather than taking the old client's inventory along.
     ///
     /// Spelled out rather than discovered at run time so the SQL stays
     /// greppable; ReportStoreAssignmentTests recomputes the set from the live
     /// schema and fails if a new table appears that is not handled here.
     /// </summary>
-    public static readonly IReadOnlyList<string> DomainScopedTables =
+    public static IReadOnlyList<string> DomainScopedTables => ClientDatabases.DomainTables;
+
+    /// <summary>
+    /// Tables in the organization's database that carry a domain's client:
+    /// where its DNS is hosted and the MTA-STS policy served for it. Updated
+    /// in place when the domain is filed under another client.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RegistryDomainTables =
     [
-        "aggregate_reports",
-        "aggregate_records",
-        "forensic_reports",
-        "tls_reports",
-        "dns_snapshots",
-        "dns_drift_events",
-        "dkim_selectors",
-        "compliance_scores",
-        "enforcement_assessments",
-        "cousin_domains",
-        "alerts",
         "dns_provider_configs",
-        "dns_change_plans",
-        "dns_changes",
-        "spf_flatten_state",
         "mta_sts_policies",
     ];
 
     /// <summary>
-    /// Every table carrying a denormalized tenant_id alongside a client_id.
+    /// Tables in the organization's database carrying a denormalized tenant_id
+    /// alongside a client_id.
     ///
-    /// Moving a client to another organization has to move all of it. The
-    /// tenant_id on these tables is not a cache of the client's - it is what
-    /// every read filters on, because a boundary enforced by remembering to
-    /// write a JOIN is not a boundary. Update the clients row alone and the
-    /// customer's whole history stays filed under the organization they just
-    /// left: invisible from the new one, and still counted by the old one.
+    /// Moving a client to another organization has to move all of it: these,
+    /// and every table in the client's own file. The tenant_id on them is not
+    /// a cache of the client's - it is what every read filters on, because a
+    /// boundary enforced by remembering to write a JOIN is not a boundary.
+    /// Update the clients row alone and the customer's whole history stays
+    /// filed under the organization they just left: invisible from the new
+    /// one, and still counted by the old one.
     ///
     /// Spelled out rather than discovered at run time so the SQL stays
     /// greppable; ClientMoveTests recomputes the set from the live schema and
@@ -651,28 +728,12 @@ public sealed class ReportStore
     /// </summary>
     public static readonly IReadOnlyList<string> ClientScopedTables =
     [
-        "alerts",
-        "aggregate_records",
-        "aggregate_reports",
         "client_contacts",
         "client_settings",
-        "compliance_scores",
-        "cousin_domains",
-        "dkim_selectors",
-        "dns_change_plans",
-        "dns_changes",
-        "dns_drift_events",
         "dns_provider_configs",
-        "dns_snapshots",
         "domains",
-        "enforcement_assessments",
-        "forensic_reports",
         "ingest_log",
         "mta_sts_policies",
-        "senders",
-        "spf_flatten_state",
-        "tls_failure_details",
-        "tls_reports",
         "user_client_access",
     ];
 
@@ -861,7 +922,31 @@ public sealed class ReportStore
             await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
+        // Committed here first, then the client's own file: the file keeps
+        // its name wherever the client goes, and every row in it is theirs,
+        // so all that changes is the organization written on each row. Were
+        // this to stop between the two, the rows would still carry the old
+        // organization's id - which is why ReconcileAsync puts the file right
+        // against the organization's database on every init-db.
         await transaction.CommitAsync(ct).ConfigureAwait(false);
+
+        if (File.Exists(Files.PathFor(new ClientFile(clientId, slug, toTenant))))
+        {
+            await using var file = await Files.OpenAsync(ClientScope.Client(clientId), write: true, ct: ct).ConfigureAwait(false);
+            await using var inFile = file.BeginTransaction(deferred: false);
+
+            foreach (var table in ClientDatabases.Tables)
+            {
+                await using var update = file.CreateCommand();
+                update.Transaction = inFile;
+                update.CommandText = $"UPDATE {ClientDatabases.Attached}.{table} SET tenant_id = $to WHERE tenant_id <> $to";
+                update.Parameters.AddWithValue("$to", toTenant);
+                await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            await inFile.CommitAsync(ct).ConfigureAwait(false);
+        }
+
         return MoveOutcome.Moved;
     }
 
@@ -891,34 +976,58 @@ public sealed class ReportStore
     /// <param name="tenantId">One organization's, or null for every organization's.</param>
     public async Task<IReadOnlyList<ClientSummary>> GetClientsAsync(string? tenantId = null, CancellationToken ct = default)
     {
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
+        var rows = new List<(string Id, ClientSummary Summary)>();
 
-        // Left joins throughout: a client onboarded before its first report
-        // still needs to appear, or it looks like the assignment failed.
-        command.CommandText = """
-            SELECT c.slug, c.name,
-                   COUNT(DISTINCT d.id)                  AS domains,
-                   COALESCE(SUM(r.message_count), 0)     AS messages,
-                   t.slug, t.name, c.entra_group_id
-            FROM clients c
-            JOIN tenants t ON t.id = c.tenant_id
-            LEFT JOIN domains d ON d.client_id = c.id
-            LEFT JOIN aggregate_records r ON r.domain_id = d.id
-            WHERE ($tenant IS NULL OR c.tenant_id = $tenant)
-            GROUP BY c.id, c.slug, c.name, t.slug, t.name, c.entra_group_id
-            ORDER BY t.name, c.name
-            """;
-        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
-
-        var result = new List<ClientSummary>();
-        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        await using (var connection = await OpenAsync(ct).ConfigureAwait(false))
+        await using (var command = connection.CreateCommand())
         {
-            result.Add(new ClientSummary(
-                reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3),
-                reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
+            // Left join: a client onboarded before its first report still needs
+            // to appear, or it looks like the assignment failed.
+            command.CommandText = """
+                SELECT c.id, c.slug, c.name, COUNT(DISTINCT d.id), t.slug, t.name, c.entra_group_id
+                FROM clients c
+                JOIN tenants t ON t.id = c.tenant_id
+                LEFT JOIN domains d ON d.client_id = c.id
+                WHERE ($tenant IS NULL OR c.tenant_id = $tenant)
+                GROUP BY c.id, c.slug, c.name, t.slug, t.name, c.entra_group_id
+                ORDER BY t.name, c.name
+                """;
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                rows.Add((reader.GetString(0), new ClientSummary(
+                    reader.GetString(1), reader.GetString(2), reader.GetInt32(3), 0,
+                    reader.GetString(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6))));
+            }
         }
+
+        // The message count is the one figure that is in the client's own
+        // file, so each file is asked for its own - one small query per
+        // client rather than every client's records copied together to count
+        // them. Only records for domains the client holds now are counted,
+        // as before.
+        var result = new List<ClientSummary>(rows.Count);
+        foreach (var (id, summary) in rows)
+        {
+            long messages = 0;
+            if (File.Exists(Files.PathFor(new ClientFile(id, summary.Slug, ""))))
+            {
+                await using var file = await Files.OpenAsync(ClientScope.Client(id), ct: ct).ConfigureAwait(false);
+                await using var sum = file.CreateCommand();
+                sum.CommandText = """
+                    SELECT COALESCE(SUM(r.message_count), 0)
+                    FROM aggregate_records r
+                    JOIN domains d ON d.id = r.domain_id
+                    WHERE d.client_id = $id
+                    """;
+                sum.Parameters.AddWithValue("$id", id);
+                messages = Convert.ToInt64(await sum.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L, CultureInfo.InvariantCulture);
+            }
+            result.Add(summary with { Messages = messages });
+        }
+
         return result;
     }
 
@@ -975,6 +1084,7 @@ public sealed class ReportStore
             }
         }
 
+        var clientId = Guid.NewGuid().ToString("N");
         await using (var insert = connection.CreateCommand())
         {
             insert.Transaction = transaction;
@@ -982,7 +1092,7 @@ public sealed class ReportStore
                 INSERT INTO clients (id, tenant_id, name, slug, status, collection_method, created_at, updated_at)
                 VALUES ($id, $tenant, $name, $slug, 'active', 'central_mailbox', $now, $now)
                 """;
-            insert.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+            insert.Parameters.AddWithValue("$id", clientId);
             insert.Parameters.AddWithValue("$tenant", tenantId);
             insert.Parameters.AddWithValue("$name", name.Trim());
             insert.Parameters.AddWithValue("$slug", wanted);
@@ -991,6 +1101,17 @@ public sealed class ReportStore
         }
 
         await transaction.CommitAsync(ct).ConfigureAwait(false);
+
+        // The client's own file, made now rather than with its first report,
+        // so the folder of client files lists every client there is. One
+        // that could not be made here is made on the first write instead.
+        try
+        {
+            await Files.EnsureFileAsync(new ClientFile(clientId, wanted, tenantId), ct).ConfigureAwait(false);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+
         return wanted;
     }
 
@@ -1017,104 +1138,160 @@ public sealed class ReportStore
         var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
         var slug = clientSlug.Trim().ToLowerInvariant();
 
-        await using var connection = await OpenAsync(ct).ConfigureAwait(false);
-        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
-
-        string domainId, currentClientId, currentTenantId;
-        await using (var lookup = connection.CreateCommand())
+        for (var attempt = 1; ; attempt++)
         {
-            lookup.Transaction = transaction;
-            lookup.CommandText = """
-                SELECT id, client_id, tenant_id FROM domains
-                WHERE name = $name AND ($tenant IS NULL OR tenant_id = $tenant) LIMIT 1
-                """;
-            lookup.Parameters.AddWithValue("$name", name);
-            lookup.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
-            await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+            ClientFile from, to;
+            string domainId;
+
+            await using (var connection = await OpenAsync(ct).ConfigureAwait(false))
             {
-                await transaction.RollbackAsync(ct).ConfigureAwait(false);
-                return AssignOutcome.DomainNotFound;
+                await using (var lookup = connection.CreateCommand())
+                {
+                    lookup.CommandText = """
+                        SELECT d.id, d.client_id, d.tenant_id, c.slug FROM domains d
+                        JOIN clients c ON c.id = d.client_id
+                        WHERE d.name = $name AND ($tenant IS NULL OR d.tenant_id = $tenant) LIMIT 1
+                        """;
+                    lookup.Parameters.AddWithValue("$name", name);
+                    lookup.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+                    await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                    if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        return AssignOutcome.DomainNotFound;
+                    }
+                    domainId = reader.GetString(0);
+                    from = new ClientFile(reader.GetString(1), reader.GetString(3), reader.GetString(2));
+                }
+
+                await using (var lookup = connection.CreateCommand())
+                {
+                    // A scoped caller stays inside its organization. Slugs are unique
+                    // per organization (UNIQUE(tenant_id, slug)), not across them,
+                    // and this used to look the slug up with no tenant at all: two
+                    // MSPs on one install each with an "acme-corp", and a Tech filing
+                    // their own domain under their own client could have it - and
+                    // every report, DNS snapshot and provider config behind it -
+                    // rewritten into the other organization's tenant, depending on
+                    // which row SQLite scanned first.
+                    //
+                    // Only a caller with no tenant - the master account, which sees
+                    // every organization - may file a domain under another
+                    // organization's client; that is the one documented way a domain
+                    // changes organization. Even then, Unassigned means the domain's
+                    // own.
+                    lookup.CommandText = """
+                        SELECT id, tenant_id, slug FROM clients
+                        WHERE slug = $slug AND deleted_at IS NULL
+                          AND CASE WHEN $tenant IS NOT NULL THEN tenant_id = $tenant
+                                   ELSE (slug <> $unassigned OR tenant_id = $current) END
+                        LIMIT 1
+                        """;
+                    lookup.Parameters.AddWithValue("$slug", slug);
+                    lookup.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+                    lookup.Parameters.AddWithValue("$unassigned", UnassignedClientSlug);
+                    lookup.Parameters.AddWithValue("$current", from.TenantId);
+                    await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                    if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        return AssignOutcome.ClientNotFound;
+                    }
+                    to = new ClientFile(reader.GetString(0), reader.GetString(2), reader.GetString(1));
+                }
             }
-            domainId = reader.GetString(0);
-            currentClientId = reader.GetString(1);
-            currentTenantId = reader.GetString(2);
+
+            if (to.Id == from.Id) { return AssignOutcome.AlreadyAssigned; }
+
+            if (await MoveDomainAsync(domainId, from, to, ct).ConfigureAwait(false))
+            {
+                return AssignOutcome.Assigned;
+            }
+
+            // Filed somewhere else while this was deciding. Decide again.
+            if (attempt >= 5)
+            {
+                throw new InvalidOperationException(
+                    $"{name} kept changing client while it was being filed; nothing was moved.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Files a domain under another client: its row here, and its history from
+    /// one client's file into the other's, under one lock.
+    /// </summary>
+    /// <returns>False when the domain was no longer <paramref name="from"/>'s by the time the lock was held.</returns>
+    /// <remarks>
+    /// <para>
+    /// One transaction over the organization's database and both files. SQLite
+    /// commits each file of a WAL-mode transaction separately, so a crash in
+    /// the middle of the commit can leave the rows in both files or the domain
+    /// row saying one thing and the files another; <see cref="ClientDatabases.ReconcileAsync"/>
+    /// finds either and puts it right, and runs on every init-db.
+    /// </para>
+    /// <para>
+    /// The rows are merged into the destination rather than written over it
+    /// (see <see cref="ClientDatabases.MoveDomainRowsAsync"/>), so a move can
+    /// always be retried, and reports stored in the destination since the
+    /// domain was first filed there are never lost to a retry.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> MoveDomainAsync(string domainId, ClientFile from, ClientFile to, CancellationToken ct)
+    {
+        var target = await Files.EnsureFileAsync(to, ct).ConfigureAwait(false);
+        var source = Files.PathFor(from);
+        var hasSource = File.Exists(source);
+
+        await using var db = await Files.OpenRegistryAsync(write: true, ct).ConfigureAwait(false);
+        await ClientDatabases.AttachAsync(db, target, "dst", to, readOnly: false, ct).ConfigureAwait(false);
+        if (hasSource)
+        {
+            await ClientDatabases.AttachAsync(db, source, "src", from, readOnly: false, ct).ConfigureAwait(false);
         }
 
-        string clientId, clientTenantId;
-        await using (var lookup = connection.CreateCommand())
-        {
-            lookup.Transaction = transaction;
-            // A scoped caller stays inside its organization. Slugs are unique
-            // per organization (UNIQUE(tenant_id, slug)), not across them,
-            // and this used to look the slug up with no tenant at all: two
-            // MSPs on one install each with an "acme-corp", and a Tech filing
-            // their own domain under their own client could have it - and
-            // every report, DNS snapshot and provider config behind it -
-            // rewritten into the other organization's tenant, depending on
-            // which row SQLite scanned first.
-            //
-            // Only a caller with no tenant - the master account, which sees
-            // every organization - may file a domain under another
-            // organization's client; that is the one documented way a domain
-            // changes organization. Even then, Unassigned means the domain's
-            // own.
-            lookup.CommandText = """
-                SELECT id, tenant_id FROM clients
-                WHERE slug = $slug AND deleted_at IS NULL
-                  AND CASE WHEN $tenant IS NOT NULL THEN tenant_id = $tenant
-                           ELSE (slug <> $unassigned OR tenant_id = $current) END
-                LIMIT 1
-                """;
-            lookup.Parameters.AddWithValue("$slug", slug);
-            lookup.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
-            lookup.Parameters.AddWithValue("$unassigned", UnassignedClientSlug);
-            lookup.Parameters.AddWithValue("$current", currentTenantId);
-            await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            if (!await reader.ReadAsync(ct).ConfigureAwait(false))
-            {
-                await transaction.RollbackAsync(ct).ConfigureAwait(false);
-                return AssignOutcome.ClientNotFound;
-            }
-            clientId = reader.GetString(0);
-            clientTenantId = reader.GetString(1);
-        }
+        await using var tx = db.BeginTransaction(deferred: false);
 
-        if (clientId == currentClientId)
+        var owner = await ScalarAsync(db, tx, "SELECT client_id FROM main.domains WHERE id = $id",
+            [("$id", domainId)], ct).ConfigureAwait(false);
+        if (owner != from.Id)
         {
-            await transaction.RollbackAsync(ct).ConfigureAwait(false);
-            return AssignOutcome.AlreadyAssigned;
+            await tx.RollbackAsync(ct).ConfigureAwait(false);
+            return false;
         }
 
         var now = Iso(DateTimeOffset.UtcNow);
 
-        await using (var move = connection.CreateCommand())
+        await RunAsync(db, tx,
+            "UPDATE main.domains SET client_id = $client, tenant_id = $tenant, updated_at = $now WHERE id = $domain",
+            to, domainId, now, ct).ConfigureAwait(false);
+
+        foreach (var table in RegistryDomainTables)
         {
-            move.Transaction = transaction;
-            move.CommandText = "UPDATE domains SET client_id = $client, tenant_id = $tenant, updated_at = $now WHERE id = $domain";
-            move.Parameters.AddWithValue("$client", clientId);
-            move.Parameters.AddWithValue("$tenant", clientTenantId);
-            move.Parameters.AddWithValue("$now", now);
-            move.Parameters.AddWithValue("$domain", domainId);
-            await move.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            // Names from a constant list in this file; the values are bound.
+            await RunAsync(db, tx,
+                $"UPDATE main.{table} SET client_id = $client, tenant_id = $tenant WHERE domain_id = $domain",
+                to, domainId, now, ct).ConfigureAwait(false);
         }
 
-        foreach (var table in DomainScopedTables)
+        if (hasSource)
         {
-            await using var update = connection.CreateCommand();
-            update.Transaction = transaction;
-
-            // The table name is from this constant list, never from a caller,
-            // so there is nothing here to inject; the values stay parameters.
-            update.CommandText = $"UPDATE {table} SET client_id = $client, tenant_id = $tenant WHERE domain_id = $domain";
-            update.Parameters.AddWithValue("$client", clientId);
-            update.Parameters.AddWithValue("$tenant", clientTenantId);
-            update.Parameters.AddWithValue("$domain", domainId);
-            await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            await ClientDatabases.MoveDomainRowsAsync(db, tx, "src", "dst", domainId, to, ct).ConfigureAwait(false);
         }
 
-        await transaction.CommitAsync(ct).ConfigureAwait(false);
-        return AssignOutcome.Assigned;
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        return true;
+    }
+
+    private static async Task RunAsync(
+        SqliteConnection db, SqliteTransaction tx, string sql, ClientFile to, string domainId, string now, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$client", to.Id);
+        command.Parameters.AddWithValue("$tenant", to.TenantId);
+        command.Parameters.AddWithValue("$domain", domainId);
+        command.Parameters.AddWithValue("$now", now);
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>The longest slug worth having. A filename is built from it.</summary>
@@ -1213,7 +1390,7 @@ public sealed class ReportStore
         return (lastHyphen > 0 ? cut[..lastHyphen] : cut).Trim('-');
     }
 
-    private sealed record DomainIds(string TenantId, string ClientId, string DomainId);
+    private sealed record DomainIds(string TenantId, string ClientId, string DomainId, string ClientSlug);
 
     /// <summary>
     /// Resolves a domain to its ids, creating the organization, its Unassigned
@@ -1241,14 +1418,17 @@ public sealed class ReportStore
         await using (var lookup = connection.CreateCommand())
         {
             lookup.Transaction = tx;
-            lookup.CommandText =
-                "SELECT id, tenant_id, client_id FROM domains WHERE name = $name AND tenant_id = $tenant LIMIT 1";
+            lookup.CommandText = """
+                SELECT d.id, d.tenant_id, d.client_id, c.slug FROM domains d
+                JOIN clients c ON c.id = d.client_id
+                WHERE d.name = $name AND d.tenant_id = $tenant LIMIT 1
+                """;
             lookup.Parameters.AddWithValue("$name", name);
             lookup.Parameters.AddWithValue("$tenant", tenantId);
             await using var reader = await lookup.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                return new DomainIds(reader.GetString(1), reader.GetString(2), reader.GetString(0));
+                return new DomainIds(reader.GetString(1), reader.GetString(2), reader.GetString(0), reader.GetString(3));
             }
         }
 
@@ -1278,7 +1458,7 @@ public sealed class ReportStore
             await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        return new DomainIds(tenantId, clientId, domainId);
+        return new DomainIds(tenantId, clientId, domainId, UnassignedClientSlug);
     }
 
     /// <summary>

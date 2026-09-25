@@ -170,17 +170,83 @@ moving nothing. Run it against the live mailbox as many times as you like.
 What to check in the output:
 
 - **Messages read** roughly matches what is in the mailbox. A much smaller
-  number means folders are not being walked.
+  number means folders are not being walked: compare `folders read` with the
+  folders your mail rules file reports into, and see
+  [Which folders it reads](#which-folders-it-reads).
 - **Every client domain appears.** The domains the Outlook export truncated —
   `acme.example`, `client-e.example`, `client-f.example` — should show
   current data here. If they do not, the reports genuinely are not arriving
   and that is a finding rather than a bug.
-- **Errors are named, not counted.** Anything unreadable is listed.
+- **Errors are named, not counted.** Anything unreadable is listed. So is a
+  report that could not be stored: its message is left where it was for the
+  next run, `reports ingested` says how many of them were stored and how many
+  were not, and the run exits 1.
 
 Then drop `--dry-run`. The first real run stores everything and moves each
 message into the processed folder. Messages are filed only after their reports
 are stored, so an interruption re-reads rather than loses, and the duplicate
 check makes the second read harmless.
+
+---
+
+## Which folders it reads
+
+With nothing configured: Inbox, and the folders directly inside it, which is
+where a mail rule sorting reports by domain usually puts them.
+
+If your rules file reports somewhere else, name the folders to read instead,
+one `--folder` for each:
+
+```
+dmarc ingest --mailbox DMARC@nrgtechservices.com --folder "DMARC\client-a.example" --folder "DMARC\client-b.example" --folder Inbox --dry-run
+```
+
+- **Naming folders replaces the default.** Inbox is read only when it is one
+  of the names, as above.
+- **Each named folder is read with the folders directly inside it**, the way
+  Inbox is.
+- **A name is a folder at the top of the folder list**, at the same level as
+  Inbox, matched by its whole name, ignoring case. A backslash is part of the
+  name, not a path: `DMARC\client-a.example` is one folder called exactly
+  that, not `client-a.example` inside `DMARC`. To read `client-a.example`
+  inside `DMARC`, name `DMARC`.
+- **A name that matches no folder is reported and skipped, never created.**
+  The other folders are still read, and the run exits 1. A dry run says so
+  too.
+- **The folders ingest files into** — `DMARC-Processed`, `DMARC-Unrecognized`
+  and `DMARC-Quarantine` — are never read, even when named: everything in them
+  has been dealt with already.
+
+For the scheduled run, set `DMARC_FOLDERS` in the environment file, with the
+names separated by semicolons. **Put the value in single quotes.** systemd, and
+a shell reading the same file, treat an unquoted backslash as an escape and
+drop it, and `DMARC\client-a.example` then arrives as `DMARCclient-a.example`,
+which matches nothing:
+
+```bash
+DMARC_FOLDERS='DMARC\client-a.example;DMARC\client-b.example;Inbox'
+```
+
+The same goes for `--folder` typed into a shell: put the name in double quotes,
+as above, which keeps the backslash in bash, PowerShell and cmd alike. With
+more than one mailbox, each instance's own `/etc/dmarc-ingest-<instance>.env`
+carries its own `DMARC_FOLDERS`.
+
+On Windows, add the line to `C:\dmarc\ingest.cmd`, above the line that runs
+`dmarc.exe`. A backslash needs no quoting there:
+
+```
+set "DMARC_FOLDERS=DMARC\client-a.example;DMARC\client-b.example;Inbox"
+```
+
+`bootstrap.ps1` rewrites that file with only the settings it knows about, so
+put the line back after running it again, or set `DMARC_FOLDERS` as a system
+environment variable instead, which it leaves alone.
+
+A `--folder` on the command line wins over `DMARC_FOLDERS`. Either way, the run
+prints the folders it was told to read before it starts, and `folders read` at
+the end lists every folder it actually read, so a folder that was named but
+never reached is plain from the output.
 
 ---
 
@@ -320,8 +386,11 @@ likely to behave differently from the test fake:
   in tests, and a mailbox with thousands of messages is where that is first
   exercised for real.
 - **Folder names containing a backslash.** The live mailbox has folders named
-  `DMARC\client-a.example`. Graph addresses folders by id so this should not matter,
-  but it has not been proved.
+  `DMARC\client-a.example`. A named folder is found by listing the folders at
+  the top of the mailbox and comparing names in the collector itself, so no
+  filter on the server has to parse the backslash, and it is read by id from
+  then on. That is unit-tested against a stub of Graph, and has not yet run
+  against the mailbox.
 - **Attachment shapes.** Large or unusual attachments come back from Graph
   differently from the way the fake produces them.
 

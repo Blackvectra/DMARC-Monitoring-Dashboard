@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Rollout;
@@ -60,8 +61,9 @@ public sealed class PolicySimulationService(string databasePath, string? tenantI
 
         var rows = new List<AuthenticationFacts>();
 
-        await using var db = new SqliteConnection(ReadOnly());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        // The file of the client that owns the domain.
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.For(_tenantId, domain: domain), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -115,8 +117,8 @@ public sealed class PolicySimulationService(string databasePath, string? tenantI
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
-        await using var db = new SqliteConnection(ReadOnly());
-        await db.OpenAsync(ct).ConfigureAwait(false);
+        await using var db = await new ClientDatabases(_databasePath).OpenAsync(
+            ClientScope.For(_tenantId, domain: domain), ["aggregate_reports"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
         command.CommandText = """
@@ -156,10 +158,4 @@ public sealed class PolicySimulationService(string databasePath, string? tenantI
     private static string Since(int windowDays) =>
         DateTimeOffset.UtcNow.AddDays(-Math.Max(1, windowDays))
             .UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-
-    private string ReadOnly() => new SqliteConnectionStringBuilder
-    {
-        DataSource = _databasePath,
-        Mode = SqliteOpenMode.ReadOnly,
-    }.ToString();
 }

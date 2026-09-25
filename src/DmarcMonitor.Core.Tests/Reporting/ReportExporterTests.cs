@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using DmarcMonitor.Core.Reporting;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tests.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Tests.Reporting;
@@ -27,14 +28,7 @@ public sealed class ReportExporterTests : IDisposable
         SeedAsync().GetAwaiter().GetResult();
     }
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     /// <summary>
     /// Two organizations, one domain name each, and one row apiece.
@@ -49,15 +43,8 @@ public sealed class ReportExporterTests : IDisposable
     {
         const string when = "2026-09-20 00:00:00";
 
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-
-        async Task Run(string sql)
-        {
-            await using var command = db.CreateCommand();
-            command.CommandText = sql;
-            await command.ExecuteNonQueryAsync();
-        }
+        // Written as one database; split into client files as an upgrade would.
+        Task Run(string sql) => SingleDatabase.ExecuteAsync(_dbPath, sql);
 
         await Run($"""
             INSERT INTO tenants (id,slug,name,created_at,updated_at)
@@ -395,13 +382,8 @@ public sealed class ReportExporterTests : IDisposable
     {
         // Written through a Utf8JsonWriter and read back as a string, which is
         // two chances to mangle anything that is not ASCII.
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-
-        await using var command = db.CreateCommand();
-        command.CommandText =
-            "UPDATE aggregate_records SET header_from = 'pöst.example' WHERE source_ip = '192.0.2.1'";
-        await command.ExecuteNonQueryAsync();
+        await SingleDatabase.ExecuteAsync(
+            _dbPath, "UPDATE aggregate_records SET header_from = 'pöst.example' WHERE source_ip = '192.0.2.1'");
 
         var (text, _) = await ExportAsync(new ExportQuery { TenantId = "t-a" });
 

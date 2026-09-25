@@ -22,14 +22,7 @@ public sealed class ReportStoreTests : IDisposable
         _store.InitializeAsync(schema).GetAwaiter().GetResult();
     }
 
-    public void Dispose()
-    {
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     private static string FindSchema()
     {
@@ -76,8 +69,7 @@ public sealed class ReportStoreTests : IDisposable
         var report = Aggregate("outlook-aggregate.xml");
         Assert.NotNull(await _store.SaveAggregateAsync(report, "raw", "msg-1"));
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*), SUM(message_count) FROM aggregate_records";
         await using var reader = await command.ExecuteReaderAsync();
@@ -109,8 +101,7 @@ public sealed class ReportStoreTests : IDisposable
         await _store.SaveAggregateAsync(report, "raw", "msg-1");
         await _store.SaveAggregateAsync(report, "raw", "msg-2");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM aggregate_records";
         Assert.Equal(123L, Convert.ToInt64(await command.ExecuteScalarAsync()));
@@ -141,8 +132,7 @@ public sealed class ReportStoreTests : IDisposable
         // every report looks like success.
         await _store.SaveTlsAsync(Tls("google-tlsrpt.json"), "raw");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT policy_mode FROM tls_reports LIMIT 1";
         Assert.Equal("testing", (string?)await command.ExecuteScalarAsync());
@@ -175,8 +165,7 @@ public sealed class ReportStoreTests : IDisposable
         await _store.SaveAggregateAsync(Aggregate("gosecure-aggregate.xml"), "raw");
         await _store.SaveTlsAsync(Tls("google-tlsrpt.json"), "raw");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM domains WHERE name = 'nrgtechservices.com'";
         Assert.Equal(1L, Convert.ToInt64(await command.ExecuteScalarAsync()));
@@ -189,8 +178,7 @@ public sealed class ReportStoreTests : IDisposable
         // policy was on a given date, after it has since changed.
         await _store.SaveAggregateAsync(Aggregate("gosecure-aggregate.xml"), "raw");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT policy_p, policy_adkim, policy_aspf FROM aggregate_reports LIMIT 1";
         await using var reader = await command.ExecuteReaderAsync();
@@ -208,8 +196,7 @@ public sealed class ReportStoreTests : IDisposable
         // cosmetic problem: the insert fails and the report is lost.
         await _store.SaveAggregateAsync(Aggregate("google-aggregate.xml"), "raw");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM aggregate_records WHERE source_ip_version = 6";
         Assert.True(Convert.ToInt64(await command.ExecuteScalarAsync()) > 0);
@@ -238,8 +225,7 @@ public sealed class ReportStoreTests : IDisposable
         // operator to go and fix a sender that was never theirs.
         await _store.SaveAggregateAsync(Aggregate("dmv-entoutlook-aggregate.xml"), "raw");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT dkim_domain, dkim_auth_result
@@ -262,8 +248,7 @@ public sealed class ReportStoreTests : IDisposable
         // would record the failure and lose the fact that anything passed.
         await _store.SaveAggregateAsync(Aggregate("gosecure-aggregate.xml"), "raw");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT spf_domain, spf_auth_result FROM aggregate_records LIMIT 1";
         await using var reader = await command.ExecuteReaderAsync();
@@ -294,8 +279,7 @@ public sealed class ReportStoreTests : IDisposable
         // one invented for it.
         await _store.SaveAggregateAsync(Aggregate("google-aggregate.xml"), "raw", "msg-1");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT received_at FROM aggregate_reports LIMIT 1";
         Assert.Equal(DBNull.Value, await command.ExecuteScalarAsync());
@@ -311,8 +295,7 @@ public sealed class ReportStoreTests : IDisposable
 
         await _store.SaveAggregateAsync(Aggregate("google-aggregate.xml"), "raw", "msg-1", arrivedAt: arrived);
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT received_at FROM aggregate_reports LIMIT 1";
         var stored = (string)(await command.ExecuteScalarAsync())!;
@@ -329,8 +312,7 @@ public sealed class ReportStoreTests : IDisposable
 
         await _store.SaveAggregateAsync(Aggregate("google-aggregate.xml"), "raw", "msg-1", arrivedAt: arrived);
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT received_at, date_end FROM aggregate_reports LIMIT 1";
         await using var reader = await command.ExecuteReaderAsync();
@@ -344,8 +326,7 @@ public sealed class ReportStoreTests : IDisposable
     {
         await _store.SaveTlsAsync(Tls("microsoft-tlsrpt.json"), "raw", "msg-1");
 
-        await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
-        await connection.OpenAsync();
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT received_at FROM tls_reports LIMIT 1";
         Assert.Equal(DBNull.Value, await command.ExecuteScalarAsync());

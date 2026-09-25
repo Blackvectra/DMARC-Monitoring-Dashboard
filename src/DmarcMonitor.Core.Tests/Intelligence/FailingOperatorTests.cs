@@ -23,15 +23,21 @@ namespace DmarcMonitor.Core.Tests.Intelligence;
 /// </summary>
 public sealed class FailingOperatorTests
 {
+    /// <summary>A failing source whose name was looked up and confirmed.</summary>
     private static FailingSource Source(string ip, string? reverseName, params string[] domains) => new()
     {
         SourceIp = ip,
         ReverseName = reverseName,
+        NameConfirmed = reverseName is not null,
         FailedMessages = 1,
         Domains = domains,
         Clients = domains,
         IndependentParties = domains.Length,
     };
+
+    /// <summary>The same, with a name its forward records do not confirm: a claim.</summary>
+    private static FailingSource Claimed(string ip, string reverseName, params string[] domains) =>
+        Source(ip, reverseName, domains) with { NameConfirmed = false };
 
     /// <summary>The case this exists for, with the real addresses.</summary>
     [Fact]
@@ -67,6 +73,43 @@ public sealed class FailingOperatorTests
         ]);
 
         Assert.Empty(grouped);
+    }
+
+    /// <summary>
+    /// Only where the name is confirmed. Grouping is by the domain each
+    /// address claims, and a sender forging mail can reverse to
+    /// something.outlook.com: taken at its word, the whole group vanished from
+    /// the page as "infrastructure".
+    /// </summary>
+    [Fact]
+    public void ClaimingToBeAMailProviderDoesNotHideACampaign()
+    {
+        var grouped = CorrelationService.ByOperator([
+            Claimed("203.0.113.10", "mail1.outbound.protection.outlook.com", "a.example"),
+            Claimed("203.0.113.11", "mail2.outbound.protection.outlook.com", "b.example"),
+        ]);
+
+        var found = Assert.Single(grouped);
+        Assert.Equal(SourceKind.Unknown, found.Kind);
+        Assert.Equal("outlook.com", found.Name);
+    }
+
+    /// <summary>
+    /// And a group is named for the vendor only when every address in it is
+    /// confirmed as the vendor's. One claimant in it and "INKY" would vouch
+    /// for the claim.
+    /// </summary>
+    [Fact]
+    public void AGroupIsNamedForTheVendorOnlyWhenEveryAddressIsConfirmed()
+    {
+        var grouped = CorrelationService.ByOperator([
+            Source("100.24.129.5", "ipw-outbound.inkyphishfence.com", "a.example"),
+            Claimed("203.0.113.12", "mail.inkyphishfence.com", "b.example"),
+        ]);
+
+        var found = Assert.Single(grouped);
+        Assert.Equal("inkyphishfence.com", found.Name);
+        Assert.Equal(SourceKind.Unknown, found.Kind);
     }
 
     /// <summary>

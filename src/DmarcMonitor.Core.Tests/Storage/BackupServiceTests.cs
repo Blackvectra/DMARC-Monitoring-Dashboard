@@ -28,22 +28,26 @@ public sealed class BackupServiceTests : IDisposable
 
     public void Dispose()
     {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
+        SingleDatabase.Delete(_dbPath);
         try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
     }
 
-    private async Task SeedAsync()
+    /// <summary>Acme's own file, where its reports are.</summary>
+    private string ClientFile => new ClientDatabases(_dbPath).PathFor(new ClientFile("c1", "acme", "t1"));
+
+    /// <summary>A backup's files, unpacked into a folder of their own.</summary>
+    private string Unpack(string backup)
+    {
+        var into = Path.Combine(_dir, "unpacked-" + Guid.NewGuid().ToString("N"));
+        System.IO.Compression.ZipFile.ExtractToDirectory(backup, into);
+        return into;
+    }
+
+    private Task SeedAsync()
     {
         const string when = "2026-09-20 00:00:00";
 
-        await using var db = new SqliteConnection($"Data Source={_dbPath}");
-        await db.OpenAsync();
-        await using var command = db.CreateCommand();
-        command.CommandText = $"""
+        return SingleDatabase.ExecuteAsync(_dbPath, $"""
             INSERT INTO tenants (id,slug,name,created_at,updated_at)
               VALUES ('t1','local','Local','{when}','{when}');
             INSERT INTO clients (id,tenant_id,slug,name,created_at,updated_at)
@@ -58,8 +62,7 @@ public sealed class BackupServiceTests : IDisposable
               (report_id,tenant_id,client_id,domain_id,date_begin,source_ip,message_count,dmarc_result)
               VALUES ('r1','t1','c1','d1','{when}','192.0.2.1',10,'pass'),
                      ('r1','t1','c1','d1','{when}','192.0.2.2',3,'fail');
-            """;
-        await command.ExecuteNonQueryAsync();
+            """);
     }
 
     private BackupService Service() => new(_dbPath);
@@ -84,13 +87,58 @@ public sealed class BackupServiceTests : IDisposable
         // The property that makes it a backup rather than a file. Counted from
         // the copy, through a fresh connection, with the original untouched.
         var result = await Service().RunAsync(_dir);
+        var unpacked = Unpack(result.Path!);
 
-        await using var db = new SqliteConnection($"Data Source={result.Path};Mode=ReadOnly");
-        await db.OpenAsync();
-        await using var command = db.CreateCommand();
-        command.CommandText = "SELECT name FROM domains";
+        await using (var db = new SqliteConnection(
+            $"Data Source={Path.Combine(unpacked, Path.GetFileName(_dbPath))};Mode=ReadOnly;Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "SELECT name FROM domains";
+            Assert.Equal("acme.com", (string?)await command.ExecuteScalarAsync());
+        }
 
-        Assert.Equal("acme.com", (string?)await command.ExecuteScalarAsync());
+        // And the client's own file, where the reports are, beside it as on disk.
+        var folder = Path.GetFileName(ClientDatabases.FolderFor(_dbPath));
+        await using (var db = new SqliteConnection(
+            $"Data Source={Path.Combine(unpacked, folder, Path.GetFileName(ClientFile))};Mode=ReadOnly;Pooling=False"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM aggregate_records";
+            Assert.Equal(2L, (long)(await command.ExecuteScalarAsync())!);
+        }
+    }
+
+    [Fact]
+    public async Task EveryClientsFileIsInItAndItRestoresToTheSameData()
+    {
+        // A backup of the organization's database alone would be a list of
+        // customers with none of their reports. Unpacked where the database
+        // was, it has to read back exactly what was there.
+        const string when = "2026-09-20 00:00:00";
+        await SingleDatabase.ExecuteAsync(_dbPath, $"""
+            INSERT INTO clients (id,tenant_id,slug,name,created_at,updated_at)
+              VALUES ('c2','t1','globex','Globex','{when}','{when}');
+            INSERT INTO domains (id,tenant_id,client_id,name,created_at,updated_at)
+              VALUES ('d2','t1','c2','globex.com','{when}','{when}');
+            INSERT INTO aggregate_reports
+              (id,tenant_id,client_id,domain_id,org_name,external_report_id,
+               date_begin,date_end,raw_hash,ingested_at)
+              VALUES ('r2','t1','c2','d2','google.com','rep-2','{when}','{when}','h2','{when}');
+            INSERT INTO aggregate_records
+              (report_id,tenant_id,client_id,domain_id,date_begin,source_ip,message_count,dmarc_result)
+              VALUES ('r2','t1','c2','d2','{when}','192.0.2.7',5,'pass');
+            """);
+
+        var result = await Service().RunAsync(_dir);
+        Assert.Equal(2, result.Reports);
+        Assert.Equal(3, result.Records);
+
+        var restored = Path.Combine(Unpack(result.Path!), Path.GetFileName(_dbPath));
+        Assert.Equal(3, await SingleDatabase.CountAsync(restored, "SELECT COUNT(*) FROM aggregate_records"));
+        Assert.Equal(13, await SingleDatabase.CountAsync(restored, "SELECT SUM(message_count) FROM aggregate_records WHERE client_id = 'c1'"));
+        Assert.Equal(5, await SingleDatabase.CountAsync(restored, "SELECT SUM(message_count) FROM aggregate_records WHERE client_id = 'c2'"));
     }
 
     [Fact]
@@ -109,7 +157,7 @@ public sealed class BackupServiceTests : IDisposable
         // The whole reason this is VACUUM INTO rather than File.Copy: the
         // collector may be mid-write, and cp catches a torn page plus a -wal
         // that may not match it.
-        await using var writer = new SqliteConnection($"Data Source={_dbPath}");
+        await using var writer = new SqliteConnection($"Data Source={ClientFile}");
         await writer.OpenAsync();
 
         await using (var wal = writer.CreateCommand())
@@ -222,7 +270,9 @@ public sealed class BackupServiceTests : IDisposable
     /// </remarks>
     private async Task CorruptTheSourceAsync()
     {
-        await using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        var target = ClientFile;
+
+        await using (var db = new SqliteConnection($"Data Source={target}"))
         {
             await db.OpenAsync();
             await using var command = db.CreateCommand();
@@ -242,12 +292,12 @@ public sealed class BackupServiceTests : IDisposable
 
         SqliteConnection.ClearAllPools();
 
-        var size = new FileInfo(_dbPath).Length;
+        var size = new FileInfo(target).Length;
         Assert.True(size > 65536, $"the seed did not grow the database enough to damage ({size} bytes)");
 
         // Two thirds of the way in: past the header and the schema, inside
         // pages holding rows.
-        await using var file = new FileStream(_dbPath, FileMode.Open, FileAccess.Write);
+        await using var file = new FileStream(target, FileMode.Open, FileAccess.Write);
         file.Seek(size / 3 * 2, SeekOrigin.Begin);
         await file.WriteAsync(new byte[16384]);
         await file.FlushAsync();
@@ -322,7 +372,7 @@ public sealed class BackupServiceTests : IDisposable
         // pointing at a report that is no longer there passes integrity_check
         // completely, and is worth knowing before it is copied forward another
         // fourteen nights.
-        await using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        await using (var db = new SqliteConnection($"Data Source={ClientFile}"))
         {
             await db.OpenAsync();
 

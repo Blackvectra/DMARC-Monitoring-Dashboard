@@ -132,6 +132,11 @@ else
                 }
             </h2>
 
+            @if (_recheckFailed.GetValueOrDefault(row.Domain) is { } failed)
+            {
+                <p class="bad">Checking again failed, so what follows is still the last reading: @failed</p>
+            }
+
             @if (d is null)
             {
                 @* Listed at once and filled in as each answer arrives. Asking
@@ -527,6 +532,9 @@ else
     private async Task LoadAsync()
     {
         _error = null;
+
+        // Every domain is about to be read afresh, which answers them all.
+        _recheckFailed.Clear();
         try
         {
             // The scope first, then the list, which is a database read and
@@ -575,6 +583,12 @@ else
     private string? _rechecking;
 
     /// <summary>
+    /// Why the last "Check again" on a domain failed, by domain, until a
+    /// reading of it succeeds.
+    /// </summary>
+    private readonly Dictionary<string, string> _recheckFailed = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Reads DNS and the policy host for one domain again.
     /// </summary>
     /// <remarks>
@@ -592,12 +606,17 @@ else
         try
         {
             _domains[domain] = await Fixes.PlanAsync(domain, current.Triage, null, _tenant);
+            _recheckFailed.Remove(domain);
         }
         catch (Exception ex)
         {
-            // A failed re-read must not take the section away. The finding on
-            // screen is still the last thing that was true.
-            _error = ex.Message;
+            // A failed re-read must not take the section away, let alone the
+            // page. The finding on screen is still the last thing that was
+            // true, so it stays, with the failure said beside it. This used to
+            // go into _error, which replaces every domain and the change
+            // history with "Could not plan" - and only a full load clears
+            // that, which nothing on the replaced page could start.
+            _recheckFailed[domain] = ex.Message;
         }
         finally
         {

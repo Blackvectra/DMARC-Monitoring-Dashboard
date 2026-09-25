@@ -1,0 +1,19 @@
+-- Whether an address's reverse name is confirmed by the name's own forward
+-- records, so a name can be told apart from a claim.
+--
+-- A PTR is written by whoever holds the address. Most hosting providers let a
+-- customer set it to anything, so a server sending forged mail can call
+-- itself mail.inkyphishfence.com as easily as INKY can. Shown to a person
+-- that is a label; used to decide that a source is a mail filter rather than
+-- an impersonator, it hid the impersonation: the report moved it out of "who
+-- tried to send mail as you" and called it expected.
+--
+-- Forward-confirmed reverse DNS closes that. The name is trusted only when
+-- its own A or AAAA records point back at the address - and those are written
+-- by whoever holds the NAME, which for inkyphishfence.com is INKY, not the
+-- sender. Nothing is decided on a name without it.
+--
+-- NULL is "not checked yet": every name stored before this migration, which
+-- the next lookup run re-asks once. 0 is "checked, and the name does not
+-- point back"; 1 is confirmed.
+ALTER TABLE source_names ADD COLUMN forward_confirmed INTEGER;

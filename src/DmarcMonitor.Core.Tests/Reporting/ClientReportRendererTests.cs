@@ -210,8 +210,8 @@ public sealed class ClientReportRendererTests
 
         // Twenty addresses none of which belong to a service anybody knows, so
         // twenty rows: nothing is merged on a guess.
-        Assert.Contains("and 5 more sender(s)", html, StringComparison.Ordinal);
-        Assert.Contains("500 message(s)", html, StringComparison.Ordinal);
+        Assert.Contains("and 5 more senders", html, StringComparison.Ordinal);
+        Assert.Contains("500 messages", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -244,10 +244,10 @@ public sealed class ClientReportRendererTests
             Report(sources: [.. microsoft, theOneThatMatters], messages: 405, passing: 405));
 
         Assert.Contains("Microsoft 365", html, StringComparison.Ordinal);
-        Assert.Contains("40 address(es)", html, StringComparison.Ordinal);
+        Assert.Contains("40 addresses", html, StringComparison.Ordinal);
 
         // Forty-one sources, two rows: no long tail to hide anything behind.
-        Assert.DoesNotContain("more sender(s)", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("more sender", html, StringComparison.Ordinal);
         Assert.Contains("203.0.113.9", html, StringComparison.Ordinal);
 
         // And the individual Microsoft addresses are gone from the document.

@@ -125,7 +125,16 @@ else
         }
     </section>
 
-    @if (_preview is not null)
+    @if (_previewError is not null)
+    {
+        @* Where the preview would have been, under pickers that still work:
+           the next client or month chosen tries again. *@
+        <div class="empty">
+            <h2>Could not build that month</h2>
+            <p>@_previewError</p>
+        </div>
+    }
+    else if (_preview is not null)
     {
         @* The verdict decides the colour, not the message count. A client
            with one domain losing half its mail inside an estate averaging
@@ -175,7 +184,14 @@ else
     private IReadOnlyList<(string Slug, string Name)>? _clients;
     private ClientReport? _preview;
     private ReportSummary? _summary;
+
+    // The page failing to load: there is nothing to choose from, so it
+    // replaces everything below the heading.
     private string? _error;
+
+    // One client's month failing to build, which is not the same thing: the
+    // pickers stay, and the next thing chosen clears it. See PreviewAsync.
+    private string? _previewError;
     private bool _checked;
     private string? _tenant;
 
@@ -312,11 +328,21 @@ else
     /// </remarks>
     private async Task ClientChangedAsync()
     {
-        if (!string.IsNullOrEmpty(_slug)
-            && await ReportUi.LatestMonthWithDataAsync(_slug, _tenant) is { } month
-            && ReportUiService.RecentMonths().Any(m => m.Value == month))
+        try
         {
-            _month = month;
+            if (!string.IsNullOrEmpty(_slug)
+                && await ReportUi.LatestMonthWithDataAsync(_slug, _tenant) is { } month
+                && ReportUiService.RecentMonths().Any(m => m.Value == month))
+            {
+                _month = month;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Only which month to open on, which is no reason to fail the
+            // pick: the picker keeps its month, and the preview below says
+            // whether that one builds. Uncaught, it escaped the client
+            // picker's handler and took the whole circuit down.
         }
 
         await PreviewAsync();
@@ -327,6 +353,7 @@ else
         _checked = false;
         _preview = null;
         _summary = null;
+        _previewError = null;
 
         // Only a client this login was offered. The dropdown is filtered to
         // the customer's own client, but the value it posts back is whatever
@@ -356,7 +383,13 @@ else
         }
         catch (Exception ex)
         {
-            _error = ex.Message;
+            // Said where the preview goes, and cleared by the next attempt.
+            // It went into _error, which replaces the whole page - pickers
+            // included - with "Could not read the database", and nothing ever
+            // cleared it: the controls that would have tried again were the
+            // ones it had taken away. One month that would not build left the
+            // page stuck until it was reloaded.
+            _previewError = ex.Message;
         }
         finally
         {

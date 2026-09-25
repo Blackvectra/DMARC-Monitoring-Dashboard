@@ -21,14 +21,7 @@ public sealed class DatabaseMigrationTests : IDisposable
     private readonly string _dbPath =
         Path.Combine(Path.GetTempPath(), $"dmarc-migrate-{Guid.NewGuid():N}.db");
 
-    public void Dispose()
-    {
-        SqliteConnection.ClearAllPools();
-        foreach (var suffix in new[] { "", "-wal", "-shm" })
-        {
-            try { File.Delete(_dbPath + suffix); } catch (IOException) { }
-        }
-    }
+    public void Dispose() => SingleDatabase.Delete(_dbPath);
 
     private SqliteConnection Open()
     {
@@ -37,19 +30,33 @@ public sealed class DatabaseMigrationTests : IDisposable
         return db;
     }
 
-    /// <summary>A database as an older build left it: current schema, minus what came after.</summary>
+    /// <summary>
+    /// A database as an older build left it: the single database as it was at
+    /// 0018, minus what came after the version asked for.
+    /// </summary>
+    /// <remarks>
+    /// From the frozen single-database schema rather than today's, because
+    /// 0019 is not a change that can be undone by dropping what it added: it
+    /// moved every client's rows into files of their own. Every database from
+    /// before it is a single database, so that is where an older one starts.
+    /// </remarks>
     private async Task<string> AnOlderDatabaseAsync(string upToVersion)
     {
-        await new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql);
-
         await using var db = Open();
+
+        await using (var create = db.CreateCommand())
+        {
+            create.CommandText = SingleDatabase.Schema;
+            await create.ExecuteNonQueryAsync();
+        }
 
         // Undo everything at or after the version, so this is genuinely a
         // database that never had it rather than one that has it hidden.
         // Newest first, so a column added by one migration is gone before the
         // table it was added to is dropped by an earlier one's undo.
         foreach (var migration in DatabaseMigrations.All
-                     .Where(m => string.CompareOrdinal(m.Version, upToVersion) >= 0)
+                     .Where(m => string.CompareOrdinal(m.Version, upToVersion) >= 0
+                              && string.CompareOrdinal(m.Version, ClientFileSplit.Version) < 0)
                      .OrderByDescending(m => m.Version, StringComparer.Ordinal))
         {
             // Indexes first. SQLite refuses to drop a column an index still
@@ -310,7 +317,8 @@ public sealed class DatabaseMigrationTests : IDisposable
 
         await DatabaseMigrations.ApplyAsync(_dbPath);
 
-        Assert.Equal(1, CountAggregateRecords());
+        // In the client's own file now, which is where 0019 put it.
+        Assert.Equal(1, await SingleDatabase.CountAsync(_dbPath, "SELECT COUNT(*) FROM aggregate_records"));
     }
 }
 

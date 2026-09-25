@@ -6,14 +6,16 @@ namespace DmarcMonitor.Core.Intelligence;
 /// <param name="Looked">Addresses asked about.</param>
 /// <param name="Named">Of those, how many came back with a name.</param>
 /// <param name="Silent">Of those, how many had a reverse zone that did not answer.</param>
-public readonly record struct SourceNameRun(int Looked, int Named, int Silent)
+/// <param name="Confirmed">Of the named, how many names point back at the address.</param>
+public readonly record struct SourceNameRun(int Looked, int Named, int Silent, int Confirmed = 0)
 {
     /// <summary>Of the addresses asked about, how many now have nothing to show but digits.</summary>
     public int Unnamed => Looked - Named;
 
     public string Describe() => Looked == 0
         ? "Every source already has a name; nothing to look up."
-        : $"Looked up {Looked} source(s): {Named} named, {Unnamed} with no name ({Silent} whose reverse zone did not answer).";
+        : $"Looked up {Looked} source(s): {Named} named ({Confirmed} confirmed by their own forward records), "
+        + $"{Unnamed} with no name ({Silent} whose reverse zone did not answer).";
 }
 
 /// <summary>
@@ -59,13 +61,24 @@ public sealed class SourceNameResolver(SourceNameStore store, DnsLookup dns)
 
         var named = 0;
         var silent = 0;
+        var confirmed = 0;
 
         foreach (var batch in addresses.Chunk(AtOnce))
         {
+            // Each name is checked against its own forward records in the same
+            // pass. A name that does not point back is kept for display and
+            // decides nothing: the PTR is written by whoever holds the address,
+            // and a forger can reverse to a security vendor's hostname as
+            // easily as the vendor can.
             var answers = await Task.WhenAll(batch.Select(async ip =>
-                (Ip: ip, Name: await _dns.ReverseAsync(ip, ct).ConfigureAwait(false)))).ConfigureAwait(false);
+            {
+                var name = await _dns.ReverseAsync(ip, ct).ConfigureAwait(false);
+                var points = !string.IsNullOrWhiteSpace(name)
+                    && await _dns.ForwardConfirmsAsync(name, ip, ct).ConfigureAwait(false);
+                return (Ip: ip, Name: name, Confirmed: points);
+            })).ConfigureAwait(false);
 
-            foreach (var (ip, name) in answers)
+            foreach (var (ip, name, points) in answers)
             {
                 // ReverseAsync returns null both for "no PTR" and for "the
                 // zone did not answer", and this cannot tell them apart from
@@ -78,13 +91,15 @@ public sealed class SourceNameResolver(SourceNameStore store, DnsLookup dns)
                 // PTR - is not re-asked daily.
                 var has = !string.IsNullOrWhiteSpace(name);
                 if (has) { named++; } else { silent++; }
+                if (points) { confirmed++; }
 
-                await _store.SaveAsync(ip, name, answered: true, ct: ct).ConfigureAwait(false);
+                await _store.SaveAsync(ip, name, answered: true, forwardConfirmed: has ? points : null, ct: ct)
+                    .ConfigureAwait(false);
 
                 ct.ThrowIfCancellationRequested();
             }
         }
 
-        return new SourceNameRun(addresses.Count, named, silent);
+        return new SourceNameRun(addresses.Count, named, silent, confirmed);
     }
 }
