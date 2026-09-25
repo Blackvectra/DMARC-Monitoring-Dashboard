@@ -28,7 +28,8 @@ public sealed class ReportImporterTests : IDisposable
 
     private static string Fixture(string name) => Path.Combine(AppContext.BaseDirectory, "Fixtures", name);
 
-    private ReportImporter Importer() => new(new ReportStore(_dbPath));
+    private ReportImporter Importer(Func<string, (string[] Files, string[] Folders)>? listFolder = null) =>
+        new(new ReportStore(_dbPath), listFolder);
 
     [Theory]
     [InlineData("google-aggregate.zip")]
@@ -92,11 +93,14 @@ public sealed class ReportImporterTests : IDisposable
 
     // ---- one bad file among good ones ------------------------------------------
 
-    private string Folder(params (string Name, byte[] Content)[] files)
+    private string Folder(params (string Name, byte[] Content)[] files) =>
+        Subfolder(_dir, $"in-{Guid.NewGuid():N}", files);
+
+    private static string Subfolder(string parent, string name, params (string Name, byte[] Content)[] files)
     {
-        var folder = Path.Combine(_dir, $"in-{Guid.NewGuid():N}");
+        var folder = Path.Combine(parent, name);
         Directory.CreateDirectory(folder);
-        foreach (var (name, content) in files) { File.WriteAllBytes(Path.Combine(folder, name), content); }
+        foreach (var (file, content) in files) { File.WriteAllBytes(Path.Combine(folder, file), content); }
         return folder;
     }
 
@@ -212,6 +216,128 @@ public sealed class ReportImporterTests : IDisposable
         Assert.Equal(3, result.Failed);
         Assert.Equal(1, result.FailedFiles);
         Assert.Equal(0, result.NotReports);
+    }
+
+    // ---- a folder that cannot be listed, or is a link --------------------------
+
+    /// <summary>Access denied, in the framework's own words.</summary>
+    /// <remarks>
+    /// Thrown by a stand-in for the listing rather than got from a folder's
+    /// mode, because root opens any folder whatever its mode, and root is who
+    /// these tests run as in a container. The command's tests take a real
+    /// mode away where they are not root.
+    /// </remarks>
+    private static UnauthorizedAccessException Denied(string path) => new($"Access to the path '{path}' is denied.");
+
+    /// <summary>
+    /// The one this is about. A subfolder that could not be opened threw out
+    /// of the framework's recursive listing before a single file was read:
+    /// the whole import ended and the command called it a bug. It is named
+    /// now, in its place among the files, and everything else comes through.
+    /// </summary>
+    [Fact]
+    public async Task AFolderThatCannotBeListedIsNamedAndTheRestImported()
+    {
+        var folder = Folder(
+            ("1-good.xml", Bytes(AggregateXml("r-1"))),
+            ("2-damaged.zip", WithDamagedListOfContents(Zip(("r.xml", Bytes(AggregateXml("r-2")))))),
+            ("6-damaged.zip", WithDamagedListOfContents(Zip(("r.xml", Bytes(AggregateXml("r-6")))))));
+        var locked = Subfolder(folder, "3-locked", ("r.xml", Bytes(AggregateXml("r-3"))));
+        var open = Subfolder(folder, "4-open", ("r.xml", Bytes(AggregateXml("r-4"))));
+        var lockedToo = Subfolder(open, "5-locked-too", ("r.xml", Bytes(AggregateXml("r-5"))));
+
+        var importer = Importer(dir => dir == locked || dir == lockedToo ? throw Denied(dir) : ReportImporter.ListOnDisk(dir));
+        var result = await importer.ImportFolderAsync(folder);
+
+        Assert.False(result.StoppedEarly);
+        Assert.Equal(6, result.FilesSeen);
+        Assert.Equal(2, result.Stored);
+        Assert.Equal(4, result.Failed);
+        Assert.Equal(4, result.FailedFiles);
+
+        // Each named by its path within the import, and where its files would
+        // have been, so the list reads in the same order as the folder.
+        var s = Path.DirectorySeparatorChar;
+        Assert.Collection(result.Errors,
+            e => Assert.StartsWith("2-damaged.zip: could not be opened as a zip archive", e, StringComparison.Ordinal),
+            e => Assert.Equal($"3-locked{s}: could not be listed: Access to the path '{locked}' is denied.", e),
+            e => Assert.Equal($"4-open{s}5-locked-too{s}: could not be listed: Access to the path '{lockedToo}' is denied.", e),
+            e => Assert.StartsWith("6-damaged.zip: could not be opened as a zip archive", e, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AFolderRemovedPartWayThroughIsNamedNotDropped()
+    {
+        // Somebody tidying up while an import runs: the folder was there when
+        // the one around it was listed, and gone by its own turn. The
+        // recursive listing passed over a folder like that without a word,
+        // and over the reports that had been in it.
+        var folder = Folder(("1-good.xml", Bytes(AggregateXml("r-1"))));
+        var gone = Subfolder(folder, "2-gone", ("r.xml", Bytes(AggregateXml("r-2"))));
+        Subfolder(folder, "3-kept", ("r.xml", Bytes(AggregateXml("r-3"))));
+
+        var importer = Importer(dir =>
+        {
+            var listing = ReportImporter.ListOnDisk(dir);
+            if (dir == folder) { Directory.Delete(gone, recursive: true); }
+            return listing;
+        });
+        var result = await importer.ImportFolderAsync(folder);
+
+        Assert.Equal(2, result.Stored);
+        Assert.Equal(1, result.Failed);
+        Assert.StartsWith($"2-gone{Path.DirectorySeparatorChar}: could not be listed: ",
+            Assert.Single(result.Errors), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheFolderBeingImportedIsNamedByItsOwnNameWhenItCannotBeListed()
+    {
+        // It has no path within the import, being the import.
+        var folder = Folder(("1-good.xml", Bytes(AggregateXml("r-1"))));
+
+        var result = await Importer(dir => throw Denied(dir)).ImportFolderAsync(folder);
+
+        Assert.Equal(0, result.Stored);
+        Assert.Equal(1, result.Failed);
+        Assert.Equal(
+            $"{Path.GetFileName(folder)}{Path.DirectorySeparatorChar}: could not be listed: Access to the path '{folder}' is denied.",
+            Assert.Single(result.Errors));
+    }
+
+    /// <summary>
+    /// The recursive listing followed a link to a folder, and one pointing
+    /// back up the tree had it list the same files again at every level,
+    /// forty levels deep on Linux. Not followed now, and named rather than
+    /// passed over, because a link to a folder elsewhere holds reports that
+    /// used to come in through it.
+    /// </summary>
+    [Fact]
+    public async Task ALinkToAFolderIsNamedAndNotFollowed()
+    {
+        if (OperatingSystem.IsWindows()) { return; }   // making a link needs Developer Mode or an administrator
+
+        var folder = Folder(("1-good.xml", Bytes(AggregateXml("r-1"))));
+        var elsewhere = Folder(("r.xml", Bytes(AggregateXml("r-elsewhere"))));
+        Directory.CreateSymbolicLink(Path.Combine(folder, "2-elsewhere"), elsewhere);
+        Directory.CreateSymbolicLink(Path.Combine(folder, "3-loop"), folder);
+
+        // A link to a file is still read, as it always was. It cannot loop.
+        File.CreateSymbolicLink(Path.Combine(folder, "4-linked.xml"), Path.Combine(elsewhere, "r.xml"));
+
+        var result = await Importer().ImportFolderAsync(folder);
+
+        // Nothing read twice: through the loop, the first file would have
+        // been; through the other link, the report the file link points at.
+        Assert.Equal(4, result.FilesSeen);
+        Assert.Equal(2, result.Stored);
+        Assert.Equal(0, result.AlreadyStored);
+        Assert.Equal(2, result.Failed);
+
+        var s = Path.DirectorySeparatorChar;
+        Assert.Collection(result.Errors,
+            e => Assert.Equal($"2-elsewhere{s}: a link to another folder, not followed", e),
+            e => Assert.Equal($"3-loop{s}: a link to another folder, not followed", e));
     }
 
     public void Dispose()
