@@ -1,0 +1,86 @@
+@inherits LayoutComponentBase
+@layout MainLayout
+@using DmarcMonitor.Web.Auth
+@inject OrgContext Org
+@inject ReportStoreConnection Db
+@inject AuthenticationStateProvider Auth
+@inject IConfiguration Configuration
+
+@*
+    The pages that belong to whoever runs the service rather than to the
+    people it is run for: Clients, Import, Settings and Updates.
+
+    A customer's own login is confined to one client, and none of these has
+    anything of theirs on it. The sidebar never offered them, but a hidden
+    link is not a permission: the address typed by hand opened Settings - the
+    install's Entra tenant and app registration, the master group, where the
+    database lives, the build, and the provider's organization with a count of
+    every client and domain it has - and Updates, which asked GitHub for
+    releases with the install's own token each time it was opened.
+
+    Decided here, on the server, before the page exists. A page that is never
+    rendered has nothing to load, nothing to fetch and no button to press, so
+    no section of four pages has to remember to ask who is looking. The role
+    checks inside each page's handlers stay as they were.
+*@
+
+@if (_open is true)
+{
+    @Body
+}
+else if (_open is false)
+{
+    <PageTitle>Not part of your view — DMARC Monitor</PageTitle>
+
+    <div class="empty">
+        @if (_unreadable is null)
+        {
+            <h2>Not part of your view</h2>
+            <p>This page is for the people who run the service. Your domains are under
+               <a href="domains">Domain health</a>, and their monthly reports under
+               <a href="reports">Client reports</a>.</p>
+        }
+        else
+        {
+            <h2>Could not read the database</h2>
+            <p>@_unreadable</p>
+            <p class="muted">Who may open this page is worked out from the database, so it stays shut
+               until the database can be read.</p>
+        }
+    </div>
+}
+
+@code {
+    // Null until who is looking has been worked out, and neither the page
+    // nor the refusal is drawn before then. A gate that started open would
+    // already have started the page.
+    private bool? _open;
+    private string? _unreadable;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // No database, no customers: a client's login group is a row in it.
+        if (!Db.Exists)
+        {
+            _open = true;
+            return;
+        }
+
+        try
+        {
+            var access = await Org.GetAsync();
+            _open = access.HasAccess && access.RestrictedClient is null;
+        }
+        catch (Exception ex)
+        {
+            // The organizations could not be read, so neither could anybody's
+            // client group, and a customer cannot be told apart from staff. A
+            // master is one by the sign-in alone - or by there being no
+            // sign-in - and is let through to find out what is wrong; nobody
+            // else is.
+            var state = await Auth.GetAuthenticationStateAsync();
+            _open = OrgContext.Resolve(state.User, [], Configuration).IsMaster;
+            _unreadable = ex.Message;
+        }
+    }
+}

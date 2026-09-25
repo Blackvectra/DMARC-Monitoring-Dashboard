@@ -230,8 +230,13 @@ public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
 
         // No Clients, Import, Settings or Updates: there is nothing there for
         // a customer, and the client picker would offer them other people's.
-        Assert.DoesNotContain("nav-group\">Setup", triage, StringComparison.Ordinal);
-        Assert.DoesNotContain("href=\"import\"", triage, StringComparison.Ordinal);
+        // Asserted per link: this used to look for a nav group called Setup,
+        // which was renamed Settings, so it passed whatever the sidebar drew.
+        foreach (var link in new[] { "href=\"clients\"", "href=\"import\"", "href=\"settings\"", "href=\"updates\"" })
+        {
+            Assert.DoesNotContain(link, triage, StringComparison.Ordinal);
+        }
+
         Assert.Contains("read only", triage, StringComparison.Ordinal);
     }
 
@@ -245,6 +250,88 @@ public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
 
         var domain = await client.GetStringAsync("/domains/cornerpost.example");
         Assert.Contains("Nothing stored for", domain, StringComparison.Ordinal);
+    }
+
+    // ---- the provider's own pages --------------------------------------------
+
+    /// <summary>
+    /// What the server hands a browser to run a page interactively. Every
+    /// one of the provider's pages carries it, so its absence means the page
+    /// never started for that person.
+    /// </summary>
+    private const string InteractivePage = "\"type\":\"server\"";
+
+    public static TheoryData<string, string> ProviderPages => new()
+    {
+        { "/settings", "<h1>Settings</h1>" },
+        { "/updates", "<h1>Updates</h1>" },
+        { "/clients", "<h1>Clients</h1>" },
+        { "/import", "<h1>Import reports</h1>" },
+    };
+
+    /// <summary>
+    /// A customer's own login is turned away from the provider's pages by the
+    /// server, not merely not shown the links to them.
+    /// </summary>
+    /// <remarks>
+    /// The sidebar never offered these to a customer, and the address typed
+    /// by hand opened them anyway. Settings showed the install's Entra tenant
+    /// and app registration, the master group, where the database lives, the
+    /// build, and the provider's organization with a count of every client
+    /// and domain it has; Updates asked GitHub for releases with the
+    /// install's token each time it was opened.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(ProviderPages))]
+    public async Task ACustomerIsTurnedAwayFromTheProvidersOwnPages(string route, string heading)
+    {
+        var html = await As("customer@acme.example", TwoOrganizationApp.AcmeGroup).GetStringAsync(route);
+
+        Assert.Contains("Not part of your view", html, StringComparison.Ordinal);
+        Assert.DoesNotContain(heading, html, StringComparison.Ordinal);
+        Assert.DoesNotContain(TwoOrganizationApp.MasterGroup, html, StringComparison.Ordinal);
+        Assert.DoesNotContain(TwoOrganizationApp.AppRegistration, html, StringComparison.Ordinal);
+
+        // Withheld before it started rather than emptied afterwards: the page
+        // is never handed to the browser to run, so nothing it would read,
+        // fetch or offer to change exists for this person.
+        Assert.DoesNotContain(InteractivePage, html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same pages still open for the provider's own people, down to the
+    /// least of them.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ProviderPages))]
+    public async Task TheProvidersOwnPeopleStillOpenThem(string route, string heading)
+    {
+        var html = await As("reader@example.com", TwoOrganizationApp.NrgViewers).GetStringAsync(route);
+
+        Assert.Contains(heading, html, StringComparison.Ordinal);
+        Assert.Contains(InteractivePage, html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Not part of your view", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>Everything a customer's login is for is still theirs.</summary>
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/domains")]
+    [InlineData("/domains/acme.com")]
+    [InlineData("/sources")]
+    [InlineData("/fix")]
+    [InlineData("/dns-changes")]
+    [InlineData("/reports")]
+    [InlineData("/reports/views")]
+    [InlineData("/tls")]
+    [InlineData("/failures")]
+    public async Task ACustomerStillOpensEverythingAboutTheirOwnClient(string route)
+    {
+        var html = await As("customer@acme.example", TwoOrganizationApp.AcmeGroup).GetStringAsync(route);
+
+        Assert.DoesNotContain("Not part of your view", html, StringComparison.Ordinal);
+        Assert.Contains(InteractivePage, html, StringComparison.Ordinal);
+        Assert.DoesNotContain("cornerpost.example", html, StringComparison.Ordinal);
     }
 
     // ---- white label ---------------------------------------------------------
@@ -301,6 +388,59 @@ public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
 }
 
 /// <summary>
+/// The provider's own pages while the organizations cannot be read.
+/// </summary>
+/// <remarks>
+/// Whether somebody is a customer is a client group in the database, so with
+/// the database unreadable a customer cannot be told apart from staff. The
+/// pages stay shut rather than guessing in the customer's favor - except to a
+/// master, who is one by the sign-in alone and is the person who has to find
+/// out what is wrong. A class of its own, because it damages its database.
+/// </remarks>
+public sealed class UnreadableOrganizationTests : IClassFixture<TwoOrganizationApp>
+{
+    private readonly TwoOrganizationApp _app;
+
+    public UnreadableOrganizationTests(TwoOrganizationApp app) => _app = app;
+
+    private HttpClient As(string user, string groups)
+    {
+        var client = _app.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        client.DefaultRequestHeaders.Add(TestAuthHandler.UserHeader, user);
+        client.DefaultRequestHeaders.Add(TestAuthHandler.GroupsHeader, groups);
+        return client;
+    }
+
+    [Fact]
+    public async Task OnlyAMasterIsLetThroughWhileNobodysAccessCanBeRead()
+    {
+        // A running install whose database then went bad, not one that never
+        // started: the first request is made while it is still whole.
+        Assert.Contains("<h1>Settings</h1>",
+            await As("boss@example.com", TwoOrganizationApp.MasterGroup).GetStringAsync("/settings"),
+            StringComparison.Ordinal);
+
+        await using (var db = new SqliteConnection($"Data Source={_app.DatabasePath}"))
+        {
+            await db.OpenAsync();
+            await using var command = db.CreateCommand();
+            command.CommandText = "ALTER TABLE tenants RENAME TO tenants_unreadable";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var customer = await As("customer@acme.example", TwoOrganizationApp.AcmeGroup).GetStringAsync("/settings");
+        Assert.Contains("Could not read the database", customer, StringComparison.Ordinal);
+        Assert.DoesNotContain("<h1>Settings</h1>", customer, StringComparison.Ordinal);
+        Assert.DoesNotContain(TwoOrganizationApp.MasterGroup, customer, StringComparison.Ordinal);
+        Assert.DoesNotContain(TwoOrganizationApp.AppRegistration, customer, StringComparison.Ordinal);
+
+        Assert.Contains("<h1>Settings</h1>",
+            await As("boss@example.com", TwoOrganizationApp.MasterGroup).GetStringAsync("/settings"),
+            StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
 /// The application with Entra sign-in configured and a test scheme standing
 /// in for it: whoever the request's headers say, with the groups they say.
 /// </summary>
@@ -313,6 +453,9 @@ public sealed class TwoOrganizationApp : WebApplicationFactory<Program>
     public const string NrgViewers = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
     public const string AcmeGroup = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 
+    /// <summary>The Entra app registration's id, which Settings shows to the provider's own people.</summary>
+    public const string AppRegistration = "00000000-0000-0000-0000-000000000001";
+
     /// <summary>A one-pixel PNG: enough to prove the logo reaches the markup.</summary>
     private const string Logo =
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -322,6 +465,12 @@ public sealed class TwoOrganizationApp : WebApplicationFactory<Program>
 
     public TwoOrganizationApp() => Seed().GetAwaiter().GetResult();
 
+    /// <summary>
+    /// This instance's database. Safe to damage from a test class of its own,
+    /// which gets its own instance; see SeededApp.DatabasePath.
+    /// </summary>
+    public string DatabasePath => _dbPath;
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("Database:Path", _dbPath);
@@ -330,7 +479,7 @@ public sealed class TwoOrganizationApp : WebApplicationFactory<Program>
         // Entra "configured", so the app takes the sign-in path rather than
         // local mode; the test scheme below answers in its place.
         builder.UseSetting("AzureAd:TenantId", "common");
-        builder.UseSetting("AzureAd:ClientId", "00000000-0000-0000-0000-000000000001");
+        builder.UseSetting("AzureAd:ClientId", AppRegistration);
         builder.UseSetting("Auth:MasterGroupId", MasterGroup);
 
         builder.ConfigureTestServices(services =>
