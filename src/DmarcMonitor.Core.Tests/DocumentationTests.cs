@@ -195,6 +195,47 @@ public sealed class DocumentationTests
         Assert.Contains("DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net", unit, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TheWindowsBootstrapKeepsTheFoldersTheCollectorWasToldToRead()
+    {
+        // bootstrap.ps1 rewrites ingest.cmd from a table of the keys it knows,
+        // and keeps an existing line only for a key in that table. DMARC_FOLDERS
+        // was not in it, so every run dropped the line somebody had added by
+        // hand, and the collector went back to reading Inbox without a word.
+        // It also has to be among the optional keys: an install that names no
+        // folders would otherwise never get its ingest task registered.
+        var lines = File.ReadAllLines(Path.Combine(RepoRoot().FullName, "deploy", "bootstrap.ps1"));
+        var table = lines.SingleOrDefault(l => l.TrimStart().StartsWith("$values = [ordered]@{", StringComparison.Ordinal));
+        var optional = lines.SingleOrDefault(l => l.TrimStart().StartsWith("$optional = @(", StringComparison.Ordinal));
+
+        Assert.True(table is not null, "bootstrap.ps1 no longer builds the ingest.cmd table on one line; point this test at where it does");
+        Assert.Contains("DMARC_FOLDERS = ''", table, StringComparison.Ordinal);
+        Assert.True(optional is not null, "bootstrap.ps1 no longer lists the optional ingest.cmd keys on one line; point this test at where it does");
+        Assert.Contains("'DMARC_FOLDERS'", optional, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheLinuxScriptsSingleQuoteTheFoldersSoSystemdKeepsTheBackslash()
+    {
+        // systemd reads an unquoted backslash in an environment file as an
+        // escape and drops it, so DMARC\client-a.example arrives as
+        // DMARCclient-a.example and matches no folder. The template's example
+        // is what somebody uncomments, and bootstrap.sh writes the line itself;
+        // both single-quote it, which is what docs/INGEST-SETUP.md tells people.
+        var root = RepoRoot().FullName;
+
+        var example = File.ReadAllLines(Path.Combine(root, "deploy", "install.sh"))
+            .Single(l => l.Contains("DMARC_FOLDERS=", StringComparison.Ordinal));
+        var value = example[(example.IndexOf('=', StringComparison.Ordinal) + 1)..];
+        Assert.True(value.Length > 1 && value[0] == '\'' && value[^1] == '\'',
+            $"install.sh's DMARC_FOLDERS example is not single-quoted: {example.Trim()}");
+
+        var write = File.ReadAllLines(Path.Combine(root, "deploy", "bootstrap.sh"))
+            .Single(l => l.Contains("env_set DMARC_FOLDERS", StringComparison.Ordinal));
+        Assert.True(write.TrimEnd().EndsWith(" single", StringComparison.Ordinal),
+            $"bootstrap.sh does not write DMARC_FOLDERS single-quoted: {write.Trim()}");
+    }
+
     [Theory]
     [InlineData("Ubuntu 24.04")]
     [InlineData("Amazon Linux 2023")]
