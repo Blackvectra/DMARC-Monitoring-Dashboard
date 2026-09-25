@@ -120,7 +120,7 @@ banner, and Settings says it again with the detail.
 
 ### On a server
 
-The published bundle needs the **ASP.NET Core 8 runtime** on the host — unlike
+The published bundle needs the **ASP.NET Core 10 runtime** on the host — unlike
 `dmarc`, it is not self-contained.
 
 ```

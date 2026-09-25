@@ -2,7 +2,7 @@
 #
 # First install of DMARC Monitor on a Linux server, from the two release
 # artifacts. Ubuntu and Amazon Linux 2023 are the two it is written for; any
-# systemd distribution with the ASP.NET Core 8 runtime should be the same.
+# systemd distribution with the ASP.NET Core 10 runtime should be the same.
 #
 # What it does, in order:
 #

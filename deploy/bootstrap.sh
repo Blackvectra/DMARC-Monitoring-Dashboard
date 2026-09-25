@@ -7,8 +7,9 @@
 # https://<host>. It does everything docs/DEPLOYING.md steps 1 to 4 describe,
 # and can do steps 5 and 6 too when handed the Entra details:
 #
-#   1. Installs the ASP.NET Core 8 runtime and the tools, from the
-#      distribution's own repositories (apt or dnf).
+#   1. Installs the ASP.NET Core 10 runtime and the tools, from the
+#      distribution's own repositories (apt or dnf), or the runtime from
+#      Microsoft's installer into /opt/dotnet where the distribution has none.
 #   2. Installs Caddy - from apt where a package exists, as the static binary
 #      with Caddy's own unit file where one does not - and writes the
 #      Caddyfile for --host. Caddy then gets and renews the certificate.

@@ -8,7 +8,7 @@ DNS name pointing at it - to a running, TLS-terminated instance answering on
 https://<host>. The Windows counterpart of deploy/bootstrap.sh, with the same
 shape and the same arguments:
 
-  1. Installs a private copy of the ASP.NET Core 8 runtime under C:\dmarc\dotnet
+  1. Installs a private copy of the ASP.NET Core 10 runtime under C:\dmarc\dotnet
      with Microsoft's dotnet-install script, so nothing machine-wide changes.
   2. Downloads the release (or takes it from -FromDir): dmarc.exe, the web
      bundle, and the deploy scripts.

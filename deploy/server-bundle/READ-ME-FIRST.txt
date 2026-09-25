@@ -7,7 +7,7 @@ application. See below.
 What this is
 ------------
 The compiled web application, for installing on a server that already has the
-ASP.NET Core 8 runtime. It is framework-dependent and platform-neutral on
+ASP.NET Core 10 runtime. It is framework-dependent and platform-neutral on
 purpose, so the same bundle installs on x64 and arm64.
 
 There is no .exe in this folder and that is not a mistake. The only launcher
