@@ -33,7 +33,7 @@ public sealed record DomainSource
 
     /// <summary>
     /// The source as it should be written down: the vendor the catalogue
-    /// recognises, else the reverse name, else the address.
+    /// recognizes, else the reverse name, else the address.
     /// </summary>
     /// <remarks>
     /// The "Authenticating cleanly" table on a live domain was ten rows of

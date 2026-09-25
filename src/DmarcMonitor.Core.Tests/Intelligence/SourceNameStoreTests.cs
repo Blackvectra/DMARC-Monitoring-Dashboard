@@ -47,7 +47,7 @@ public sealed class SourceNameStoreTests : IAsyncLifetime
 
     /// <summary>
     /// The whole point: the catalogue turns the reverse name into something a
-    /// person recognises, and the operator reads a vendor rather than a host.
+    /// person recognizes, and the operator reads a vendor rather than a host.
     /// </summary>
     [Fact]
     public async Task ACachedReverseNameBecomesAVendorName()
@@ -80,7 +80,7 @@ public sealed class SourceNameStoreTests : IAsyncLifetime
     /// digits: it is at least a domain somebody can search for.
     /// </summary>
     [Fact]
-    public async Task AnUnrecognisedReverseNameIsShownRatherThanDiscarded()
+    public async Task AnUnrecognizedReverseNameIsShownRatherThanDiscarded()
     {
         await _store.SaveAsync("198.51.100.9", "mail07.some-small-isp.example", answered: true);
 

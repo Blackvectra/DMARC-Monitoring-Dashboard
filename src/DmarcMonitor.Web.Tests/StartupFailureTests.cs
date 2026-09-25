@@ -98,7 +98,7 @@ public sealed class StartupFailureTests
 
     /// <summary>
     /// The honest case. Inventing friendly advice for a failure nobody has
-    /// had produces confident wrong instructions, so an unrecognised one is
+    /// had produces confident wrong instructions, so an unrecognized one is
     /// named as itself and flagged as worth reporting.
     /// </summary>
     [Fact]

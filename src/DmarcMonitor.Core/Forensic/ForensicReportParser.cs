@@ -174,7 +174,7 @@ public static class ForensicReportParser
             }
         }
 
-        // A multipart with no feedback part but a recognisable one nested
+        // A multipart with no feedback part but a recognizable one nested
         // inside it, which some receivers produce by wrapping the whole report
         // once more. Worth one look rather than a recursive walk.
         if (feedback is null)

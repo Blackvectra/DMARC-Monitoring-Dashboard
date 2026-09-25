@@ -71,7 +71,7 @@ internal static class StartupFailure
     /// Only the failures that actually happen to somebody running this on
     /// their own machine are translated. Inventing friendly text for a
     /// failure nobody has had produces confident wrong advice, so anything
-    /// unrecognised is reported as itself.
+    /// unrecognized is reported as itself.
     /// </remarks>
     private static string Explain(Exception ex)
     {

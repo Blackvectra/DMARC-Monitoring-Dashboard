@@ -147,7 +147,7 @@ public sealed class ClientReportBuilderTests : IDisposable
 
         Assert.Equal(19, report.Daily.Count);
         Assert.Equal(new DateOnly(2026, 9, 19), report.Through);
-        Assert.Contains("19 Sep 2026; the month is still in progress", report.Covers, StringComparison.Ordinal);
+        Assert.Contains("Sep 19, 2026; the month is still in progress", report.Covers, StringComparison.Ordinal);
         Assert.Equal("1 of 19 so far", report.Covered.Single(f => f.Label == "Days covered").Value);
     }
 
@@ -158,7 +158,7 @@ public sealed class ClientReportBuilderTests : IDisposable
 
         Assert.Equal(30, report.Daily.Count);
         Assert.Null(report.Through);
-        Assert.Equal("Covers 1 Sep 2026 to 30 Sep 2026.", report.Covers);
+        Assert.Equal("Covers Sep 1, 2026 to Sep 30, 2026.", report.Covers);
     }
 
     [Fact]

@@ -66,7 +66,7 @@ public sealed record FailingSource
 
     /// <summary>
     /// The source as it should be written down: the vendor if the catalogue
-    /// recognises one, else the reverse name, else the address.
+    /// recognizes one, else the reverse name, else the address.
     /// </summary>
     /// <remarks>
     /// Never empty and never a guess. An address nobody can name prints as an
@@ -74,7 +74,7 @@ public sealed record FailingSource
     /// the worst case here is the old best case.
     ///
     /// The name is for reading, never for judging. A PTR is written by
-    /// whoever holds the address, so recognising "ColoCrossing" says who owns
+    /// whoever holds the address, so recognizing "ColoCrossing" says who owns
     /// the wire and nothing about whether the mail is legitimate. Every
     /// verdict on this record still comes from what was signed and from how
     /// many unrelated parties the address was seen against.
@@ -132,7 +132,7 @@ public sealed record FailingSource
 /// </remarks>
 public sealed record FailingOperator
 {
-    /// <summary>The vendor the catalogue recognises, else the registrable domain.</summary>
+    /// <summary>The vendor the catalogue recognizes, else the registrable domain.</summary>
     public required string Name { get; init; }
 
     /// <summary>The registrable domain the addresses share, e.g. colocrossing.com.</summary>
@@ -629,7 +629,7 @@ public sealed record SourceDetail
         : IsCrossClient ? SourceVerdict.CrossClientImpersonation
         : SourceVerdict.Unauthenticated;
 
-    /// <summary>The vendor the catalogue recognises, else the reverse name, else the address.</summary>
+    /// <summary>The vendor the catalogue recognizes, else the reverse name, else the address.</summary>
     public string Display =>
         SourceCatalog.Identify(ReverseName) is { } known ? known.Name
         : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName

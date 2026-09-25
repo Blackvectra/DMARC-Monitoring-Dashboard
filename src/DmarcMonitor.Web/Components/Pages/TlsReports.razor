@@ -155,7 +155,7 @@ else
                         </td>
                         <td class="num @(d.SuccessRate < 100 ? "bad" : "good")">@d.SuccessRate%</td>
                         <td class="num muted">@d.Reporters</td>
-                        <td class="when">@(d.LastReport is { } r ? r.ToString("d MMM") : "—")</td>
+                        <td class="when">@(d.LastReport is { } r ? r.ToString("MMM d") : "—")</td>
                     </tr>
                 }
             </tbody>

@@ -442,7 +442,7 @@ else
     private static RenderFragment Source(DetailRow row) => builder =>
     {
         // The name if there is one, with the address under it. Nobody
-        // recognises an address, and nobody can ask their host about a name
+        // recognizes an address, and nobody can ask their host about a name
         // without one.
         builder.OpenElement(0, "a");
         builder.AddAttribute(1, "href", $"/sources/{row.SourceIp}");

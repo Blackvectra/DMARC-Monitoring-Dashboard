@@ -492,7 +492,7 @@ public sealed class DnsLookup(ILookupClient? client = null)
     /// both mean the same to a caller - there is no name, print the address.
     /// A PTR is also not proof of anything: whoever holds the address writes
     /// it, so it identifies a source the way a return address does. That is
-    /// enough to recognise a provider and not enough to trust one, which is
+    /// enough to recognize a provider and not enough to trust one, which is
     /// why nothing here feeds a verdict.
     /// </para>
     /// </remarks>

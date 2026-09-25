@@ -246,7 +246,7 @@ public static class ExplainCommand
         Console.WriteLine();
         Console.WriteLine($"  A failure report about one message claiming to be from {report.Domain}");
         if (report.ReportedBy.Length > 0) { Console.WriteLine($"  Reported by {report.ReportedBy}"); }
-        if (report.ArrivalDate is { } at) { Console.WriteLine($"  It arrived at the receiver on {at:d MMM yyyy HH:mm} UTC"); }
+        if (report.ArrivalDate is { } at) { Console.WriteLine($"  It arrived at the receiver on {at:MMM d, yyyy HH:mm} UTC"); }
         Console.WriteLine();
 
         if (report.SourceIp.Length > 0) { Console.WriteLine($"  Sent from     {report.SourceIp}"); }
@@ -347,8 +347,8 @@ public static class ExplainCommand
     private static string Window(DateTimeOffset begin, DateTimeOffset end)
     {
         if (begin == DateTimeOffset.MinValue) { return "over an unstated period"; }
-        var b = begin.UtcDateTime.ToString("d MMM yyyy HH:mm", CultureInfo.InvariantCulture);
-        var e = end.UtcDateTime.ToString("d MMM yyyy HH:mm", CultureInfo.InvariantCulture);
+        var b = begin.UtcDateTime.ToString("MMM d, yyyy HH:mm", CultureInfo.InvariantCulture);
+        var e = end.UtcDateTime.ToString("MMM d, yyyy HH:mm", CultureInfo.InvariantCulture);
         return $"{b} to {e} UTC";
     }
 

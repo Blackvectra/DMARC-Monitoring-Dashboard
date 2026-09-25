@@ -145,7 +145,7 @@ else
                     @foreach (var row in _rows)
                     {
                         <tr class="@(row.WasDelivered ? "urgent" : "")">
-                            <td class="when">@(row.ArrivedAt is { } at ? at.ToString("d MMM HH:mm") : "—")</td>
+                            <td class="when">@(row.ArrivedAt is { } at ? at.ToString("MMM d HH:mm") : "—")</td>
                             <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
                             <td class="muted">@row.ClientName</td>
                             <td>
@@ -262,7 +262,7 @@ else
             _mayReadContent = access.CanReadMessageContent;
 
             _rows = await Failures.ListAsync(_days, _tenantId, _client);
-            _summary = await Failures.SummariseAsync(_days, _tenantId, _client);
+            _summary = await Failures.SummarizeAsync(_days, _tenantId, _client);
         }
         catch (Exception ex)
         {
