@@ -263,7 +263,7 @@ public static class ClientReportRenderer
                       <td class="n">{E(dkim)}</td>
                       <td class="n">{E(failing)}</td>
                       <td class="n">{(d.Messages == 0 ? "-" : N(d.FailingSources))}</td>
-                      <td>{E(d.Recommended)}<br><span class="note">{E(d.Readiness)}</span></td>
+                      <td>{E(report.WhatToDo(d))}<br><span class="note">{E(report.ReadinessOf(d))}</span></td>
                     </tr>
 
                 """);
@@ -336,7 +336,7 @@ public static class ClientReportRenderer
         if (report.Messages == 0) { return; }
 
         var enforcing = report.Domains.Count(d => d.IsEnforcing);
-        var ready = report.Domains.Count(d => d.Readiness is "Ready");
+        var ready = report.Domains.Count(d => report.ReadinessOf(d) is "Ready");
         var unproven = report.ImpersonatingSources.Sum(s => s.Failing);
 
         // Stated as a direction rather than a delta where there is nothing to
@@ -427,6 +427,7 @@ public static class ClientReportRenderer
     {
         SenderClass.Approved => "Yours, and correct",
         SenderClass.Misconfigured => "Yours, and needs correcting",
+        SenderClass.Relayed => "Passed on by a mail filter",
         SenderClass.Unidentified => "Unrecognised, at a known provider",
         SenderClass.Suspicious => "Unrecognised entirely",
         _ => "Stopped sending",
@@ -436,6 +437,7 @@ public static class ClientReportRenderer
     [
         (SenderClass.Approved, "Authenticating correctly. Nothing to do.", "ok"),
         (SenderClass.Misconfigured, "Real mail of yours, set up in a way that does not prove it. This is the mail most likely to go missing.", "warn"),
+        (SenderClass.Relayed, "A security service passing mail on, usually a recipient's filter re-sending your message. Expected, and not an attack.", "rest"),
         (SenderClass.Unidentified, "Never proved entitled, but run by a service provider we recognise. Usually a tool somebody signed up for. Worth confirming.", "warn"),
         (SenderClass.Suspicious, "Never proved entitled, and nothing identifies the operator.", "bad"),
         (SenderClass.Retired, "Sent last month and not this one. Either retired, or it stopped working quietly.", "rest"),

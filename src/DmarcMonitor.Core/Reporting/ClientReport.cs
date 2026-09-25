@@ -157,6 +157,12 @@ public enum SenderClass
     /// <summary>The client's own path, or a recognised service, losing some of its mail.</summary>
     Misconfigured,
 
+    /// <summary>
+    /// Never authenticated, but a security gateway passing mail on - usually a
+    /// recipient's filter re-sending the client's own message. Not an attack.
+    /// </summary>
+    Relayed,
+
     /// <summary>Never authenticated, but operated by somebody the catalog recognises.</summary>
     Unidentified,
 
@@ -774,7 +780,7 @@ public sealed record ClientReport
     /// own infrastructure. Passing even once is the thing a forger cannot do.
     /// </remarks>
     public IReadOnlyList<ReportSource> ImpersonatingSources =>
-        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated)
+        [.. Sources.Where(s => !s.IsClean && s.Passing == 0 && !s.Authenticated && ClassOf(s) != SenderClass.Relayed)
                    .OrderByDescending(s => s.Failing)];
 
     /// <summary>
@@ -1159,10 +1165,21 @@ public sealed record ClientReport
         if (source.IsClean) { return SenderClass.Approved; }
         if (source.Passing > 0 || source.Authenticated) { return SenderClass.Misconfigured; }
 
+        // A security gateway that never authenticated is somebody's filter
+        // passing mail on - INKY and Proofpoint re-sending a message to the
+        // recipient behind them - and it was printed in eleven of nineteen
+        // September reports under "somebody pretending to be you".
+        if (Intelligence.SourceCatalog.Identify(source.ReverseName)?.Kind is Intelligence.SourceKind.SecurityGateway)
+        {
+            return SenderClass.Relayed;
+        }
+
         // Never authenticated. A name the catalog knows makes it a question
-        // for the customer; anything else is a finding.
+        // for the customer; anything else is a finding. The source catalogue
+        // is keyed on host names: asked about the address, as it was, it
+        // never matched anything.
         return SenderCatalog.Identify(source.SourceIp) is not null
-               || Intelligence.SourceCatalog.Identify(source.SourceIp) is not null
+               || Intelligence.SourceCatalog.Identify(source.ReverseName) is not null
             ? SenderClass.Unidentified
             : SenderClass.Suspicious;
     }
@@ -1172,6 +1189,52 @@ public sealed record ClientReport
         [.. Sources
             .GroupBy(ClassOf)
             .OrderBy(g => (int)g.Key)];
+
+    /// <summary>
+    /// The client's services that sent as this domain and are not set up to
+    /// prove it.
+    /// </summary>
+    public IReadOnlyList<ReportSource> BrokenSendersFor(ReportDomainHealth domain)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        return [.. InventoryOf(SenderClass.Misconfigured).Where(s =>
+            Domains.Count == 1 || s.Domains.Contains(domain.Domain, StringComparer.OrdinalIgnoreCase))];
+    }
+
+    /// <summary>
+    /// What to do about one domain, in one line, consistent with the verdict
+    /// and the decision requested.
+    /// </summary>
+    /// <remarks>
+    /// The domain's own <see cref="ReportDomainHealth.Recommended"/> cannot
+    /// see the sources, so it said "Nothing. Keep watching." beside a verdict
+    /// of "3 of your services still send mail that cannot prove it" - in
+    /// eleven of nineteen September reports, NRG's own among them - and "Move
+    /// from p=none to p=quarantine" beside a decision box saying to stay at
+    /// p=none until the services pass. The next step is the services.
+    /// </remarks>
+    public string WhatToDo(ReportDomainHealth domain)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        if (domain.Messages == 0 || domain.IsStruggling || BrokenSendersFor(domain).Count == 0)
+        {
+            return domain.Recommended;
+        }
+
+        return domain.Policy switch
+        {
+            "reject" => "Correct the named services: their failing mail is being refused now.",
+            "quarantine" => "Correct the named services before moving to p=reject.",
+            _ => "Correct the named services, then move to p=quarantine.",
+        };
+    }
+
+    /// <summary>The readiness word, with the same knowledge of the sources.</summary>
+    public string ReadinessOf(ReportDomainHealth domain)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        return domain.Readiness == "Ready" && BrokenSendersFor(domain).Count > 0 ? "Conditional" : domain.Readiness;
+    }
 
     /// <summary>Sources under one heading, busiest first.</summary>
     public IReadOnlyList<ReportSource> InventoryOf(SenderClass which) =>
@@ -1401,7 +1464,15 @@ public sealed record ClientReport
                         ? "No action needed. Recorded so the pattern is visible if it grows."
                         : EveryDomainEnforcing
                             ? "Close the gap: set sp= to match p=, and take pct to 100."
-                            : "Raise the policy so receivers are asked to refuse it.",
+                            // Not "raise the policy" on its own while the
+                            // client's own services still fail: the decision
+                            // box says to hold until they pass, and a
+                            // register that says both is one the client
+                            // stops trusting.
+                            : InventoryOf(SenderClass.Misconfigured).Count > 0
+                                ? "Once the named services authenticate, raise the policy so receivers are asked to "
+                                + "refuse it."
+                                : "Raise the policy so receivers are asked to refuse it.",
                     Owner = ProviderIsUnnamed ? "Your IT provider" : ProviderName,
                     Validation = refused
                         ? "The volume stops, or stays refused."
@@ -1430,6 +1501,8 @@ public sealed record ClientReport
                     Action = domain.Messages == 0
                         ? "Confirm whether this domain sends mail at all. If it does not, publish p=reject "
                         + "and it is closed."
+                        : BrokenSendersFor(domain).Count > 0
+                            ? "Correct the named services first, then move to p=quarantine."
                         : domain.Readiness == "Ready"
                             ? "Its own mail authenticates. Move to p=quarantine, then to p=reject."
                             : $"Account for the {domain.OwnFailing:N0} failing message(s) first, then move to "

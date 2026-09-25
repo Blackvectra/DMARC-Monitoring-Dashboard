@@ -436,7 +436,7 @@ public static class ClientReportPdf
             Value(row[3], domain.Messages == 0 ? "—" : $"{domain.SpfAlignedRate:0.#}%");
             Value(row[4], domain.Messages == 0 ? "—" : $"{domain.DkimAlignedRate:0.#}%");
 
-            var todo = row[5].AddParagraph(domain.Recommended);
+            var todo = row[5].AddParagraph(report.WhatToDo(domain));
             todo.Format.Font.Size = 8;
         }
 
@@ -778,6 +778,7 @@ public static class ClientReportPdf
     {
         SenderClass.Approved => "Yours, and correct",
         SenderClass.Misconfigured => "Yours, and needs correcting",
+        SenderClass.Relayed => "Passed on by a mail filter",
         SenderClass.Unidentified => "Unrecognised, at a known provider",
         SenderClass.Suspicious => "Unrecognised entirely",
         _ => "Stopped sending",
@@ -787,6 +788,7 @@ public static class ClientReportPdf
     [
         (SenderClass.Approved, "Authenticating correctly. Nothing to do."),
         (SenderClass.Misconfigured, "Real mail of yours, set up in a way that does not prove it. The mail most likely to go missing."),
+        (SenderClass.Relayed, "A security service passing mail on, usually a recipient's filter re-sending your message. Expected, and not an attack."),
         (SenderClass.Unidentified, "Never proved entitled, but run by a provider we recognise. Usually a tool somebody signed up for."),
         (SenderClass.Suspicious, "Never proved entitled, and nothing identifies the operator."),
         (SenderClass.Retired, "Sent last month and not this one. Either retired, or it stopped working quietly."),
