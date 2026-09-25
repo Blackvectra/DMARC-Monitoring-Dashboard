@@ -1238,24 +1238,30 @@ public sealed record ClientReport
             // "Protected. Every domain is enforcing" over a domain anybody
             // could send as tomorrow. A policy is about what a domain
             // permits, not about what it did in a given month.
-            var watching = Domains.Where(d => !d.IsEnforcing).Select(d => d.Domain).ToList();
+            var watching = Domains.Where(d => !d.IsEnforcing).ToList();
 
             // Named, with the step: "the domain that is only being watched"
             // was this product's vocabulary, not the client's. The client
             // knows the domain and can look up p=none; they cannot look up
             // what "watched" means.
-            var named = watching.Count == 1 ? watching[0] : $"{watching.Count} domains";
+            var named = watching.Count == 1 ? watching[0].Domain : Plural.Count(watching.Count, "domain");
+
+            // "From p=none" only when that is known. A domain no receiver
+            // reported on this period carries a placeholder policy, and its
+            // row in the table already says "not known for this period".
+            var step = watching.All(d => d.PolicyKnown) ? "move from p=none to p=quarantine" : "move to p=quarantine";
 
             if (watching.Count > 0 && broken > 0)
             {
                 return $"Not ready for p=quarantine. {PassRate:0.#}% of the mail sent using your name was provably yours, and "
-                     + $"{broken} service(s) still need correcting before {named} can move from p=none to p=quarantine.";
+                     + $"{Plural.Count(broken, "service")} still {Plural.Of(broken, "needs", "need")} correcting before "
+                     + $"{named} can {step}.";
             }
 
             if (watching.Count > 0)
             {
                 return $"Ready for p=quarantine. {PassRate:0.#}% of the mail sent using your name was provably yours and no "
-                     + $"sender needs correcting, so {named} can move from p=none to p=quarantine.";
+                     + $"sender needs correcting, so {named} can {step}.";
             }
 
             // "Of the mail sent using your name", not "of your mail". The

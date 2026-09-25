@@ -89,7 +89,7 @@ public sealed class SenderInventoryTests
     [Fact]
     public void BulkHostingThatNeverAuthenticatesIsNotAskedAbout()
     {
-        var vps = Source(ip: "198.51.100.40", messages: 3, passing: 0) with { ReverseName = "198-51-100-40-host.colocrossing.com" };
+        var vps = Source(ip: "198.51.100.40", messages: 3, passing: 0) with { ReverseName = "198-51-100-40-host.colocrossing.com", NameConfirmed = true };
 
         Assert.Equal(SenderClass.Suspicious, ClientReport.ClassOf(vps));
     }
@@ -846,6 +846,20 @@ public sealed class VerdictTests
         Assert.EndsWith("The rest was forged mail, which your policy asks receivers to refuse or send to junk.",
             Report([spoofed], [forger]).Verdict, StringComparison.Ordinal);
         Assert.DoesNotContain("The rest was forged", Report([Domain()]).Verdict, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A domain nobody reported on has no known policy; "from p=none" would
+    /// be a guess the domain table beside it does not make.
+    /// </summary>
+    [Fact]
+    public void AnUnknownPolicyIsNotCalledPNone()
+    {
+        var known = Report([Domain("acme.example", "none")]);
+        var quiet = Report([Domain("acme.example", "reject"), Domain("quiet.example", "none", messages: 0, passing: 0) with { PolicyKnown = false }]);
+
+        Assert.Contains("can move from p=none to p=quarantine", known.Verdict, StringComparison.Ordinal);
+        Assert.Contains("quiet.example can move to p=quarantine", quiet.Verdict, StringComparison.Ordinal);
     }
 
     [Fact]
