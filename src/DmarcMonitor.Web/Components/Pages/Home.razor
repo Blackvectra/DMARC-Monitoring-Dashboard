@@ -31,7 +31,7 @@
     <div class="head-actions">
         @* One client at a time, when there is more than one to choose from.
            The whole page follows it: the dial, the chart, the rows. An MSP is
-           asked "how is Morton doing", and the answer must not be the estate. *@
+           asked "how is Acme doing", and the answer must not be the estate. *@
         @if (_clients.Count > 1 && _access?.RestrictedClient is null)
         {
             <label>

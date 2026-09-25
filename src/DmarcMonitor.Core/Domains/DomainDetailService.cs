@@ -88,7 +88,7 @@ public sealed record DomainSource
     /// The evidence behind <see cref="SameServiceSigningCorrectly"/>, and the
     /// reason it is not simply "this source passes DMARC". A source can pass
     /// while signing somebody else's domain - the live data has three addresses
-    /// passing for bmcedc.com that all sign
+    /// passing for client-a.example that all sign
     /// <c>antispam.mailspamprotection.com</c>, exactly the domain the failing
     /// address signs. Offered as proof, that would send an operator to a vendor
     /// claiming the vendor already signs as their customer, which it does not.
@@ -181,7 +181,7 @@ public sealed record DomainReporter
     /// and that is the more dangerous shape: reports keep arriving, the page
     /// keeps showing a pass rate, and the pass rate is now computed over
     /// whoever is left. On the live data Enterprise Outlook carried 73.5% of
-    /// mortonnd.gov's mail and stopped sending about it on 2026-07-16, while
+    /// acme.example's mail and stopped sending about it on 2026-07-16, while
     /// still reporting on every other domain. What was left read as 100%
     /// clean and "ready for p=reject".
     /// </remarks>
@@ -539,7 +539,7 @@ public sealed class DomainDetailService(string databasePath)
         // DKIM. Counting those as "left out" removed a domain's own clean mail
         // from the source tables and then described it to the operator in the
         // same breath as forwarded failures - on the live data, 19 of
-        // mortonnd.gov's 84 messages, which is its own mail servers.
+        // acme.example's 84 messages, which is its own mail servers.
         command.CommandText = """
             SELECT COALESCE(SUM(message_count), 0),
                    COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
@@ -678,7 +678,7 @@ public sealed class DomainDetailService(string databasePath)
         // right somewhere. Only from sources with no failures at all - a source
         // that half works is not proof that the vendor can do it - and only
         // where the source actually produced an ALIGNED signature. Passing
-        // DMARC is not the same claim: three addresses pass for bmcedc.com on
+        // DMARC is not the same claim: three addresses pass for client-a.example on
         // the live data while signing the very domain the failing address
         // signs, and reading those as proof would be a false accusation
         // against a vendor.

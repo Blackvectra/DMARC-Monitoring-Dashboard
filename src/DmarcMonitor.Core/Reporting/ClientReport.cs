@@ -688,7 +688,7 @@ public sealed record ClientReport
                     Label = "Turned away on your behalf",
                     Value = Stopped.ToString("N0", CultureInfo.InvariantCulture),
                     // "The protection doing its job" only when it was: at
-                    // River City Boats 224 of 234 were the client's own
+                    // one client 224 of 234 were the client's own
                     // Mailchimp and Avanan mail, sent to junk.
                     Note = Domains.Sum(d => d.OwnFailing) > 0
                         ? "Refused or filed as junk by the receiving provider because your policy said to. This "

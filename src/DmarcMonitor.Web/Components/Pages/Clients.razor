@@ -96,7 +96,7 @@ else
         <section>
             <h2>Add a client</h2>
             <div class="form-row">
-                <input placeholder="Client name, e.g. Morton, ND" @bind="_newName" @bind:event="oninput" />
+                <input placeholder="Client name, e.g. Contoso Dental" @bind="_newName" @bind:event="oninput" />
                 @if (_access is { IsMaster: true, Visible.Count: > 1 })
                 {
                     @* A master looking across organizations has to say which one

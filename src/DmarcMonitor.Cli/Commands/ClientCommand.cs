@@ -137,8 +137,8 @@ public static class ClientCommand
     /// each one IS its own customer, and typing eighteen pairs of commands is
     /// the only thing standing between an import and a usable set of reports.
     ///
-    /// The client is named after the domain exactly - mortonnd.gov is filed
-    /// as "mortonnd.gov", slug "mortonnd-gov" - so the mapping is one to one
+    /// The client is named after the domain exactly - acme.example is filed
+    /// as "acme.example", slug "acme-example" - so the mapping is one to one
     /// and obvious. That matters later: when a real client name is known, it
     /// is clear which placeholder it replaces, and two domains can never
     /// collide onto one slug by accident. The slug is permanent because it

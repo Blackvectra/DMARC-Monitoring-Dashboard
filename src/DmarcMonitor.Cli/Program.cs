@@ -442,8 +442,8 @@ public static class Program
               dmarc explain report.json.gz
               dmarc init-db --db /var/dmarc/dmarc.db
               dmarc import --from C:\dmarc-export
-              dmarc client add --name "Morton, ND"
-              dmarc client assign --domain mortonnd.gov --client morton-nd
+              dmarc client add --name "Acme Corp"
+              dmarc client assign --domain acme.example --client acme-corp
               dmarc check --domain example.com
               dmarc audit --zone example.com.txt
               dmarc simulate --domain example.com --policy quarantine

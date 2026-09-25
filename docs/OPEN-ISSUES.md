@@ -51,7 +51,7 @@ Untested against reality, in rough order of how likely they are to bite:
   honours it in tests; a mailbox with thousands of messages is where that gets
   exercised for the first time.
 - **Folder names with a backslash.** The live mailbox has folders literally
-  named `DMARC\bmcedc.com`. Graph addresses folders by id, so this should be
+  named `DMARC\client-a.example`. Graph addresses folders by id, so this should be
   irrelevant, but nothing has proved it.
 - **The move.** A message is filed only after its reports are stored, so a
   crash re-reads rather than loses. The duplicate check should make the second
@@ -78,8 +78,8 @@ product collects mail and never was, so its bugs do not block anything the
 product does.
 
 It did truncate four folders in the live export — two months for
-`mortonnd.gov`, three for `redriverrc.com`, everything for
-`mcleanelectric.com` — almost certainly because `Attachment.FileName` throws
+`acme.example`, three for `client-e.example`, everything for
+`client-f.example` — almost certainly because `Attachment.FileName` throws
 for some attachment kinds and, under `$ErrorActionPreference = 'Stop'`, ended
 the run part way through a folder. Outlook hands items back oldest-first,
 which is why each affected folder kept its early history and lost the rest.
@@ -512,7 +512,7 @@ last step is untried.
 
 Everything up to the provider is exercised against real data: `dmarc fix
 --all` on the 1,687-report database plans the two `sp=none` removals
-(bmcedc.com, ndunited.org), plans mortonnd.gov's move to quarantine, and
+(client-a.example, client-b.example), plans acme.example's move to quarantine, and
 refuses its move to reject. The guardrails - refuse unsafe, no-op twice,
 snapshot before writing, refuse a stale plan, roll back from the snapshot,
 refuse a second rollback - are proven against the in-memory zone.
@@ -595,7 +595,7 @@ renders it server-side as a PDF with the product's own header, footer and page
 numbers, the day-by-day chart, and the impersonating sources grouped by
 operator. What it does not have:
 
-- **From an outside review of the River City Boats report (24 Sep)**, worth
+- **From an outside review of the one client's report (24 Sep)**, worth
   adding and not yet done: an enforcement-readiness panel under the verdict
   (policy / senders identified / unknowns / coverage / ready for reject, each
   pass-partial-no with its evidence); a "decision needed" line naming what the
@@ -603,7 +603,7 @@ operator. What it does not have:
   on the PDF; and a one-line DNS posture strip (DMARC, SPF, DKIM, MTA-STS,
   TLS-RPT, last change). The four related figures are now reconciled: the
   verdict, the Critical and High findings all quote what the named services
-  failed (224 on River City Boats), the sender row shows "229 (224 failed)",
+  failed (224 on one client), the sender row shows "229 (224 failed)",
   and what receivers did (234) is its own labelled sentence.
 - **One report, not three.** The brief asks for an executive report, a
   technical report and a QBR; this is one document that sits between the first
@@ -733,7 +733,7 @@ fail without the fix.
    against seven of ten clients. It is a gateway carrying their outbound that
    breaks a share of its own signatures in transit. Fixed in three places; the
    rule is that passing even once *for that domain* is what a forger cannot do.
-2. **The client report accusing the same relay.** DMV WRR's August report said
+2. **The client report accusing the same relay.** One client's August report said
    177 messages were "sent by someone who is not you". It was their own mail.
 3. **"210 of those 137."** The impersonation sentence reused a figure counting
    every failing message on every enforcing domain.

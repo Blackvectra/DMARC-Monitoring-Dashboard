@@ -140,9 +140,9 @@ internal static class Args
     /// wrote last month's report instead, and the operator sent a customer the
     /// wrong month with nothing on screen to suggest it. Worse:
     ///
-    ///     dmarc client add --name "Morton, ND" --slugg morton-nd
+    ///     dmarc client add --name "Acme Corp" --slugg acme-corp
     ///
-    /// filed the client as 'morton-com' rather than the slug asked for, and
+    /// filed the client as 'acme-com' rather than the slug asked for, and
     /// the slug is permanent because it goes into report filenames.
     ///
     /// A value that happens to begin with two dashes is not a flag here; only

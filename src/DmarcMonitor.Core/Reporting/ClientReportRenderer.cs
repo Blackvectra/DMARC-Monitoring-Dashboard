@@ -186,7 +186,7 @@ public static class ClientReportRenderer
     /// <remarks>
     /// Without these a client heard from on exactly one day of the month gets
     /// an empty rectangle where the chart should be. Found on the real data:
-    /// mcleanelectric.com had one reported day in August, so the line was a
+    /// client-f.example had one reported day in August, so the line was a
     /// single move with nothing to join to and the area had no width. A blank
     /// box in a report going to a customer reads as broken software.
     /// </remarks>
@@ -920,7 +920,7 @@ public static class ClientReportRenderer
            allows"; the first column then takes whatever is left. */
         td.n, th.n { text-align:right; white-space:nowrap; width:1%; }
         .mono { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; }
-        /* A domain is one word. Wrapped, "bmcedc" over ".com" reads as two. */
+        /* A domain is one word. Wrapped, "client-a" over ".example" reads as two. */
         td.mono { white-space:nowrap; }
 
         /* A named source: the name is what a person reads, the address is what

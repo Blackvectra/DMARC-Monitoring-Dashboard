@@ -376,7 +376,7 @@ evidence going somewhere nobody looks.
 Run it after onboarding a domain — that is when this breaks. The other half of
 the check lives in `dmarc audit`: given a zone file and the database, it flags
 `_report._dmarc` records authorizing domains you do **not** monitor, which is
-how a transposed name is found. `ndgaa.com` beside `ndgga.com` reads correctly
+how a transposed name is found. `clinet-c.example` beside `client-c.example` reads correctly
 in a column of near-identical rows.
 
 ---
@@ -395,7 +395,7 @@ cost of *the change* rather than of the whole record. It exits non-zero when
 the change would cost mail, so it can gate a script.
 
 ```
-  ndaco.org
+  client-d.example
     929 message(s) across 24 day(s) of reports, asked for the last 30;
     9 of them carried a signature the store did not keep, so they are left out
     now      p=quarantine; adkim=r; aspf=r

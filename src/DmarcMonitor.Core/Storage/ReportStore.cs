@@ -1180,7 +1180,7 @@ public sealed class ReportStore
         return map;
     }
 
-    /// <summary>"Morton, ND" becomes "morton-nd": usable in a filename and a URL.</summary>
+    /// <summary>"Acme Corp" becomes "acme-corp": usable in a filename and a URL.</summary>
     /// <remarks>
     /// Accented letters are folded to their ASCII base rather than dropped.
     /// Dropping them turned "Søren Ågård Farms" into "s-ren-g-rd-farms", and

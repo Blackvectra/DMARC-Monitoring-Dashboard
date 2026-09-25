@@ -481,7 +481,7 @@ that does not exist would. Guests invited into your directory work, so a
 customer signs in with their own email address.
 
 ```bash
-dmarc client set-group --client morton-nd --group <id>
+dmarc client set-group --client acme-corp --group <id>
 ```
 
 Or **Clients → Customer login group** as an admin. Somebody who is also in a

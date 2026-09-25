@@ -113,10 +113,10 @@ public sealed record FailingSource
 /// reported four separate findings:
 /// </para>
 /// <code>
-///   107.175.149.54   107-175-149-54-host.colocrossing.com   ndgga.com
-///   192.210.194.21   192-210-194-21-host.colocrossing.com   ndunited.org
-///   198.46.243.200   198-46-243-200-host.colocrossing.com   ndunited.org
-///   192.210.134.82   192-210-134-82-host.colocrossing.com   bmcedc.com
+///   107.175.149.54   107-175-149-54-host.colocrossing.com   client-c.example
+///   192.210.194.21   192-210-194-21-host.colocrossing.com   client-b.example
+///   198.46.243.200   198-46-243-200-host.colocrossing.com   client-b.example
+///   192.210.134.82   192-210-134-82-host.colocrossing.com   client-a.example
 /// </code>
 /// <para>
 /// One hosting provider, four addresses, three unrelated customers. As four
