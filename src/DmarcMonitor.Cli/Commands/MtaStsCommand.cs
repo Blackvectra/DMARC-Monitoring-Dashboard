@@ -22,7 +22,12 @@ public static class MtaStsCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--domain", "--mode", "--mx", "--policy-host", "!--i-have-checked") is var bad and not 0) { return bad; }
+        //
+        // --mx is the one flag here meant to be given more than once, as the
+        // usage text says: a domain with two mail servers needs both in its
+        // policy. Declared without the "...", the second one was refused as a
+        // repeat, so a list named by hand could hold only one host.
+        if (Args.Reject(args, "--db", "--domain", "--mode", "--mx...", "--policy-host", "!--i-have-checked") is var bad and not 0) { return bad; }
 
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
