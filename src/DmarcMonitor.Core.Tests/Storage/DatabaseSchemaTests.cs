@@ -72,7 +72,17 @@ public sealed class DatabaseSchemaTests
         var own = new[] { "schema_migrations" };
         Assert.Empty(organization.Intersect(client).Except(own));
 
-        var accounted = organization.Union(client).Except(["client_file", "row_ids"]).ToHashSet();
+        // And what migrations after the split added, which the frozen single
+        // database never had because it stopped at 0018. Read from the
+        // migrations themselves, so the next one to add a table does not have
+        // to remember this test exists.
+        var sinceSplit = DatabaseMigrations.All
+            .Where(m => string.CompareOrdinal(m.Version, ClientFileSplit.Version) > 0)
+            .SelectMany(m => m.Sql.Split('\n'))
+            .Where(line => line.TrimStart().StartsWith("CREATE TABLE ", StringComparison.OrdinalIgnoreCase))
+            .Select(line => line.Trim()["CREATE TABLE ".Length..].Split(' ', '(')[0]);
+
+        var accounted = organization.Union(client).Except(["client_file", "row_ids"]).Except(sinceSplit).ToHashSet();
         Assert.Equal(single.OrderBy(t => t), accounted.OrderBy(t => t));
     }
 

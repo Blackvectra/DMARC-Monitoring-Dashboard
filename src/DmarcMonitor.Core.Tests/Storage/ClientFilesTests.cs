@@ -187,7 +187,7 @@ public sealed class ClientFilesTests : IDisposable
         // What the organization owns stays: its clients and their domains.
         Assert.Equal(4, await CountInAsync(_dbPath, "SELECT COUNT(*) FROM clients"));
         Assert.Equal(3, await CountInAsync(_dbPath, "SELECT COUNT(*) FROM domains"));
-        Assert.Equal(ClientFileSplit.Version, await DatabaseMigrations.VersionAsync(_dbPath));
+        Assert.Equal(DatabaseMigrations.BaselineVersion, await DatabaseMigrations.VersionAsync(_dbPath));
     }
 
     [Fact]

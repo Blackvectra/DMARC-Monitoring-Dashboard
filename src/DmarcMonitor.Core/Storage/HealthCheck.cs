@@ -10,6 +10,17 @@ namespace DmarcMonitor.Core.Storage;
 public sealed record CollectionFacts(
     string Organization, int Domains, DateTimeOffset? LastStored, int StoredLastDay);
 
+/// <summary>An organization's webhook, as far as the health check needs it.</summary>
+/// <param name="Organization">Its slug.</param>
+/// <param name="Destination">Scheme and host, never the full address.</param>
+/// <param name="CreatedAt">When it was set up.</param>
+/// <param name="LastDelivered">When something last arrived there, or null if nothing ever has.</param>
+/// <param name="LastFailed">When a delivery last failed, or null if none ever has.</param>
+/// <param name="LastError">What the last failure said.</param>
+public sealed record WebhookFacts(
+    string Organization, string Destination, DateTimeOffset CreatedAt,
+    DateTimeOffset? LastDelivered, DateTimeOffset? LastFailed, string? LastError);
+
 /// <summary>A domain that used to have reports arriving and now does not.</summary>
 /// <param name="Domain">The name.</param>
 /// <param name="LastReport">When its newest report covered, or null if none ever.</param>
@@ -40,6 +51,9 @@ public sealed record HealthFacts
 
     /// <summary>Domain names held by more than one organization, which is usually a typo.</summary>
     public IReadOnlyList<string> HeldTwice { get; init; } = [];
+
+    /// <summary>Every organization's webhook, working or not.</summary>
+    public IReadOnlyList<WebhookFacts> Webhooks { get; init; } = [];
 }
 
 /// <summary>
@@ -112,6 +126,7 @@ public static class HealthCheck
         Quiet(findings, facts, now);
         Backups(findings, facts, now);
         Duplicates(findings, facts);
+        Webhooks(findings, facts, now);
 
         return [.. findings.OrderByDescending(f => f.Severity)];
     }
@@ -277,6 +292,41 @@ public static class HealthCheck
             Fix = "Check both are meant to exist. If one came from a mistyped --org, correct the "
                 + "collector's DMARC_ORGANIZATION or it will happen again tonight.",
         });
+    }
+
+    /// <summary>
+    /// A webhook that has stopped delivering.
+    /// </summary>
+    /// <remarks>
+    /// The two thresholds the backups have, for the same reason. One failed
+    /// night is a receiver that was restarting at the wrong moment, and the
+    /// next scan will send what waited. A day and a half with nothing
+    /// delivered is not that: the findings are piling up where nobody reads
+    /// them, which is the silence the webhook exists to end - so it has to
+    /// reach the exit code, which is what OnFailure= hangs off.
+    /// </remarks>
+    private static void Webhooks(List<HygieneFinding> findings, HealthFacts facts, DateTimeOffset now)
+    {
+        foreach (var hook in facts.Webhooks)
+        {
+            var failing = hook.LastFailed is { } failed && (hook.LastDelivered is not { } ok || failed > ok);
+            if (!failing) { continue; }
+
+            var since = now - (hook.LastDelivered ?? hook.CreatedAt);
+            var stopped = since.TotalHours >= StoppedAfterHours;
+            findings.Add(new HygieneFinding
+            {
+                Severity = stopped ? HygieneSeverity.Breaking : HygieneSeverity.Weakness,
+                Record = "webhook",
+                Problem = stopped
+                    ? $"Nothing has reached {hook.Destination} for {hook.Organization} in {Describe(since)}, "
+                      + $"so its DNS changes are being found and not sent. It said: {hook.LastError}"
+                    : $"The last delivery to {hook.Destination} for {hook.Organization} failed: {hook.LastError?.TrimEnd('.')}. "
+                      + "What was not sent waits for the next run.",
+                Fix = $"Check the receiver, then `dmarc notify test --org {hook.Organization}`; "
+                    + $"once it answers, `dmarc notify send --org {hook.Organization}` sends what waited.",
+            });
+        }
     }
 
     /// <summary>A duration an operator reads rather than a TimeSpan.</summary>

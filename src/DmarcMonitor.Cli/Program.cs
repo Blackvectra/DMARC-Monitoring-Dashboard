@@ -85,6 +85,7 @@ public static class Program
                 "fix" => await FixCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "mta-sts" => await MtaStsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "notify" => await NotifyCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "version" or "--version" => Version(),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
@@ -412,6 +413,19 @@ public static class Program
                                  named. Starts in testing, which enforces nothing.
                 check            --domain <d>  Fetch what is really served, as a sender does.
                 remove           --domain <d>
+                --db <path>      Database file. Default: dmarc.db
+
+              notify             Where an organization's findings are sent: a signed JSON
+                                 webhook per organization. See docs/WEBHOOKS.md.
+                list             What is configured, and whether it is working.
+                set              [--org <slug>] --url https://... [--min-severity warning]
+                                 [--link-base https://dmarc.example.com]
+                                 The signing secret is read from DMARC_WEBHOOK_SECRET, stdin
+                                 with --secret-stdin, or a prompt. Never as an argument.
+                test             [--org <slug>]  Send a signed test event now.
+                send             [--org <slug>]  Deliver what is waiting. Run after each scan.
+                remove           [--org <slug>]
+                --secrets <dir>  Secret store folder; on a server, the web app's.
                 --db <path>      Database file. Default: dmarc.db
 
               intel              Refresh and show what has been learned about sources
