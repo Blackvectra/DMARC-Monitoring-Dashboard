@@ -17,6 +17,15 @@
     into DMARC\acme.com land in <output>\acme.com and still say which domain
     they belong to.
 
+    Run it again into the same folder and it saves only what is new. Every
+    report it saves is fingerprinted by its contents into
+    .dmarc-export-index.txt in the output folder, and a report already there
+    is not saved again - under the same name or a different one, since
+    receivers reuse file names. Files that were in the folder before the
+    index existed count as exported too, so an old export folder can simply
+    be kept. Deleting a file after importing it does not bring it back: the
+    index remembers it. Delete the index to start over.
+
     Every folder it looks in is listed with what it found, including the ones
     that held nothing. "Inbox  412 scanned  0 saved" and no line at all for
     the Inbox mean different things, and only one of them is a problem.
@@ -35,6 +44,22 @@
     is marked as read, so the next run's "unread" count means new reports
     rather than everything ever received. A message whose attachment could
     not be saved is never marked, so it is still there to be noticed.
+
+.PARAMETER Schedule
+    Register a Windows scheduled task that runs this export every day at the
+    given time - "07:00", "6:30 PM" - with the same -OutputPath, -Mailbox,
+    -Folder and other options, then exit without exporting. The task runs as
+    you, only while you are signed in, because Outlook runs in your session
+    and nothing outside it can reach it. Each run is appended to
+    .dmarc-export-log.txt in the output folder. Run with -Schedule again to
+    change the time or options; it replaces the task.
+
+.PARAMETER Unschedule
+    Remove the daily task registered by -Schedule.
+
+.PARAMETER LogFile
+    Append everything this run prints to a file. The scheduled task passes
+    this so a run nobody watched still leaves a record.
 
 .PARAMETER List
     Show what is there and exit, without exporting anything. Use this when a
@@ -68,6 +93,11 @@
     yet are still reports.
 
 .EXAMPLE
+    .\Export-DMARCAttachments.ps1 -OutputPath C:\dmarc-export -Mailbox "DMARC Reports" -Schedule 07:00
+    Export every morning at 7 into the same folder, new reports only, marking
+    each message read. -Unschedule removes it.
+
+.EXAMPLE
     .\Export-DMARCAttachments.ps1 -OutputPath C:\x -Mailbox "DMARC Reports" -List
     Show what folders exist, without exporting.
 
@@ -90,6 +120,9 @@ param(
     [switch]$List,
     [switch]$SkipInbox,
     [switch]$LeaveUnread,
+    [string]$Schedule,
+    [switch]$Unschedule,
+    [string]$LogFile,
 
     # A mailbox also holds signature images and auto-replies. Reports are
     # always one of these, so everything else is skipped rather than written.
@@ -108,10 +141,83 @@ $OutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromP
 # The file's extension is lowercased before it is compared, so the list it is
 # compared against has to be too, or "-Extensions .XML" matched nothing and
 # said nothing. A missing dot is supplied for the same reason.
-$Extensions = @($Extensions | ForEach-Object {
+#
+# Split on commas as well: a scheduled task passes "-Extensions .gz,.zip" to
+# powershell -File, which hands it over as one string rather than a list.
+$Extensions = @($Extensions | ForEach-Object { $_ -split ',' } | ForEach-Object {
     $e = $_.Trim().ToLowerInvariant()
     if ($e -and -not $e.StartsWith('.')) { ".$e" } else { $e }
 } | Where-Object { $_ })
+
+# ---- run daily ------------------------------------------------------------
+
+$TaskName = 'DMARC report export'
+
+if ($Unschedule) {
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Host "Removed the daily task '$TaskName'." -ForegroundColor Green
+    } else {
+        Write-Host "No task called '$TaskName' is registered."
+    }
+    exit 0
+}
+
+if ($Schedule) {
+    $at = [datetime]::MinValue
+    if (-not [datetime]::TryParse($Schedule, [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None, [ref]$at)) {
+        Write-Host "-Schedule takes a time of day, such as 07:00 or `"6:30 PM`"." -ForegroundColor Red
+        exit 64
+    }
+
+    # The same export, run by the task. Everything that shapes it is passed
+    # through; -Schedule itself is not, or every run would re-register.
+    $log = if ($LogFile) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile) }
+           else { Join-Path $OutputPath '.dmarc-export-log.txt' }
+    $taskArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                  '-File', "`"$PSCommandPath`"", '-OutputPath', "`"$OutputPath`"", '-LogFile', "`"$log`"")
+    if ($Mailbox)     { $taskArgs += @('-Mailbox', "`"$Mailbox`"") }
+    if ($Folder)      { $taskArgs += @('-Folder', "`"$Folder`"") }
+    if ($SkipInbox)   { $taskArgs += '-SkipInbox' }
+    if ($LeaveUnread) { $taskArgs += '-LeaveUnread' }
+    if ($PSBoundParameters.ContainsKey('Extensions')) { $taskArgs += @('-Extensions', ($Extensions -join ',')) }
+
+    # Whichever PowerShell is running this - Windows PowerShell or 7 - runs
+    # the task too, so it behaves the way it did when it was set up.
+    $shell = (Get-Process -Id $PID).Path
+
+    $action = New-ScheduledTaskAction -Execute $shell -Argument ($taskArgs -join ' ')
+    $trigger = New-ScheduledTaskTrigger -Daily -At $at
+
+    # Interactive, as the signed-in user. Outlook runs in that session; a
+    # task set to run "whether the user is logged on or not" runs in a
+    # session with no Outlook in it and can only fail.
+    $principal = New-ScheduledTaskPrincipal -UserId "$([Environment]::UserDomainName)\$([Environment]::UserName)" -LogonType Interactive
+
+    # A laptop asleep at 7:00 runs it when it wakes, rather than skipping a day.
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal `
+        -Settings $settings -Force | Out-Null
+
+    Write-Host ""
+    Write-Host "Registered '$TaskName': every day at $($at.ToString('HH:mm')), into $OutputPath." -ForegroundColor Green
+    Write-Host "It runs while you are signed in, with Outlook open or not yet started; each run is logged to" -ForegroundColor DarkGray
+    Write-Host "  $log" -ForegroundColor DarkGray
+    Write-Host "Run it now to check:  Start-ScheduledTask -TaskName '$TaskName'" -ForegroundColor DarkGray
+    Write-Host "Remove it:            .\Export-DMARCAttachments.ps1 -OutputPath `"$OutputPath`" -Unschedule" -ForegroundColor DarkGray
+    Write-Host ""
+    exit 0
+}
+
+if ($LogFile) {
+    $LogFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile)
+    $logDir = Split-Path -Parent $LogFile
+    if ($logDir -and -not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+    Start-Transcript -Path $LogFile -Append | Out-Null
+}
 
 # ---- connect --------------------------------------------------------------
 
@@ -403,6 +509,55 @@ if ($targets.Count -eq 0) {
 
 # ---- export ---------------------------------------------------------------
 
+# ---- what has been exported before ----------------------------------------
+
+# Content fingerprints, not names. Receivers reuse file names across days, so
+# a name says nothing about whether this is the same report; and a report
+# saved under google.xml last week and google(1).xml this week is still one
+# report. The index outlives the files: deleting a report after importing it
+# does not have the next run fetch it again.
+if (-not (Test-Path $OutputPath)) { New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null }
+
+$IndexPath = Join-Path $OutputPath '.dmarc-export-index.txt'
+$known = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$indexedPaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+if (Test-Path -LiteralPath $IndexPath) {
+    foreach ($line in (Get-Content -LiteralPath $IndexPath)) {
+        $parts = $line -split "`t", 2
+        if ($parts[0]) { [void]$known.Add($parts[0]) }
+        if ($parts.Count -gt 1 -and $parts[1]) { [void]$indexedPaths.Add($parts[1]) }
+    }
+}
+
+function Get-RelativePath([string]$Path) {
+    $Path.Substring($OutputPath.TrimEnd('\', '/').Length).TrimStart('\', '/')
+}
+
+# Whatever is already in the folder counts as exported, whether an earlier
+# run put it there before there was an index or somebody copied it in.
+# Only files the index does not already name are read, so this costs
+# nothing after the first run.
+$adopted = 0
+foreach ($file in (Get-ChildItem -LiteralPath $OutputPath -Recurse -File -ErrorAction SilentlyContinue)) {
+    if ($file.Name.StartsWith('.')) { continue }
+    if ($Extensions -notcontains $file.Extension.ToLowerInvariant()) { continue }
+    $relative = Get-RelativePath $file.FullName
+    if ($relative.StartsWith('.') -or $indexedPaths.Contains($relative)) { continue }
+
+    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    if ($known.Add($hash)) { $adopted++ }
+    [void]$indexedPaths.Add($relative)
+    Add-Content -LiteralPath $IndexPath -Value "$hash`t$relative"
+}
+
+# Saved here first and moved into place only once it is known to be new,
+# so a duplicate never appears in the folder even briefly.
+$Staging = Join-Path $OutputPath '.incoming'
+if (-not (Test-Path $Staging)) { New-Item -Path $Staging -ItemType Directory -Force | Out-Null }
+
+$script:alreadyTotal = 0
+
 # Folders already done, by EntryID. Without this, -Folder Inbox would export
 # the Inbox twice: once as the folder asked for and once as the Inbox added
 # to it.
@@ -420,6 +575,7 @@ function Export-Folder {
     }
 
     $saved = 0
+    $already = 0
     $scanned = 0
     $skipped = 0
     $marked = 0
@@ -448,6 +604,7 @@ function Export-Folder {
             try { $attachmentCount = $attachments.Count } catch { $attachmentCount = 0 }
 
             $savedHere = 0
+            $alreadyHere = 0
             $failedHere = 0
 
             for ($a = 1; $a -le $attachmentCount; $a++) {
@@ -466,6 +623,19 @@ function Export-Folder {
                     $extension = [System.IO.Path]::GetExtension($name)
                     if ($Extensions -notcontains $extension.ToLower()) { continue }
 
+                    # Into staging first, to be fingerprinted before it is
+                    # allowed into the folder.
+                    $incoming = Join-Path $Staging ([guid]::NewGuid().ToString('N') + $extension)
+                    $attachment.SaveAsFile($incoming)
+                    $hash = (Get-FileHash -LiteralPath $incoming -Algorithm SHA256).Hash
+
+                    if ($known.Contains($hash)) {
+                        Remove-Item -LiteralPath $incoming -Force
+                        $already++
+                        $alreadyHere++
+                        continue
+                    }
+
                     # Receivers reuse file names across days, so a collision is
                     # the normal case rather than an oddity. Overwriting would
                     # shrink the export without saying so.
@@ -478,7 +648,9 @@ function Export-Folder {
                         $n++
                     }
 
-                    $attachment.SaveAsFile($target)
+                    Move-Item -LiteralPath $incoming -Destination $target
+                    [void]$known.Add($hash)
+                    Add-Content -LiteralPath $IndexPath -Value "$hash`t$(Get-RelativePath $target)"
                     $saved++
                     $savedHere++
                 } catch {
@@ -494,7 +666,11 @@ function Export-Folder {
             # attachment on it failed: a message left unread is one somebody
             # will still look at. Anything else in the mailbox - an
             # auto-reply, a message with no report on it - is left alone.
-            if (-not $LeaveUnread -and $savedHere -gt 0 -and $failedHere -eq 0) {
+            #
+            # A message whose report an earlier run already saved counts: it
+            # is exported, and leaving it unread would have every run
+            # re-read it and the unread count never go down.
+            if (-not $LeaveUnread -and ($savedHere + $alreadyHere) -gt 0 -and $failedHere -eq 0) {
                 try {
                     if ($item.UnRead) {
                         $item.UnRead = $false
@@ -516,8 +692,11 @@ function Export-Folder {
     # Every folder looked in is printed, including empty ones. A folder that
     # was searched and held nothing, and a folder that was never searched,
     # are different problems and used to look identical.
-    Write-Host ("    {0,-34} {1,8} {2,7} {3,8} {4,12}" -f `
-        $MailFolder.Name, $scanned, $saved, $(if ($skipped) { $skipped } else { '' }), $(if ($marked) { $marked } else { '' }))
+    Write-Host ("    {0,-34} {1,8} {2,6} {3,12} {4,8} {5,12}" -f `
+        $MailFolder.Name, $scanned, $saved, $(if ($already) { $already } else { '' }),
+        $(if ($skipped) { $skipped } else { '' }), $(if ($marked) { $marked } else { '' }))
+
+    $script:alreadyTotal += $already
 
     if ($unread -gt 0) {
         Write-Host ("    {0,-34} {1}" -f '', "$unread still unread (read or not, all of them were scanned)") -ForegroundColor DarkGray
@@ -544,17 +723,27 @@ if ($Folder) {
 }
 Write-Host "Output  : $OutputPath"
 Write-Host ""
-Write-Host ("    {0,-34} {1,8} {2,7} {3,8} {4,12}" -f 'folder', 'scanned', 'saved', 'skipped', 'marked read') -ForegroundColor DarkGray
+Write-Host ("    {0,-34} {1,8} {2,6} {3,12} {4,8} {5,12}" -f 'folder', 'scanned', 'new', 'had already', 'skipped', 'marked read') -ForegroundColor DarkGray
 
 $count = 0
 foreach ($target in $targets) {
     $count += Export-Folder -MailFolder $target.MailFolder -Destination $target.Into
 }
 
+Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host ""
-Write-Host "$count attachment(s) written to $OutputPath" -ForegroundColor Green
+Write-Host "$count new report(s) written to $OutputPath" -ForegroundColor Green
+if ($script:alreadyTotal -gt 0) {
+    Write-Host "$($script:alreadyTotal) already exported by an earlier run, not saved again." -ForegroundColor DarkGray
+}
+if ($adopted -gt 0) {
+    Write-Host "$adopted report(s) already in the folder were added to the index, so they will not be exported again." -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "Next: import them." -ForegroundColor DarkGray
 Write-Host "  Drop the folder onto the Import page, or:" -ForegroundColor DarkGray
 Write-Host "  dmarc import --from $OutputPath" -ForegroundColor DarkGray
 Write-Host ""
+
+if ($LogFile) { Stop-Transcript | Out-Null }

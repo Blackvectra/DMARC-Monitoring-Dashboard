@@ -287,8 +287,15 @@ public sealed class ReportImporter(ReportStore store)
     private static async IAsyncEnumerable<ImportFile> ReadFolderAsync(
         string folder, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
+        // Dot-files and dot-folders are bookkeeping, not reports: the Outlook
+        // exporter keeps its index of what it has exported, its log and its
+        // staging folder beside the reports, under names starting with a dot.
+        // Read, they were counted as "not a report" on every import.
         var files = Directory
             .EnumerateFiles(folder, "*", SearchOption.AllDirectories)
+            .Where(f => !Path.GetRelativePath(folder, f)
+                .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Any(part => part.StartsWith('.')))
             .OrderBy(f => f, StringComparer.Ordinal);
 
         foreach (var file in files)
