@@ -567,13 +567,15 @@ an alert are the same row with different types, and that row does not exist.
 
 The consequences, in the order they will be felt:
 
-- **No alerting.** Email, Slack and webhooks are all absent; the only
-  notification anywhere is a systemd unit that fires when the collector stops.
-  A real finding is learned about by opening the app.
-- **No DNS drift detection.** `dns_snapshots` is content-addressed, so a
-  change is already a new row, and `dns_drift_events` is a table nothing
-  writes to. The data for the product's best differentiator is being collected
-  and not read.
+- **Alerting is one path, for one kind of finding.** DNS drift is detected
+  on every scan, written to `dns_drift_events`, acknowledged on the domain's
+  page, and sent to a signed webhook ([`WEBHOOKS.md`](WEBHOOKS.md)). Nothing
+  else is sent anywhere: no email, no Slack without a relay in front of it,
+  and no sender, reachability or collection finding goes out at all. Those
+  are still learned about by opening the app, or by `dmarc health`'s
+  `OnFailure=` for collection that has stopped.
+- **The webhook has no Windows schedule.** `dmarc notify send` runs by hand
+  there; nothing runs it after the scan.
 - **Sender classification is not remembered.** It is good, and it is computed
   per report: nothing can be confirmed as approved, given a business owner, or
   marked as an exception with a review date.

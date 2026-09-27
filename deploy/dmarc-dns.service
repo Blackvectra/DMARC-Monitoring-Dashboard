@@ -17,6 +17,11 @@ Description=Read each domain's published DNS records
 After=network-online.target
 Wants=network-online.target
 
+# And then send what changed to whoever is listening: dmarc-notify, which
+# holds the webhook secrets this unit deliberately does not. On success only -
+# a scan that failed found nothing new to say, and the next one will.
+OnSuccess=dmarc-notify.service
+
 [Service]
 Type=oneshot
 User=dmarc

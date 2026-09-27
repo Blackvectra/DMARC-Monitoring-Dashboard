@@ -87,8 +87,8 @@ first.
 | BIMI | **none** — two schema columns, no code |
 | DNSSEC / DANE | **none** |
 | Historical snapshots with timestamps | **have** — keyed on content hash, so a change is a new row |
-| Readable record diffs | **none** — the data supports it, nothing renders it |
-| Alert on policy weakened, SPF invalid, selector disappearing, MTA-STS failing | **none** — `dns_drift_events` is a table nothing writes to |
+| Readable record diffs | **have** — each change carries a one-line summary (`DMARC: p=quarantine → p=none.`), listed on the domain's page |
+| Alert on policy weakened, SPF invalid, selector disappearing, MTA-STS failing | **partial** — every scan diffs against the last and writes a severity-rated drift event, sent to a signed webhook; DKIM selectors are not diffed, and MTA-STS is only seen being withdrawn, not failing |
 | Plain-English impact on every alert | **partial** — the chips and the Fix page say it; no alert carries it |
 | Baseline approval workflow | **none** |
 
@@ -140,12 +140,12 @@ table with a lifecycle in it.
 | | state |
 |---|---|
 | REST / OpenAPI | **none** |
-| Webhooks | **none** |
+| Webhooks | **partial** — one signed webhook per organization, DNS drift only; see `docs/WEBHOOKS.md` |
 | PSA, SIEM, SOAR, Teams, Slack, email | **none** — `dmarc intel` exports indicators a SIEM can read, which is the nearest thing |
 | Bulk onboarding by CSV or API | **partial** — an import files every domain it finds, and now creates a client per domain; no CSV of tenants |
 | Domain and subdomain discovery with review | **partial** — discovery happens on import; review does not |
 | RUA endpoint setup, tenant-specific and validated | **have** — `dmarc reachability` checks the RFC 7489 §7.1 authorization almost nobody checks |
-| Health checks for queues, polling, storage, notifications, backups | **partial** — `dmarc health` covers backups and collection; nothing covers notifications, because there are none |
+| Health checks for queues, polling, storage, notifications, backups | **partial** — `dmarc health` covers backups, collection and a webhook that has stopped delivering |
 
 ## 10. Security and operations
 
@@ -181,7 +181,7 @@ The brief's Phase 1 is ten items. Seven are done:
 3. ~~Reliable RUA ingestion, dedup, report health~~ — done
 4. **Sender inventory with approval workflow** — the classification is done, the table is not
 5. ~~DMARC/SPF/DKIM checks with historical snapshots~~ — done
-6. **Critical DNS drift alerts** — snapshots exist, diffing and alerting do not
+6. **Critical DNS drift alerts** — **mostly**: diffed on every scan and sent to a signed webhook; no email
 7. ~~Client-facing monthly report~~ — done, as a branded PDF; what is left is
    sending and keeping it, which is item 8's table and a delivery path
 8. **Open remediation queue with owners, statuses, due dates** — the register is computed per report; nothing persists it
