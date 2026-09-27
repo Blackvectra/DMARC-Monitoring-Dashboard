@@ -129,12 +129,49 @@ key and says so, rather than sending unsigned.
 Refused, except to `127.0.0.1`, `localhost` and `[::1]` — a receiver on the
 same machine, or one being tried out.
 
-### Windows
+### One Windows desktop
 
-Not scheduled yet. `dmarc notify send` works by hand, but the Windows install
-has no task that runs it after the DNS scan, and the secret store there is
-DPAPI in current-user scope, so the webhook has to be set by the same account
-the scheduled tasks run as.
+The Windows download, run as yourself, with the receiver on the same machine
+(the MSP Security Operations Console under Docker Desktop, for one).
+
+The key is kept with DPAPI for **the Windows account that set it**, so set it
+and send as the same account. That is you, so the nightly job below runs as
+you too.
+
+In PowerShell 7, from the folder holding `dmarc.exe` and `dmarc.db`:
+
+```powershell
+# The same key the receiver has. For the console, it is in its .env file.
+$key = ((Get-Content 'C:\path\to\msp-security-ops-console\.env') -match '^DMARC_MONITOR_SECRET=') -replace '^DMARC_MONITOR_SECRET=', ''
+$key | .\dmarc.exe notify set --org local --url http://localhost:8080/api/sources/dmarc-monitor/events --secret-stdin
+.\dmarc.exe notify test --org local
+```
+
+Plain HTTP is accepted because `localhost` never leaves the machine.
+
+Then the nightly scan and send, as a task that runs as you:
+
+```powershell
+$dir       = (Get-Location).Path
+$action    = New-ScheduledTaskAction -Execute 'cmd.exe' -WorkingDirectory $dir `
+               -Argument '/c (dmarc.exe check --all --save & dmarc.exe notify send) >> nightly.log 2>&1'
+$trigger   = New-ScheduledTaskTrigger -Daily -At 3:20am
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+$settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable
+Register-ScheduledTask -TaskName 'DMARC scan and notify' -Action $action -Trigger $trigger `
+  -Principal $principal -Settings $settings
+```
+
+- `Interactive` means it runs while you are signed in. A locked screen counts.
+  `-StartWhenAvailable` runs a missed night at the next sign-in.
+- The send runs even when the scan reports broken records, which is the scan
+  working.
+- A delivery that fails is kept and retried the next night. It shows in
+  `nightly.log` and in `.\dmarc.exe notify list`.
+
+Not for the Windows *service* install (`bootstrap.ps1`). Its tasks run as
+`NT AUTHORITY\LocalService`, which cannot read a key you set from your own
+session, and it has no task that sends after the scan yet.
 
 ---
 
