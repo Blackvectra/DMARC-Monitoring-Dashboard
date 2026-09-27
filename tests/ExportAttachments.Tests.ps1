@@ -24,7 +24,11 @@ BeforeAll {
     # ---- a fake Outlook ------------------------------------------------------
 
     function New-FakeAttachment {
-        param([string]$FileName, [string]$Body = 'report', [switch]$ThrowsOnName, [switch]$ThrowsOnSave)
+        param([string]$FileName, [string]$Body, [switch]$ThrowsOnName, [switch]$ThrowsOnSave)
+        # Distinct unless a test says otherwise: the exporter recognizes a
+        # report it has saved before by its contents, and a dozen fakes all
+        # reading "report" are, to it, one report.
+        if (-not $Body) { $Body = "report $([guid]::NewGuid())" }
         $a = [pscustomobject]@{ Body = $Body; SavedTo = $null }
         if ($ThrowsOnName) {
             $a | Add-Member ScriptProperty FileName { throw 'The attachment is not readable (OLE)' }
@@ -228,7 +232,9 @@ Describe 'Export-DMARCAttachments' {
             finally { Pop-Location }
 
             [IO.Path]::IsPathRooted($att.SavedTo) | Should -BeTrue
-            $att.SavedTo | Should -BeLike "*rel-export*google.xml.gz"
+            # Saved into the folder's staging area first, then moved in once
+            # it is known to be new; either way, under the folder asked for.
+            $att.SavedTo | Should -BeLike "*rel-export*"
             # A whole-mailbox export mirrors the Inbox as a folder of its own,
             # so the file lands one level down. The first version of this
             # test looked for it at the top and blamed the script.
@@ -437,7 +443,7 @@ Describe 'Export-DMARCAttachments' {
 
             $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-Folder', 'Inbox')
 
-            $r.Text | Should -Match '1 attachment\(s\) written'
+            $r.Text | Should -Match '1 new report\(s\) written'
             Test-Path (Join-Path $script:Out 'a(1).xml') | Should -BeFalse
         }
     }
@@ -558,6 +564,134 @@ Describe 'Export-DMARCAttachments' {
             Test-Path (Join-Path $script:Out 'Inbox' 'google.xml') | Should -BeTrue
             $item.UnRead | Should -BeTrue
             $item.Saved  | Should -Be 0
+        }
+    }
+
+    Context 'running again into the same folder' {
+        # The folder had to be deleted before every run to see only new mail:
+        # otherwise every report came back as name(1), name(2)...
+
+        It 'saves nothing the second time' {
+            $att = New-FakeAttachment 'google.xml'
+            $inbox = New-FakeFolder 'Inbox' -Items @(New-FakeItem @($att))
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $r.Text | Should -Match '0 new report\(s\) written'
+            $r.Text | Should -Match '1 already exported by an earlier run'
+            @(Get-ChildItem (Join-Path $script:Out 'Inbox') -File).Name | Should -Be @('google.xml')
+        }
+
+        It 'saves only what arrived since' {
+            $first = New-FakeItem @(New-FakeAttachment 'a.xml')
+            $inbox = New-FakeFolder 'Inbox' -Items @($first)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            $inbox = New-FakeFolder 'Inbox' -Items @($first, (New-FakeItem @(New-FakeAttachment 'b.xml')))
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $r.Text | Should -Match '1 new report\(s\) written'
+            @(Get-ChildItem (Join-Path $script:Out 'Inbox') -File | Sort-Object Name).Name | Should -Be @('a.xml', 'b.xml')
+        }
+
+        It 'recognizes a report by its contents, whatever it is called' {
+            # Receivers reuse names; the same report can also arrive twice
+            # under different ones.
+            $inbox = New-FakeFolder 'Inbox' -Items @(
+                (New-FakeItem @(New-FakeAttachment 'one.xml' -Body 'same report')),
+                (New-FakeItem @(New-FakeAttachment 'two.xml' -Body 'same report')))
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            @(Get-ChildItem (Join-Path $script:Out 'Inbox') -File).Name | Should -Be @('one.xml')
+        }
+
+        It 'keeps an old export folder and does not save its reports again' {
+            # A folder from before the index existed: its files are adopted.
+            New-Item -ItemType Directory -Path (Join-Path $script:Out 'Inbox') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $script:Out 'Inbox' 'google.xml') -Value 'already here' -NoNewline
+
+            $inbox = New-FakeFolder 'Inbox' -Items @(New-FakeItem @(New-FakeAttachment 'google.xml' -Body 'already here'))
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $r.Text | Should -Match '0 new report\(s\) written'
+            $r.Text | Should -Match '1 report\(s\) already in the folder were added to the index'
+            Test-Path (Join-Path $script:Out 'Inbox' 'google(1).xml') | Should -BeFalse
+        }
+
+        It 'does not bring back a report deleted after it was imported' {
+            $inbox = New-FakeFolder 'Inbox' -Items @(New-FakeItem @(New-FakeAttachment 'google.xml'))
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            Remove-Item (Join-Path $script:Out 'Inbox' 'google.xml')
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            Test-Path (Join-Path $script:Out 'Inbox' 'google.xml') | Should -BeFalse
+        }
+
+        It 'still marks a message read when its report was exported before' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-LeaveUnread') | Out-Null
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            $item.UnRead | Should -BeFalse
+        }
+
+        It 'leaves no staging files behind' {
+            $inbox = New-FakeFolder 'Inbox' -Items @(New-FakeItem @(New-FakeAttachment 'google.xml'))
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            Test-Path (Join-Path $script:Out '.incoming') | Should -BeFalse
+        }
+    }
+
+    Context 'running daily' {
+        BeforeEach {
+            # The ScheduledTasks module is Windows-only. Stand-ins record what
+            # would have been registered.
+            $global:Registered = $null
+            function global:New-ScheduledTaskAction { param($Execute, $Argument) [pscustomobject]@{ Execute = $Execute; Argument = $Argument } }
+            function global:New-ScheduledTaskTrigger { param([switch]$Daily, $At) [pscustomobject]@{ At = $At } }
+            function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType) [pscustomobject]@{ LogonType = $LogonType } }
+            function global:New-ScheduledTaskSettingsSet { param([switch]$StartWhenAvailable, [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, $ExecutionTimeLimit) [pscustomobject]@{} }
+            function global:Register-ScheduledTask { param($TaskName, $Action, $Trigger, $Principal, $Settings, [switch]$Force) $global:Registered = [pscustomobject]@{ Name = $TaskName; Action = $Action; Trigger = $Trigger; Principal = $Principal } }
+        }
+
+        AfterEach {
+            foreach ($f in 'New-ScheduledTaskAction', 'New-ScheduledTaskTrigger', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet', 'Register-ScheduledTask') {
+                Remove-Item "Function:\$f" -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'registers the same export to run every day, without re-registering itself' {
+            $r = Invoke-Export -Stores @() -Arguments @('-OutputPath', $script:Out, '-Mailbox', 'DMARC Reports', '-Schedule', '07:00')
+
+            $r.ExitCode | Should -Be 0
+            $global:Registered.Name | Should -Be 'DMARC report export'
+            $global:Registered.Trigger.At.ToString('HH:mm') | Should -Be '07:00'
+            $global:Registered.Principal.LogonType | Should -Be 'Interactive'
+            $global:Registered.Action.Argument | Should -Match ([regex]::Escape($script:Out))
+            $global:Registered.Action.Argument | Should -Match '-Mailbox "DMARC Reports"'
+            $global:Registered.Action.Argument | Should -Match '-LogFile'
+            $global:Registered.Action.Argument | Should -Not -Match '-Schedule'
+        }
+
+        It 'refuses a time it cannot read, and registers nothing' {
+            $r = Invoke-Export -Stores @() -Arguments @('-OutputPath', $script:Out, '-Schedule', 'teatime')
+
+            $r.ExitCode | Should -Be 64
+            $global:Registered | Should -BeNullOrEmpty
         }
     }
 

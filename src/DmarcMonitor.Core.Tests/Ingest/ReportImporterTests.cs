@@ -75,6 +75,30 @@ public sealed class ReportImporterTests : IDisposable
         Assert.Equal(0, result.Failed);
     }
 
+    /// <summary>
+    /// The Outlook exporter keeps its index, its log and a staging folder
+    /// beside the reports, under dot-names. They are not reports, and were
+    /// being counted as "not a report" on every import of the folder.
+    /// </summary>
+    [Fact]
+    public async Task TheExportersOwnFilesAreNotRead()
+    {
+        var folder = Path.Combine(_dir, "export-with-index");
+        Directory.CreateDirectory(Path.Combine(folder, "Inbox"));
+        Directory.CreateDirectory(Path.Combine(folder, ".incoming"));
+        File.Copy(Fixture("google-aggregate.zip"), Path.Combine(folder, "Inbox", "a.zip"));
+        File.WriteAllText(Path.Combine(folder, ".dmarc-export-index.txt"), "ABC\tInbox/a.zip");
+        File.WriteAllText(Path.Combine(folder, ".dmarc-export-log.txt"), "a log");
+        File.WriteAllText(Path.Combine(folder, ".incoming", "partial.xml"), "half a report");
+
+        var result = await Importer().ImportFolderAsync(folder);
+
+        Assert.Equal(1, result.FilesSeen);
+        Assert.Equal(1, result.Stored);
+        Assert.Equal(0, result.NotReports);
+        Assert.Equal(0, result.Failed);
+    }
+
     [Fact]
     public async Task AFileThatIsNotAReportIsCountedNotFailed()
     {
