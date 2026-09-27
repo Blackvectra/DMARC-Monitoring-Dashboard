@@ -333,6 +333,14 @@ public sealed class ReportImporter(
     /// being told.
     /// </para>
     /// <para>
+    /// Dot-files and dot-folders are bookkeeping, not reports: the Outlook
+    /// exporter keeps its index of what it has exported, its log and its
+    /// staging folder beside the reports, under names starting with a dot.
+    /// Read, they were counted as "not a report" on every import. A dot-folder
+    /// is not opened at all, so one that cannot be listed, or is a link, is not
+    /// a failure either. The folder being imported is read whatever its name.
+    /// </para>
+    /// <para>
     /// A folder that was not read sorts by its path with a separator on the
     /// end, which is where its files would have sorted, so it is named in
     /// the same order as everything around it.
@@ -358,9 +366,9 @@ public sealed class ReportImporter(
                 continue;
             }
 
-            foreach (var file in files) { found.Add((file, null)); }
+            foreach (var file in files.Where(f => !IsDotName(f))) { found.Add((file, null)); }
 
-            foreach (var sub in folders)
+            foreach (var sub in folders.Where(f => !IsDotName(f)))
             {
                 if (IsLink(sub)) { found.Add(Unread(folder, sub, "a link to another folder, not followed")); }
                 else { pending.Enqueue(sub); }
@@ -372,11 +380,16 @@ public sealed class ReportImporter(
 
     /// <summary>The files in one folder, and the folders in it, as the disk has them.</summary>
     /// <remarks>
-    /// Hidden files are included, as they were by the recursive listing this
-    /// replaced: both use the framework's compatible defaults.
+    /// Hidden files are listed, as they were by the recursive listing this
+    /// replaced: both use the framework's compatible defaults. Names starting
+    /// with a dot are left out afterwards, by the walk, so that a listing a
+    /// test makes up is held to the same rule.
     /// </remarks>
     internal static (string[] Files, string[] Folders) ListOnDisk(string folder) =>
         (Directory.GetFiles(folder), Directory.GetDirectories(folder));
+
+    /// <summary>True for a file or folder whose name starts with a dot, which is not read.</summary>
+    private static bool IsDotName(string path) => Path.GetFileName(path).StartsWith('.');
 
     /// <summary>True for a folder that is a link to another, which is not followed.</summary>
     /// <remarks>

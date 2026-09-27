@@ -1,0 +1,41 @@
+# Sends what the DNS scan found to each organization's webhook. Started by
+# OnSuccess= on dmarc-dns.service, so a change found at 03:20 is on its way at
+# 03:20 rather than whenever somebody next opens the app. Runnable by hand
+# with
+#   sudo systemctl start dmarc-notify
+# which is also how to send what waited once a receiver that was down is back.
+#
+# A unit of its own rather than a third ExecStart in dmarc-dns, because the
+# scan holds no secret and this does: the webhook's address and signing key,
+# from the same secret store the web app uses. Keeping them apart keeps the
+# scan the thing that reads public DNS and nothing else.
+#
+# Every install runs this and most have no webhook set up. That is exit 0 and
+# one line in the journal, not a failure. A delivery that did not work IS a
+# failure: the findings are not reaching anybody, which is the one thing this
+# exists to prevent, so it fails the unit and carries OnFailure= like the
+# backup and health units. dmarc health says the same thing twice a day. See
+# docs/WEBHOOKS.md.
+
+[Unit]
+Description=Send DNS changes to each organization's webhook
+After=network-online.target
+Wants=network-online.target
+OnFailure=dmarc-alert@%N.service
+
+[Service]
+Type=oneshot
+User=dmarc
+ExecStart=/usr/local/bin/dmarc notify send --db /opt/dmarc/data/dmarc.db --secrets /opt/dmarc/data/secrets
+
+# The same reason as dmarc-dns: the self-contained binary unpacks its native
+# SQLite library on first run and needs somewhere writable to do it.
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/dmarc/data/.net
+
+# Reads the database and the secret store, writes which events were sent, and
+# talks HTTPS to the configured receivers. Nothing else.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/dmarc/data

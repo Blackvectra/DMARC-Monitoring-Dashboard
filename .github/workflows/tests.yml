@@ -467,6 +467,51 @@ jobs:
           sudo systemctl start dmarc-health
           test "$(systemctl is-failed dmarc-health || true)" != failed
 
+      - name: The notify unit runs under its sandbox, and reads the key it was given
+        run: |
+          # It has no timer - OnSuccess= on dmarc-dns starts it - so nothing
+          # above has run it. With no webhook it must succeed: every install
+          # runs it nightly, and most never set one up.
+          systemctl show dmarc-dns -p OnSuccess --value | grep -q dmarc-notify.service
+          sudo systemctl start dmarc-notify
+          sudo journalctl -u dmarc-notify -n 10 --no-pager
+          test "$(systemctl show dmarc-notify -p Result --value)" = success
+
+          # A receiver on loopback: 204 to every POST, and a note of what came.
+          cat > /tmp/receiver.py <<'PY'
+          import http.server
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                  with open("/tmp/received", "ab") as f:
+                      f.write(self.headers.get("X-Dmarc-Signature", "").encode() + b" " + body + b"\n")
+                  self.send_response(204)
+                  self.end_headers()
+          http.server.HTTPServer(("127.0.0.1", 5099), H).serve_forever()
+          PY
+          python3 /tmp/receiver.py > /tmp/receiver.log 2>&1 &
+          receiver=$!
+          sleep 1
+
+          # Set up exactly as docs/WEBHOOKS.md says: as the service account,
+          # into the secret store the unit reads, the key never an argument.
+          ctl=(--db /opt/dmarc/data/dmarc.db --secrets /opt/dmarc/data/secrets)
+          openssl rand -hex 32 | sudo -H -u dmarc dmarc notify set --org local \
+            --url http://127.0.0.1:5099/hook --secret-stdin "${ctl[@]}"
+          sudo -H -u dmarc dmarc notify test --org local "${ctl[@]}"
+          cat /tmp/received
+          grep -q '^v1=[0-9a-f]\{64\} {.*"type":"ping"' /tmp/received
+
+          # The key must be readable from inside ProtectHome=true and
+          # ProtectSystem=strict. Nothing has drifted, so nothing is sent -
+          # but the key is read first, and one it cannot read fails the run.
+          sudo systemctl start dmarc-notify
+          sudo journalctl -u dmarc-notify -n 10 --no-pager
+          test "$(systemctl show dmarc-notify -p Result --value)" = success
+
+          sudo -H -u dmarc dmarc notify remove --org local "${ctl[@]}"
+          kill "$receiver" || true
+
       - name: A second mailbox collects under its own organization
         run: |
           # The templated unit is how an install collecting for more than one

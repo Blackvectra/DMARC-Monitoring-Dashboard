@@ -76,6 +76,30 @@ public sealed class ReportImporterTests : IDisposable
         Assert.Equal(0, result.Failed);
     }
 
+    /// <summary>
+    /// The Outlook exporter keeps its index, its log and a staging folder
+    /// beside the reports, under dot-names. They are not reports, and were
+    /// being counted as "not a report" on every import of the folder.
+    /// </summary>
+    [Fact]
+    public async Task TheExportersOwnFilesAreNotRead()
+    {
+        var folder = Path.Combine(_dir, "export-with-index");
+        Directory.CreateDirectory(Path.Combine(folder, "Inbox"));
+        Directory.CreateDirectory(Path.Combine(folder, ".incoming"));
+        File.Copy(Fixture("google-aggregate.zip"), Path.Combine(folder, "Inbox", "a.zip"));
+        File.WriteAllText(Path.Combine(folder, ".dmarc-export-index.txt"), "ABC\tInbox/a.zip");
+        File.WriteAllText(Path.Combine(folder, ".dmarc-export-log.txt"), "a log");
+        File.WriteAllText(Path.Combine(folder, ".incoming", "partial.xml"), "half a report");
+
+        var result = await Importer().ImportFolderAsync(folder);
+
+        Assert.Equal(1, result.FilesSeen);
+        Assert.Equal(1, result.Stored);
+        Assert.Equal(0, result.NotReports);
+        Assert.Equal(0, result.Failed);
+    }
+
     [Fact]
     public async Task AFileThatIsNotAReportIsCountedNotFailed()
     {
@@ -338,6 +362,29 @@ public sealed class ReportImporterTests : IDisposable
         Assert.Collection(result.Errors,
             e => Assert.Equal($"2-elsewhere{s}: a link to another folder, not followed", e),
             e => Assert.Equal($"3-loop{s}: a link to another folder, not followed", e));
+    }
+
+    [Fact]
+    public async Task ADotFolderIsNotOpenedSoOneThatCannotBeListedIsNoFailure()
+    {
+        // The exporter's staging folder is its bookkeeping, like its index.
+        // It is passed over before it is opened, so a locked one cannot fail
+        // the import of the reports around it.
+        var folder = Folder(("1-good.xml", Bytes(AggregateXml("r-1"))));
+        Subfolder(folder, "2-inbox", ("r.xml", Bytes(AggregateXml("r-2"))));
+        var staging = Subfolder(folder, ".incoming", ("partial.xml", Bytes("half a report")));
+
+        var listed = new List<string>();
+        var importer = Importer(dir =>
+        {
+            listed.Add(dir);
+            return dir == staging ? throw Denied(dir) : ReportImporter.ListOnDisk(dir);
+        });
+        var result = await importer.ImportFolderAsync(folder);
+
+        Assert.Equal(2, result.Stored);
+        Assert.Equal(0, result.Failed);
+        Assert.DoesNotContain(staging, listed);
     }
 
     public void Dispose()

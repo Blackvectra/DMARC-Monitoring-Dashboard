@@ -237,14 +237,14 @@ loopback. What it did, so that it is not magic:
   `/etc/dmarc-ingest.env` (step 6) as templates.
 - Installed every unit in `deploy/` - `dmarc-web.service`, the collector pair
   `dmarc-ingest.service`/`.timer` and its templated equivalents
-  `dmarc-ingest@.service`/`.timer`, `dmarc-dns`, `dmarc-prune`,
+  `dmarc-ingest@.service`/`.timer`, `dmarc-dns`, `dmarc-notify`, `dmarc-prune`,
   `dmarc-backup`, `dmarc-health` and `dmarc-alert@.service` - and started the
   web app.
 - **Enabled four timers**, all of which need nothing configured to be useful:
 
   | timer | what, and when |
   |---|---|
-  | `dmarc-dns.timer` | nightly 03:20 - reads every domain's published SPF, DKIM and DMARC records. Fills the Records column on the domains page |
+  | `dmarc-dns.timer` | nightly 03:20 - reads every domain's published SPF, DKIM and DMARC records. Fills the Records column on the domains page, and records what changed. When it succeeds it starts `dmarc-notify`, which sends those changes to a webhook if one is set - see [WEBHOOKS.md](WEBHOOKS.md) |
   | `dmarc-backup.timer` | nightly 03:20 - a verified copy into `/opt/dmarc/backups`, 14 kept |
   | `dmarc-health.timer` | 09:10 and 21:10 - whether collection and backups are still happening |
   | `dmarc-prune.timer` | Sunday 04:40 - the retention window, aggregate 400 days and forensic 30 |

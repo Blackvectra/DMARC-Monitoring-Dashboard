@@ -41,9 +41,35 @@ public sealed class HealthService(string databasePath)
             Collection = await CollectionAsync(db, at, ct).ConfigureAwait(false),
             Quiet = await QuietAsync(db, at, ct).ConfigureAwait(false),
             HeldTwice = await HeldTwiceAsync(db, ct).ConfigureAwait(false),
+            Webhooks = await WebhooksAsync(db, ct).ConfigureAwait(false),
             BackupDirectory = backupDirectory,
             LastBackup = backupDirectory is null ? null : NewestBackup(backupDirectory),
         };
+    }
+
+    /// <summary>Every organization's webhook, from the organization's database.</summary>
+    private static async Task<IReadOnlyList<WebhookFacts>> WebhooksAsync(SqliteConnection db, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT t.slug, w.destination, w.created_at, w.last_delivered_at, w.last_error_at, w.last_error
+            FROM main.webhooks w JOIN main.tenants t ON t.id = w.tenant_id
+            ORDER BY t.slug
+            """;
+
+        static DateTimeOffset? When(SqliteDataReader r, int i) =>
+            !r.IsDBNull(i) && DateTimeOffset.TryParse(r.GetString(i), CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal, out var at) ? at : null;
+
+        var result = new List<WebhookFacts>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            result.Add(new WebhookFacts(reader.GetString(0), reader.GetString(1),
+                When(reader, 2) ?? DateTimeOffset.MinValue, When(reader, 3), When(reader, 4),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
+        }
+        return result;
     }
 
     /// <summary>One row per organization holding domains.</summary>

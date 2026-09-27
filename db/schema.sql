@@ -515,6 +515,43 @@ INSERT INTO row_ids (table_name, next_id) VALUES
 
 
 -- ============================================================================
+--  NOTIFICATIONS  (where findings are sent, and what has been; see
+--  docs/WEBHOOKS.md. Holds which events went where, never what they said:
+--  the payload is built from the client's own file when it is sent.)
+-- ============================================================================
+
+CREATE TABLE webhooks (
+    id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL UNIQUE REFERENCES tenants(id) ON DELETE CASCADE,
+    destination         TEXT NOT NULL,                 -- scheme and host only, for display
+    credential_ref      TEXT NOT NULL,                 -- the full address and signing secret, in the secret store
+    min_severity        TEXT NOT NULL DEFAULT 'warning'
+                        CHECK (min_severity IN ('info','warning','critical')),
+    link_base           TEXT,                          -- the dashboard's address, for links; NULL sends none
+    created_at          TEXT NOT NULL,                 -- events detected before this are never sent
+    created_by          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    last_delivered_at   TEXT,
+    last_error          TEXT,
+    last_error_at       TEXT
+);
+
+CREATE TABLE webhook_deliveries (
+    webhook_id          TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    event_id            TEXT NOT NULL,                 -- dns_drift_events.id, in the client's file
+    client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    delivered_at        TEXT,
+    last_attempt_at     TEXT,
+    last_status         INTEGER,
+    last_error          TEXT,
+    PRIMARY KEY (webhook_id, event_id)
+);
+
+CREATE INDEX ix_webhook_deliveries_client ON webhook_deliveries(client_id);
+
+
+-- ============================================================================
 --  SCHEMA VERSIONING
 -- ============================================================================
 
@@ -574,6 +611,9 @@ VALUES ('0018', datetime('now'), 'forward_confirmed on source_names: a reverse n
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0019', datetime('now'), 'One file per client: each client''s reports, DNS history and changes move to a database file of its own, and this one keeps the organization, its clients, its people and its audit trail');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0020', datetime('now'), 'Webhooks: somewhere to send what the product finds, and a record of which events went where, so a change in a client''s DNS reaches a person without anybody opening the app');
 
 
 -- ============================================================================

@@ -263,6 +263,7 @@ render_unit 'dmarc-ingest@.service'
 render_unit 'dmarc-ingest@.timer'
 render_unit dmarc-dns.service
 render_unit dmarc-dns.timer
+render_unit dmarc-notify.service
 render_unit dmarc-prune.service
 render_unit dmarc-prune.timer
 render_unit dmarc-backup.service
@@ -408,6 +409,9 @@ Running on their own from now on:
                        fails its unit; /etc/systemd/system/dmarc-alert@.service
                        is where that becomes mail, Slack or SNS, and until you
                        edit it nothing is sent anywhere.
-  dmarc-dns.timer      nightly, reads each domain's published records.
+  dmarc-dns.timer      nightly, reads each domain's published records, then
+                       dmarc-notify sends what changed to each organization's
+                       webhook. Nothing is sent until one is set up:
+                       dmarc notify set --org <slug> --url https://...
   dmarc-prune.timer    weekly, aggregate 400 days, forensic 30.
 DONE

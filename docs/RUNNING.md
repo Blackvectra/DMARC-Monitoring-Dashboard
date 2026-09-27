@@ -507,6 +507,22 @@ safe: it returns what it has already done, and the next run resumes.
 
 ---
 
+## Being told what changed
+
+The nightly DNS scan records every change to a domain's SPF, DMARC, MTA-STS
+and TLS-RPT records, and the domain's page lists them. To hear about them
+without opening it, give the organization a webhook:
+
+```
+dmarc notify set --org <slug> --url https://console.example/api/sources/dmarc-monitor/events
+dmarc notify test --org <slug>
+```
+
+Each change at or above `--min-severity` (default `warning`) is sent once, as
+signed JSON, after the scan. [`WEBHOOKS.md`](WEBHOOKS.md) has the contract a
+receiver checks and the commands for a server, where they must be run as the
+service account.
+
 ## Backups
 
     dmarc backup --to /var/backups/dmarc
