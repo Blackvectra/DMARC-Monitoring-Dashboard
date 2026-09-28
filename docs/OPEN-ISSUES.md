@@ -584,6 +584,75 @@ See `docs/MSP-PLATFORM.md` for how this sits against what an MSP platform is
 expected to be. It is one table and the workflow on top of it, and four of the
 brief's ten Phase 1 items collapse into it.
 
+## 12a. Anomaly detection, as part of the alerting that 12 is missing
+
+**Area** a new nightly job over each client's file; `alerts` in
+`db/client-schema.sql`, which already names the two types this needs
+(`new_sender`, `volume_anomaly`) and which nothing writes to yet.
+**Severity** Medium on its own. High as the first thing to put through the
+alert path, because the alert path is what an MSP is paying for.
+
+An autoencoder was proposed for this. Not first, and this is why: an
+organization's month is a few thousand aggregate rows, which is enough to
+train a small network and not enough to know what it learned; and an alert
+that cannot say *why* it fired is one an on-call tech mutes within a week. The
+practice that holds up in MSP operations is the other way round - a statistic
+a human can check, wired into the on-call path, with the model earning its
+place by beating that statistic on the same data.
+
+**Phase 1 - baselines, per client, from that client's own file.** Nightly,
+after the collector, writing `alerts` rows with a `dedup_key` per
+(type, domain, day) so a re-run never fires twice:
+
+- *New failing source*: an address first seen for this client today, failing
+  DMARC, above a floor of messages. This is the impersonation case, and the
+  threat indicators already know whether the same address hit other clients -
+  that count goes in `payload_json` and raises severity.
+- *Volume anomaly*: today's count from a known source against that source's
+  own history for this client - median and MAD, not mean and standard
+  deviation, because one spike must not inflate its own baseline. Needs a
+  minimum of history (seven days) before it may fire at all.
+- *Pass-rate drop*: a domain whose authenticated share falls a set number of
+  points below its 30-day rate, which is a broken DKIM key or an SPF edit
+  before the customer notices bounces.
+
+Every alert names the client, the domain, the address, the number, the
+baseline it was compared with and the receiver that reported it. A tech can
+verify each of those in the source page in under a minute; that is the
+standard, not the model's confidence.
+
+**Phase 2 - the MSP operations side, which is most of the value.**
+
+- *Delivery*: the alerts table is read by `dmarc health` (so `OnFailure=` and
+  `dmarc-alert@` carry a critical one tonight, with nothing new to deploy) and
+  by a new `dmarc alerts` command that prints open ones and exits 1 when a
+  critical is open - the shape every RMM and PSA already knows how to poll.
+  A webhook (Teams/Slack, ticket creation) is the one channel worth adding
+  after that, into the PSA rather than into somebody's inbox.
+- *Workflow*: acknowledge, suppress with a reason and a review date, resolve.
+  This is the findings table issue 12 asks for; anomaly alerts are its first
+  rows, not a separate system.
+- *Per-client tuning*: a client whose newsletter tool sends 5,000 on the
+  first of the month is not an anomaly; the suppression above is how that is
+  remembered, in the client's own file, so it moves with the client.
+- *Reporting*: the month's alerts and how they were closed become a section
+  of the client report - "3 new senders reviewed, 1 blocked" - which is the
+  evidence of monitoring the customer is billed for.
+- *Cross-client*: the organization-wide view (one address, several clients)
+  already exists in threat intelligence; alerts feed it rather than repeat it.
+
+**Phase 3 - the autoencoder, if it earns it.** Train per organization, not
+per client (the data is too thin per client), on per-source-per-day feature
+vectors; score reconstruction error; compare against Phase 1 on the same
+month using the alerts techs actually acted on as labels. Ship it only where
+it finds something Phase 1 missed and a tech agreed was real. If that never
+happens, the answer was the baseline, and that is a fine answer.
+
+**Not to do**: alert on every DMARC failure (that is what the client report
+is for), send anything by email from the box (issue 12's reasoning), or train
+on all organizations together (one MSP's customers are not another's
+baseline, and the client files exist to keep them apart).
+
 ## 13. The client report is one document, and nothing sends it
 
 **Area** `src/DmarcMonitor.Core/Reporting/ClientReportRenderer.cs`,
