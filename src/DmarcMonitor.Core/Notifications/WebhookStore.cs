@@ -8,12 +8,15 @@ using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Notifications;
 
-/// <summary>An organization's webhook, as a person may see it: no address past the host, no secret.</summary>
+/// <summary>An organization's destination, as a person may see it: no address past the host, no secret.</summary>
 public sealed record Webhook
 {
     public required string Id { get; init; }
     public required string TenantId { get; init; }
     public required string TenantSlug { get; init; }
+
+    /// <summary><see cref="WebhookStore.WebhookKind"/> or <see cref="WebhookStore.ConnectWiseKind"/>.</summary>
+    public string Kind { get; init; } = WebhookStore.WebhookKind;
 
     /// <summary>Scheme and host only. The full address is a secret for most chat tools.</summary>
     public required string Destination { get; init; }
@@ -21,11 +24,17 @@ public sealed record Webhook
     public required string CredentialRef { get; init; }
     public required string MinSeverity { get; init; }
     public string? LinkBase { get; init; }
+
+    /// <summary>Where tickets go, for a ConnectWise destination; null for a webhook.</summary>
+    public ConnectWiseSettings? ConnectWise { get; init; }
+
     public DateTimeOffset CreatedAt { get; init; }
     public required string CreatedBy { get; init; }
     public DateTimeOffset? LastDeliveredAt { get; init; }
     public string? LastError { get; init; }
     public DateTimeOffset? LastErrorAt { get; init; }
+
+    public bool IsConnectWise => Kind == WebhookStore.ConnectWiseKind;
 
     /// <summary>The last attempt failed, and nothing has been delivered since.</summary>
     public bool IsFailing => LastErrorAt is { } failed && (LastDeliveredAt is not { } ok || failed > ok);
@@ -39,19 +48,26 @@ internal sealed record WebhookCredential(string Url, string Secret);
 /// </summary>
 /// <remarks>
 /// <para>
-/// One per organization. Setting it again replaces the address and the secret
-/// but keeps its history, so events that were waiting still go - to the new
+/// One destination of each kind per organization: a webhook, given a signed
+/// POST per change, and a ConnectWise PSA, given a ticket per finding
+/// (docs/CONNECTWISE.md). Setting one again replaces its address or keys but
+/// keeps its history, so events that were waiting still go - to the new
 /// address.
 /// </para>
 /// <para>
 /// The same rule as DNS provider credentials: the database never holds a
-/// secret. The full address and the signing key are in the secret store under
-/// one credential reference, and the database keeps the pointer and a
-/// display form of where it goes.
+/// secret. The full address and the signing key - or the four parts of a
+/// ConnectWise credential - are in the secret store under one credential
+/// reference, and the database keeps the pointer and a display form of where
+/// it goes.
 /// </para>
 /// </remarks>
 public sealed class WebhookStore(string databasePath, ISecretStore secrets, TimeProvider? clock = null)
 {
+    public const string WebhookKind = "webhook";
+    public const string ConnectWiseKind = "connectwise";
+    public static readonly IReadOnlyList<string> Kinds = [WebhookKind, ConnectWiseKind];
+
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
 
     public static readonly IReadOnlyList<string> Severities = ["info", "warning", "critical"];
@@ -65,26 +81,41 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
 
     public ISecretStore Secrets { get; } = secrets;
 
+    /// <summary>Every organization's destinations, of every kind.</summary>
     public async Task<IReadOnlyList<Webhook>> ListAsync(CancellationToken ct = default)
     {
         await using var db = await OpenAsync(ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
-        command.CommandText = Select + " ORDER BY t.slug";
+        command.CommandText = Select + " ORDER BY t.slug, w.kind";
         return await ReadAsync(command, ct).ConfigureAwait(false);
     }
 
-    public async Task<Webhook?> GetAsync(string tenantSlug, CancellationToken ct = default)
+    /// <summary>One organization's destinations, of every kind.</summary>
+    public async Task<IReadOnlyList<Webhook>> ForOrganizationAsync(string tenantSlug, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(tenantSlug);
 
         await using var db = await OpenAsync(ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
-        command.CommandText = Select + " WHERE t.slug = $slug";
+        command.CommandText = Select + " WHERE t.slug = $slug ORDER BY w.kind";
         command.Parameters.AddWithValue("$slug", tenantSlug.Trim().ToLowerInvariant());
+        return await ReadAsync(command, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>One organization's destination of one kind, or null.</summary>
+    public async Task<Webhook?> GetAsync(string tenantSlug, string kind = WebhookKind, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(tenantSlug);
+
+        await using var db = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = db.CreateCommand();
+        command.CommandText = Select + " WHERE t.slug = $slug AND w.kind = $kind";
+        command.Parameters.AddWithValue("$slug", tenantSlug.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$kind", ParseKind(kind));
         return (await ReadAsync(command, ct).ConfigureAwait(false)).SingleOrDefault();
     }
 
-    /// <summary>Points an organization's findings at an address, replacing whatever it had.</summary>
+    /// <summary>Points an organization's findings at an address, replacing whatever webhook it had.</summary>
     /// <exception cref="ArgumentException">The address, secret or severity is not one this accepts.</exception>
     /// <exception cref="InvalidOperationException">No such organization, or no secret store to keep the key in.</exception>
     public async Task<Webhook> SetAsync(
@@ -103,29 +134,9 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
                 + "Generate one with: openssl rand -hex 32");
         }
 
-        var severity = minSeverity.Trim().ToLowerInvariant();
-        if (!Severities.Contains(severity))
-        {
-            throw new ArgumentException($"'{minSeverity}' is not a severity. Use one of: {string.Join(", ", Severities)}.");
-        }
-
-        if (!Secrets.IsAvailable)
-        {
-            throw new InvalidOperationException($"The secret store cannot be used, so there is nowhere to keep the key. {Secrets.Description}");
-        }
-
-        // The built-in organization exists from the first report onwards, and
-        // setting a webhook up is a reasonable thing to do before that: on
-        // install day. It is created here the way a report would create it.
-        // Any other is expected to have been created deliberately.
-        var found = await TenantAsync(tenantSlug, ct).ConfigureAwait(false);
-        if (found is null && string.Equals(tenantSlug.Trim(), ReportStore.DefaultTenantSlug, StringComparison.OrdinalIgnoreCase))
-        {
-            await new OrganizationStore(databasePath).CreateAsync("Local", ReportStore.DefaultTenantSlug, ct: ct).ConfigureAwait(false);
-            found = await TenantAsync(tenantSlug, ct).ConfigureAwait(false);
-        }
-        var tenant = found ?? throw new InvalidOperationException($"There is no organization '{tenantSlug}'.");
-        var existing = await GetAsync(tenant.Slug, ct).ConfigureAwait(false);
+        var severity = ParseSeverity(minSeverity);
+        var tenant = await EnsureTenantAsync(tenantSlug, ct).ConfigureAwait(false);
+        var existing = await GetAsync(tenant.Slug, WebhookKind, ct).ConfigureAwait(false);
 
         // The new key is stored before the row points at it and the old one is
         // removed after, so there is no moment where the row names a key that
@@ -134,32 +145,8 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
         await Secrets.SetAsync(credentialRef,
             JsonSerializer.Serialize(new WebhookCredential(address.AbsoluteUri, secret.Trim())), ct).ConfigureAwait(false);
 
-        var now = Stamp(_clock.GetUtcNow());
-        await using (var db = await OpenAsync(ct).ConfigureAwait(false))
-        await using (var command = db.CreateCommand())
-        {
-            command.CommandText = existing is null
-                ? """
-                  INSERT INTO webhooks (id, tenant_id, destination, credential_ref, min_severity, link_base,
-                                        created_at, created_by, updated_at)
-                  VALUES ($id, $tenant, $destination, $ref, $severity, $link, $now, $by, $now)
-                  """
-                : """
-                  UPDATE webhooks
-                  SET destination = $destination, credential_ref = $ref, min_severity = $severity,
-                      link_base = $link, updated_at = $now, last_error = NULL, last_error_at = NULL
-                  WHERE id = $id
-                  """;
-            command.Parameters.AddWithValue("$id", existing?.Id ?? Guid.NewGuid().ToString());
-            command.Parameters.AddWithValue("$tenant", tenant.Id);
-            command.Parameters.AddWithValue("$destination", Destination(address));
-            command.Parameters.AddWithValue("$ref", credentialRef);
-            command.Parameters.AddWithValue("$severity", severity);
-            command.Parameters.AddWithValue("$link", (object?)link?.AbsoluteUri.TrimEnd('/') ?? DBNull.Value);
-            command.Parameters.AddWithValue("$now", now);
-            command.Parameters.AddWithValue("$by", by.Trim());
-            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
+        await UpsertAsync(existing, tenant.Id, WebhookKind, Destination(address), credentialRef, severity,
+            link?.AbsoluteUri.TrimEnd('/'), null, by, ct).ConfigureAwait(false);
 
         if (existing is not null && existing.CredentialRef != credentialRef)
         {
@@ -170,13 +157,69 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
             existing is null ? "webhook.set" : "webhook.replace",
             $"to {Destination(address)}, {severity} and above", ct).ConfigureAwait(false);
 
-        return (await GetAsync(tenant.Slug, ct).ConfigureAwait(false))!;
+        return (await GetAsync(tenant.Slug, WebhookKind, ct).ConfigureAwait(false))!;
     }
 
-    /// <summary>Stops sending, and forgets the address and the key. False when there was nothing to remove.</summary>
-    public async Task<bool> RemoveAsync(string tenantSlug, string by, CancellationToken ct = default)
+    /// <summary>
+    /// Points an organization's findings at its ConnectWise PSA, as tickets,
+    /// replacing whatever ConnectWise destination it had.
+    /// </summary>
+    /// <param name="site">The ConnectWise API host, e.g. https://api-na.myconnectwise.net, with or without the version path.</param>
+    /// <param name="companyId">The organization's own ConnectWise company id (the login's), not a client's.</param>
+    /// <param name="clientId">The integration's clientId from developer.connectwise.com.</param>
+    /// <exception cref="ArgumentException">A part is missing, the site is not https, or the severity is unknown.</exception>
+    /// <exception cref="InvalidOperationException">No such organization, or no secret store to keep the keys in.</exception>
+    public async Task<Webhook> SetConnectWiseAsync(
+        string tenantSlug, string site, string companyId, string publicKey, string privateKey, string clientId,
+        ConnectWiseSettings settings, string minSeverity, string? linkBase, string by, CancellationToken ct = default)
     {
-        var existing = await GetAsync(tenantSlug, ct).ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(tenantSlug);
+        ArgumentException.ThrowIfNullOrWhiteSpace(by);
+        ArgumentNullException.ThrowIfNull(settings);
+
+        var apiBase = ConnectWiseClient.BaseFor(site);
+        var link = linkBase is null ? null : ParseLinkBase(linkBase);
+        var severity = ParseSeverity(minSeverity);
+
+        foreach (var (name, value) in new[] { ("company id", companyId), ("public key", publicKey), ("private key", privateKey), ("clientId", clientId), ("board", settings.Board) })
+        {
+            if (string.IsNullOrWhiteSpace(value)) { throw new ArgumentException($"The ConnectWise {name} is missing."); }
+        }
+
+        var tenant = await EnsureTenantAsync(tenantSlug, ct).ConfigureAwait(false);
+        var existing = await GetAsync(tenant.Slug, ConnectWiseKind, ct).ConfigureAwait(false);
+
+        var credentialRef = CredentialRef.New(tenant.Slug, "connectwise");
+        await Secrets.SetAsync(credentialRef, JsonSerializer.Serialize(new ConnectWiseCredential(
+            apiBase.AbsoluteUri, companyId.Trim(), publicKey.Trim(), privateKey.Trim(), clientId.Trim())), ct).ConfigureAwait(false);
+
+        var trimmed = settings with
+        {
+            Board = settings.Board.Trim(),
+            Status = Clean(settings.Status),
+            PriorityCritical = Clean(settings.PriorityCritical),
+            PriorityWarning = Clean(settings.PriorityWarning),
+        };
+
+        await UpsertAsync(existing, tenant.Id, ConnectWiseKind, Destination(apiBase), credentialRef, severity,
+            link?.AbsoluteUri.TrimEnd('/'), trimmed.ToJson(), by, ct).ConfigureAwait(false);
+
+        if (existing is not null && existing.CredentialRef != credentialRef)
+        {
+            await Secrets.RemoveAsync(existing.CredentialRef, ct).ConfigureAwait(false);
+        }
+
+        await new AuditLog(databasePath).RecordAsync(tenant.Id, by,
+            existing is null ? "psa.set" : "psa.replace",
+            $"ConnectWise at {Destination(apiBase)}, board '{trimmed.Board}', {severity} and above", ct).ConfigureAwait(false);
+
+        return (await GetAsync(tenant.Slug, ConnectWiseKind, ct).ConfigureAwait(false))!;
+    }
+
+    /// <summary>Stops sending to a destination, and forgets its address and keys. False when there was nothing to remove.</summary>
+    public async Task<bool> RemoveAsync(string tenantSlug, string by, string kind = WebhookKind, CancellationToken ct = default)
+    {
+        var existing = await GetAsync(tenantSlug, kind, ct).ConfigureAwait(false);
         if (existing is null) { return false; }
 
         await using (var db = await OpenAsync(ct).ConfigureAwait(false))
@@ -188,7 +231,8 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
         }
 
         await Secrets.RemoveAsync(existing.CredentialRef, ct).ConfigureAwait(false);
-        await new AuditLog(databasePath).RecordAsync(existing.TenantId, by, "webhook.remove",
+        await new AuditLog(databasePath).RecordAsync(existing.TenantId, by,
+            existing.IsConnectWise ? "psa.remove" : "webhook.remove",
             $"was {existing.Destination}", ct).ConfigureAwait(false);
         return true;
     }
@@ -198,6 +242,13 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
     {
         var stored = await Secrets.GetAsync(webhook.CredentialRef, ct).ConfigureAwait(false);
         return stored is null ? null : JsonSerializer.Deserialize<WebhookCredential>(stored);
+    }
+
+    /// <summary>The four parts of the ConnectWise credential, or null when the store no longer has them.</summary>
+    internal async Task<ConnectWiseCredential?> ConnectWiseCredentialAsync(Webhook webhook, CancellationToken ct)
+    {
+        var stored = await Secrets.GetAsync(webhook.CredentialRef, ct).ConfigureAwait(false);
+        return stored is null ? null : JsonSerializer.Deserialize<ConnectWiseCredential>(stored);
     }
 
     /// <summary>
@@ -222,20 +273,93 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
         return uri;
     }
 
+    public static string ParseKind(string kind)
+    {
+        var clean = (kind ?? "").Trim().ToLowerInvariant();
+        return Kinds.Contains(clean)
+            ? clean
+            : throw new ArgumentException($"'{kind}' is not a destination kind. Use one of: {string.Join(", ", Kinds)}.");
+    }
+
+    private static string ParseSeverity(string minSeverity)
+    {
+        var severity = (minSeverity ?? "").Trim().ToLowerInvariant();
+        return Severities.Contains(severity)
+            ? severity
+            : throw new ArgumentException($"'{minSeverity}' is not a severity. Use one of: {string.Join(", ", Severities)}.");
+    }
+
     private static Uri ParseLinkBase(string linkBase) =>
         Uri.TryCreate(linkBase.Trim(), UriKind.Absolute, out var uri)
         && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp)
             ? uri
             : throw new ArgumentException($"'{linkBase}' is not the dashboard's address, e.g. https://dmarc.example.com");
 
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private static bool IsThisMachine(Uri uri) =>
         uri.IsLoopback || (IPAddress.TryParse(uri.Host.Trim('[', ']'), out var ip) && IPAddress.IsLoopback(ip));
 
     private static string Destination(Uri uri) => $"{uri.Scheme}://{uri.Authority}";
 
+    /// <summary>
+    /// The organization, created when it is the built-in one and no report
+    /// has made it yet: setting up where findings go is exactly what somebody
+    /// does on install day. Any other is expected to have been created
+    /// deliberately.
+    /// </summary>
+    private async Task<(string Id, string Slug)> EnsureTenantAsync(string tenantSlug, CancellationToken ct)
+    {
+        if (!Secrets.IsAvailable)
+        {
+            throw new InvalidOperationException($"The secret store cannot be used, so there is nowhere to keep the key. {Secrets.Description}");
+        }
+
+        var found = await TenantAsync(tenantSlug, ct).ConfigureAwait(false);
+        if (found is null && string.Equals(tenantSlug.Trim(), ReportStore.DefaultTenantSlug, StringComparison.OrdinalIgnoreCase))
+        {
+            await new OrganizationStore(databasePath).CreateAsync("Local", ReportStore.DefaultTenantSlug, ct: ct).ConfigureAwait(false);
+            found = await TenantAsync(tenantSlug, ct).ConfigureAwait(false);
+        }
+        return found ?? throw new InvalidOperationException($"There is no organization '{tenantSlug}'.");
+    }
+
+    private async Task UpsertAsync(
+        Webhook? existing, string tenantId, string kind, string destination, string credentialRef, string severity,
+        string? link, string? configJson, string by, CancellationToken ct)
+    {
+        var now = Stamp(_clock.GetUtcNow());
+        await using var db = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = db.CreateCommand();
+        command.CommandText = existing is null
+            ? """
+              INSERT INTO webhooks (id, tenant_id, kind, destination, credential_ref, min_severity, link_base, config_json,
+                                    created_at, created_by, updated_at)
+              VALUES ($id, $tenant, $kind, $destination, $ref, $severity, $link, $config, $now, $by, $now)
+              """
+            : """
+              UPDATE webhooks
+              SET destination = $destination, credential_ref = $ref, min_severity = $severity,
+                  link_base = $link, config_json = $config, updated_at = $now, last_error = NULL, last_error_at = NULL
+              WHERE id = $id
+              """;
+        command.Parameters.AddWithValue("$id", existing?.Id ?? Guid.NewGuid().ToString());
+        command.Parameters.AddWithValue("$tenant", tenantId);
+        command.Parameters.AddWithValue("$kind", kind);
+        command.Parameters.AddWithValue("$destination", destination);
+        command.Parameters.AddWithValue("$ref", credentialRef);
+        command.Parameters.AddWithValue("$severity", severity);
+        command.Parameters.AddWithValue("$link", (object?)link ?? DBNull.Value);
+        command.Parameters.AddWithValue("$config", (object?)configJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("$now", now);
+        command.Parameters.AddWithValue("$by", by.Trim());
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
     private const string Select = """
         SELECT w.id, w.tenant_id, t.slug, w.destination, w.credential_ref, w.min_severity, w.link_base,
-               w.created_at, w.created_by, w.last_delivered_at, w.last_error, w.last_error_at
+               w.created_at, w.created_by, w.last_delivered_at, w.last_error, w.last_error_at,
+               w.kind, w.config_json
         FROM webhooks w JOIN tenants t ON t.id = w.tenant_id
         """;
 
@@ -261,6 +385,8 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
                 LastDeliveredAt = Text(9) is { } delivered ? ParseStamp(delivered) : null,
                 LastError = Text(10),
                 LastErrorAt = Text(11) is { } failed ? ParseStamp(failed) : null,
+                Kind = reader.GetString(12),
+                ConnectWise = ConnectWiseSettings.FromJson(Text(13)),
             });
         }
         return result;

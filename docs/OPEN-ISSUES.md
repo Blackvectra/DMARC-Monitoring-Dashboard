@@ -643,18 +643,20 @@ standard, not the model's confidence.
 - *Cross-client*: the organization-wide view (one address, several clients)
   already exists in threat intelligence; alerts feed it rather than repeat it.
 
-**The PSA is ConnectWise PSA (Manage).** Decided 28 Sep. It cannot receive
-the signed generic POST - there is no inbound webhook-to-ticket in it - so it
-is reached through its REST API, as a second *kind* of destination on the
-channel `dmarc notify` already runs, not as a parallel system. What that
-reuses without change: the pending-events query (oldest first, stop at the
-first failure so a receiver never sees things out of order), the
-`webhook_deliveries` ledger, the secret store for the credential, the
-`dmarc-notify.service` schedule after each scan, and the `dmarc health`
-"stopped delivering" check. So DNS drift reaches ConnectWise the day the kind
-exists, before any anomaly alert does - which is also the order to build in:
-the integration is proved against events that exist today, and phase 1's
-alerts flow through it when they arrive.
+**The PSA is ConnectWise PSA (Manage).** Decided 28 Sep; **built the same
+day for DNS drift** (migration 0021, `docs/CONNECTWISE.md`), so the
+integration is proved against events that exist today and phase 1's alerts
+flow through it when they arrive. It cannot receive the signed generic POST -
+there is no inbound webhook-to-ticket in it - so it is reached through its
+REST API, as a second *kind* of destination on the channel `dmarc notify`
+already runs, not as a parallel system. What that reuses without change: the
+pending-events query (oldest first, stop at the first failure so a receiver
+never sees things out of order), the `webhook_deliveries` ledger, the secret
+store for the credential, the `dmarc-notify.service` schedule after each
+scan, and the `dmarc health` "stopped delivering" check. Still to do once it
+has run against the real instance: confirm the 100-character summary cap and
+the note fields against the instance's API version, and decide whether ticket
+state should be read back to resolve alerts (one way for now).
 
 - *Authentication*, as ConnectWise documents it: HTTP Basic with
   `companyId+publicKey:privateKey`, plus a `clientId` header registered at

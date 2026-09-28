@@ -17,7 +17,7 @@ public static class ClientCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--name", "--slug", "--org", "--domain", "--client", "--group", "--by", "--confirm", "!--apply") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--name", "--slug", "--org", "--domain", "--client", "--group", "--company", "--by", "--confirm", "!--apply") is var bad and not 0) { return bad; }
 
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
@@ -39,9 +39,42 @@ public static class ClientCommand
             "assign" => await AssignAsync(store, dbPath, rest, ct).ConfigureAwait(false),
             "auto-assign" => await AutoAssignAsync(dbPath, rest, ct).ConfigureAwait(false),
             "set-group" => await SetGroupAsync(store, rest, ct).ConfigureAwait(false),
+            "set-connectwise" => await SetConnectWiseAsync(dbPath, Args.Value(rest, "--org") ?? ReportStore.DefaultTenantSlug, rest, ct).ConfigureAwait(false),
             "erase" => await EraseAsync(dbPath, rest, ct).ConfigureAwait(false),
             _ => Usage($"Unknown: dmarc client {action}"),
         };
+    }
+
+    /// <summary>
+    /// Which company the client is in the organization's ConnectWise PSA, so
+    /// its findings are filed as tickets there (docs/CONNECTWISE.md). Set by a
+    /// person from `dmarc notify companies`, never guessed from a name.
+    /// </summary>
+    private static async Task<int> SetConnectWiseAsync(string dbPath, string org, string[] args, CancellationToken ct)
+    {
+        var client = Args.Value(args, "--client");
+        if (string.IsNullOrWhiteSpace(client))
+        {
+            return Usage("dmarc client set-connectwise --client <slug> --company <ConnectWise company id> [--org <slug>] [--db <path>]   (omit --company to clear it)");
+        }
+
+        var company = Args.Value(args, "--company");
+        if (company is not null && !int.TryParse(company.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _))
+        {
+            Console.Error.WriteLine($"'{company}' is not a ConnectWise company id. It is the number `dmarc notify companies --search` shows, not the identifier or the name.");
+            return 64;
+        }
+
+        if (!await new ClientSettingsStore(dbPath).SetAsync(org, client, ClientSettingsStore.ConnectWiseCompany, company?.Trim(), ct).ConfigureAwait(false))
+        {
+            Console.Error.WriteLine($"No client with the slug '{client}' in '{org}'. See: dmarc client list");
+            return 66;
+        }
+
+        Console.WriteLine(company is null
+            ? $"'{client}' is no longer filed on any ConnectWise company; its findings wait until it is."
+            : $"'{client}' is filed on ConnectWise company {company.Trim()} from now on. Prove it: dmarc notify test --org {org} --kind connectwise --client {client}");
+        return 0;
     }
 
     /// <summary>
@@ -352,6 +385,7 @@ public static class ClientCommand
         Console.Error.WriteLine("  dmarc client add    --name \"<name>\" [--slug <slug>] [--org <organization slug>]");
         Console.Error.WriteLine("  dmarc client assign --domain <domain> --client <slug>");
         Console.Error.WriteLine("  dmarc client set-group --client <slug> --group <entra group object id>   (the customer's own login)");
+        Console.Error.WriteLine("  dmarc client set-connectwise --client <slug> --company <id>   (which ConnectWise company its tickets go on)");
         Console.Error.WriteLine("  dmarc client erase --client <slug> [--apply --confirm <slug> --by <name>]   (permanent)");
         return 64;
     }

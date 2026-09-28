@@ -140,7 +140,7 @@ table with a lifecycle in it.
 | | state |
 |---|---|
 | REST / OpenAPI | **none** |
-| Webhooks | **partial** — one signed webhook per organization, DNS drift only; see `docs/WEBHOOKS.md` |
+| Webhooks | **partial** — one signed webhook and one ConnectWise PSA destination per organization, DNS drift only; see `docs/WEBHOOKS.md` and `docs/CONNECTWISE.md` |
 | PSA, SIEM, SOAR, Teams, Slack, email | **none** — `dmarc intel` exports indicators a SIEM can read, which is the nearest thing |
 | Bulk onboarding by CSV or API | **partial** — an import files every domain it finds, and now creates a client per domain; no CSV of tenants |
 | Domain and subdomain discovery with review | **partial** — discovery happens on import; review does not |

@@ -196,6 +196,9 @@ public static class Program
                 assign           File a domain, and its stored history, under a client.
                   --domain <d>   Domain as it appears in the reports.
                   --client <s>   Client slug, from 'dmarc client list'.
+                set-connectwise  --client <s> --company <id>  Which ConnectWise company the
+                                 client's tickets are filed on (docs/CONNECTWISE.md). Never
+                                 guessed from a name. Omit --company to clear it.
                 erase            Remove a client and everything belonging to them,
                                  permanently. The answer to "can we have our data
                                  deleted". A dry run unless --apply, and --apply alone
@@ -416,15 +419,26 @@ public static class Program
                 --db <path>      Database file. Default: dmarc.db
 
               notify             Where an organization's findings are sent: a signed JSON
-                                 webhook per organization. See docs/WEBHOOKS.md.
+                                 webhook (docs/WEBHOOKS.md), and tickets in ConnectWise PSA
+                                 (docs/CONNECTWISE.md). One of each per organization.
                 list             What is configured, and whether it is working.
                 set              [--org <slug>] --url https://... [--min-severity warning]
                                  [--link-base https://dmarc.example.com]
                                  The signing secret is read from DMARC_WEBHOOK_SECRET, stdin
                                  with --secret-stdin, or a prompt. Never as an argument.
-                test             [--org <slug>]  Send a signed test event now.
+                set --kind connectwise
+                                 --site https://api-na.myconnectwise.net --company-id <id>
+                                 --client-id <guid> --public-key <key> --board <name>
+                                 [--status <name>] [--priority-critical <name>]
+                                 [--priority-warning <name>]
+                                 The private key is read from DMARC_CONNECTWISE_PRIVATE_KEY,
+                                 stdin with --secret-stdin, or a prompt. Never as an argument.
+                companies        [--org <slug>] --search <text>  Find a client's company id.
+                test             [--org <slug>] [--kind ...] [--client <slug>]  Prove it now: a
+                                 signed test event, or a ConnectWise sign-in and, with
+                                 --client, a test ticket on that client's company.
                 send             [--org <slug>]  Deliver what is waiting. Run after each scan.
-                remove           [--org <slug>]
+                remove           [--org <slug>] [--kind webhook|connectwise]
                 --secrets <dir>  Secret store folder; on a server, the web app's.
                 --db <path>      Database file. Default: dmarc.db
 
