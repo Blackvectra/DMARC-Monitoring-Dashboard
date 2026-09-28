@@ -627,8 +627,10 @@ standard, not the model's confidence.
   `dmarc-alert@` carry a critical one tonight, with nothing new to deploy) and
   by a new `dmarc alerts` command that prints open ones and exits 1 when a
   critical is open - the shape every RMM and PSA already knows how to poll.
-  A webhook (Teams/Slack, ticket creation) is the one channel worth adding
-  after that, into the PSA rather than into somebody's inbox.
+  And alerts go out the same way DNS drift already does: the signed webhook
+  ([`WEBHOOKS.md`](WEBHOOKS.md)) gains an `alert.*` event type, and the PSA
+  becomes a second destination kind on that channel - see the ConnectWise
+  section below. Into the PSA rather than into somebody's inbox.
 - *Workflow*: acknowledge, suppress with a reason and a review date, resolve.
   This is the findings table issue 12 asks for; anomaly alerts are its first
   rows, not a separate system.
@@ -640,6 +642,74 @@ standard, not the model's confidence.
   evidence of monitoring the customer is billed for.
 - *Cross-client*: the organization-wide view (one address, several clients)
   already exists in threat intelligence; alerts feed it rather than repeat it.
+
+**The PSA is ConnectWise PSA (Manage).** Decided 28 Sep. It cannot receive
+the signed generic POST - there is no inbound webhook-to-ticket in it - so it
+is reached through its REST API, as a second *kind* of destination on the
+channel `dmarc notify` already runs, not as a parallel system. What that
+reuses without change: the pending-events query (oldest first, stop at the
+first failure so a receiver never sees things out of order), the
+`webhook_deliveries` ledger, the secret store for the credential, the
+`dmarc-notify.service` schedule after each scan, and the `dmarc health`
+"stopped delivering" check. So DNS drift reaches ConnectWise the day the kind
+exists, before any anomaly alert does - which is also the order to build in:
+the integration is proved against events that exist today, and phase 1's
+alerts flow through it when they arrive.
+
+- *Authentication*, as ConnectWise documents it: HTTP Basic with
+  `companyId+publicKey:privateKey`, plus a `clientId` header registered at
+  developer.connectwise.com; a request without the header is a 401. All four
+  go in the secret store under one credential ref, as the webhook's address
+  and key do. The API member they belong to gets the least the integration
+  needs - add and edit on the alert board's tickets, inquire on companies -
+  and nothing else, and the product's docs say so.
+- *Configuration*, per organization: `dmarc notify set --kind connectwise
+  --site <api host> --board <name> ...`, with the board's own default status,
+  and a severity-to-priority map (critical and warning; info is never a
+  ticket). `webhooks.tenant_id` is UNIQUE today - one destination per
+  organization - and becomes UNIQUE per (organization, kind), so a Teams
+  relay and the PSA can both be fed. That is a migration (0021), with a
+  `kind` column defaulting to `webhook`.
+- *Client to company*: an explicit mapping, `connectwise.company_id` in the
+  existing `client_settings`, set with `dmarc client set --client <slug>
+  --connectwise-company <id>` after a `dmarc notify companies --search
+  "Acme"` lookup. Never matched by name: a slug that happens to resemble a
+  company identifier would file one customer's alert on another customer's
+  account, and that is the cross-tenant bug in a new coat. An unmapped client's
+  alerts stay in the dashboard and are named by `dmarc alerts` as unfiled.
+- *One ticket per finding, not per event*: an alert's `dedup_key` maps to one
+  open ticket. A repeat while it is open adds a note (`POST
+  /service/tickets/{id}/notes`) rather than a second ticket; once a tech has
+  closed it, the next occurrence opens a new one that names the old. The
+  ticket id is kept beside the delivery record (`webhook_deliveries` gains a
+  `remote_id`), and a short marker of the event id goes in the summary so a
+  create whose answer was lost can be found again rather than repeated.
+- *The ticket itself*: `summary` (short - ConnectWise caps it; treat 100
+  characters as the limit until the build confirms it) reads `DMARC:
+  <client> - <one line>`; `initialDescription` carries the evidence the
+  alert already has - client, domain, address and its confirmed name, count,
+  baseline, reporter - and the dashboard link when `--link-base` is set.
+  Required by the API are summary, board and company; status and priority
+  fall back to the board's defaults when not mapped.
+- *Direction*: one way. The PSA is the system of record for the work, so the
+  product never closes a ticket; resolving an alert in the dashboard adds a
+  note. Reading ticket state back to resolve alerts is a later, separate
+  decision.
+- *Volume and limits*: a nightly run is a few dozen calls at most, well under
+  any published throttle (the Power Platform connector, for comparison, allows
+  100 calls a minute per connection). The channel's stop-at-first-failure
+  already handles a 429 the same as an outage: the rest wait for the next run.
+- *What leaves the box*: client name, domain, source address and its name,
+  counts and the baseline. Never a report, never a header. `DATA-HANDLING.md`'s
+  outbound list gains the ConnectWise API host; the destination is the MSP's
+  own PSA, which already holds the client's records.
+- *Proving it*: unit tests against a fake ConnectWise (the notifier already
+  takes an `HttpMessageHandler` for this), asserting the auth header, the
+  marker, the note-not-ticket path and the unmapped-client refusal; then
+  `dmarc notify test --kind connectwise` creates one ticket on a board the
+  operator names, on the real instance, and prints its number. There is no
+  public ConnectWise sandbox to run CI against, so that manual step is the
+  acceptance test and is written down as such.
 
 **Phase 3 - the autoencoder, if it earns it.** Train per organization, not
 per client (the data is too thin per client), on per-source-per-day feature
