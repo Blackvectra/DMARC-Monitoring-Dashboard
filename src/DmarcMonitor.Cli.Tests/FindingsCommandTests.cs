@@ -59,12 +59,68 @@ public sealed class FindingsCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task SomethingOtherThanObserveIsUsage()
+    public async Task SomethingOtherThanObserveOrListIsUsage()
     {
-        var (code, _, error) = await RunAsync(["list"]);
+        var (code, _, error) = await RunAsync(["frobnicate"]);
 
         Assert.Equal(64, code);
         Assert.Contains("dmarc findings observe", error, StringComparison.Ordinal);
+        Assert.Contains("dmarc findings list", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ListSaysNothingIsOpenAndExitsOneOnceACriticalFindingIs()
+    {
+        var folder = Path.Combine(_dir, "reports");
+        Directory.CreateDirectory(folder);
+        await File.WriteAllBytesAsync(Path.Combine(folder, "r-1.xml"), Report("r-1"));
+        Assert.Equal(0, await ImportCommand.RunAsync(["--from", folder, "--db", _db], CancellationToken.None));
+
+        var (quiet, output, _) = await RunAsync(["list", "--db", _db]);
+        Assert.Equal(0, quiet);
+        Assert.Contains("Nothing open", output, StringComparison.Ordinal);
+
+        // What the scan would raise for a loosened record, without the scan.
+        var (tenantId, clientId, domainId) = await DomainAsync("example.org");
+        await new FindingLifecycle(_db).ObserveAsync(new Observation
+        {
+            TenantId = tenantId, ClientId = clientId, DomainId = domainId,
+            SourceId = FindingSourceIds.DnsScan, Type = FindingTypes.DmarcPolicyWeakened, Rule = "policy_loosened",
+            Severity = "critical", Title = "DMARC: p=reject → p=none.", DedupKey = "dns:" + domainId + ":dmarc",
+        });
+
+        var (open, listed, _) = await RunAsync(["list", "--db", _db]);
+        Assert.Equal(1, open);
+        Assert.Contains("critical", listed, StringComparison.Ordinal);
+        Assert.Contains("example.org", listed, StringComparison.Ordinal);
+        Assert.Contains("p=reject → p=none", listed, StringComparison.Ordinal);
+        Assert.Contains("1 critical open", listed, StringComparison.Ordinal);
+
+        // Decided benign: out of the queue, and the exit code follows.
+        var finding = Assert.Single(await new FindingStore(_db).ListAsync(new FindingFilter()));
+        await new FindingLifecycle(_db).SetAnalystStateAsync(finding.Id, AnalystStates.Benign, "tester", "test domain");
+        var (decided, after, _) = await RunAsync(["list", "--db", _db]);
+        Assert.Equal(0, decided);
+        Assert.Contains("Nothing open", after, StringComparison.Ordinal);
+        var (everything, all, _) = await RunAsync(["list", "--db", _db, "--all"]);
+        Assert.Equal(0, everything);
+        Assert.Contains("benign", all, StringComparison.Ordinal);
+
+        var (missing, _, error) = await RunAsync(["list", "--db", _db, "--org", "nobody"]);
+        Assert.Equal(65, missing);
+        Assert.Contains("no organization 'nobody'", error, StringComparison.Ordinal);
+    }
+
+    private async Task<(string TenantId, string ClientId, string DomainId)> DomainAsync(string name)
+    {
+        await using var db = new SqliteConnection($"Data Source={_db};Pooling=False");
+        await db.OpenAsync();
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT tenant_id, client_id, id FROM domains WHERE name = $name";
+        command.Parameters.AddWithValue("$name", name);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync(), $"no domain {name}");
+        return (reader.GetString(0), reader.GetString(1), reader.GetString(2));
     }
 
     [Fact]

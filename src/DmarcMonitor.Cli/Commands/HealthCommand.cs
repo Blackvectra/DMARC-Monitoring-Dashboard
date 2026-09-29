@@ -60,6 +60,16 @@ public static class HealthCommand
                     Console.WriteLine($"    backup: newest {Ago(DateTimeOffset.UtcNow - backup)}");
                 }
 
+                // The engines, said even on a good day: an engine that has
+                // not reported is not healthy, and "nothing wrong" must not
+                // read as "everything is running".
+                foreach (var engine in facts.Sources)
+                {
+                    Console.WriteLine(
+                        $"    {engine.Organization}: {engine.Kind}{(engine.Client is null ? "" : $" ({engine.Client})")} {engine.Health}"
+                        + (engine.LastSuccess is { } ok ? $", last success {Ago(DateTimeOffset.UtcNow - ok)}" : ", never succeeded"));
+                }
+
                 Console.WriteLine();
             }
 

@@ -421,7 +421,8 @@ public static class Program
 
               findings           What the stored data says: domains whose reports stopped while the
                                  collector kept working, applied changes the receivers' reports now
-                                 show in force, exceptions that have run out (findings observe).
+                                 show in force, exceptions that have run out (findings observe); and what
+                                 is open and wants a person, exit 1 while a critical is (findings list).
               notify             Where an organization's findings are sent: a signed JSON
                                  webhook (docs/WEBHOOKS.md), and tickets in ConnectWise PSA
                                  (docs/CONNECTWISE.md). One of each per organization.

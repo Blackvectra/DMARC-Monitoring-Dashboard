@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Findings;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Storage;
@@ -42,9 +43,80 @@ public sealed class HealthService(string databasePath)
             Quiet = await QuietAsync(db, at, ct).ConfigureAwait(false),
             HeldTwice = await HeldTwiceAsync(db, ct).ConfigureAwait(false),
             Webhooks = await WebhooksAsync(db, ct).ConfigureAwait(false),
+            Sources = await SourcesAsync(db, at, ct).ConfigureAwait(false),
+            Critical = await CriticalAsync(db, ct).ConfigureAwait(false),
             BackupDirectory = backupDirectory,
             LastBackup = backupDirectory is null ? null : NewestBackup(backupDirectory),
         };
+    }
+
+    /// <summary>Every engine that has recorded a run, with its health as the registry computes it.</summary>
+    private static async Task<IReadOnlyList<SourceFacts>> SourcesAsync(SqliteConnection db, DateTimeOffset now, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT t.slug, c.slug, s.id, s.tenant_id, s.client_id, s.kind, s.expected_every_hours,
+                   s.last_attempt_at, s.last_success_at, s.last_failure_at, s.last_error
+            FROM main.finding_sources s
+            JOIN main.tenants t ON t.id = s.tenant_id
+            LEFT JOIN main.clients c ON c.id = s.client_id
+            ORDER BY t.slug, s.kind, c.slug
+            """;
+
+        var found = new List<SourceFacts>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            DateTimeOffset? When(int i) => Text(i) is { } text ? Parse(text) : null;
+
+            var source = new FindingSource
+            {
+                Id = reader.GetString(2),
+                TenantId = reader.GetString(3),
+                ClientId = Text(4),
+                Kind = reader.GetString(5),
+                ExpectedEveryHours = reader.GetInt32(6),
+                LastAttemptAt = When(7),
+                LastSuccessAt = When(8),
+                LastFailureAt = When(9),
+                LastError = Text(10),
+            };
+            found.Add(new SourceFacts(reader.GetString(0), Text(1), source.Kind, source.HealthAt(now), source.LastSuccessAt, source.LastError));
+        }
+        return found;
+    }
+
+    /// <summary>Per organization, the critical findings open and wanting a person, with the first few domains.</summary>
+    private static async Task<IReadOnlyList<CriticalFacts>> CriticalAsync(SqliteConnection db, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT t.slug, COALESCE(d.name, '')
+            FROM main.findings f
+            JOIN main.tenants t ON t.id = f.tenant_id
+            LEFT JOIN main.domains d ON d.id = f.domain_id
+            LEFT JOIN main.finding_exceptions x ON x.finding_id = f.id AND x.ended_at IS NULL
+            WHERE f.severity = 'critical'
+              AND f.source_state IN ('active', 'unknown')
+              AND f.analyst_state NOT IN ('closed', 'benign')
+              AND x.id IS NULL
+            ORDER BY t.slug, f.first_observed_at, f.id
+            """;
+
+        var perOrganization = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            var slug = reader.GetString(0);
+            if (!perOrganization.TryGetValue(slug, out var domains)) { perOrganization[slug] = domains = []; }
+            domains.Add(reader.GetString(1));
+        }
+
+        return [.. perOrganization
+            .OrderBy(p => p.Key, StringComparer.Ordinal)
+            .Select(p => new CriticalFacts(p.Key, p.Value.Count,
+                [.. p.Value.Where(n => n.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Take(5)]))];
     }
 
     /// <summary>Every organization's webhook, from the organization's database.</summary>

@@ -1,0 +1,571 @@
+@page "/operations"
+@using System.Globalization
+@using DmarcMonitor.Core.Findings
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
+@using Microsoft.Data.Sqlite
+@inject OrgContext Org
+@inject FindingStore Findings
+@inject FindingLifecycle Lifecycle
+@inject FindingSourceRegistry Sources
+@inject AuditLog Audit
+@rendermode InteractiveServer
+
+@*
+    What the engines found, in the order a morning asks: what broke, what
+    changed, what needs a person, what was fixed and is not yet verified,
+    what was excepted and when it is due back, and whether the engines
+    themselves are running.
+
+    A detection and verification console, not a work queue. Nothing here is
+    assigned or given a deadline: the ticket lives in the PSA, and this page
+    is where a person reads what the product knows, says what they decided,
+    and checks that a fix took. Every decision is written on the finding's
+    own history and in the audit log, and none of them tells a source what
+    it can see: closing a finding whose record is still wrong leaves the
+    record wrong, and the source will say so.
+*@
+
+<PageTitle>Operations — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>Operations</h1>
+        <p class="sub">What the engines found and have not seen go away. Detection and verification, not a work
+           queue: the ticket is in the PSA, and a decision here never tells a source what it can see.</p>
+    </div>
+    <div class="head-actions">
+        <label>
+            Changes in the last
+            <select @bind="_days" @bind:after="LoadAsync">
+                <option value="7">7 days</option>
+                <option value="14">14 days</option>
+                <option value="30">30 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (_access is null || _broke is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_error is not null)
+{
+    <div class="empty">
+        <h2>Could not read the findings</h2>
+        <p>@_error</p>
+    </div>
+}
+else
+{
+    @if (_notice is not null)
+    {
+        <p class="muted">@_notice</p>
+    }
+
+    <div class="panel-stack">
+        <section class="panel">
+            <h2 class="panel-h">What broke</h2>
+            <p class="panel-sub">Open findings at warning or above that nobody has closed, called benign or excepted; worst first.</p>
+            @if (_broke.Count == 0)
+            {
+                <p class="muted">Nothing is broken that the engines can see.</p>
+            }
+            else
+            {
+                @Table(_broke)
+            }
+        </section>
+
+        <section class="panel">
+            <h2 class="panel-h">What changed</h2>
+            <p class="panel-sub">Every change on a finding in the last @_days days, newest first: what a destination was told.</p>
+            @if (_changes!.Count == 0)
+            {
+                <p class="muted">Nothing has changed on any finding in the last @_days days.</p>
+            }
+            else
+            {
+                <div class="table-scroll">
+                    <table class="triage">
+                        <thead><tr><th>When</th><th>What</th><th>Finding</th><th>Domain</th></tr></thead>
+                        <tbody>
+                            @foreach (var change in _changes)
+                            {
+                                <tr>
+                                    <td class="when">@When(change.Event.At)</td>
+                                    <td>@Describe(change.Event)</td>
+                                    <td><span class="badge @Css(change.Finding.Severity)">@Label(change.Finding.Severity)</span> @change.Finding.Title</td>
+                                    <td>@DomainLink(change.Finding)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section class="panel">
+            <h2 class="panel-h">What needs review</h2>
+            <p class="panel-sub">Open findings nobody has decided about yet, at any severity, oldest first.</p>
+            @if (_review!.Count == 0)
+            {
+                <p class="muted">Every open finding has been looked at.</p>
+            }
+            else
+            {
+                @Table(_review)
+            }
+        </section>
+
+        <section class="panel">
+            <h2 class="panel-h">Awaiting verification</h2>
+            <p class="panel-sub">Changes applied from this product that DNS, and then the receivers' reports, have not yet shown took. This is where a customer's "you said it was done" comes from.</p>
+            @if (_verifying!.Count == 0)
+            {
+                <p class="muted">Nothing applied is waiting to be verified.</p>
+            }
+            else
+            {
+                @Table(_verifying)
+            }
+        </section>
+
+        <section class="panel">
+            <h2 class="panel-h">Excepted</h2>
+            <p class="panel-sub">Findings somebody decided to live with for a while. Their sources keep observing them; each is due back for review on the date shown.</p>
+            @if (_excepted!.Count == 0)
+            {
+                <p class="muted">No finding is under an exception.</p>
+            }
+            else
+            {
+                @Table(_excepted)
+            }
+        </section>
+
+        <section class="panel">
+            <h2 class="panel-h">Engines</h2>
+            <p class="panel-sub">Whether each engine is running. Silence is never health: an engine that has not reported is not known to be working, and what it found is not known to have gone away.</p>
+            @if (_sources!.Count == 0)
+            {
+                <p class="muted">No engine has recorded a run yet. Nothing here is known to be working until the nightly DNS scan, the collector or an import has run.</p>
+            }
+            else
+            {
+                <div class="table-scroll">
+                    <table class="triage">
+                        <thead><tr><th>Engine</th><th>Client</th><th>Health</th><th>Last success</th><th>Last error</th></tr></thead>
+                        <tbody>
+                            @foreach (var (source, health) in _sources)
+                            {
+                                <tr>
+                                    <td>@source.Kind</td>
+                                    <td>@(source.ClientName.Length > 0 ? source.ClientName : "the organization")</td>
+                                    <td><span class="badge @HealthCss(health)">@health</span></td>
+                                    <td class="when">@(source.LastSuccessAt is { } ok ? When(ok) : "never")</td>
+                                    <td class="muted">@(source.LastError ?? "")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    private OrganizationAccess? _access;
+    private string _days = "7";
+    private string? _error;
+    private string? _notice;
+
+    private IReadOnlyList<Finding>? _broke;
+    private IReadOnlyList<FindingChange>? _changes;
+    private IReadOnlyList<Finding>? _review;
+    private IReadOnlyList<Finding>? _verifying;
+    private IReadOnlyList<Finding>? _excepted;
+    private IReadOnlyList<(FindingSource Source, string Health)>? _sources;
+
+    // The one finding opened for its history and actions, and the form state for it.
+    private string? _selected;
+    private IReadOnlyList<FindingEvent>? _history;
+    private string _state = AnalystStates.Investigating;
+    private string _note = "";
+    private bool _excepting;
+    private string _reason = "";
+    private string _approver = "";
+    private string _control = "";
+    private DateTime? _reviewOn;
+    private DateTime? _expiresOn;
+    private string? _actionError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _access = await Org.GetAsync();
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (_access is null) { return; }
+        var tenant = _access.TenantId;
+        var client = _access.RestrictedClient;
+        var days = int.TryParse(_days, NumberStyles.Integer, CultureInfo.InvariantCulture, out var d) ? d : 7;
+
+        try
+        {
+            _broke = await Findings.ListAsync(new FindingFilter
+            {
+                TenantId = tenant, ClientSlug = client, InQueueOnly = true, MinSeverity = "warning",
+                SourceStates = [SourceStates.Active, SourceStates.Unknown], Limit = 200,
+            });
+            _changes = await Findings.ChangesAsync(tenant, DateTimeOffset.UtcNow.AddDays(-days), FindingEventKinds.Delivering, client, 200);
+            _review = [.. (await Findings.ListAsync(new FindingFilter
+            {
+                TenantId = tenant, ClientSlug = client, InQueueOnly = true,
+                AnalystStates = [AnalystStates.Unreviewed, AnalystStates.Investigating],
+                SourceStates = [SourceStates.Active, SourceStates.Unknown], Limit = 200,
+            })).OrderBy(f => f.FirstObservedAt)];
+            _verifying = [.. (await Findings.ListAsync(new FindingFilter
+            {
+                TenantId = tenant, ClientSlug = client, AwaitingVerificationOnly = true,
+                SourceStates = [SourceStates.Active, SourceStates.Unknown], Limit = 200,
+            })).OrderBy(f => f.FirstObservedAt)];
+            _excepted = [.. (await Findings.ListAsync(new FindingFilter { TenantId = tenant, ClientSlug = client, ExceptedOnly = true, Limit = 200 }))
+                .OrderBy(f => f.OpenException?.ReviewAt)];
+            _sources = await Sources.HealthAsync(tenant, client);
+            _error = null;
+
+            if (_selected is not null) { _history = await Findings.EventsAsync(_selected); }
+        }
+        catch (SqliteException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task SelectAsync(Finding finding)
+    {
+        if (_selected == finding.Id)
+        {
+            _selected = null;
+            _history = null;
+            return;
+        }
+
+        _selected = finding.Id;
+        _excepting = false;
+        _actionError = null;
+        _note = "";
+        _state = finding.AnalystState is AnalystStates.Unreviewed ? AnalystStates.Investigating : finding.AnalystState;
+        _history = await Findings.EventsAsync(finding.Id);
+    }
+
+    // ---- what a person decides -------------------------------------------------
+
+    private async Task AcknowledgeAsync(Finding finding)
+    {
+        if (_access is not { CanOperate: true }) { return; }
+        var seen = await Lifecycle.AcknowledgeAsync(finding.Id, _access.User, null, _access.TenantId, _access.RestrictedClient);
+        if (seen is not null)
+        {
+            await Audit.RecordAsync(_access.Current?.Id, _access.User, "finding.acknowledged", $"{finding.Domain}: {finding.Title} (finding {finding.Id})");
+        }
+        await LoadAsync();
+    }
+
+    private async Task SetStateAsync(Finding finding)
+    {
+        if (_access is not { CanOperate: true }) { return; }
+        try
+        {
+            var note = string.IsNullOrWhiteSpace(_note) ? null : _note.Trim();
+            var updated = await Lifecycle.SetAnalystStateAsync(finding.Id, _state, _access.User, note, _access.TenantId, _access.RestrictedClient);
+            if (updated is not null)
+            {
+                await Audit.RecordAsync(_access.Current?.Id, _access.User, "finding.decided", $"{finding.Domain}: {_state} (finding {finding.Id})" + (note is null ? "" : $": {note}"));
+                _notice = $"Marked {StateLabel(_state)}. The source keeps observing it; if it is still there, it will say so.";
+            }
+            _actionError = null;
+        }
+        catch (ArgumentException ex)
+        {
+            _actionError = ex.Message;
+        }
+        await LoadAsync();
+    }
+
+    private async Task ExceptAsync(Finding finding)
+    {
+        if (_access is not { CanEscalatePolicy: true }) { return; }
+        try
+        {
+            var request = new ExceptionRequest
+            {
+                Reason = _reason,
+                Approver = _approver,
+                CompensatingControl = _control,
+                ReviewAt = _reviewOn is { } review ? new DateTimeOffset(DateTime.SpecifyKind(review, DateTimeKind.Utc)) : DateTimeOffset.MinValue,
+                ExpiresAt = _expiresOn is { } expires ? new DateTimeOffset(DateTime.SpecifyKind(expires, DateTimeKind.Utc)) : null,
+                By = _access.User,
+            };
+            var excepted = await Lifecycle.ExceptAsync(finding.Id, request, _access.TenantId, _access.RestrictedClient);
+            if (excepted is not null)
+            {
+                await Audit.RecordAsync(_access.Current?.Id, _access.User, "finding.excepted",
+                    $"{finding.Domain}: {finding.Title} (finding {finding.Id}); approved by {request.Approver.Trim()}, review {request.ReviewAt:yyyy-MM-dd}");
+                _notice = "Exception recorded. The finding leaves the queue; its source keeps observing it, and it is due back for review on the date given.";
+                _excepting = false;
+                _reason = _approver = _control = "";
+                _reviewOn = _expiresOn = null;
+            }
+            _actionError = null;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            _actionError = ex.Message;
+        }
+        await LoadAsync();
+    }
+
+    private async Task EndExceptionAsync(Finding finding)
+    {
+        if (_access is not { CanEscalatePolicy: true }) { return; }
+        if (await Lifecycle.EndExceptionAsync(finding.Id, _access.User, null, _access.TenantId, _access.RestrictedClient))
+        {
+            await Audit.RecordAsync(_access.Current?.Id, _access.User, "finding.exception_ended", $"{finding.Domain}: {finding.Title} (finding {finding.Id})");
+            _notice = "Exception ended. The finding is back in the queue if its source still sees it.";
+        }
+        await LoadAsync();
+    }
+
+    // ---- rendering ------------------------------------------------------------------
+
+    private RenderFragment Table(IReadOnlyList<Finding> list) =>
+        @<div class="table-scroll">
+            <table class="triage">
+                <thead>
+                    <tr><th>Severity</th><th>Finding</th><th>Domain</th><th>Source says</th><th>Decision</th><th>Seen</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var finding in list)
+                    {
+                        <tr>
+                            <td><span class="badge @Css(finding.Severity)">@Label(finding.Severity)</span></td>
+                            <td>
+                                <button class="linkish" @onclick="() => SelectAsync(finding)">@finding.Title</button>
+                                <br /><span class="muted">@finding.Type@(finding.Rule is { } rule ? " · " + rule : "")</span>
+                            </td>
+                            <td>@DomainLink(finding)</td>
+                            <td>
+                                <span class="badge @SourceCss(finding.SourceState)">@SourceLabel(finding.SourceState)</span>
+                                @if (finding.RemediationStage is { } stage)
+                                {
+                                    <br /><span class="muted">@StageLabel(stage)</span>
+                                }
+                            </td>
+                            <td>
+                                @StateLabel(finding.AnalystState)
+                                @if (finding.OpenException is { } exception)
+                                {
+                                    <br /><span class="muted">review @exception.ReviewAt.ToString("MMM d, yyyy", CultureInfo.InvariantCulture)@(exception.ExpiresAt is { } expires ? ", expires " + expires.ToString("MMM d, yyyy", CultureInfo.InvariantCulture) : "")</span>
+                                }
+                            </td>
+                            <td class="when">@When(finding.FirstObservedAt)<br />@(finding.ObservationCount)× · last @When(finding.LastObservedAt)</td>
+                        </tr>
+                        @if (_selected == finding.Id)
+                        {
+                            <tr class="note-row">
+                                <td colspan="6">
+                                    @Detail(finding)
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>;
+
+    private RenderFragment Detail(Finding finding) =>
+        @<div>
+            @if (finding.EvidenceRef is { } evidence)
+            {
+                <p class="muted">Evidence: <code>@evidence</code>@(finding.ExpectedRef is { } expected ? " · expected " : "")@if (finding.ExpectedRef is { } expectedRef) { <code>@expectedRef</code> }</p>
+            }
+            @if (finding.RelatedFindingId is { } related)
+            {
+                <p class="muted">Answers finding <code>@related</code>.</p>
+            }
+
+            @if (_history is { Count: > 0 })
+            {
+                <table class="triage">
+                    <tbody>
+                        @foreach (var e in _history.OrderByDescending(e => e.At))
+                        {
+                            <tr>
+                                <td class="when">@When(e.At)</td>
+                                <td>@Describe(e)</td>
+                                <td class="muted">@(e.Note ?? "")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+
+            @if (_actionError is not null)
+            {
+                <p class="banner-warn">@_actionError</p>
+            }
+
+            @if (_access is { CanOperate: true })
+            {
+                <div class="form-row">
+                    @if (finding.AnalystState == AnalystStates.Unreviewed)
+                    {
+                        <button class="quiet" @onclick="() => AcknowledgeAsync(finding)">Mark as seen</button>
+                    }
+                    <select @bind="_state" aria-label="Decision">
+                        <option value="@AnalystStates.Investigating">Investigating</option>
+                        <option value="@AnalystStates.ActionRequired">Action required</option>
+                        <option value="@AnalystStates.Benign">Benign</option>
+                        <option value="@AnalystStates.Closed">Closed</option>
+                    </select>
+                    <input placeholder="Note (optional)" @bind="_note" />
+                    <button class="quiet" @onclick="() => SetStateAsync(finding)">Save decision</button>
+                </div>
+
+                @if (_access.CanEscalatePolicy)
+                {
+                    @if (finding.OpenException is not null)
+                    {
+                        <div class="form-row">
+                            <button class="quiet" @onclick="() => EndExceptionAsync(finding)">End the exception</button>
+                        </div>
+                    }
+                    else if (!_excepting)
+                    {
+                        <div class="form-row">
+                            <button class="quiet" @onclick="() => _excepting = true">Record an exception…</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="form-row">
+                            <input class="wide" placeholder="Reason" @bind="_reason" />
+                            <input placeholder="Approved by" @bind="_approver" />
+                        </div>
+                        <div class="form-row">
+                            <input class="wide" placeholder="Compensating control" @bind="_control" />
+                            <label>Review on <input type="date" @bind="_reviewOn" /></label>
+                            <label>Expires <input type="date" @bind="_expiresOn" /></label>
+                            <button class="quiet" @onclick="() => ExceptAsync(finding)">Record</button>
+                            <button class="quiet" @onclick="() => _excepting = false">Cancel</button>
+                        </div>
+                        <p class="muted">An exception needs all four: a reason, who approved it, what compensates for it, and a date it is due back. The source keeps observing the finding throughout.</p>
+                    }
+                }
+            }
+        </div>;
+
+    private static RenderFragment DomainLink(Finding finding) =>
+        @<text>
+            @if (finding.Domain is { } domain)
+            {
+                <a href="@($"domains/{Uri.EscapeDataString(domain)}")">@domain</a>
+            }
+            else
+            {
+                <span class="muted">—</span>
+            }
+            @if (finding.ClientName.Length > 0 && !string.Equals(finding.ClientName, finding.Domain, StringComparison.OrdinalIgnoreCase))
+            {
+                <br /><span class="muted">@finding.ClientName</span>
+            }
+        </text>;
+
+    private static string Describe(FindingEvent e) => e.Kind switch
+    {
+        FindingEventKinds.Observed => e.FromValue is null ? "New" : "Seen again after a failed observation",
+        FindingEventKinds.SeverityChanged => $"Severity {e.FromValue} → {e.ToValue}",
+        FindingEventKinds.TypeChanged => $"Now {e.ToValue}",
+        FindingEventKinds.SourceUnknown => "Could not be observed",
+        FindingEventKinds.ObservationAbsent => "Not seen",
+        FindingEventKinds.SourceResolved => "Resolved by its source",
+        FindingEventKinds.Reopened => "Back",
+        FindingEventKinds.Acknowledged => $"Seen by {e.Actor}",
+        FindingEventKinds.AnalystStateChanged => $"{StateLabel(e.ToValue ?? "")} by {e.Actor}",
+        FindingEventKinds.ExceptionApplied => $"Excepted by {e.Actor}",
+        FindingEventKinds.ExceptionExpired => "Exception expired",
+        FindingEventKinds.ExceptionEnded => $"Exception ended by {e.Actor}",
+        FindingEventKinds.RemediationStaged => $"Remediation: {StageLabel(e.ToValue ?? "")}",
+        FindingEventKinds.ExpectedChanged => "What it should serve changed",
+        FindingEventKinds.TicketCreated => $"Ticket #{e.ToValue}",
+        FindingEventKinds.TicketUpdated => $"Ticket #{e.ToValue} noted",
+        _ => e.Kind,
+    };
+
+    private static string When(DateTimeOffset at) => at.UtcDateTime.ToString("MMM d, yyyy HH:mm", CultureInfo.InvariantCulture) + " UTC";
+
+    private static string Css(string severity) => severity switch
+    {
+        "critical" => "urgent",
+        "warning" => "act",
+        _ => "dim",
+    };
+
+    private static string Label(string severity) => severity switch
+    {
+        "critical" => "Critical",
+        "warning" => "Check",
+        _ => "Info",
+    };
+
+    private static string SourceCss(string state) => state switch
+    {
+        SourceStates.Active => "act",
+        SourceStates.Unknown => "watch",
+        _ => "fine",
+    };
+
+    private static string SourceLabel(string state) => state switch
+    {
+        SourceStates.Active => "Still there",
+        SourceStates.Unknown => "Unknown: could not observe",
+        SourceStates.Resolved => "Gone",
+        _ => state,
+    };
+
+    private static string HealthCss(string health) => health switch
+    {
+        SourceHealth.Healthy => "fine",
+        SourceHealth.Degraded => "watch",
+        SourceHealth.Stale => "act",
+        SourceHealth.Failed => "urgent",
+        _ => "dim",
+    };
+
+    private static string StateLabel(string state) => state switch
+    {
+        AnalystStates.Unreviewed => "Not yet reviewed",
+        AnalystStates.Investigating => "Investigating",
+        AnalystStates.ActionRequired => "Action required",
+        AnalystStates.Benign => "Benign",
+        AnalystStates.AcceptedRisk => "Accepted risk",
+        AnalystStates.Closed => "Closed",
+        _ => state,
+    };
+
+    private static string StageLabel(string stage) => stage switch
+    {
+        RemediationStages.Planned => "planned",
+        RemediationStages.Applied => "applied",
+        RemediationStages.DnsPending => "applied; DNS not yet seen serving it",
+        RemediationStages.DnsVerified => "DNS verified",
+        RemediationStages.EffectivenessPending => "DNS verified; awaiting a receiver's report",
+        _ => stage,
+    };
+}
