@@ -196,6 +196,38 @@ public sealed class DnsFindingSourceTests : IDisposable
     }
 
     [Fact]
+    public async Task AcknowledgingAChangeAcknowledgesItsFindingAndWritesNothingOnTheRow()
+    {
+        await _dns.SaveAsync(Domain, Reading());
+        await _dns.SaveAsync(Domain, Reading(dmarc: Loosened));
+        var drift = new DnsDriftStore(_dbPath);
+        var change = Assert.Single(await drift.ListAsync(_acme.TenantId, openOnly: true));
+        var finding = Assert.Single(await _findings.ListAsync(new FindingFilter { TenantId = _acme.TenantId }));
+        Assert.Equal(finding.Id, change.FindingId);
+
+        Assert.True(await drift.AcknowledgeAsync(change.Id, "tech@msp.example", "client moved registrar", _acme.TenantId));
+
+        var seen = (await _findings.GetAsync(finding.Id))!;
+        Assert.Equal(AnalystStates.Investigating, seen.AnalystState);
+        Assert.Equal(SourceStates.Active, seen.SourceState);
+        Assert.Contains(await _findings.EventsAsync(seen.Id), e => e.Kind == FindingEventKinds.Acknowledged && e.Actor == "tech@msp.example" && e.Note == "client moved registrar");
+
+        // The page reads the acknowledgement from the finding; the row's own columns stay empty.
+        var listed = Assert.Single(await drift.ListAsync(_acme.TenantId, domain: Domain));
+        Assert.Equal("tech@msp.example", listed.AcknowledgedBy);
+        Assert.Equal(AnalystStates.Investigating, listed.FindingAnalystState);
+        Assert.Empty(await drift.ListAsync(_acme.TenantId, openOnly: true));
+        Assert.DoesNotContain("client moved registrar", ClientFilesText(), StringComparison.Ordinal);
+
+        // Once acknowledged, a second click is not a second acknowledgement.
+        Assert.False(await drift.AcknowledgeAsync(change.Id, "tech@msp.example", null, _acme.TenantId));
+
+        // Another night of the same drift is the same finding, still acknowledged, and the new row is not "not yet seen".
+        await _dns.SaveAsync(Domain, Reading(dmarc: Loosened));
+        Assert.Empty(await drift.ListAsync(_acme.TenantId, openOnly: true));
+    }
+
+    [Fact]
     public async Task TheScanRecordsItsHealthPerClient()
     {
         var scanner = new DnsScanner(_dbPath);

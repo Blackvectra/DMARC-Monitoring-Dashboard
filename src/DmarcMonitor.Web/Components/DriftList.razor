@@ -66,6 +66,10 @@ else
                         @if (e.IsAcknowledged)
                         {
                             <span class="muted">Seen by @e.AcknowledgedBy</span>
+                            @if (e.FindingAnalystState is { } state && state != "investigating" && state != "unreviewed")
+                            {
+                                <br /><span class="badge dim">@StateLabel(state)</span>
+                            }
                         }
                         else if (Access is { CanOperate: true })
                         {
@@ -74,6 +78,10 @@ else
                         else
                         {
                             <span class="badge dim">New</span>
+                        }
+                        @if (e.IsResolved)
+                        {
+                            <br /><span class="muted">A later scan read the record as it was before: resolved.</span>
                         }
                     </td>
                 </tr>
@@ -111,7 +119,8 @@ else
 
         if (await Drift.AcknowledgeAsync(e.Id, Access.User, null, Access.TenantId, Access.RestrictedClient))
         {
-            await Audit.RecordAsync(Access.Current?.Id, Access.User, "dns.drift.acknowledged", $"{e.Domain}: {e.Summary}");
+            await Audit.RecordAsync(Access.Current?.Id, Access.User, "finding.acknowledged",
+                $"{e.Domain}: {e.Summary}" + (e.FindingId is null ? "" : $" (finding {e.FindingId})"));
         }
 
         await LoadAsync();
@@ -122,6 +131,15 @@ else
         "critical" => "urgent",
         "warning" => "act",
         _ => "dim",
+    };
+
+    private static string StateLabel(string state) => state switch
+    {
+        "action_required" => "Action required",
+        "benign" => "Benign",
+        "accepted_risk" => "Accepted risk",
+        "closed" => "Closed",
+        _ => state,
     };
 
     private static string Label(string severity) => severity switch
