@@ -1,10 +1,11 @@
 using System.Globalization;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
 
-/// <summary>A change seen in a domain's DNS between two scans.</summary>
+/// <summary>One change seen in a domain's records between two scans.</summary>
 public sealed record DriftEvent
 {
     public required string Id { get; init; }
@@ -17,30 +18,51 @@ public sealed record DriftEvent
     public required string Summary { get; init; }
     public required string Severity { get; init; }
 
-    /// <summary>True when this product changed the domain's DNS itself shortly before.</summary>
+    /// <summary>True when this product changed the domain's DNS itself in the two days before.</summary>
     public bool WasExpected { get; init; }
 
+    /// <summary>When somebody first looked at it - through the finding it belongs to, or, for a change from before findings existed, the row's own mark.</summary>
     public DateTimeOffset? AcknowledgedAt { get; init; }
     public string? AcknowledgedBy { get; init; }
     public string? Note { get; init; }
 
     public bool IsAcknowledged => AcknowledgedAt is not null;
+
+    public string DomainId { get; init; } = "";
+
+    /// <summary>The finding this change raised or moved: the one with the same domain and record.</summary>
+    public string? FindingId { get; init; }
+    public string? FindingSourceState { get; init; }
+    public string? FindingAnalystState { get; init; }
+
+    /// <summary>True when a later scan read the record as it was before the change.</summary>
+    public bool IsResolved => string.Equals(FindingSourceState, SourceStates.Resolved, StringComparison.Ordinal);
 }
 
 /// <summary>
-/// Reads and acknowledges DNS drift - what changed in a domain's records, and
-/// whether anybody has looked at it yet.
+/// Reads DNS drift - what changed in a domain's records, and whether anybody
+/// has looked at it yet - and records that somebody did.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Written by <see cref="DnsSnapshotStore"/> as a scan finds each change;
-/// this only reads them back and records that somebody saw one. Scoped the
-/// way every other read is: an organization sees its own domains, and a
-/// customer login sees only its own client's.
+/// this reads them back. Scoped the way every other read is: an organization
+/// sees its own domains, and a customer login sees only its own client's.
+/// </para>
+/// <para>
+/// Whether a change has been looked at is a fact about its finding, not about
+/// the change: a domain's record has one finding however many nights it
+/// drifts, and acknowledging a change acknowledges that. The acknowledgement
+/// columns on the row itself are read for changes from before findings
+/// existed and written for nothing newer.
+/// </para>
 /// </remarks>
 public sealed class DnsDriftStore(string databasePath)
 {
     /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
     private readonly ClientDatabases _files = new(databasePath);
+
+    private readonly FindingLifecycle _lifecycle = new(databasePath);
 
     /// <param name="tenantId">The organization, or null for every one (the master account).</param>
     /// <param name="clientSlug">Only this client's domains, for a customer login.</param>
@@ -56,14 +78,24 @@ public sealed class DnsDriftStore(string databasePath)
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT e.id, d.name, COALESCE(c.name, ''), e.detected_at, e.record_type, e.old_value, e.new_value,
-                   e.summary, e.severity, e.was_expected, e.acknowledged_at, e.acknowledged_by, e.acknowledgement_note
+                   e.summary, e.severity, e.was_expected,
+                   COALESCE(e.acknowledged_at, a.at), COALESCE(e.acknowledged_by, a.actor), COALESCE(e.acknowledgement_note, a.note),
+                   e.domain_id, f.id, f.source_state, f.analyst_state
             FROM dns_drift_events e
             JOIN domains d ON d.id = e.domain_id
             LEFT JOIN clients c ON c.id = e.client_id
+            LEFT JOIN main.findings f
+                   ON f.domain_id = e.domain_id AND f.source_id = 'dns-scan'
+                  AND f.dedup_key = 'dns:' || e.domain_id || ':' || e.record_type
+            LEFT JOIN main.finding_events a
+                   ON a.id = (SELECT x.id FROM main.finding_events x
+                              WHERE x.finding_id = f.id
+                                AND x.kind IN ('Acknowledged', 'AnalystStateChanged', 'ExceptionApplied')
+                              ORDER BY x.at DESC, x.rowid DESC LIMIT 1)
             WHERE ($tenant IS NULL OR e.tenant_id = $tenant)
               AND ($client IS NULL OR c.slug = $client)
               AND ($domain IS NULL OR d.name = $domain)
-              AND ($open = 0 OR e.acknowledged_at IS NULL)
+              AND ($open = 0 OR (e.acknowledged_at IS NULL AND (f.id IS NULL OR f.analyst_state = 'unreviewed')))
             ORDER BY e.detected_at DESC,
                      CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END
             LIMIT $limit
@@ -95,6 +127,10 @@ public sealed class DnsDriftStore(string databasePath)
                 AcknowledgedAt = Text(10) is { } at ? Parse(at) : null,
                 AcknowledgedBy = Text(11),
                 Note = Text(12),
+                DomainId = reader.GetString(13),
+                FindingId = Text(14),
+                FindingSourceState = Text(15),
+                FindingAnalystState = Text(16),
             });
         }
 
@@ -102,8 +138,9 @@ public sealed class DnsDriftStore(string databasePath)
     }
 
     /// <summary>
-    /// Records that somebody has seen a change. Returns false when there is no
-    /// such change in the caller's organization, or it was already acknowledged.
+    /// Records that somebody has seen a change, by acknowledging the finding
+    /// it belongs to. Returns false when there is no such change in the
+    /// caller's organization, or somebody already has.
     /// </summary>
     public async Task<bool> AcknowledgeAsync(
         string id, string by, string? note, string? tenantId, string? clientSlug = null, CancellationToken ct = default)
@@ -111,9 +148,42 @@ public sealed class DnsDriftStore(string databasePath)
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentException.ThrowIfNullOrWhiteSpace(by);
 
-        // The event is in whichever client's file its domain is; each file in
-        // the caller's scope is asked in turn, and the first to hold it
-        // answers.
+        // The change is in whichever client's file its domain is; each file
+        // in the caller's scope is asked in turn, and the first to hold it
+        // answers with what identifies its finding.
+        (string Tenant, string Client, string Domain, string Record, bool MarkedOnRow)? change = null;
+        await _files.FirstAsync(ClientScope.For(tenantId, clientSlug), write: false, async (db, _, token) =>
+        {
+            await using var command = db.CreateCommand();
+            command.CommandText = """
+                SELECT tenant_id, client_id, domain_id, record_type, acknowledged_at IS NOT NULL
+                FROM dns_drift_events
+                WHERE id = $id
+                  AND ($tenant IS NULL OR tenant_id = $tenant)
+                  AND ($client IS NULL OR client_id = (SELECT id FROM clients WHERE slug = $client AND tenant_id = dns_drift_events.tenant_id))
+                """;
+            command.Parameters.AddWithValue("$id", id);
+            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$client", (object?)clientSlug ?? DBNull.Value);
+
+            await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            if (!await reader.ReadAsync(token).ConfigureAwait(false)) { return false; }
+            change = (reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt64(4) == 1);
+            return true;
+        }, ct).ConfigureAwait(false);
+
+        if (change is not { } found) { return false; }
+
+        var finding = await _lifecycle.Store.FindAsync(
+            found.Tenant, FindingSourceIds.DnsScan, found.Client, DnsFindingSource.DedupKey(found.Domain, found.Record), ct).ConfigureAwait(false);
+        if (finding is not null)
+        {
+            if (!string.Equals(finding.AnalystState, AnalystStates.Unreviewed, StringComparison.Ordinal)) { return false; }
+            return await _lifecycle.AcknowledgeAsync(finding.Id, by, note, tenantId, clientSlug, ct).ConfigureAwait(false) is not null;
+        }
+
+        // A change from before findings existed keeps its own mark.
+        if (found.MarkedOnRow) { return false; }
         return await _files.FirstAsync(ClientScope.For(tenantId, clientSlug), write: true, async (db, _, token) =>
         {
             await using var command = db.CreateCommand();
@@ -121,16 +191,11 @@ public sealed class DnsDriftStore(string databasePath)
                 UPDATE dns_drift_events
                 SET acknowledged_at = $at, acknowledged_by = $by, acknowledgement_note = $note
                 WHERE id = $id AND acknowledged_at IS NULL
-                  AND ($tenant IS NULL OR tenant_id = $tenant)
-                  AND ($client IS NULL OR client_id = (SELECT id FROM clients WHERE slug = $client AND tenant_id = dns_drift_events.tenant_id))
                 """;
             command.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
             command.Parameters.AddWithValue("$by", by.Trim());
             command.Parameters.AddWithValue("$note", string.IsNullOrWhiteSpace(note) ? DBNull.Value : note.Trim());
             command.Parameters.AddWithValue("$id", id);
-            command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
-            command.Parameters.AddWithValue("$client", (object?)clientSlug ?? DBNull.Value);
-
             return await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) == 1;
         }, ct).ConfigureAwait(false);
     }

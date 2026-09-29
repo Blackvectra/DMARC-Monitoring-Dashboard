@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Dns;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Notifications;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
@@ -61,7 +62,7 @@ public sealed class ConnectWiseNotifierTests : IDisposable
         return slug;
     }
 
-    private static PublishedRecords Reading(string domain, string dmarc = "v=DMARC1; p=quarantine; rua=mailto:d@msp.example",
+    private static PublishedRecords Reading(string domain, string? dmarc = "v=DMARC1; p=quarantine; rua=mailto:d@msp.example",
         string spf = "v=spf1 include:_spf.mail.example -all") => new()
     {
         Domain = domain,
@@ -77,10 +78,114 @@ public sealed class ConnectWiseNotifierTests : IDisposable
         await _dns.SaveAsync(domain, Reading(domain, dmarc: "v=DMARC1; p=none; rua=mailto:d@msp.example"));
     }
 
-    private Task<Webhook> ConnectWiseAsync(string org = "local", string minSeverity = "warning", string board = "Alerts") =>
+    /// <summary>A destination on the older contract unless the test says otherwise: those tests are about that contract.</summary>
+    private Task<Webhook> ConnectWiseAsync(string org = "local", string minSeverity = "warning", string board = "Alerts", string payload = WebhookStore.EventVersion) =>
         new WebhookStore(_dbPath, _secrets).SetConnectWiseAsync(org, Site, CompanyId, PublicKey, PrivateKey, ClientId,
             new ConnectWiseSettings(board, "New", "Priority 1 - Emergency", "Priority 3 - Medium"),
-            minSeverity, "https://dmarc.msp.example/", "tester");
+            minSeverity, "https://dmarc.msp.example/", "tester", payload);
+
+    [Fact]
+    public async Task AFindingIsOneTicketHoweverManyNightsSeeIt()
+    {
+        await ConnectWiseAsync(payload: WebhookStore.FindingVersion);
+        await MapAsync("acme-corp", 1001);
+        await LoosenedAsync();
+        Assert.Equal(1, Assert.Single(await Notifier().SendAsync()).Delivered);
+
+        // Two more nights of the same drift: the same finding, nothing to file.
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: "v=DMARC1; p=none; rua=mailto:d@msp.example"));
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: "v=DMARC1; p=none; rua=mailto:d@msp.example"));
+        Assert.Equal(0, Assert.Single(await Notifier().SendAsync()).Delivered);
+
+        var ticket = Assert.Single(_cw.Tickets.Values);
+        Assert.Empty(_cw.Notes);
+        Assert.Equal(1001, ticket.CompanyId);
+        Assert.Equal("Priority 1 - Emergency", ticket.Priority);
+        Assert.StartsWith("DMARC: Acme Corp: ", ticket.Summary, StringComparison.Ordinal);
+        Assert.Contains("p=quarantine → p=none", ticket.Summary, StringComparison.Ordinal);
+        Assert.Matches(@" \[dm:[0-9a-f]{8}\]$", ticket.Summary);
+        Assert.Contains("Was: v=DMARC1; p=quarantine", ticket.Description, StringComparison.Ordinal);
+        Assert.Contains("Now: v=DMARC1; p=none", ticket.Description, StringComparison.Ordinal);
+        Assert.Contains("https://dmarc.msp.example/domains/acme.example", ticket.Description, StringComparison.Ordinal);
+
+        // The ledger keys the ticket to the finding, and the finding's history names the ticket.
+        var findings = new FindingStore(_dbPath);
+        var finding = Assert.Single(await findings.ListAsync(new FindingFilter()));
+        Assert.Contains("finding " + finding.Id, ticket.Description, StringComparison.Ordinal);
+        Assert.Equal(finding.Id, await ScalarAsync("SELECT remote_key FROM webhook_deliveries"));
+        Assert.Equal(ticket.Id.ToString(CultureInfo.InvariantCulture), await ScalarAsync("SELECT remote_id FROM webhook_deliveries"));
+        var filed = Assert.Single(await findings.EventsAsync(finding.Id), e => e.Kind == FindingEventKinds.TicketCreated);
+        Assert.Equal(ticket.Id.ToString(CultureInfo.InvariantCulture), filed.ToValue);
+        Assert.Contains("'Alerts'", filed.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WhatChangesOnTheFindingIsANoteWhileTheTicketIsOpen()
+    {
+        await ConnectWiseAsync(payload: WebhookStore.FindingVersion);
+        await MapAsync("acme-corp", 1001);
+        await _dns.SaveAsync("acme.example", Reading("acme.example"));
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: "v=DMARC1; p=quarantine; pct=50; rua=mailto:d@msp.example"));
+        await Notifier().SendAsync();
+        var ticket = Assert.Single(_cw.Tickets.Values);
+        Assert.Equal("Priority 3 - Medium", ticket.Priority);
+
+        // Worse, then back as it was: notes on the ticket the tech has.
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: null));
+        await _dns.SaveAsync("acme.example", Reading("acme.example"));
+        var run = Assert.Single(await Notifier().SendAsync());
+
+        Assert.True(run.Worked, run.Error);
+        Assert.Equal(3, run.Delivered);
+        Assert.Single(_cw.Tickets.Values);
+        Assert.Equal(3, _cw.Notes.Count);
+        Assert.All(_cw.Notes, note => Assert.Equal(ticket.Id, note.Ticket));
+        Assert.StartsWith("Severity warning → critical", _cw.Notes[0].Text, StringComparison.Ordinal);
+        Assert.Contains("Now: (not published)", _cw.Notes[0].Text, StringComparison.Ordinal);
+        Assert.StartsWith("Now " + FindingTypes.DmarcPolicyWeakened, _cw.Notes[1].Text, StringComparison.Ordinal);
+        Assert.StartsWith("Resolved by its source", _cw.Notes[2].Text, StringComparison.Ordinal);
+        Assert.Contains("Close this ticket", _cw.Notes[2].Text, StringComparison.Ordinal);
+
+        // What a person decides here reaches the tech there.
+        var findings = new FindingStore(_dbPath);
+        var finding = Assert.Single(await findings.ListAsync(new FindingFilter()));
+        await new FindingLifecycle(_dbPath).AcknowledgeAsync(finding.Id, "tech@msp.example", "looking");
+        Assert.Equal(1, Assert.Single(await Notifier().SendAsync()).Delivered);
+        Assert.StartsWith("Acknowledged in DMARC Monitor by tech@msp.example", _cw.Notes[3].Text, StringComparison.Ordinal);
+        Assert.Contains("looking", _cw.Notes[3].Text, StringComparison.Ordinal);
+        Assert.Equal(4, (await findings.EventsAsync(finding.Id)).Count(e => e.Kind == FindingEventKinds.TicketUpdated));
+    }
+
+    [Fact]
+    public async Task AFindingBackAfterItsTicketWasClosedGetsANewTicketNamingTheOld()
+    {
+        await ConnectWiseAsync(payload: WebhookStore.FindingVersion);
+        await MapAsync("acme-corp", 1001);
+        await LoosenedAsync();
+        await Notifier().SendAsync();
+        var first = Assert.Single(_cw.Tickets.Values);
+        first.Closed = true;
+
+        // Resolved after the tech closed it: nothing a closed ticket needs to hear, and delivered.
+        await _dns.SaveAsync("acme.example", Reading("acme.example"));
+        Assert.Equal(1, Assert.Single(await Notifier().SendAsync()).Delivered);
+        Assert.Single(_cw.Tickets.Values);
+        Assert.Empty(_cw.Notes);
+
+        // Back again: a new ticket, naming the old one.
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: "v=DMARC1; p=none; rua=mailto:d@msp.example"));
+        Assert.Equal(1, Assert.Single(await Notifier().SendAsync()).Delivered);
+
+        Assert.Equal(2, _cw.Tickets.Count);
+        var second = _cw.Tickets.Values.Single(t => t.Id != first.Id);
+        Assert.StartsWith($"Previously ticket #{first.Id}, since closed.", second.Description, StringComparison.Ordinal);
+        Assert.Contains("Now: v=DMARC1; p=none", second.Description, StringComparison.Ordinal);
+
+        var findings = new FindingStore(_dbPath);
+        var finding = Assert.Single(await findings.ListAsync(new FindingFilter()));
+        Assert.Equal(2, (await findings.EventsAsync(finding.Id)).Count(e => e.Kind == FindingEventKinds.TicketCreated));
+        Assert.Equal(second.Id.ToString(CultureInfo.InvariantCulture), await ScalarAsync("SELECT remote_id FROM webhook_deliveries ORDER BY delivered_at DESC, rowid DESC LIMIT 1"));
+    }
 
     private async Task MapAsync(string clientSlug, int company, string org = "local") =>
         Assert.True(await new ClientSettingsStore(_dbPath).SetAsync(org, clientSlug, ClientSettingsStore.ConnectWiseCompany,

@@ -1,6 +1,7 @@
 using System.Security.Cryptography.X509Certificates;
 using Azure.Core;
 using Azure.Identity;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Graph;
 using DmarcMonitor.Core.Ingest;
 using DmarcMonitor.Core.Storage;
@@ -223,6 +224,7 @@ public static class IngestCommand
             {
                 // Already a sentence naming a likely cause.
                 Console.Error.WriteLine(ex.Message);
+                await RecordCollectionAsync(dbPath, organization, ex.Message, ct).ConfigureAwait(false);
                 return 69;
             }
             catch (AuthenticationFailedException ex)
@@ -232,7 +234,27 @@ public static class IngestCommand
                 Console.Error.WriteLine();
                 Console.Error.WriteLine("Check the tenant id, the application id, and that this certificate is the one");
                 Console.Error.WriteLine("uploaded to that app registration.");
+                await RecordCollectionAsync(dbPath, organization, "could not authenticate to Microsoft Entra: " + ex.Message, ct).ConfigureAwait(false);
                 return 77;
+            }
+
+            // The mailbox was read and what it held is stored: from here on,
+            // a domain nothing arrived for is a domain nothing was sent for,
+            // which is what the reports source needs before it can say so.
+            // Only when that is true of the whole run. A message that could
+            // not be stored may have been the one domain's report; a run in
+            // which nothing was addressed here stored nothing; and a run that
+            // stopped at its cap left a backlog nobody has looked at. The
+            // first two are recorded as the failures they are, the third
+            // vouches for nothing, and a dry run stored nothing at all.
+            if (!dryRun && !result.StoppedEarly)
+            {
+                var problem = result.Errors.Count > 0
+                    ? $"{result.Errors.Count} message(s) could not be stored: {result.Errors[0]}"
+                    : result.UnattributedCount > 0 && result.IngestedCount == 0 && result.DuplicateCount == 0
+                        ? "no report was addressed to a recognized address, so nothing was stored"
+                        : null;
+                await RecordCollectionAsync(dbPath, organization, problem, ct).ConfigureAwait(false);
             }
 
             Report(result, stored, dryRun);
@@ -277,6 +299,15 @@ public static class IngestCommand
             _ => false,
         };
     }
+
+    /// <summary>
+    /// One run of the collector, for the organization's reports source: what
+    /// dmarc findings observe reads before trusting any silence. Nothing to
+    /// record for an organization no report has ever been stored for.
+    /// </summary>
+    private static Task<bool> RecordCollectionAsync(string dbPath, string organization, string? error, CancellationToken ct) =>
+        new FindingSourceRegistry(dbPath).RecordForOrganizationAsync(
+            organization, FindingSourceIds.Reports, succeeded: error is null, error, ReportsFindingSource.ExpectedEveryHours, ct: ct);
 
     /// <summary>What became of the reports handed to the store.</summary>
     internal readonly record struct StoreOutcome(int Written, int AlreadyStored, int NotStored)

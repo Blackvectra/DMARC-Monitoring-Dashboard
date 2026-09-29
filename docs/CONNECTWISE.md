@@ -1,15 +1,16 @@
 # ConnectWise PSA
 
-What the nightly DNS scan finds, filed as tickets in ConnectWise PSA
-(Manage): one ticket per finding, on the client's own company, with a note
-when the finding repeats while a tech still has the ticket open.
+What the product finds, filed as tickets in ConnectWise PSA (Manage): one
+ticket per finding, on the client's own company, with a note on it for what
+changes while a tech still has the ticket open.
 
-The same channel as the [webhook](WEBHOOKS.md): the same events, sent after
-the same scan by the same `dmarc-notify.service`, recorded in the same ledger
-of what went where, with the credential in the same secret store. An
-organization may have one of each, so a Teams channel and the ticket queue can
-both hear about a change. The anomaly alerts planned in
-[`OPEN-ISSUES.md`](OPEN-ISSUES.md) (12a) will flow through it the same way.
+The same channel as the [webhook](WEBHOOKS.md): the same findings
+([`FINDINGS.md`](FINDINGS.md)), sent after the same nightly scan by the same
+`dmarc-notify.service`, recorded in the same ledger of what went where, with
+the credential in the same secret store. An organization may have one of
+each, so a Teams channel and the ticket queue can both hear about a change.
+The anomaly findings planned in [`OPEN-ISSUES.md`](OPEN-ISSUES.md) (12a) will
+flow through it the same way.
 
 ---
 
@@ -70,7 +71,10 @@ The version path (`/v4_6_release/apis/3.0`) is added when it is left off.
 link to the domain's page there. Leave it out and tickets carry no link.
 
 Setting it again replaces the keys and the board and keeps the record of what
-was already filed, so a rotated key is one command.
+was already filed, so a rotated key is one command. A destination set before
+findings existed files the older ticket per DNS change until it is set again;
+`--payload event.v1` keeps that on purpose, and `dmarc notify list` shows
+which contract each destination is on.
 
 ### Which company each client is
 
@@ -122,21 +126,31 @@ run cannot file.
 
 | | |
 |---|---|
-| summary | `DMARC: Acme Corp: DMARC: p=quarantine → p=none. [dm:3f0c2a52]` - the client, what changed, and a marker (below). Cut to ConnectWise's 100 characters, marker kept |
+| summary | `DMARC: Acme Corp: DMARC: p=quarantine → p=none. [dm:3f0c2a52]` - the client, the finding, and a marker (below). Cut to ConnectWise's 100 characters, marker kept |
 | board, status | as configured |
 | priority | the name configured for the finding's severity; the board's default when none is |
 | company | the client's, from `dmarc client set-connectwise` |
-| description | the client and domain, the severity, what changed, the record before and after, whether this product itself made the change (a fix applied from the dashboard), when it was seen, the dashboard link, and the event id |
+| description | the client and domain, the severity, the finding, the record before and after for a DNS finding, when it was first and last seen and how many times, the dashboard link, and the finding's id |
 
-**One ticket per finding.** A finding is one record of one domain: the DMARC
-record of `acme.example`, say. A second change to it while a tech has the
-ticket open is added as a note on that ticket, not a second ticket. Once the
-ticket is closed, the next change opens a new one whose first line names the
-old, so the history is one click away.
+**One ticket per finding.** A finding is one thing wrong however many nights
+see it: the DMARC record of `acme.example`, say, or that domain's reports
+having stopped. The same drift another night files nothing. What changes on
+the finding while a tech has the ticket open is a note on that ticket: worse
+(`Severity warning → critical`), a different kind of wrong (`Changed: DMARC:
+the record was removed.`), resolved by its
+source (`Close this ticket if nothing else is needed`), back again, and what
+a person decided in the dashboard - acknowledged, marked, excepted, a
+remediation stage. A failed observation is not a note; it changes nothing
+for the tech.
 
-**One way.** The PSA is the system of record for the work, so this product
-never closes, reassigns or reprioritizes a ticket. What a tech does with it
-is theirs.
+Once the ticket is closed, a finding that is new, back or worse opens a new
+one whose first line names the old, so the history is one click away. A
+resolution after the tech closed it files nothing.
+
+**One way, and back.** The PSA is the system of record for the work, so this
+product never closes, reassigns or reprioritizes a ticket. What a tech does
+with it is theirs. The ticket's number is written on the finding's own
+history, so the Operations page shows which ticket a finding is on.
 
 **The marker.** `[dm:` and eight hex characters of the event's id `]`, in the
 summary. If ConnectWise created the ticket and the answer never came back -
@@ -161,8 +175,8 @@ in `dmarc notify list`, and in `dmarc health`.
 | | |
 |---|---|
 | secret store | the API base address, your company id, the public key, the private key and the clientId, under one credential reference |
-| the organization's database | the API host for display, the board, status and priority names, the ledger of which event became which ticket number, and each client's company id (`client_settings`) |
-| ConnectWise | the ticket: client name, domain, the record before and after, counts, and the dashboard link |
+| the organization's database | the API host for display, the board, status and priority names, the contract, the ledger of which finding is on which ticket number, and each client's company id (`client_settings`) |
+| ConnectWise | the ticket: client name, domain, the finding, the record before and after (read from the drift event in the client's file; public DNS), and the dashboard link |
 
 Never a report, never a header, never anybody's mail. The destination is your
 own PSA, which already holds the client's records; `DATA-HANDLING.md` lists it

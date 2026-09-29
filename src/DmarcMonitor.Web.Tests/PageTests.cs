@@ -49,6 +49,7 @@ public sealed class PageTests : IClassFixture<SeededApp>
         "/reports",
         "/settings",
         "/updates",
+        "/operations",
     };
 
     [Theory]
@@ -771,6 +772,22 @@ public sealed class PageTests : IClassFixture<SeededApp>
         var html = await Client().GetStringAsync("/");
 
         Assert.Contains("href=\"failures\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OperationsIsReachableAndAsksTheQuestionsAMorningAsks()
+    {
+        var home = await Client().GetStringAsync("/");
+        var html = await Client().GetStringAsync("/operations");
+
+        Assert.Contains("href=\"operations\"", home, StringComparison.Ordinal);
+        Assert.Contains("<h1>Operations</h1>", html, StringComparison.Ordinal);
+        foreach (var question in new[] { "What broke", "What changed", "What needs review", "Awaiting verification", "Excepted", "Engines" })
+        {
+            Assert.Contains(question, html, StringComparison.Ordinal);
+        }
+        // Silence is never health: with no engine run recorded, the page says so rather than showing nothing.
+        Assert.Contains("No engine has recorded a run yet", html, StringComparison.Ordinal);
     }
 
     [Fact]

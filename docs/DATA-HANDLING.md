@@ -85,7 +85,7 @@ in a backup or an export can be used to authenticate as anybody.
 
 | | |
 |---|---|
-| The database | SQLite, on the machine you run it on: one file for the organization - clients, domains, users, the audit log - and one per client for that client's reports and DNS history, `0600` in a `0700` folder ([CLIENT-FILES.md](CLIENT-FILES.md)) |
+| The database | SQLite, on the machine you run it on: one file for the organization - clients, domains, users, the audit log, and the findings - and one per client for that client's reports and DNS history, `0600` in a `0700` folder ([CLIENT-FILES.md](CLIENT-FILES.md)). A finding is metadata about a client - a type, a severity, a derived title, two states, and a pointer at the evidence in the client's file - never the record text or a report ([FINDINGS.md](FINDINGS.md)) |
 | Backups | `0600`, in a `0700` directory, same machine unless you configure offsite |
 | Offsite copies | only if `DMARC_BACKUP_S3` is set — your bucket, your region, your keys |
 | Exports | `0600`, only when somebody runs `dmarc export --out` |
@@ -96,9 +96,12 @@ collected, DNS queries for the domains being monitored, HTTPS fetches of
 `mta-sts.<domain>` policy files, the DNS provider's API when a fix is applied,
 GitHub for update checks, and - only where you have set them up - the webhook
 receiver and the ConnectWise PSA you named ([`WEBHOOKS.md`](WEBHOOKS.md),
-[`CONNECTWISE.md`](CONNECTWISE.md)). What goes to those two is a DNS change:
-the client's name, the domain, the record before and after, and a link back to
-the dashboard. Never a report, never a header.
+[`CONNECTWISE.md`](CONNECTWISE.md)). What goes to those two is a finding: the
+client's name, the domain, the finding's type, severity and one-line title,
+its two states, and a link back to the dashboard - a pointer at the evidence,
+never the evidence. A ConnectWise ticket, and a webhook on the older
+`event.v1` contract, also carry a DNS record's text before and after a
+change, which is public DNS. Never a report, never a header.
 
 That is the substantive difference from a hosted DMARC platform, and it is
 worth stating plainly to a client: with dmarcian, PowerDMARC or Sendmarc their

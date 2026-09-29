@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using DmarcMonitor.Core.Dns;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -76,6 +77,14 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     /// are a client's history and live in its file; see ClientDatabases.
     /// </summary>
     private readonly ClientDatabases _files = new(databasePath);
+
+    /// <summary>
+    /// The finding an applied change is until DNS is seen serving it and,
+    /// for a policy, the receivers' reports show it in force. Raised by the
+    /// apply, moved on by the verify poll and the nightly scan, withdrawn by
+    /// a rollback.
+    /// </summary>
+    private readonly RemediationFindingSource _findings = new(databasePath);
 
     // Its own resolver, with no cache. The page's shared lookup caches for
     // the record's TTL, which is exactly the window this polls across: one
@@ -284,6 +293,28 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
             };
         }
 
+        // Accepted is not served, and served is not in force: the change is
+        // a finding until it is verified. Raised after the row it points at.
+        try
+        {
+            await _findings.AppliedAsync(ids.Value.TenantId, ids.Value.ClientId, ids.Value.DomainId, changeId, plan, appliedBy, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is SqliteException or IOException)
+        {
+            // The change is in the history and can be rolled back; what is
+            // missing is the thing that would have said "not yet verified"
+            // until it was. Said here instead, once, to the person applying.
+            return new ApplyOutcome
+            {
+                Plan = plan, PlanId = planId, ChangeId = changeId, Applied = true, Provider = provider.Name,
+                Snapshot = live,
+                Error = $"The change was recorded, but the finding that tracks its verification could not be: {ex.Message}",
+                Message = $"Applied: {Lower(plan.Summary)}. Accepted by {provider.Name}; not yet confirmed visible in DNS. "
+                        + "It is in the history, but nothing is tracking whether it takes: verify it yourself.",
+            };
+        }
+
         return new ApplyOutcome
         {
             Plan = plan, PlanId = planId, ChangeId = changeId, Applied = true, Provider = provider.Name,
@@ -315,7 +346,14 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
             return true;
         }, ct).ConfigureAwait(false);
 
-        return found ? visible : throw new ArgumentException($"No change with id {changeId}.", nameof(changeId));
+        if (!found) { throw new ArgumentException($"No change with id {changeId}.", nameof(changeId)); }
+        if (visible)
+        {
+            // Seen served: the finding moves on. Nothing for a change whose
+            // finding has already moved, or that has none.
+            await _findings.DnsVerifiedAsync(changeId, ct: ct).ConfigureAwait(false);
+        }
+        return visible;
     }
 
     /// <summary>Polls DNS for one change, in the file that holds it.</summary>
@@ -387,7 +425,14 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
             return true;
         }, ct).ConfigureAwait(false);
 
-        return found ? outcome! : throw new ArgumentException($"No change with id {changeId}.", nameof(changeId));
+        if (!found) { throw new ArgumentException($"No change with id {changeId}.", nameof(changeId)); }
+        if (outcome is { Applied: true })
+        {
+            // Withdrawn, not verified; and the drift it answered expects what
+            // it did before it.
+            await _findings.RolledBackAsync(changeId, by, reason, ct).ConfigureAwait(false);
+        }
+        return outcome!;
     }
 
     /// <summary>Rolls one change back, in the file that holds it.</summary>
@@ -516,7 +561,7 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         JOIN clients c ON c.id = ch.client_id
         """;
 
-    private static async Task<AppliedChange?> GetChangeAsync(SqliteConnection db, string changeId, CancellationToken ct)
+    internal static async Task<AppliedChange?> GetChangeAsync(SqliteConnection db, string changeId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
         command.CommandText = ChangeSelect + " WHERE ch.id = $id OR ch.id LIKE $prefix LIMIT 1";

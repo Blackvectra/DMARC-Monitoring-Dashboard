@@ -586,9 +586,9 @@ brief's ten Phase 1 items collapse into it.
 
 ## 12a. Anomaly detection, as part of the alerting that 12 is missing
 
-**Area** a new nightly job over each client's file; `alerts` in
-`db/client-schema.sql`, which already names the two types this needs
-(`new_sender`, `volume_anomaly`) and which nothing writes to yet.
+**Area** a new nightly job over each client's file, writing findings (12b)
+into the organization's file. `alerts` in `db/client-schema.sql` was the
+planned target and is retired by 12b before anything writes to it.
 **Severity** Medium on its own. High as the first thing to put through the
 alert path, because the alert path is what an MSP is paying for.
 
@@ -601,8 +601,9 @@ a human can check, wired into the on-call path, with the model earning its
 place by beating that statistic on the same data.
 
 **Phase 1 - baselines, per client, from that client's own file.** Nightly,
-after the collector, writing `alerts` rows with a `dedup_key` per
-(type, domain, day) so a re-run never fires twice:
+after the collector, writing findings (12b) with a `dedup_key` per
+(type, domain, service or network) - never per day and never per address,
+so a re-run updates `last_seen_at` rather than firing twice:
 
 - *New failing source*: an address first seen for this client today, failing
   DMARC, above a floor of messages. This is the impersonation case, and the
@@ -623,20 +624,22 @@ standard, not the model's confidence.
 
 **Phase 2 - the MSP operations side, which is most of the value.**
 
-- *Delivery*: the alerts table is read by `dmarc health` (so `OnFailure=` and
-  `dmarc-alert@` carry a critical one tonight, with nothing new to deploy) and
-  by a new `dmarc alerts` command that prints open ones and exits 1 when a
-  critical is open - the shape every RMM and PSA already knows how to poll.
-  And alerts go out the same way DNS drift already does: the signed webhook
-  ([`WEBHOOKS.md`](WEBHOOKS.md)) gains an `alert.*` event type, and the PSA
-  becomes a second destination kind on that channel - see the ConnectWise
-  section below. Into the PSA rather than into somebody's inbox.
+- *Delivery* - **built in 12b**: open findings are read by `dmarc health`
+  (a check naming them) and by `dmarc findings list`, which prints open ones
+  and exits 1 when a critical is open - the shape every RMM and PSA already
+  knows how to poll. And they go out the same way DNS drift does: the signed
+  webhook ([`WEBHOOKS.md`](WEBHOOKS.md)) sends `dmarc-monitor.finding.v1`
+  for every finding type alike, and the PSA is the second destination kind
+  on that channel - see the ConnectWise section below. Into the PSA rather
+  than into somebody's inbox. An anomaly type lands as rows in the same
+  table, with nothing new to deliver.
 - *Workflow*: acknowledge, suppress with a reason and a review date, resolve.
-  This is the findings table issue 12 asks for; anomaly alerts are its first
-  rows, not a separate system.
+  This is the findings table issue 12 asks for and 12b designs; anomaly
+  findings are among its first rows, not a separate system.
 - *Per-client tuning*: a client whose newsletter tool sends 5,000 on the
-  first of the month is not an anomaly; the suppression above is how that is
-  remembered, in the client's own file, so it moves with the client.
+  first of the month is not an anomaly; an exception (12b) with a reason and
+  a review date is how that is remembered, carried by client id so an erasure
+  or a move takes it along.
 - *Reporting*: the month's alerts and how they were closed become a section
   of the client report - "3 new senders reviewed, 1 blocked" - which is the
   evidence of monitoring the customer is billed for.
@@ -724,6 +727,205 @@ happens, the answer was the baseline, and that is a fine answer.
 is for), send anything by email from the box (issue 12's reasoning), or train
 on all organizations together (one MSP's customers are not another's
 baseline, and the client files exist to keep them apart).
+
+
+## 12b. The findings lifecycle: one table under 12 and 12a, kept to email authentication and DNS
+
+**Area** migration 0022 in `db/schema.sql` - findings, their timeline,
+exceptions and sources, in the organization's file; `alerts` in
+`db/client-schema.sql` dropped by client migration 0002 before anything wrote
+to it; the acknowledgement columns on `dns_drift_events` read for history
+only; the Operations page; `dmarc findings`; the notify channel reading
+findings.
+**Severity** High. This is issue 12, designed and built. Everything in 12a
+lands in it.
+
+**Decided 29 September, built the same week (#62).** This product stays the
+operational control plane for domain and email authentication. The lifecycle
+is generic enough that a second product could write to it, and no
+first-class feature is built for one: every finding type is DMARC-native,
+identity, endpoint, vulnerability and baseline-drift findings stay in the
+assessment and MSP-Ops tools, and nothing here ingests them. The two share
+a finding contract, not a database model. The reason is the one that has
+held all month: one thing done to the standard of `dmarc simulate` beats ten
+things done to the standard of a viewer.
+
+[`FINDINGS.md`](FINDINGS.md) is the reference for what was built. What
+follows is the design as reconciled against the code, the corrections made
+on the way, and what remains.
+
+### Where findings live
+
+Every client's data has its own SQLite file since #55. A finding is about one
+client, so the client file looks like the place, and it is the wrong place for
+a queue:
+
+| findings in | the queue read | a decision, an exception | isolation |
+|---|---|---|---|
+| client files | a TEMP-table union of every file on every page load | one write per client file | strong by construction |
+| the organization file | one table, one index | one row | carried by `client_id`; `dmarc client erase` already checks every such table |
+
+They are in the organization's file. They are operational state *about* a
+client - like the audit log, and like `webhook_deliveries` already - not the
+client's data. The discipline that buys is that a finding never carries the
+evidence itself: a DNS record's text and a report are client data and stay in
+the client file, and the finding points at them (`evidence_ref`) and hashes
+what a resolving read must serve (`expected_ref`). Both consequences are
+built and tested: erasure covers findings, exceptions and events; a domain
+reassigned carries them.
+
+### Two states, not one status
+
+The design as first written had one `status` column running from `open`
+through `fixed_awaiting_dns` to `resolved`, with `sla_due` and `assigned_to`
+beside it. Reconciling it against the specification for the shared contract
+changed that in three ways, each of which the tests now pin:
+
+- **`source_state` and `analyst_state` are separate columns.** What the
+  source last saw (`active`, `resolved`, `unknown`) and what a person decided
+  (`unreviewed`, `investigating`, `action_required`, `benign`,
+  `accepted_risk`, `closed`) never move each other. Closing a finding whose
+  record is still wrong leaves the record wrong; the next observation says so.
+- **Failed collection is `unknown`, never resolution.** A failed DNS read, a
+  collector whose last run failed, an organization with nothing stored in 36
+  hours: every finding the source has open there becomes unknown and none is
+  cleared. Silence is evidence only when somebody was listening.
+- **No SLA and no assignee.** This is a detection and verification console;
+  the ticket is in the PSA, and that is where work is owned and timed.
+  Putting a second work queue here was the giant-merged-codebase mistake in
+  miniature.
+
+### The tables, as built
+
+`findings`: identity (`tenant_id`, `source_id`, `client_id`, `dedup_key`,
+unique), `domain_id`, `type` and `rule`, `severity`, `title`, the two states,
+`remediation_stage`, `first_observed_at`, `last_observed_at`,
+`observation_count`, `absent_count`, `reopened_count`, `evidence_ref`,
+`expected_ref`, `related_finding_id`, `payload_json`. `finding_events`:
+append-only, kind, actor (a source's id or a person), from, to, note.
+`finding_exceptions`: reason, approver, compensating control, approved date,
+review date (required), optional expiry, one open per finding.
+`finding_sources`: one row per engine per client or organization, last
+attempt, last success, last failure, last error; health computed when read.
+
+The PSA side needed one change: `remote_key` is now the finding's id rather
+than domain plus record type, so a ticket follows the finding whatever its
+type, and the ticket's number is written back as a `TicketCreated` event.
+
+### Identity
+
+A finding is (`source`, `client`, `dedup_key`). The engine that raises it
+re-observes it on every run: seen again moves `last_observed_at` and
+`observation_count` and inserts nothing; not seen on N successful
+observations (one for DNS, three for reports; the type says) resolves it by
+the source; seen again after that reopens the same row with a `Reopened`
+event and asks to be reviewed again. The key is the thing, not the
+observation: DNS keys on domain plus record type, so a record that goes from
+weakened to removed is one finding whose type and severity moved, and one
+ticket. The volume-anomaly dry run in 12a remains the counter-example.
+
+### The finding types
+
+Built: `DNS_DRIFT`, `DMARC_POLICY_WEAKENED`, `DMARC_POLICY_CHANGED`,
+`SPF_INVALID` and `SPF_CHANGED` from the rules already in `DnsDrift.cs` - the
+specification names them as types, so they are types, each still one finding
+per record; `REPORTING_STOPPED` from the quiet-domain judgement `HealthFacts`
+had, per domain, only for a domain that reported in four of the five weeks
+before its last report, and only while the collector was listening;
+`REMEDIATION_PENDING_VERIFICATION` for every change applied from the Fix
+page.
+
+Deferred, each with its reason: `dkim_selector_missing` (selectors are not
+diffed nightly yet), `mta_sts_failure` (needs the nightly policy fetch),
+`tls_failure` (a small detector over `tls_failure_details`), `new_sender`,
+`alignment_degradation` and `volume_anomaly` (12a phase 1), and
+`unknown_sender`, which cannot exist until a sender can be approved. Each
+lands as a source writing rows to the same table; none needs a new lifecycle,
+a new delivery path or a new page.
+
+### The Operations page
+
+Six questions, in order, each a filtered view of `findings`: what broke, what
+changed, what needs review, awaiting verification, excepted (with the review
+date), and the engines. A finding opens to its history and to what a person
+may decide: Tech marks as seen and records a decision with a note; Engineer
+records an exception (reason, approver, compensating control, review date,
+optional expiry) or ends one. Every action writes `finding_events` and the
+audit log. This is not the dashboard: the triage table answers "how healthy
+is the estate"; this page answers "what did the engines find, and did the
+fix take".
+
+Not built, on purpose: assignment, SLAs, and reading the ticket's state back
+from the PSA onto the finding (the number is there; the state is a later
+read).
+
+### Verification, which is where DNS is different
+
+Built as designed, with one simplification: the stages are `dns_pending`,
+`dns_verified` and `effectiveness_pending`, and DNS verification is one read
+serving the applied value (the verify poll after applying, or the nightly
+read) rather than two consecutive nights, because the poll uses its own
+uncached resolver and the nightly read is hours later. The reporting evidence
+is the `policy_*` columns each receiver reports, matched on `p`, `sp`, `pct`,
+`adkim` and `aspf` for a period after the change; fourteen days after DNS
+verification without one resolves as *verified by DNS only* and says so; a
+rollback withdraws the finding as not verified and restores the drift
+finding's expectation.
+
+**Still open:** whether the verify poll and the nightly read ask the domain's
+authoritative servers or only a resolver with no cache of its own. Until that
+is confirmed, DNS verification is a read past the caches this product
+controls, not past every cache.
+
+### The anomaly model, corrected for DMARC data
+
+The feature list proposed (messages per source, new-source count, SPF, DKIM,
+alignment and DMARC failure ratios, receiver count, report volume,
+disposition ratio, unknown-sender ratio) is right. What it is computed *over*
+is where this goes wrong, and each of these is a rule for phase 1 as much as
+for phase 3:
+
+- **Time base is the report period, not arrival.** A receiver's report covers
+  `date_begin` to `date_end` and arrives a day or three later; bucketing by
+  arrival makes every late report a drop followed by a spike. Bucket a day by
+  the period's midpoint, and score a day only once its lag window has closed
+  (two days).
+- **Features are deviations from the domain's own baseline**, not raw counts:
+  each feature as a z-score against that domain's trailing 28-day median and
+  MAD. A per-organization model fed raw counts learns big domains versus
+  small ones and nothing else.
+- **Ratios on small volume are noise.** Smooth them, (fail + 1) / (n + 2),
+  keep the log of the count beside each, and never score a domain-day under a
+  floor of messages.
+- **Distribution shift is one number.** "Pass rate is fine but the sources
+  changed" is the Jensen-Shannon divergence between today's source-share
+  vector and the trailing 28-day share, plus the entropy of the share. One
+  scalar each, rather than a variable-length vector the model cannot take.
+- **Receiver count is the reporting-gap signal.** Google stopping is a count
+  going from three to two before it is a volume drop.
+- **Explainability is a requirement.** The finding's title names the three
+  features with the largest reconstruction error, in the domain's own
+  numbers: "volume 90% under the 28-day median; receivers 3 → 1". A score
+  alone is a finding a tech mutes.
+- `unknown_sender_ratio` waits for sender approval, as above; until then the
+  feature is the share from sources first seen inside 30 days.
+
+### What remains
+
+1. `dkim_selector_missing`, `mta_sts_failure` and `tls_failure`, each a small
+   detector on data the product already stores, writing to the same table.
+2. Phase 1 of 12a (`new_sender`, `alignment_degradation`, `volume_anomaly`)
+   on the features above, as sources.
+3. The ticket's state read back from the PSA onto the finding.
+4. Phase 3 of 12a, gated as 12a says.
+5. Sender approval, and with it `unknown_sender`.
+6. The authoritative-server question above.
+
+**Not to do**: ingest another product's findings (the schema allows it; the
+product does not, until a second product exists); put findings in client
+files for the sake of symmetry; close a ticket from this side; send anything
+by email from the box (issue 12); add assignment or SLAs here; or let the
+anomaly types into the queue before they can name their own evidence.
 
 ## 13. The client report is one document, and nothing sends it
 

@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -22,6 +23,11 @@ public sealed record ScanResult(
 
     /// <summary>True when this was the first reading on record for the domain.</summary>
     public bool First { get; init; }
+
+    /// <summary>The domain the reading was stored for, when it was stored.</summary>
+    public string? DomainId { get; init; }
+    public string? TenantId { get; init; }
+    public string? ClientId { get; init; }
 }
 
 /// <summary>What a whole run produced.</summary>
@@ -143,7 +149,39 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, Mt
             progress?.Report(result);
         }
 
+        await CompleteAsync(results, ct).ConfigureAwait(false);
         return new ScanSummary(results, skipped);
+    }
+
+    /// <summary>
+    /// Records how the run went for each client whose domains it read, as
+    /// the DNS scan's entry in the source registry: a success when every one
+    /// of the client's domains answered, a failure naming the ones that did
+    /// not. A domain that does not exist answered; a lookup that failed did
+    /// not, and the findings it could not see are marked unknown, never
+    /// cleared.
+    /// </summary>
+    public async Task CompleteAsync(IReadOnlyList<ScanResult> results, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(results);
+
+        var registry = new FindingSourceRegistry(databasePath);
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var client in results.Where(r => r.Stored && r.TenantId is not null && r.ClientId is not null)
+                                      .GroupBy(r => (r.TenantId!, r.ClientId!)))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var failed = client.Where(r => r.Status == DnsCheckStatus.Failed).Select(r => r.Domain).Order(StringComparer.Ordinal).ToList();
+            var error = failed.Count == 0
+                ? null
+                : failed.Count.ToString(CultureInfo.InvariantCulture) + " of " + client.Count().ToString(CultureInfo.InvariantCulture)
+                  + " domains could not be read: " + string.Join(", ", failed.Take(5)) + (failed.Count > 5 ? ", …" : "");
+
+            await registry.RecordAsync(client.Key.Item1, client.Key.Item2, FindingSourceIds.DnsScan,
+                succeeded: failed.Count == 0, error, DnsFindingSource.ExpectedEveryHours, now, ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -195,7 +233,14 @@ public sealed class DnsScanner(string databasePath, DnsLookup? lookup = null, Mt
             _ => DnsCheckStatus.Ok,
         };
 
-        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count) { Drift = save.Drift, First = save.First };
+        return new ScanResult(name, status, save.Stored, save.Changed, readings.Count)
+        {
+            Drift = save.Drift,
+            First = save.First,
+            DomainId = save.DomainId,
+            TenantId = save.TenantId,
+            ClientId = save.ClientId,
+        };
     }
 
     private async Task<List<string>> TargetsAsync(

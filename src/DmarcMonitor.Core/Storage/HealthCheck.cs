@@ -21,6 +21,18 @@ public sealed record WebhookFacts(
     string Organization, string Destination, DateTimeOffset CreatedAt,
     DateTimeOffset? LastDelivered, DateTimeOffset? LastFailed, string? LastError);
 
+/// <summary>One engine's health, as the findings registry computes it.</summary>
+/// <param name="Organization">Its slug.</param>
+/// <param name="Client">The client's slug for an engine that runs per client; null for the organization's own.</param>
+/// <param name="Kind">The engine: dns-scan, reports, remediation.</param>
+/// <param name="Health">One of <see cref="DmarcMonitor.Core.Findings.SourceHealth"/>.</param>
+public sealed record SourceFacts(
+    string Organization, string? Client, string Kind, string Health, DateTimeOffset? LastSuccess, string? LastError);
+
+/// <summary>An organization's critical findings still open and wanting a person.</summary>
+/// <param name="Domains">Up to five of the domains concerned, oldest finding first.</param>
+public sealed record CriticalFacts(string Organization, int Count, IReadOnlyList<string> Domains);
+
 /// <summary>A domain that used to have reports arriving and now does not.</summary>
 /// <param name="Domain">The name.</param>
 /// <param name="LastReport">When its newest report covered, or null if none ever.</param>
@@ -54,6 +66,12 @@ public sealed record HealthFacts
 
     /// <summary>Every organization's webhook, working or not.</summary>
     public IReadOnlyList<WebhookFacts> Webhooks { get; init; } = [];
+
+    /// <summary>Every engine that has recorded a run, with its health now.</summary>
+    public IReadOnlyList<SourceFacts> Sources { get; init; } = [];
+
+    /// <summary>Per organization, the critical findings open and wanting a person.</summary>
+    public IReadOnlyList<CriticalFacts> Critical { get; init; } = [];
 }
 
 /// <summary>
@@ -127,8 +145,105 @@ public static class HealthCheck
         Backups(findings, facts, now);
         Duplicates(findings, facts);
         Webhooks(findings, facts, now);
+        Engines(findings, facts);
+        Critical(findings, facts);
 
         return [.. findings.OrderByDescending(f => f.Severity)];
+    }
+
+    /// <summary>
+    /// The engines, from what each recorded of its own runs.
+    /// </summary>
+    /// <remarks>
+    /// The stored-data checks above notice a collector that runs against an
+    /// empty mailbox; this notices one that does not run at all, or fails,
+    /// hours before those do. An engine that failed its last run is broken
+    /// now: nothing it watches is being observed, and what it had found is
+    /// marked unknown rather than resolved. One that has never recorded a
+    /// success is not broken, but its silence means nothing yet, and that is
+    /// said rather than shown as health.
+    /// </remarks>
+    private static void Engines(List<HygieneFinding> findings, HealthFacts facts)
+    {
+        foreach (var engine in facts.Sources)
+        {
+            var what = $"The {engine.Kind} engine for {engine.Organization}{(engine.Client is null ? "" : $" ({engine.Client})")}";
+            var fix = engine.Kind switch
+            {
+                "reports" => "Check the collector ran and what it said: `systemctl list-timers 'dmarc-ingest*'` and "
+                           + "`journalctl -u 'dmarc-ingest*' -n 50`. By hand: `dmarc ingest` or `dmarc import`.",
+                "dns-scan" => "Check the scan ran: `systemctl list-timers dmarc-dns.timer` and `journalctl -u dmarc-dns -n 50`. "
+                            + "By hand: `dmarc check --all --save`.",
+                _ => "Check the unit that runs it: `journalctl -u dmarc-dns -n 50`. By hand: `dmarc findings observe`.",
+            };
+
+            switch (engine.Health)
+            {
+                case DmarcMonitor.Core.Findings.SourceHealth.Failed:
+                    findings.Add(new HygieneFinding
+                    {
+                        Severity = HygieneSeverity.Breaking,
+                        Record = "engine",
+                        Problem = $"{what} failed its last run: {engine.LastError}. Until it runs again nothing it watches is "
+                                + "being observed, and what it had found is marked unknown rather than resolved.",
+                        Fix = fix,
+                    });
+                    break;
+
+                case DmarcMonitor.Core.Findings.SourceHealth.Stale:
+                    findings.Add(new HygieneFinding
+                    {
+                        Severity = HygieneSeverity.Weakness,
+                        Record = "engine",
+                        Problem = $"{what} has not run within its expected window"
+                                + (engine.LastSuccess is { } ok ? $"; it last succeeded {Describe(DateTimeOffset.UtcNow - ok)} ago." : ".")
+                                + " Nothing it watches has been observed since.",
+                        Fix = fix,
+                    });
+                    break;
+
+                case DmarcMonitor.Core.Findings.SourceHealth.Degraded:
+                    findings.Add(new HygieneFinding
+                    {
+                        Severity = HygieneSeverity.Weakness,
+                        Record = "engine",
+                        Problem = $"{what} failed its last run ({engine.LastError}), though one within its window succeeded.",
+                        Fix = fix,
+                    });
+                    break;
+
+                case DmarcMonitor.Core.Findings.SourceHealth.Unknown:
+                    findings.Add(new HygieneFinding
+                    {
+                        Severity = HygieneSeverity.Tidy,
+                        Record = "engine",
+                        Problem = $"{what} has never recorded a successful run, so its silence means nothing yet.",
+                        Fix = fix,
+                    });
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Critical findings open and wanting a person: a check, not an alert.
+    /// The alert is the destination the findings are sent to; this is for
+    /// the install with none, so they are at least printed somewhere.
+    /// </summary>
+    private static void Critical(List<HygieneFinding> findings, HealthFacts facts)
+    {
+        foreach (var org in facts.Critical)
+        {
+            if (org.Count == 0) { continue; }
+            findings.Add(new HygieneFinding
+            {
+                Severity = HygieneSeverity.Weakness,
+                Record = "findings",
+                Problem = $"{Plural(org.Count, "critical finding")} open for {org.Organization} that nobody has closed, called benign or excepted: "
+                        + string.Join(", ", org.Domains) + (org.Count > org.Domains.Count ? $", and {org.Count - org.Domains.Count} more" : "") + ".",
+                Fix = $"Open Operations in the dashboard, or: `dmarc findings list --org {org.Organization}`.",
+            });
+        }
     }
 
     /// <summary>

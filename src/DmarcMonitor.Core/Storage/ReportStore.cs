@@ -61,6 +61,9 @@ public sealed class ReportStore
 
     private readonly string _databasePath;
     private readonly string _organization;
+
+    /// <summary>The organization's database, for what else has to write beside a report.</summary>
+    internal string DatabasePath => _databasePath;
     private readonly Lazy<ClientDatabases> _files;
 
     /// <summary>Where each client's own file is.</summary>
@@ -695,13 +698,16 @@ public sealed class ReportStore
 
     /// <summary>
     /// Tables in the organization's database that carry a domain's client:
-    /// where its DNS is hosted and the MTA-STS policy served for it. Updated
-    /// in place when the domain is filed under another client.
+    /// where its DNS is hosted, the MTA-STS policy served for it, and what
+    /// was found wrong with it. Updated in place when the domain is filed
+    /// under another client; a finding's history and exceptions follow it
+    /// through the finding (see ReassignDomainAsync).
     /// </summary>
     public static readonly IReadOnlyList<string> RegistryDomainTables =
     [
         "dns_provider_configs",
         "mta_sts_policies",
+        "findings",
     ];
 
     /// <summary>
@@ -732,6 +738,10 @@ public sealed class ReportStore
         "client_settings",
         "dns_provider_configs",
         "domains",
+        "finding_events",
+        "finding_exceptions",
+        "finding_sources",
+        "findings",
         "ingest_log",
         "mta_sts_policies",
         "user_client_access",
@@ -1269,6 +1279,16 @@ public sealed class ReportStore
             // Names from a constant list in this file; the values are bound.
             await RunAsync(db, tx,
                 $"UPDATE main.{table} SET client_id = $client, tenant_id = $tenant WHERE domain_id = $domain",
+                to, domainId, now, ct).ConfigureAwait(false);
+        }
+
+        // A finding's history and its exceptions carry the client too, and
+        // have no domain of their own: they go where their finding went.
+        foreach (var table in new[] { "finding_events", "finding_exceptions" })
+        {
+            await RunAsync(db, tx,
+                $"UPDATE main.{table} SET client_id = $client, tenant_id = $tenant "
+                + "WHERE finding_id IN (SELECT id FROM main.findings WHERE domain_id = $domain)",
                 to, domainId, now, ct).ConfigureAwait(false);
         }
 

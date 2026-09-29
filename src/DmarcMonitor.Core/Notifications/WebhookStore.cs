@@ -25,6 +25,15 @@ public sealed record Webhook
     public required string MinSeverity { get; init; }
     public string? LinkBase { get; init; }
 
+    /// <summary>
+    /// Which contract it receives: <see cref="WebhookStore.FindingVersion"/>,
+    /// one message per change on a finding, or <see cref="WebhookStore.EventVersion"/>,
+    /// the older one message per DNS change (docs/WEBHOOKS.md).
+    /// </summary>
+    public string PayloadVersion { get; init; } = WebhookStore.FindingVersion;
+
+    public bool SendsFindings => PayloadVersion == WebhookStore.FindingVersion;
+
     /// <summary>Where tickets go, for a ConnectWise destination; null for a webhook.</summary>
     public ConnectWiseSettings? ConnectWise { get; init; }
 
@@ -71,6 +80,14 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
 
     public static readonly IReadOnlyList<string> Severities = ["info", "warning", "critical"];
+
+    /// <summary>The contract a new destination gets: dmarc-monitor.finding.v1.</summary>
+    public const string FindingVersion = "finding.v1";
+
+    /// <summary>The older contract, one message per DNS change; kept for a destination that asks for it.</summary>
+    public const string EventVersion = "event.v1";
+
+    public static readonly IReadOnlyList<string> PayloadVersions = [FindingVersion, EventVersion];
 
     private readonly string _connectionString = new SqliteConnectionStringBuilder
     {
@@ -120,11 +137,12 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
     /// <exception cref="InvalidOperationException">No such organization, or no secret store to keep the key in.</exception>
     public async Task<Webhook> SetAsync(
         string tenantSlug, string url, string secret, string minSeverity, string? linkBase, string by,
-        CancellationToken ct = default)
+        string payloadVersion = FindingVersion, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(tenantSlug);
         ArgumentException.ThrowIfNullOrWhiteSpace(by);
 
+        var payload = ParsePayloadVersion(payloadVersion);
         var address = ParseAddress(url);
         var link = linkBase is null ? null : ParseLinkBase(linkBase);
         if (secret is null || secret.Trim().Length < WebhookSigner.MinimumSecretLength)
@@ -146,7 +164,7 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
             JsonSerializer.Serialize(new WebhookCredential(address.AbsoluteUri, secret.Trim())), ct).ConfigureAwait(false);
 
         await UpsertAsync(existing, tenant.Id, WebhookKind, Destination(address), credentialRef, severity,
-            link?.AbsoluteUri.TrimEnd('/'), null, by, ct).ConfigureAwait(false);
+            link?.AbsoluteUri.TrimEnd('/'), null, payload, by, ct).ConfigureAwait(false);
 
         if (existing is not null && existing.CredentialRef != credentialRef)
         {
@@ -155,7 +173,7 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
 
         await new AuditLog(databasePath).RecordAsync(tenant.Id, by,
             existing is null ? "webhook.set" : "webhook.replace",
-            $"to {Destination(address)}, {severity} and above", ct).ConfigureAwait(false);
+            $"to {Destination(address)}, {severity} and above, {payload}", ct).ConfigureAwait(false);
 
         return (await GetAsync(tenant.Slug, WebhookKind, ct).ConfigureAwait(false))!;
     }
@@ -171,12 +189,14 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
     /// <exception cref="InvalidOperationException">No such organization, or no secret store to keep the keys in.</exception>
     public async Task<Webhook> SetConnectWiseAsync(
         string tenantSlug, string site, string companyId, string publicKey, string privateKey, string clientId,
-        ConnectWiseSettings settings, string minSeverity, string? linkBase, string by, CancellationToken ct = default)
+        ConnectWiseSettings settings, string minSeverity, string? linkBase, string by,
+        string payloadVersion = FindingVersion, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(tenantSlug);
         ArgumentException.ThrowIfNullOrWhiteSpace(by);
         ArgumentNullException.ThrowIfNull(settings);
 
+        var payload = ParsePayloadVersion(payloadVersion);
         var apiBase = ConnectWiseClient.BaseFor(site);
         var link = linkBase is null ? null : ParseLinkBase(linkBase);
         var severity = ParseSeverity(minSeverity);
@@ -202,7 +222,7 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
         };
 
         await UpsertAsync(existing, tenant.Id, ConnectWiseKind, Destination(apiBase), credentialRef, severity,
-            link?.AbsoluteUri.TrimEnd('/'), trimmed.ToJson(), by, ct).ConfigureAwait(false);
+            link?.AbsoluteUri.TrimEnd('/'), trimmed.ToJson(), payload, by, ct).ConfigureAwait(false);
 
         if (existing is not null && existing.CredentialRef != credentialRef)
         {
@@ -211,7 +231,7 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
 
         await new AuditLog(databasePath).RecordAsync(tenant.Id, by,
             existing is null ? "psa.set" : "psa.replace",
-            $"ConnectWise at {Destination(apiBase)}, board '{trimmed.Board}', {severity} and above", ct).ConfigureAwait(false);
+            $"ConnectWise at {Destination(apiBase)}, board '{trimmed.Board}', {severity} and above, {payload}", ct).ConfigureAwait(false);
 
         return (await GetAsync(tenant.Slug, ConnectWiseKind, ct).ConfigureAwait(false))!;
     }
@@ -281,6 +301,14 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
             : throw new ArgumentException($"'{kind}' is not a destination kind. Use one of: {string.Join(", ", Kinds)}.");
     }
 
+    public static string ParsePayloadVersion(string payloadVersion)
+    {
+        var clean = (payloadVersion ?? "").Trim().ToLowerInvariant();
+        return PayloadVersions.Contains(clean)
+            ? clean
+            : throw new ArgumentException($"'{payloadVersion}' is not a contract this sends. Use one of: {string.Join(", ", PayloadVersions)}.");
+    }
+
     private static string ParseSeverity(string minSeverity)
     {
         var severity = (minSeverity ?? "").Trim().ToLowerInvariant();
@@ -326,7 +354,7 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
 
     private async Task UpsertAsync(
         Webhook? existing, string tenantId, string kind, string destination, string credentialRef, string severity,
-        string? link, string? configJson, string by, CancellationToken ct)
+        string? link, string? configJson, string payloadVersion, string by, CancellationToken ct)
     {
         var now = Stamp(_clock.GetUtcNow());
         await using var db = await OpenAsync(ct).ConfigureAwait(false);
@@ -334,15 +362,17 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
         command.CommandText = existing is null
             ? """
               INSERT INTO webhooks (id, tenant_id, kind, destination, credential_ref, min_severity, link_base, config_json,
-                                    created_at, created_by, updated_at)
-              VALUES ($id, $tenant, $kind, $destination, $ref, $severity, $link, $config, $now, $by, $now)
+                                    payload_version, created_at, created_by, updated_at)
+              VALUES ($id, $tenant, $kind, $destination, $ref, $severity, $link, $config, $payload, $now, $by, $now)
               """
             : """
               UPDATE webhooks
               SET destination = $destination, credential_ref = $ref, min_severity = $severity,
-                  link_base = $link, config_json = $config, updated_at = $now, last_error = NULL, last_error_at = NULL
+                  link_base = $link, config_json = $config, payload_version = $payload,
+                  updated_at = $now, last_error = NULL, last_error_at = NULL
               WHERE id = $id
               """;
+        command.Parameters.AddWithValue("$payload", payloadVersion);
         command.Parameters.AddWithValue("$id", existing?.Id ?? Guid.NewGuid().ToString());
         command.Parameters.AddWithValue("$tenant", tenantId);
         command.Parameters.AddWithValue("$kind", kind);
@@ -359,7 +389,7 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
     private const string Select = """
         SELECT w.id, w.tenant_id, t.slug, w.destination, w.credential_ref, w.min_severity, w.link_base,
                w.created_at, w.created_by, w.last_delivered_at, w.last_error, w.last_error_at,
-               w.kind, w.config_json
+               w.kind, w.config_json, w.payload_version
         FROM webhooks w JOIN tenants t ON t.id = w.tenant_id
         """;
 
@@ -387,6 +417,7 @@ public sealed class WebhookStore(string databasePath, ISecretStore secrets, Time
                 LastErrorAt = Text(11) is { } failed ? ParseStamp(failed) : null,
                 Kind = reader.GetString(12),
                 ConnectWise = ConnectWiseSettings.FromJson(Text(13)),
+                PayloadVersion = reader.GetString(14),
             });
         }
         return result;

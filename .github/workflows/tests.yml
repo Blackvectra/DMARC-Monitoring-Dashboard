@@ -213,6 +213,19 @@ jobs:
           check "refused_plan_stored=1"                                "refused plan is still recorded"
           check "change_rollback_target=v=spf1 include:a -all"         "applied change keeps its rollback target"
           check "stores_only_ref=DnsToken_c-acme_cloudflare"           "provider config stores a credential ref, not a secret"
+          # Findings: one row per condition per source, exceptions need a review
+          # date and come one at a time, the states are the named ones, the
+          # organization's database holds the finding and the client's file
+          # holds the evidence, and erasing the client takes all of it.
+          check "UNIQUE constraint failed: findings.tenant_id, findings.source_id, findings.client_id, findings.dedup_key" "a re-observed finding is one row"
+          check "NOT NULL constraint failed: finding_exceptions.review_at" "an exception without a review date is refused"
+          check "UNIQUE constraint failed: finding_exceptions.finding_id" "one open exception per finding"
+          check "acme_findings_in_org_db=1"                              "findings live in the organization's database"
+          check "acme_file_has_findings_table=0"                         "a client file holds no findings or alerts table"
+          check "acme_findings_left=0"                                   "erasing a client removes its findings"
+          check "acme_finding_events_left=0"                             "erasing a client removes its finding history"
+          check "acme_exceptions_left=0"                                 "erasing a client removes its exceptions"
+          check "acme_sources_left=0"                                    "erasing a client removes its source rows"
           check "UNIQUE constraint failed: spf_flatten_state.domain_id" "one flatten state per domain enforced"
           check "orphan_provider=0"                                    "cascade removed provider configs"
           check "remediation_outside_its_file=0"                       "remediation history is in the client's file only"

@@ -122,6 +122,11 @@ builder.Services.AddScoped(_ => new DmarcMonitor.Core.Tls.TlsReportService(dbPat
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Forensic.ForensicReportService(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsStore(dbPath));
 builder.Services.AddScoped(_ => new DmarcMonitor.Core.Dns.DnsDriftStore(dbPath));
+// The findings: what every engine raises, what people decide about it, and
+// whether the engines are running. Scoped like the stores that read for a page.
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Findings.FindingLifecycle(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Findings.FindingStore(dbPath));
+builder.Services.AddScoped(_ => new DmarcMonitor.Core.Findings.FindingSourceRegistry(dbPath));
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Dns.MtaStsFetcher());
 builder.Services.AddSingleton(_ => new DmarcMonitor.Core.Updates.ReleaseChannel());
 

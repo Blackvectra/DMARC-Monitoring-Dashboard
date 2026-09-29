@@ -82,8 +82,18 @@ public sealed class DatabaseSchemaTests
             .Where(line => line.TrimStart().StartsWith("CREATE TABLE ", StringComparison.OrdinalIgnoreCase))
             .Select(line => line.Trim()["CREATE TABLE ".Length..].Split(' ', '(')[0]);
 
+        // And what a migration after the split dropped on purpose - a table the
+        // single database had that neither file keeps - read the same way, so
+        // a deliberate drop is told apart from a table that was lost.
+        var droppedSinceSplit = DatabaseMigrations.All
+            .Where(m => string.CompareOrdinal(m.Version, ClientFileSplit.Version) > 0)
+            .Concat(ClientDatabases.Migrations)
+            .SelectMany(m => m.Sql.Split('\n'))
+            .Where(line => line.TrimStart().StartsWith("DROP TABLE ", StringComparison.OrdinalIgnoreCase))
+            .Select(line => line.Trim()["DROP TABLE ".Length..].TrimEnd(';').Trim());
+
         var accounted = organization.Union(client).Except(["client_file", "row_ids"]).Except(sinceSplit).ToHashSet();
-        Assert.Equal(single.OrderBy(t => t), accounted.OrderBy(t => t));
+        Assert.Equal(single.Except(droppedSinceSplit).OrderBy(t => t), accounted.OrderBy(t => t));
     }
 
     [Fact]

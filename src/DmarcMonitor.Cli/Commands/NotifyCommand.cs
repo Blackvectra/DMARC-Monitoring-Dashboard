@@ -25,7 +25,7 @@ public static class NotifyCommand
 
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
-        if (Args.Reject(args, "--db", "--org", "--url", "--min-severity", "--link-base", "--secrets", "--kind",
+        if (Args.Reject(args, "--db", "--org", "--url", "--min-severity", "--link-base", "--secrets", "--kind", "--payload",
                 "--site", "--company-id", "--client-id", "--public-key", "--board", "--status",
                 "--priority-critical", "--priority-warning", "--search", "--client", "!--secret-stdin") is var bad and not 0)
         {
@@ -95,7 +95,7 @@ public static class NotifyCommand
             var where = hook.IsConnectWise
                 ? $"ConnectWise {hook.Destination}, board '{hook.ConnectWise?.Board}'"
                 : hook.Destination;
-            Console.WriteLine($"  {hook.TenantSlug,-20} {where}  ({hook.MinSeverity} and above)");
+            Console.WriteLine($"  {hook.TenantSlug,-20} {where}  ({hook.MinSeverity} and above, {hook.PayloadVersion})");
             Console.WriteLine($"  {"",-20} set {Show(hook.CreatedAt)} by {hook.CreatedBy}");
             Console.WriteLine($"  {"",-20} last delivered {(hook.LastDeliveredAt is { } at ? Show(at) : "never")}");
             if (hook.IsFailing) { Console.WriteLine($"  {"",-20} FAILING since {Show(hook.LastErrorAt!.Value)}: {hook.LastError}"); }
@@ -109,7 +109,7 @@ public static class NotifyCommand
         var url = Args.Value(args, "--url");
         if (string.IsNullOrWhiteSpace(url))
         {
-            return Usage("dmarc notify set [--org <slug>] --url https://... [--min-severity warning] [--link-base https://dmarc.example.com]");
+            return Usage("dmarc notify set [--org <slug>] --url https://... [--min-severity warning] [--link-base https://dmarc.example.com] [--payload finding.v1|event.v1]");
         }
 
         var secret = await ReadSecretAsync(args, SecretVariable, "Signing secret (the receiver is given the same one): ", ct).ConfigureAwait(false);
@@ -124,9 +124,10 @@ public static class NotifyCommand
         {
             var hook = await store.SetAsync(org, url, secret,
                 Args.Value(args, "--min-severity") ?? "warning", Args.Value(args, "--link-base"),
-                Actor(), ct).ConfigureAwait(false);
+                Actor(), Args.Value(args, "--payload") ?? WebhookStore.FindingVersion, ct).ConfigureAwait(false);
 
             Console.WriteLine($"{hook.TenantSlug}: {hook.MinSeverity} and above now goes to {hook.Destination}.");
+            Console.WriteLine(Contract(hook));
             Console.WriteLine($"Address and signing key stored as {hook.CredentialRef}. {store.Secrets.Description}");
             Console.WriteLine("Changes detected from now on are sent; earlier ones are not.");
             Console.WriteLine($"Prove the receiver works: dmarc notify test --org {hook.TenantSlug}");
@@ -158,7 +159,7 @@ public static class NotifyCommand
         {
             return Usage("dmarc notify set --kind connectwise [--org <slug>] --site https://api-na.myconnectwise.net --company-id <id> "
                          + "--client-id <guid> --public-key <key> --board <name> [--status <name>] "
-                         + "[--priority-critical <name>] [--priority-warning <name>] [--min-severity warning] [--link-base https://...]");
+                         + "[--priority-critical <name>] [--priority-warning <name>] [--min-severity warning] [--link-base https://...] [--payload finding.v1|event.v1]");
         }
 
         var privateKey = await ReadSecretAsync(args, PrivateKeyVariable, "ConnectWise private key (from the API member's key pair): ", ct).ConfigureAwait(false);
@@ -174,9 +175,11 @@ public static class NotifyCommand
                 Args.Value(args, "--priority-critical"), Args.Value(args, "--priority-warning"));
 
             var hook = await store.SetConnectWiseAsync(org, site, companyId, publicKey, privateKey, clientId, settings,
-                Args.Value(args, "--min-severity") ?? "warning", Args.Value(args, "--link-base"), Actor(), ct).ConfigureAwait(false);
+                Args.Value(args, "--min-severity") ?? "warning", Args.Value(args, "--link-base"), Actor(),
+                Args.Value(args, "--payload") ?? WebhookStore.FindingVersion, ct).ConfigureAwait(false);
 
             Console.WriteLine($"{hook.TenantSlug}: {hook.MinSeverity} and above now becomes tickets on '{settings.Board}' at {hook.Destination}.");
+            Console.WriteLine(Contract(hook));
             Console.WriteLine($"Keys stored as {hook.CredentialRef}. {store.Secrets.Description}");
             Console.WriteLine("Changes detected from now on are filed; earlier ones are not.");
             Console.WriteLine();
@@ -347,6 +350,13 @@ public static class NotifyCommand
         return new string([.. chars]).Trim();
     }
 
+    /// <summary>Which contract the destination now receives, said once when it is set.</summary>
+    private static string Contract(Webhook hook) => hook.SendsFindings
+        ? (hook.IsConnectWise
+            ? "One ticket per finding, and a note on it for what changes (docs/CONNECTWISE.md). --payload event.v1 keeps the older ticket per DNS change."
+            : "Sends dmarc-monitor.finding.v1: one message per change on a finding (docs/WEBHOOKS.md). --payload event.v1 keeps the older contract.")
+        : "Sends the older contract: one message per DNS change (dmarc-monitor.event.v1). Set it again with --payload finding.v1 to move to findings.";
+
     private static string Actor() => $"{Environment.UserName} (command line)";
 
     private static string Show(DateTimeOffset at) => at.UtcDateTime.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture);
@@ -358,11 +368,11 @@ public static class NotifyCommand
 
               dmarc notify list
               dmarc notify set [--org <slug>] --url https://... [--min-severity info|warning|critical]
-                               [--link-base https://dmarc.example.com]
+                               [--link-base https://dmarc.example.com] [--payload finding.v1|event.v1]
               dmarc notify set [--org <slug>] --kind connectwise --site https://api-na.myconnectwise.net
                                --company-id <id> --client-id <guid> --public-key <key> --board <name>
                                [--status <name>] [--priority-critical <name>] [--priority-warning <name>]
-                               [--min-severity warning] [--link-base https://...]
+                               [--min-severity warning] [--link-base https://...] [--payload finding.v1|event.v1]
               dmarc notify companies [--org <slug>] --search <text>
               dmarc notify test [--org <slug>] [--kind webhook|connectwise] [--client <slug>]
               dmarc notify send [--org <slug>]

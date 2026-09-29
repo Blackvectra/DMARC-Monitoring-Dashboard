@@ -267,7 +267,6 @@ public sealed partial class ClientDatabases
         "compliance_scores",
         "enforcement_assessments",
         "cousin_domains",
-        "alerts",
         "dns_change_plans",
         "dns_changes",
         "spf_flatten_state",
@@ -1018,7 +1017,7 @@ public sealed partial class ClientDatabases
     public static IReadOnlyList<Migration> Migrations { get; } = LoadMigrations();
 
     /// <summary>The version client-schema.sql builds a file at.</summary>
-    public const string BaselineVersion = "0001";
+    public const string BaselineVersion = "0002";
 
     /// <summary>
     /// Brings every client file of this organization's database up to the
