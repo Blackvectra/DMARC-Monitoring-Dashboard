@@ -72,6 +72,17 @@ INSERT INTO globex.compliance_scores (id,tenant_id,client_id,domain_id,score_dat
 INSERT INTO acme.dns_drift_events (id,tenant_id,client_id,domain_id,detected_at,record_type,old_value,new_value,summary,severity) VALUES
  ('dr1','t-nls','c-acme','d-acme',datetime('now'),'spf','v=spf1 include:a -all','v=spf1 -all','SPF: -include:a','critical');
 
+-- Findings live in the organization's database: metadata and a pointer at
+-- the evidence in the client's file, never the record text (T22-T26).
+INSERT INTO findings (id,tenant_id,client_id,domain_id,source_id,type,rule,severity,title,dedup_key,evidence_ref,first_observed_at,last_observed_at,created_at,updated_at) VALUES
+ ('f1','t-nls','c-acme','d-acme','dns-scan','SPF_CHANGED','spf_term_removed','critical','SPF: -include:a','dns:d-acme:spf','drift:dr1',datetime('now'),datetime('now'),datetime('now'),datetime('now'));
+INSERT INTO finding_events (id,finding_id,tenant_id,client_id,at,kind,actor) VALUES
+ ('fe1','f1','t-nls','c-acme',datetime('now'),'Observed','dns-scan');
+INSERT INTO finding_exceptions (id,tenant_id,client_id,finding_id,reason,approver,compensating_control,approved_at,review_at,created_by,created_at) VALUES
+ ('fx1','t-nls','c-acme','f1','migration in progress','alex','vendor include re-added by Friday',datetime('now'),date('now','+30 day'),'alex',datetime('now'));
+INSERT INTO finding_sources (id,tenant_id,client_id,kind,expected_every_hours,last_attempt_at,last_success_at,updated_at) VALUES
+ ('dns-scan:c-acme','t-nls','c-acme','dns-scan',24,datetime('now'),datetime('now'),datetime('now'));
+
 .print '=== T1: dedup - same reporter resending the same report_id MUST fail ==='
 INSERT INTO acme.aggregate_reports (id,tenant_id,client_id,domain_id,org_name,external_report_id,date_begin,date_end,raw_hash,received_at,ingested_at)
 VALUES ('r1-dup','t-nls','c-acme','d-acme','google.com','RPT-001','2026-09-14T00:00:00Z','2026-09-14T23:59:59Z','hash-a',datetime('now'),datetime('now'));
@@ -88,6 +99,21 @@ VALUES (99,'r-nonexistent','t-nls','c-acme','d-acme','2026-09-14T00:00:00Z','1.1
 INSERT INTO clients (id,tenant_id,name,slug,status,created_at,updated_at)
 VALUES ('c-bad','t-nls','Bad','bad','not-a-real-status',datetime('now'),datetime('now'));
 
+.print '=== T22: findings - the same condition from the same source MUST NOT make a second row ==='
+INSERT INTO findings (id,tenant_id,client_id,domain_id,source_id,type,severity,title,dedup_key,first_observed_at,last_observed_at,created_at,updated_at)
+VALUES ('f1-dup','t-nls','c-acme','d-acme','dns-scan','SPF_CHANGED','critical','SPF: -include:a','dns:d-acme:spf',datetime('now'),datetime('now'),datetime('now'),datetime('now'));
+
+.print '=== T23: findings - an exception without a review date MUST fail ==='
+INSERT INTO finding_exceptions (id,tenant_id,client_id,finding_id,reason,approver,compensating_control,approved_at,created_by,created_at)
+VALUES ('fx-noreview','t-nls','c-acme','f1','because','alex','none',datetime('now'),'alex',datetime('now'));
+
+.print '=== T24: findings - a second open exception on one finding MUST fail ==='
+INSERT INTO finding_exceptions (id,tenant_id,client_id,finding_id,reason,approver,compensating_control,approved_at,review_at,created_by,created_at)
+VALUES ('fx-second','t-nls','c-acme','f1','again','alex','none',datetime('now'),date('now','+30 day'),'alex',datetime('now'));
+
+.print '=== T25: findings - a state outside the named ones MUST fail ==='
+UPDATE findings SET source_state = 'fixed' WHERE id = 'f1';
+
 .print ''
 .print '=== T5: isolation - a client file holds that client and nothing else ==='
 .mode list
@@ -99,6 +125,10 @@ SELECT 'acme_file_foreign_rows=' || COUNT(*) FROM acme.aggregate_records WHERE c
 SELECT 'main_holds_client_tables=' || COUNT(*) FROM main.sqlite_master m
  WHERE m.type = 'table'
    AND m.name IN (SELECT name FROM acme.sqlite_master WHERE type = 'table' AND name <> 'schema_migrations');
+-- A finding is in the organization's database and points at its evidence
+-- in the client's file; the client's file holds no findings table at all.
+SELECT 'acme_findings_in_org_db=' || COUNT(*) FROM findings WHERE client_id='c-acme';
+SELECT 'acme_file_has_findings_table=' || COUNT(*) FROM acme.sqlite_master WHERE type='table' AND name IN ('findings','alerts');
 
 .print ''
 .print '=== T7: v_daily_rollup, inside the client file ==='
@@ -205,3 +235,10 @@ SELECT 'remediation_outside_its_file=' || (
   + (SELECT COUNT(*) FROM globex.spf_flatten_state)
   + (SELECT COUNT(*) FROM rival.dns_change_plans) + (SELECT COUNT(*) FROM rival.dns_changes)
   + (SELECT COUNT(*) FROM rival.spf_flatten_state));
+
+.print ''
+.print '=== T26: findings - erasing a client leaves none of its findings, history, exceptions or sources ==='
+SELECT 'acme_findings_left='   || COUNT(*) FROM findings WHERE client_id='c-acme';
+SELECT 'acme_finding_events_left=' || COUNT(*) FROM finding_events WHERE client_id='c-acme';
+SELECT 'acme_exceptions_left=' || COUNT(*) FROM finding_exceptions WHERE client_id='c-acme';
+SELECT 'acme_sources_left='    || COUNT(*) FROM finding_sources WHERE client_id='c-acme';

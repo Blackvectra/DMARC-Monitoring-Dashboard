@@ -30,7 +30,7 @@ backups, restores and erasure treat them that way.
 | `ingest_log` | `senders` |
 | `dns_provider_configs` (a credential *reference*, never a secret) | `dns_snapshots`, `dns_drift_events`, `dkim_selectors` |
 | `mta_sts_policies` | `compliance_scores`, `enforcement_assessments` |
-| `threat_indicators`, `source_names` | `cousin_domains`, `alerts` |
+| `threat_indicators`, `source_names`, `findings`, `finding_events`, `finding_exceptions`, `finding_sources` | `cousin_domains` |
 | `row_ids` - see [Row ids](#row-ids) | `dns_change_plans`, `dns_changes`, `spf_flatten_state` |
 | `schema_migrations` | `client_file` - whose file this is - and its own `schema_migrations` |
 

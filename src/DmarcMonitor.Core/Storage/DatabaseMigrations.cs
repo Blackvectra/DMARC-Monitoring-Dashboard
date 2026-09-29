@@ -36,7 +36,7 @@ public static class DatabaseMigrations
     /// Everything schema.sql creates in one go, so a database it built is
     /// already at this version and needs nothing replayed into it.
     /// </summary>
-    public const string BaselineVersion = "0021";
+    public const string BaselineVersion = "0022";
 
     /// <summary>
     /// The migrations, in order.

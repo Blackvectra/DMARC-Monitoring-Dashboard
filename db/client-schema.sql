@@ -522,35 +522,6 @@ CREATE INDEX ix_cousin_client ON cousin_domains(client_id) WHERE is_dismissed = 
 
 
 -- ============================================================================
---  OPERATIONS
--- ============================================================================
-
--- Fired alerts. Exists for dedup (don't page twice for the same thing in an
--- hour) and for the SLA conversation ("we alerted you at 14:22").
-CREATE TABLE alerts (
-    id                  TEXT PRIMARY KEY,
-    tenant_id           TEXT NOT NULL,
-    client_id           TEXT NOT NULL,
-    domain_id           TEXT,
-
-    alert_type          TEXT NOT NULL,                 -- failure_rate / new_sender / dns_drift / volume_anomaly / cert_expiry
-    severity            TEXT NOT NULL DEFAULT 'warning'
-                        CHECK (severity IN ('info','warning','critical')),
-    title               TEXT NOT NULL,
-    payload_json        TEXT,
-
-    fired_at            TEXT NOT NULL,
-    resolved_at         TEXT,
-    notified_channels   TEXT,                          -- JSON array: ["email","teams"]
-    dedup_key           TEXT NOT NULL                  -- type + domain + bucket, for suppression
-);
-
-CREATE INDEX ix_alerts_client_date ON alerts(client_id, fired_at DESC);
-CREATE INDEX ix_alerts_dedup       ON alerts(dedup_key, fired_at DESC);
-CREATE INDEX ix_alerts_open        ON alerts(client_id) WHERE resolved_at IS NULL;
-
-
--- ============================================================================
 --  REMEDIATION  (DNS changes this tool planned and published for this client)
 -- ============================================================================
 
@@ -699,3 +670,5 @@ CREATE TABLE schema_migrations (
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0001', datetime('now'), 'One file per client: the tables the single database held about each client''s mail as of 0018');
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0002', datetime('now'), 'Drop alerts: its lifecycle lives in findings, in the organization''s database');
