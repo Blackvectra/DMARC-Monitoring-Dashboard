@@ -507,24 +507,52 @@ safe: it returns what it has already done, and the next run resumes.
 
 ---
 
+## What it found: findings and the Operations page
+
+Everything the engines find is a finding: a DNS record that changed, a
+domain whose reports stopped arriving while the collector kept working, a
+change applied from the Fix page that DNS and then the receivers have not
+yet shown took. One row per thing that is wrong however many nights see it,
+with what its source last saw and what a person decided kept apart, so
+closing a finding never tells the scan the record is fine.
+[`FINDINGS.md`](FINDINGS.md) is the reference.
+
+**Operations**, in the web app, answers what a morning asks, in order: what
+broke, what changed, what needs review, what is awaiting verification, what
+was excepted and when it is due back, and whether the engines themselves are
+running. A finding opens to its history and to the decisions a person may
+make there. It is a detection and verification console, not a work queue:
+the ticket lives in the PSA.
+
+From the command line:
+
+```
+dmarc findings list                 # what is open and wants a person; exits 1 while a critical does
+dmarc findings list --org <slug> --all
+dmarc findings observe              # the nightly step: reports, remediation deadlines, expired exceptions
+```
+
+`dmarc-dns.service` runs `findings observe` after the scan and before the
+send below; on Windows the nightly task does the same.
+
 ## Being told what changed
 
-The nightly DNS scan records every change to a domain's SPF, DMARC, MTA-STS
-and TLS-RPT records, and the domain's page lists them. To hear about them
-without opening it, give the organization a webhook:
+To hear about findings without opening the app, give the organization a
+webhook:
 
 ```
 dmarc notify set --org <slug> --url https://console.example/api/sources/dmarc-monitor/events
 dmarc notify test --org <slug>
 ```
 
-Each change at or above `--min-severity` (default `warning`) is sent once, as
-signed JSON, after the scan. [`WEBHOOKS.md`](WEBHOOKS.md) has the contract a
-receiver checks and the commands for a server, where they must be run as the
-service account.
+Each change on a finding at or above `--min-severity` (default `warning`) is
+sent once, as signed JSON, after the scan: first seen, worse, resolved by its
+source, back again, what a person decided. [`WEBHOOKS.md`](WEBHOOKS.md) has
+the contract a receiver checks and the commands for a server, where they must
+be run as the service account.
 
 Or as tickets in ConnectWise PSA, one per finding on the client's own company,
-with a note when it repeats:
+with a note for what changes while a tech has it open:
 
 ```
 dmarc notify set --org <slug> --kind connectwise --site https://api-na.myconnectwise.net \
@@ -663,7 +691,9 @@ What it checks:
 | | |
 |---|---|
 | Collection, **per organization** | Nothing stored in 36 hours. Per organization because two collectors break independently, and one still working keeps the install-wide figure looking healthy while a whole customer book goes dark. |
-| Domains gone quiet | Reports stopped more than 7 days ago while others kept arriving. Not raised when collection itself is broken — then everything is quiet, and saying so 17 times buries the finding that matters. |
+| Domains gone quiet | Reports stopped more than 7 days ago while others kept arriving. Not raised when collection itself is broken — then everything is quiet, and saying so 17 times buries the finding that matters. The same judgement, per domain and only for domains that reported regularly, is the `REPORTING_STOPPED` finding ([`FINDINGS.md`](FINDINGS.md)). |
+| The engines | From each engine's own record of its runs: failed its last run is **broken** now (nothing it watches is being observed, and what it found is marked unknown rather than resolved); not run within its window is a weakness; never run is said rather than shown as health. |
+| Open critical findings | Named per organization as a check, not an alert: the alert is the destination they are sent to. `dmarc findings list` prints them and exits 1 while one is open. |
 | Backups | Only when you name a directory. Left out, nothing is concluded rather than assumed missing. None at all, or a newest copy more than **7 days** old, is backups having stopped. Between 2 and 7 days is one late night and only prints. |
 | A name in two organizations | Usually a mistyped `--org` on a collector. Reported, not judged. |
 

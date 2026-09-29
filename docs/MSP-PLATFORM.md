@@ -88,7 +88,7 @@ first.
 | DNSSEC / DANE | **none** |
 | Historical snapshots with timestamps | **have** — keyed on content hash, so a change is a new row |
 | Readable record diffs | **have** — each change carries a one-line summary (`DMARC: p=quarantine → p=none.`), listed on the domain's page |
-| Alert on policy weakened, SPF invalid, selector disappearing, MTA-STS failing | **partial** — every scan diffs against the last and writes a severity-rated drift event, sent to a signed webhook; DKIM selectors are not diffed, and MTA-STS is only seen being withdrawn, not failing |
+| Alert on policy weakened, SPF invalid, selector disappearing, MTA-STS failing | **mostly** — every scan diffs against the last and raises a finding with a lifecycle (`docs/FINDINGS.md`), sent to a signed webhook and a PSA; DKIM selectors are not diffed, and MTA-STS is only seen being withdrawn, not failing |
 | Plain-English impact on every alert | **partial** — the chips and the Fix page say it; no alert carries it |
 | Baseline approval workflow | **none** |
 
@@ -113,7 +113,7 @@ stored history into the feature.
 
 | | state |
 |---|---|
-| Severity levels | **partial** — triage has five levels; alerts have none because alerts do not exist |
+| Severity levels | **yes** — triage has five levels; findings have info, warning and critical, and a destination chooses its floor |
 | Alert with tenant, domain, sender, evidence, recommended action, owner, SLA | **none** |
 | The eleven alert types listed | **none** — one exists as a systemd unit: a collector that has stopped |
 | Acknowledge, assign, comment, suppress, escalate, close, reopen | **none** |
@@ -140,12 +140,12 @@ table with a lifecycle in it.
 | | state |
 |---|---|
 | REST / OpenAPI | **none** |
-| Webhooks | **partial** — one signed webhook and one ConnectWise PSA destination per organization, DNS drift only; see `docs/WEBHOOKS.md` and `docs/CONNECTWISE.md` |
+| Webhooks | **yes** — one signed webhook and one ConnectWise PSA destination per organization, told about every change on a finding as `dmarc-monitor.finding.v1`; see `docs/WEBHOOKS.md` and `docs/CONNECTWISE.md` |
 | PSA, SIEM, SOAR, Teams, Slack, email | **none** — `dmarc intel` exports indicators a SIEM can read, which is the nearest thing |
 | Bulk onboarding by CSV or API | **partial** — an import files every domain it finds, and now creates a client per domain; no CSV of tenants |
 | Domain and subdomain discovery with review | **partial** — discovery happens on import; review does not |
 | RUA endpoint setup, tenant-specific and validated | **have** — `dmarc reachability` checks the RFC 7489 §7.1 authorization almost nobody checks |
-| Health checks for queues, polling, storage, notifications, backups | **partial** — `dmarc health` covers backups, collection and a webhook that has stopped delivering |
+| Health checks for queues, polling, storage, notifications, backups | **mostly** — `dmarc health` covers backups, collection, each engine's own run record, open critical findings, and a webhook that has stopped delivering |
 
 ## 10. Security and operations
 

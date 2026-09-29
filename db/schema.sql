@@ -547,7 +547,7 @@ CREATE TABLE webhooks (
 
 CREATE TABLE webhook_deliveries (
     webhook_id          TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
-    event_id            TEXT NOT NULL,                 -- finding_events.id; rows from before 0022 hold a drift event's id from the client's file
+    event_id            TEXT NOT NULL,                 -- finding_events.id for a destination on finding.v1; a drift event's id from the client's file for one on event.v1, and for every row from before 0022
     client_id           TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     attempts            INTEGER NOT NULL DEFAULT 0,
     delivered_at        TEXT,

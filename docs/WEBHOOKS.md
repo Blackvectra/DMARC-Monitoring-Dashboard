@@ -1,48 +1,74 @@
 # Webhooks
 
-What the nightly DNS scan finds, sent somewhere as it is found: a signed JSON
-`POST` per change, to one address per organization. A PSA, a SOC console, a
-small relay in front of a chat tool — anything that can check an HMAC.
+What the product finds, sent somewhere as it changes: a signed JSON `POST`
+per change on a finding, to one address per organization. A PSA, a SOC
+console, a small relay in front of a chat tool — anything that can check an
+HMAC.
 
 Without one, a weakened DMARC policy is learned about by opening the app.
 
-The same changes can be filed as tickets in ConnectWise PSA instead of, or
+The same findings can be filed as tickets in ConnectWise PSA instead of, or
 as well as, being POSTed here: [`CONNECTWISE.md`](CONNECTWISE.md). It is the
 same channel with a second kind of destination, so everything below about
 when things are sent, what is not, and what `dmarc health` watches applies to
-both.
+both. What a finding is, and how it changes, is [`FINDINGS.md`](FINDINGS.md).
 
 ---
 
 ## What is sent, and when
 
-`dmarc-dns.service` reads every domain's records nightly at 03:20. When it
-exits cleanly, `OnSuccess=` starts `dmarc-notify.service`, which runs
-`dmarc notify send` and exits. There is no timer of its own and nothing
-listening.
+`dmarc-dns.service` reads every domain's records nightly at 03:20, then runs
+`dmarc findings observe` over what is stored. When it exits cleanly,
+`OnSuccess=` starts `dmarc-notify.service`, which runs `dmarc notify send`
+and exits. There is no timer of its own and nothing listening.
 
-Each DNS change the scan recorded is sent once, oldest first, if it is at or
-above the webhook's minimum severity:
+Each change on a finding is sent once, oldest first, if the finding is at or
+above the destination's minimum severity:
+
+| change | `eventKind` |
+|---|---|
+| first seen, or seen again after a failed observation | `Observed` |
+| worse, or a different kind of wrong | `SeverityChanged`, `TypeChanged` |
+| the source could not observe it, so nothing is known | `SourceUnknown` |
+| the source no longer sees it | `SourceResolved` |
+| back after the source had resolved it | `Reopened` |
+| what a person decided | `Acknowledged`, `AnalystStateChanged`, `ExceptionApplied`, `ExceptionExpired`, `ExceptionEnded` |
+| an applied change moved along the verification chain | `RemediationStaged` |
+
+The same drift another night is the same finding and sends nothing. An
+observation counted towards resolution, a moved expectation, and the ticket a
+destination itself filed are not sent either.
 
 | severity | for example |
 |---|---|
-| `critical` | DMARC `p=` or `sp=` loosened; a DMARC report address taken away; DMARC or SPF removed or no longer parsing; a second SPF record published |
-| `warning` | DMARC `p=` or `sp=` tightened, `pct=` lowered or alignment changed; an SPF mechanism removed or its `all` weakened; MTA-STS or TLS-RPT withdrawn |
-| `info` | a record published; an SPF include added; any other change |
+| `critical` | DMARC `p=` or `sp=` loosened; a DMARC report address taken away; DMARC or SPF removed or no longer parsing; a second SPF record published; reports stopped and the record no longer asks for them |
+| `warning` | DMARC `p=` or `sp=` tightened, `pct=` lowered or alignment changed; an SPF mechanism removed or its `all` weakened; MTA-STS or TLS-RPT withdrawn; a domain's reports stopped; an applied change DNS still does not serve a day on |
+| `info` | a record published; an SPF include added; a change applied from the Fix page, until it is verified |
 
-The default is `warning`. The rules are `DnsDrift.cs`; this table is a
-summary of them, not a second copy.
+The default is `warning`. The rules are `DnsDrift.cs` and the sources in
+`FindingTypes.cs`; this table is a summary of them, not a second copy.
 
 Some things are deliberately not sent:
 
-- **Changes from before the webhook existed.** Setting one up is not a request
-  for every change the product has ever seen.
+- **Changes from before the destination existed.** Setting one up is not a
+  request for every finding the product has ever had.
 - **Anything more than 14 days old** that has still not been delivered. After
-  two weeks it is history, and the drift page still has it.
+  two weeks it is history, and the Operations page still has it.
 
-A change to a domain this product itself changed in the two days before
-(applied from the Fix page and not rolled back) is still sent, with
-`wasExpected: true`, so the receiver can decide.
+### Two contracts
+
+A destination receives one of two payloads, chosen when it is set
+(`--payload`) and shown by `dmarc notify list`:
+
+| `payload_version` | one message per | schema |
+|---|---|---|
+| `finding.v1` — the default for anything set from now on | change on a finding | `dmarc-monitor.finding.v1`, below |
+| `event.v1` — kept for destinations set before findings existed | DNS change | `dmarc-monitor.event.v1`, at the end of this page |
+
+A destination set before `finding.v1` existed keeps `event.v1` until it is
+set again; setting it again moves it to `finding.v1` unless `--payload
+event.v1` says otherwise. `event.v1` is deprecated: it will keep working, and
+nothing new will be added to it.
 
 ### When the receiver is down
 
@@ -89,6 +115,9 @@ the environment.
 `--link-base` is the address people open the web app on; each event carries a
 link to the domain's page there. Leave it out and events carry no link.
 
+`--payload event.v1` keeps the older contract for a receiver that has not
+moved yet. Left out, the destination gets `finding.v1`.
+
 `--org` is the organization's slug (`local` if there is only one). Each
 organization has at most one webhook; setting it again replaces the address
 and key and keeps the record of what was already sent.
@@ -100,12 +129,13 @@ sudo -H -u dmarc /usr/local/bin/dmarc notify test --org <slug> \
     --db /opt/dmarc/data/dmarc.db --secrets /opt/dmarc/data/secrets
 ```
 
-That sends a `ping` event, signed like any other, and prints what came back.
+That sends a test event, signed like any other and in whichever shape the
+destination will receive, and prints what came back.
 
 The rest:
 
 ```sh
-# what is configured, where it goes, and whether it is failing
+# what is configured, where it goes, which contract, and whether it is failing
 sudo -H -u dmarc /usr/local/bin/dmarc notify list --db /opt/dmarc/data/dmarc.db --secrets /opt/dmarc/data/secrets
 
 # send what is waiting now, rather than after tomorrow's scan
@@ -122,10 +152,10 @@ and the destination's scheme and host. Not the full address.
 ### What is stored where
 
 The database holds the destination's scheme and host (`https://console.example`)
-for display, the minimum severity, and which events went where. The full
-address and the signing key are in the secret store, because for most chat
-tools the address is itself the credential. A copied database or a backup
-carries neither.
+for display, the minimum severity, the contract, and which events went where.
+The full address and the signing key are in the secret store, because for
+most chat tools the address is itself the credential. A copied database or a
+backup carries neither.
 
 A run given a different `--secrets` from the one that set the webhook finds no
 key and says so, rather than sending unsigned.
@@ -155,12 +185,13 @@ $key | .\dmarc.exe notify set --org local --url http://localhost:8080/api/source
 
 Plain HTTP is accepted because `localhost` never leaves the machine.
 
-Then the nightly scan and send, as a task that runs as you:
+Then the nightly scan, the observation of what is stored, and the send, as a
+task that runs as you:
 
 ```powershell
 $dir       = (Get-Location).Path
 $action    = New-ScheduledTaskAction -Execute 'cmd.exe' -WorkingDirectory $dir `
-               -Argument '/c (dmarc.exe check --all --save & dmarc.exe notify send) >> nightly.log 2>&1'
+               -Argument '/c (dmarc.exe check --all --save & dmarc.exe findings observe & dmarc.exe notify send) >> nightly.log 2>&1'
 $trigger   = New-ScheduledTaskTrigger -Daily -At 3:20am
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
 $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable
@@ -175,9 +206,10 @@ Register-ScheduledTask -TaskName 'DMARC scan and notify' -Action $action -Trigge
 - A delivery that fails is kept and retried the next night. It shows in
   `nightly.log` and in `.\dmarc.exe notify list`.
 
-Not for the Windows *service* install (`bootstrap.ps1`). Its tasks run as
-`NT AUTHORITY\LocalService`, which cannot read a key you set from your own
-session, and it has no task that sends after the scan yet.
+The Windows *service* install (`bootstrap.ps1`) runs the same three steps as
+its nightly task, as `NT AUTHORITY\LocalService`. Its tasks cannot read a key
+you set from your own session, and it has no task that sends after the scan
+yet.
 
 ---
 
@@ -198,41 +230,52 @@ Any `2xx` is delivered. Anything else, a timeout (20 seconds) or a redirect is
 a failure and is tried again next run. Redirects are not followed: a signed
 request going somewhere it was not sent is not something to do quietly.
 
-### The body
+### The body: `dmarc-monitor.finding.v1`
 
 ```json
 {
-  "schema": "dmarc-monitor.event.v1",
+  "schema": "dmarc-monitor.finding.v1",
+  "payloadVersion": "finding.v1",
   "id": "4f0c2a52-9d63-4b8e-a0c1-2b7e6f1d9a10",
-  "type": "dns.drift",
-  "occurredAt": "2026-09-27T03:20:41+00:00",
+  "findingId": "9b1d0e6a-2c3f-4a5b-8c7d-6e5f4a3b2c1d",
+  "sourceId": "dns-scan",
+  "tenantId": "<organization id>",
   "organization": { "id": "<organization id>", "slug": "local" },
   "client": { "id": "<client id>", "slug": "client-a", "name": "Client A" },
   "domain": "example.com",
+  "dedupKey": "dns:<domain id>:dmarc",
+  "type": "DMARC_POLICY_WEAKENED",
+  "rule": "policy_loosened",
   "severity": "critical",
-  "summary": "DMARC: p=quarantine → p=none.",
-  "wasExpected": false,
-  "dnsDrift": {
-    "recordType": "dmarc",
-    "oldValue": "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com",
-    "newValue": "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
-  },
-  "link": "https://dmarc.example.com/domains/example.com"
+  "title": "DMARC: p=quarantine → p=none.",
+  "evidenceUri": "https://dmarc.example.com/domains/example.com",
+  "evidenceRef": "drift:<drift event id>",
+  "observedAt": "2026-09-27T03:20:41+00:00",
+  "lastObservedAt": "2026-09-29T03:21:02+00:00",
+  "observationCount": 3,
+  "sourceState": "active",
+  "analystState": "unreviewed",
+  "eventKind": "Observed",
+  "eventAt": "2026-09-27T03:20:41+00:00",
+  "eventNote": "DMARC: p=quarantine → p=none."
 }
 ```
 
 | field | |
 |---|---|
-| `schema` | `dmarc-monitor.event.v1`. A breaking change gets a new one |
-| `id` | the drift event's id. **The same on every retry** — deduplicate on it |
-| `type` | `dns.drift`, or `ping` from `dmarc notify test`. Ignore types you do not know |
-| `occurredAt` | when the scan saw the change, not when it was sent |
-| `recordType` | `spf`, `dmarc`, `mta-sts` or `tls-rpt` |
-| `oldValue`, `newValue` | the record text; either is absent when the record was published or removed |
-| `link` | absent unless `--link-base` was given |
+| `schema`, `payloadVersion` | `dmarc-monitor.finding.v1` and `finding.v1`. A breaking change gets a new one; a field may be added without one |
+| `id` | the finding event's id. **The same on every retry** — deduplicate on it |
+| `findingId` | the finding: the same across every event on it |
+| `sourceId`, `dedupKey` | with `client.id`, the finding's identity across systems: a receiver that keeps its own copy files by these three, never by `id` |
+| `type`, `rule`, `severity`, `title` | as [`FINDINGS.md`](FINDINGS.md) defines them. `PING` is the test event from `dmarc notify test`; ignore types you do not know |
+| `evidenceUri` | where the evidence can be opened; absent unless `--link-base` was given |
+| `evidenceRef` | the evidence's identifier inside this product. Never the evidence itself: no record text, no report |
+| `controlId` | absent until a control catalog names one |
+| `sourceState`, `analystState`, `remediationStage` | what the source last saw and what a person decided, as they stand when sent |
+| `eventKind`, `eventAt`, `eventNote` | what happened that caused this to be sent |
 
-A `ping` carries `schema`, `id`, `type`, `occurredAt`, `organization` and a
-`summary` saying it is a test, and nothing else.
+A test event from `dmarc notify test` has `type` `PING`, `findingId` and
+`dedupKey` `ping`, an empty `client`, and a title saying nothing changed.
 
 ### Verifying it
 
@@ -247,7 +290,8 @@ signature = "v1=" + hex( HMAC-SHA256( key, timestamp + "." + body ) )
   timestamp is signed, so a captured request cannot be replayed with a fresh
   one.
 
-A check against this, for any receiver:
+A check against this, for any receiver (the body is any bytes; this one is an
+older-contract ping):
 
 | | |
 |---|---|
@@ -276,3 +320,48 @@ def verify(key: str, timestamp: str, body: bytes, header: str) -> bool:
 - Answer `4xx` only for what retrying will not fix, and expect it to be retried
   anyway: the sender does not tell the difference, and the failure is what
   makes `dmarc health` notice.
+- Keep its own copy by (`sourceId`, `client.id`, `dedupKey`), and treat each
+  event as the finding's current state, never as a second finding.
+
+---
+
+## The older contract: `dmarc-monitor.event.v1`
+
+Deprecated. Kept for a destination set before findings existed, or one set
+with `--payload event.v1`; nothing new is added to it. One message per DNS
+change the scan recorded, with the record text, sent under the same request
+headers and signature as above.
+
+```json
+{
+  "schema": "dmarc-monitor.event.v1",
+  "id": "4f0c2a52-9d63-4b8e-a0c1-2b7e6f1d9a10",
+  "type": "dns.drift",
+  "occurredAt": "2026-09-27T03:20:41+00:00",
+  "organization": { "id": "<organization id>", "slug": "local" },
+  "client": { "id": "<client id>", "slug": "client-a", "name": "Client A" },
+  "domain": "example.com",
+  "severity": "critical",
+  "summary": "DMARC: p=quarantine → p=none.",
+  "wasExpected": false,
+  "dnsDrift": {
+    "recordType": "dmarc",
+    "oldValue": "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com",
+    "newValue": "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
+  },
+  "link": "https://dmarc.example.com/domains/example.com"
+}
+```
+
+| field | |
+|---|---|
+| `id` | the drift event's id. The same on every retry |
+| `type` | `dns.drift`, or `ping` from `dmarc notify test` |
+| `occurredAt` | when the scan saw the change, not when it was sent |
+| `wasExpected` | true when this product changed the domain's DNS itself in the two days before |
+| `recordType` | `spf`, `dmarc`, `mta-sts` or `tls-rpt` |
+| `oldValue`, `newValue` | the record text; either is absent when the record was published or removed |
+| `link` | absent unless `--link-base` was given |
+
+A `ping` carries `schema`, `id`, `type`, `occurredAt`, `organization` and a
+`summary` saying it is a test, and nothing else.

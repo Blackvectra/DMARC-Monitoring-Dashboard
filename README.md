@@ -13,7 +13,8 @@ Two pieces, sharing a SQLite file and nothing else:
   folders, plans and applies DNS changes, writes client reports. No .NET
   install needed, no checkout beside it. Runs on a schedule.
 - **The web app** — the screens. Triage, per-domain evidence, the Fix
-  worklist, reports. Reads what the CLI writes.
+  worklist, Operations (what the engines found, and whether a fix took),
+  reports. Reads what the CLI writes.
 
 Neither needs the other running.
 
