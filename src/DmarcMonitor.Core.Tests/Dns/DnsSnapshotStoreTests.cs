@@ -139,7 +139,11 @@ public sealed class DnsSnapshotStoreTests : IDisposable
         // Not a change: there was nothing to differ from. Calling the first
         // reading of a domain a change would fire "this domain's DNS was
         // edited" at every newly onboarded customer.
-        Assert.Equal(new SnapshotSave(Stored: true, Changed: false) { First = true }, await _store.SaveAsync(domain, Good(domain)));
+        var save = await _store.SaveAsync(domain, Good(domain));
+        Assert.True(save.Stored);
+        Assert.False(save.Changed);
+        Assert.True(save.First);
+        Assert.NotNull(save.DomainId);
 
         var all = await _store.LatestAsync();
         var dns = all[domain];

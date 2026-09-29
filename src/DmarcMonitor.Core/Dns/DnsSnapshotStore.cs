@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Findings;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
@@ -123,6 +124,11 @@ public sealed record SnapshotSave(bool Stored, bool Changed)
     /// <summary>What changed, record by record, when <see cref="Changed"/> is true.</summary>
     public IReadOnlyList<DriftChange> Drift { get; init; } = [];
 
+    /// <summary>The domain the reading was stored for, when it was stored.</summary>
+    public string? DomainId { get; init; }
+    public string? TenantId { get; init; }
+    public string? ClientId { get; init; }
+
     /// <summary>
     /// True when this was the first reading on record for the domain.
     /// </summary>
@@ -171,6 +177,15 @@ public sealed class DnsSnapshotStore(string databasePath)
 
     /// <summary>The organization's database and each client's file; see ClientDatabases.</summary>
     private ClientDatabases Files => new(_databasePath);
+
+    /// <summary>
+    /// Where what a reading found wrong goes, once the reading is stored:
+    /// the findings in the organization's database, fed by every path that
+    /// stores a reading - the nightly scan, dmarc check --save, a refresh
+    /// from a page - because a reading is an observation whichever way it
+    /// was taken.
+    /// </summary>
+    private readonly DnsFindingSource _findings = new(databasePath);
 
     /// <summary>
     /// The current DNS state of every domain in scope, keyed by domain name.
@@ -372,10 +387,19 @@ public sealed class DnsSnapshotStore(string databasePath)
             }
         }
 
-        await using var connection = db;
-        await using var inTransaction = transaction!;
-        return await SaveAsync(db, inTransaction, domainId!, tenantId!, clientId!, published, dkim, status, now, ct)
-            .ConfigureAwait(false);
+        SnapshotSave save;
+        await using (var connection = db)
+        await using (var inTransaction = transaction!)
+        {
+            save = await SaveAsync(connection, inTransaction, domainId!, tenantId!, clientId!, published, dkim, status, now, ct)
+                .ConfigureAwait(false);
+        }
+
+        // After the reading's own transaction has committed and its
+        // connection closed: the findings live in the organization's
+        // database, on a connection of their own.
+        await _findings.RecordAsync(save, published, status, now, ct).ConfigureAwait(false);
+        return save;
     }
 
     private static async Task<SnapshotSave> SaveAsync(
@@ -410,8 +434,8 @@ public sealed class DnsSnapshotStore(string databasePath)
 
         await transaction.CommitAsync(ct).ConfigureAwait(false);
         return drift is null
-            ? new SnapshotSave(Stored: true, Changed: false) { First = first }
-            : new SnapshotSave(Stored: true, Changed: true) { Drift = drift };
+            ? new SnapshotSave(Stored: true, Changed: false) { First = first, DomainId = domainId, TenantId = tenantId, ClientId = clientId }
+            : new SnapshotSave(Stored: true, Changed: true) { Drift = drift, DomainId = domainId, TenantId = tenantId, ClientId = clientId };
     }
 
     /// <returns>
@@ -498,8 +522,7 @@ public sealed class DnsSnapshotStore(string databasePath)
             TlsRpt = published.TlsRptRecord,
         });
 
-        await WriteDriftAsync(db, transaction, domainId, tenantId, clientId, drift, now, ct).ConfigureAwait(false);
-        return drift;
+        return await WriteDriftAsync(db, transaction, domainId, tenantId, clientId, drift, now, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -512,11 +535,12 @@ public sealed class DnsSnapshotStore(string databasePath)
     /// here and not rolled back is the first kind; anything else is the
     /// second, and is what an MSP needs to hear about.
     /// </remarks>
-    private static async Task WriteDriftAsync(
+    /// <returns>The changes, each carrying the id of the row it became and whether it was expected.</returns>
+    private static async Task<IReadOnlyList<DriftChange>> WriteDriftAsync(
         SqliteConnection db, SqliteTransaction transaction, string domainId, string tenantId, string clientId,
         IReadOnlyList<DriftChange> drift, DateTimeOffset now, CancellationToken ct)
     {
-        if (drift.Count == 0) { return; }
+        if (drift.Count == 0) { return drift; }
 
         bool expected;
         await using (var ours = db.CreateCommand())
@@ -531,8 +555,10 @@ public sealed class DnsSnapshotStore(string databasePath)
             expected = Convert.ToInt64(await ours.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) == 1;
         }
 
+        var written = new List<DriftChange>(drift.Count);
         foreach (var change in drift)
         {
+            var id = Guid.NewGuid().ToString();
             await using var insert = db.CreateCommand();
             insert.Transaction = transaction;
             insert.CommandText = """
@@ -541,7 +567,7 @@ public sealed class DnsSnapshotStore(string databasePath)
                      old_value, new_value, summary, severity, was_expected)
                 VALUES ($id, $tenant, $client, $domain, $at, $type, $old, $new, $summary, $severity, $expected)
                 """;
-            insert.Parameters.AddWithValue("$id", Guid.NewGuid().ToString());
+            insert.Parameters.AddWithValue("$id", id);
             insert.Parameters.AddWithValue("$tenant", tenantId);
             insert.Parameters.AddWithValue("$client", clientId);
             insert.Parameters.AddWithValue("$domain", domainId);
@@ -553,7 +579,9 @@ public sealed class DnsSnapshotStore(string databasePath)
             insert.Parameters.AddWithValue("$severity", change.Severity);
             insert.Parameters.AddWithValue("$expected", expected ? 1 : 0);
             await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            written.Add(change with { EventId = id, WasExpected = expected });
         }
+        return written;
     }
 
     /// <summary>

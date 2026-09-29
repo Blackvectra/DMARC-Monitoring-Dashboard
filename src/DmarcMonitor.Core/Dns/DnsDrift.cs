@@ -21,7 +21,19 @@ public sealed record DnsState
 /// <summary>One record that changed between two readings.</summary>
 /// <param name="RecordType">spf, dmarc, mta-sts or tls-rpt, as dns_drift_events stores it.</param>
 /// <param name="Severity">info, warning or critical.</param>
-public sealed record DriftChange(string RecordType, string? OldValue, string? NewValue, string Summary, string Severity);
+/// <param name="Rule">
+/// Which rule decided the severity - record_removed, policy_loosened,
+/// term_removed and so on. A finding's type is read from it, so a change
+/// that trips several rules names the one that set the severity.
+/// </param>
+public sealed record DriftChange(string RecordType, string? OldValue, string? NewValue, string Summary, string Severity, string Rule)
+{
+    /// <summary>The dns_drift_events row this became, once stored: the finding's evidence.</summary>
+    public string? EventId { get; init; }
+
+    /// <summary>True when this product changed the domain's DNS itself in the two days before.</summary>
+    public bool WasExpected { get; init; }
+}
 
 /// <summary>
 /// What changed in a domain's DNS between two readings, and how much it
@@ -83,18 +95,18 @@ public static class DnsDrift
         {
             return new("spf", previous.Spf, current.Spf,
                 $"SPF: {current.SpfCount} SPF records are now published. Receivers treat that as an error, so every "
-                + "SPF check fails.", "critical");
+                + "SPF check fails.", "critical", "multiple_records");
         }
 
         if (current.Spf is null)
         {
             return new("spf", previous.Spf, null,
-                "SPF: the record was removed. No server is authorized to send as this domain.", "critical");
+                "SPF: the record was removed. No server is authorized to send as this domain.", "critical", "record_removed");
         }
 
         if (previous.Spf is null)
         {
-            return new("spf", null, current.Spf, "SPF: a record was published.", "info");
+            return new("spf", null, current.Spf, "SPF: a record was published.", "info", "record_published");
         }
 
         var before = SpfRecord.Parse(previous.Spf);
@@ -102,7 +114,7 @@ public static class DnsDrift
 
         if (!after.IsValid)
         {
-            return new("spf", previous.Spf, current.Spf, $"SPF: the record no longer parses ({after.Error}).", "critical");
+            return new("spf", previous.Spf, current.Spf, $"SPF: the record no longer parses ({after.Error}).", "critical", "no_longer_parses");
         }
 
         var oldTerms = before.Terms.Where(t => t.Name != "all").Select(t => t.Raw).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -122,12 +134,17 @@ public static class DnsDrift
         var removed = oldTerms.Except(newTerms, StringComparer.OrdinalIgnoreCase).Any();
         var weakerAll = Strength(newAll) < Strength(oldAll);
         var severity = removed || weakerAll ? "warning" : "info";
+        var rule = removed ? "term_removed"
+            : weakerAll ? "all_weakened"
+            : parts.Count == 0 ? "rewritten"
+            : newTerms.Except(oldTerms, StringComparer.OrdinalIgnoreCase).Any() ? "term_added"
+            : "all_changed";
 
         var summary = parts.Count == 0
             ? "SPF: the record was rewritten with the same meaning."
             : "SPF: " + string.Join(", ", parts) + ".";
 
-        return new("spf", previous.Spf, current.Spf, summary, severity);
+        return new("spf", previous.Spf, current.Spf, summary, severity, rule);
     }
 
     private static DriftChange Dmarc(string? previousText, string? currentText)
@@ -135,12 +152,12 @@ public static class DnsDrift
         if (currentText is null)
         {
             return new("dmarc", previousText, null,
-                "DMARC: the record was removed. Receivers apply no policy, and no reports will arrive.", "critical");
+                "DMARC: the record was removed. Receivers apply no policy, and no reports will arrive.", "critical", "record_removed");
         }
 
         if (previousText is null)
         {
-            return new("dmarc", null, currentText, "DMARC: a record was published.", "info");
+            return new("dmarc", null, currentText, "DMARC: a record was published.", "info", "record_published");
         }
 
         var before = DmarcRecord.Parse(previousText);
@@ -149,33 +166,40 @@ public static class DnsDrift
         if (!after.IsValid)
         {
             return new("dmarc", previousText, currentText,
-                $"DMARC: the record no longer parses ({after.Error}), so receivers ignore it.", "critical");
+                $"DMARC: the record no longer parses ({after.Error}), so receivers ignore it.", "critical", "no_longer_parses");
         }
 
         var parts = new List<string>();
         var severity = "info";
+        string? rule = null;
 
-        void Raise(string to)
+        // The rule that set the severity names the change; on a tie the
+        // first one seen keeps it, so a loosened policy outranks a changed
+        // report address in the same edit.
+        void Raise(string to, string because)
         {
-            if (Rank(to) > Rank(severity)) { severity = to; }
+            if (Rank(to) > Rank(severity)) { severity = to; rule = because; }
+            else if (rule is null) { rule = because; }
         }
 
         if (!string.Equals(before.Policy, after.Policy, StringComparison.OrdinalIgnoreCase))
         {
             parts.Add($"p={Show(before.Policy)} → p={Show(after.Policy)}");
-            Raise(PolicyStrength(after.Policy) < PolicyStrength(before.Policy) ? "critical" : "warning");
+            var loosened = PolicyStrength(after.Policy) < PolicyStrength(before.Policy);
+            Raise(loosened ? "critical" : "warning", loosened ? "policy_loosened" : "policy_tightened");
         }
 
         if (!string.Equals(before.EffectiveSubdomainPolicy, after.EffectiveSubdomainPolicy, StringComparison.OrdinalIgnoreCase))
         {
             parts.Add($"sp={Show(before.EffectiveSubdomainPolicy)} → sp={Show(after.EffectiveSubdomainPolicy)}");
-            Raise(PolicyStrength(after.EffectiveSubdomainPolicy) < PolicyStrength(before.EffectiveSubdomainPolicy) ? "critical" : "warning");
+            var loosened = PolicyStrength(after.EffectiveSubdomainPolicy) < PolicyStrength(before.EffectiveSubdomainPolicy);
+            Raise(loosened ? "critical" : "warning", loosened ? "subdomain_policy_loosened" : "subdomain_policy_tightened");
         }
 
         if (before.Percent != after.Percent)
         {
             parts.Add($"pct={before.Percent} → pct={after.Percent}");
-            Raise(after.Percent < before.Percent ? "warning" : "info");
+            Raise(after.Percent < before.Percent ? "warning" : "info", after.Percent < before.Percent ? "pct_lowered" : "pct_raised");
         }
 
         if (!string.Equals(Normalize(before.Rua), Normalize(after.Rua), StringComparison.OrdinalIgnoreCase))
@@ -187,28 +211,28 @@ public static class DnsDrift
             parts.Add(after.Rua.Length == 0
                 ? "reports (rua) removed"
                 : $"rua {Show(before.Rua)} → {Show(after.Rua)}");
-            Raise(lost.Count > 0 ? "critical" : "info");
+            Raise(lost.Count > 0 ? "critical" : "info", lost.Count > 0 ? "rua_removed" : "rua_changed");
         }
 
         if (before.StrictDkim != after.StrictDkim || before.StrictSpf != after.StrictSpf)
         {
             parts.Add($"alignment adkim={(before.StrictDkim ? "s" : "r")}/aspf={(before.StrictSpf ? "s" : "r")} → "
                     + $"adkim={(after.StrictDkim ? "s" : "r")}/aspf={(after.StrictSpf ? "s" : "r")}");
-            Raise("warning");
+            Raise("warning", "alignment_changed");
         }
 
         var summary = parts.Count == 0
             ? "DMARC: the record was rewritten with the same meaning."
             : "DMARC: " + string.Join(", ", parts) + ".";
 
-        return new("dmarc", previousText, currentText, summary, severity);
+        return new("dmarc", previousText, currentText, summary, severity, rule ?? "rewritten");
     }
 
     private static DriftChange Simple(
         string type, string label, string? previous, string? current, string removed, string removedText) =>
-        current is null ? new(type, previous, null, $"{label}: {removedText}", removed)
-        : previous is null ? new(type, null, current, $"{label}: a record was published.", "info")
-        : new(type, previous, current, $"{label}: the record changed.", "info");
+        current is null ? new(type, previous, null, $"{label}: {removedText}", removed, "record_removed")
+        : previous is null ? new(type, null, current, $"{label}: a record was published.", "info", "record_published")
+        : new(type, previous, current, $"{label}: the record changed.", "info", "record_changed");
 
     private static bool Differs(string? a, string? b) =>
         !string.Equals(a?.Trim(), b?.Trim(), StringComparison.Ordinal);

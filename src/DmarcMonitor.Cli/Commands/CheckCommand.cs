@@ -94,6 +94,7 @@ public static class CheckCommand
         var skipped = 0;
         var changed = 0;
         var first = 0;
+        var scanned = new List<ScanResult>();
 
         foreach (var domain in domains)
         {
@@ -129,6 +130,7 @@ public static class CheckCommand
                 if (stored.Stored) { saved++; } else { skipped++; }
                 if (stored.Changed) { changed++; }
                 if (stored.First) { first++; }
+                scanned.Add(stored);
             }
 
             // Resolve each include to the addresses it authorizes and match
@@ -183,6 +185,15 @@ public static class CheckCommand
             }
 
             worst = Math.Max(worst, findings.Max(f => (int)f.Severity));
+        }
+
+        // How the run went, per client, for the source health the operations
+        // page shows: a client whose domains all answered is healthy, one with
+        // a lookup that failed is not, and neither silence nor a failure ever
+        // clears a finding.
+        if (scanner is not null)
+        {
+            await scanner.CompleteAsync(scanned, ct).ConfigureAwait(false);
         }
 
         Console.WriteLine();
