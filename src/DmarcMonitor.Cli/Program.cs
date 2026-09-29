@@ -86,6 +86,7 @@ public static class Program
                 "dns" => await DnsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "mta-sts" => await MtaStsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "notify" => await NotifyCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
+                "findings" => await FindingsCommand.RunAsync(rest, cts.Token).ConfigureAwait(false),
                 "version" or "--version" => Version(),
                 "help" or "--help" or "-h" => Help(),
                 _ => Unknown(command),
@@ -418,6 +419,9 @@ public static class Program
                 remove           --domain <d>
                 --db <path>      Database file. Default: dmarc.db
 
+              findings           What the stored data says: domains whose reports stopped while the
+                                 collector kept working, applied changes the receivers' reports now
+                                 show in force, exceptions that have run out (findings observe).
               notify             Where an organization's findings are sent: a signed JSON
                                  webhook (docs/WEBHOOKS.md), and tickets in ConnectWise PSA
                                  (docs/CONNECTWISE.md). One of each per organization.

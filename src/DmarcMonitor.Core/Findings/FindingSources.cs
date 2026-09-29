@@ -121,6 +121,33 @@ public sealed class FindingSourceRegistry(string databasePath, TimeProvider? clo
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Records a run against an organization named by its slug, as the
+    /// commands know it. False when the organization has no row yet: one is
+    /// made by the first report stored for it, and until then there is
+    /// nothing whose silence a run could vouch for.
+    /// </summary>
+    public async Task<bool> RecordForOrganizationAsync(
+        string organizationSlug, string kind, bool succeeded, string? error, int expectedEveryHours,
+        DateTimeOffset? at = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(organizationSlug);
+
+        string? tenantId;
+        await using (var db = new SqliteConnection(_connectionString))
+        {
+            await db.OpenAsync(ct).ConfigureAwait(false);
+            await using var command = db.CreateCommand();
+            command.CommandText = "SELECT id FROM tenants WHERE slug = $slug AND deleted_at IS NULL";
+            command.Parameters.AddWithValue("$slug", organizationSlug.Trim().ToLowerInvariant());
+            tenantId = await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+        }
+
+        if (tenantId is null) { return false; }
+        await RecordAsync(tenantId, null, kind, succeeded, error, expectedEveryHours, at, ct).ConfigureAwait(false);
+        return true;
+    }
+
     /// <summary>An organization's sources, or every organization's for null.</summary>
     public async Task<IReadOnlyList<FindingSource>> ListAsync(string? tenantId, string? clientSlug = null, CancellationToken ct = default)
     {

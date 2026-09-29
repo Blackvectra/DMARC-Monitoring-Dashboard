@@ -41,6 +41,14 @@ ExecStart=/usr/local/bin/dmarc check --all --save --db /opt/dmarc/data/dmarc.db
 # what every address was before any of this existed.
 ExecStart=/usr/local/bin/dmarc intel --names --db /opt/dmarc/data/dmarc.db
 
+# And then what the stored data says, with no network at all: which domains'
+# reports have stopped arriving while the collector kept working, which
+# applied change the receivers' reports now show in force, and which
+# exception has run out. After the reading above because a change is verified
+# by that same read, and before dmarc-notify because that sends what this
+# raises. Exits 0 when it ran; what it found is for dmarc health to judge.
+ExecStart=/usr/local/bin/dmarc findings observe --db /opt/dmarc/data/dmarc.db
+
 # 'check' exits 1 when it finds a breaking fault in somebody's records, which
 # is what makes it useful in a pipeline and useless as a service: systemd
 # would mark the unit failed for doing its job and finding a real problem.

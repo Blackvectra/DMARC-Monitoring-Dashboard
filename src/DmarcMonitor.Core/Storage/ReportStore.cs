@@ -61,6 +61,9 @@ public sealed class ReportStore
 
     private readonly string _databasePath;
     private readonly string _organization;
+
+    /// <summary>The organization's database, for what else has to write beside a report.</summary>
+    internal string DatabasePath => _databasePath;
     private readonly Lazy<ClientDatabases> _files;
 
     /// <summary>Where each client's own file is.</summary>

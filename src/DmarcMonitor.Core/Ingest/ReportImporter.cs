@@ -1,6 +1,8 @@
 using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Forensic;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Storage;
+using Microsoft.Data.Sqlite;
 using DmarcMonitor.Core.Tls;
 
 namespace DmarcMonitor.Core.Ingest;
@@ -207,6 +209,24 @@ public sealed class ReportImporter(
         }
 
         progress?.Report(seen);
+
+        // A completed import is a collection: what is not in the database now
+        // did not arrive, which the reports source has to know before it can
+        // call any domain quiet. Not for a run stopped part way, which read
+        // nothing in full, and never at the cost of the import itself.
+        if (seen > 0 && !stoppedEarly && File.Exists(_store.DatabasePath))
+        {
+            try
+            {
+                await new FindingSourceRegistry(_store.DatabasePath).RecordForOrganizationAsync(
+                    _store.Organization, FindingSourceIds.Reports, succeeded: true, error: null,
+                    ReportsFindingSource.ExpectedEveryHours, ct: ct).ConfigureAwait(false);
+            }
+            catch (SqliteException ex)
+            {
+                Add(errors, "The import could not be recorded as a collection: " + ex.Message);
+            }
+        }
 
         return new ImportResult
         {

@@ -496,12 +496,18 @@ try {
         ':: fails the task on a real error, never on an address it could not name.',
         "`"$Cli`" intel --names --db `"$db`" >> `"$dnsLog`" 2>&1",
         'set "INTEL_RC=%ERRORLEVEL%"',
+        ':: What the stored data says, with no network: domains whose reports',
+        ':: stopped while collection worked, applied changes the reports now show',
+        ':: in force, exceptions run out - dmarc-dns.service''s third ExecStart.',
+        "`"$Cli`" findings observe --db `"$db`" >> `"$dnsLog`" 2>&1",
+        'set "OBSERVE_RC=%ERRORLEVEL%"',
         ':: Mirror dmarc-dns.service SuccessExitStatus=0 1 66: 0 is fine, 1 is a',
         ':: breaking fault found in somebody''s records (the command working), and',
         ':: 66 is "no domains yet" on a box the collector has not filled. Anything',
         ':: worse from either command is a genuine failure and marks the task.',
         'if %DNS_RC% GEQ 2 if not "%DNS_RC%"=="66" exit /b %DNS_RC%',
         'if %INTEL_RC% GEQ 2 if not "%INTEL_RC%"=="66" exit /b %INTEL_RC%',
+        'if %OBSERVE_RC% GEQ 2 if not "%OBSERVE_RC%"=="66" exit /b %OBSERVE_RC%',
         'exit /b 0')
     # Nightly, at an hour nobody is looking, with the window spread so a room
     # full of these installs does not hit the same resolver on the same minute.
