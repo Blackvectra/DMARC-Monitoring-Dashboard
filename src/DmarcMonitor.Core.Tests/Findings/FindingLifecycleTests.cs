@@ -87,6 +87,43 @@ public sealed class FindingLifecycleTests : IDisposable
         Assert.Single(await _lifecycle.Store.ListAsync(new FindingFilter { TenantId = _acme.TenantId }));
     }
 
+    /// <summary>
+    /// The same finding, a different kind of wrong at the same type and
+    /// severity: a loosened record that is then removed. Updating the row
+    /// silently would leave the change feed, a destination and a ticket
+    /// believing nothing had happened.
+    /// </summary>
+    [Fact]
+    public async Task AChangedConditionAtTheSameTypeAndSeverityIsRecordedOnTheSameFinding()
+    {
+        var loosened = await _lifecycle.ObserveAsync(Drift(_acme));
+        _clock.Advance(TimeSpan.FromDays(1));
+        var removed = await _lifecycle.ObserveAsync(Drift(_acme, rule: "record_removed", title: "DMARC: the record was removed.", evidence: "drift:dr-2"));
+
+        Assert.Equal(ObserveOutcome.Changed, removed.Outcome);
+        Assert.Equal(loosened.Finding.Id, removed.Finding.Id);
+        Assert.Equal("record_removed", removed.Finding.Rule);
+        Assert.Equal("DMARC: the record was removed.", removed.Finding.Title);
+        Assert.Equal("drift:dr-2", removed.Finding.EvidenceRef);
+
+        var events = await _lifecycle.Store.EventsAsync(loosened.Finding.Id);
+        Assert.Equal([FindingEventKinds.Observed, FindingEventKinds.ConditionChanged], events.Select(e => e.Kind).ToList());
+        Assert.Equal("policy_loosened", events[1].FromValue);
+        Assert.Equal("record_removed", events[1].ToValue);
+        Assert.Equal("DMARC: the record was removed.", events[1].Note);
+
+        // The same condition seen again, with the same evidence or none new, is still not a change.
+        _clock.Advance(TimeSpan.FromDays(1));
+        var again = await _lifecycle.ObserveAsync(Drift(_acme, rule: "record_removed", title: "DMARC: the record was removed.", evidence: "drift:dr-2"));
+        Assert.Equal(ObserveOutcome.Unchanged, again.Outcome);
+        Assert.Equal(2, (await _lifecycle.Store.EventsAsync(loosened.Finding.Id)).Count);
+
+        // A new piece of evidence for the same sentence is a change; the old evidence carried along is not.
+        var moved = await _lifecycle.ObserveAsync(Drift(_acme, rule: "record_removed", title: "DMARC: the record was removed.", evidence: "drift:dr-3"));
+        Assert.Equal(ObserveOutcome.Changed, moved.Outcome);
+        Assert.Equal(3, (await _lifecycle.Store.EventsAsync(loosened.Finding.Id)).Count);
+    }
+
     // ---- resolution is evidence ------------------------------------------------------
 
     [Fact]
@@ -422,18 +459,18 @@ public sealed class FindingLifecycleTests : IDisposable
 
     private static Observation Drift(
         Ids ids, string severity = "critical", string type = FindingTypes.DmarcPolicyWeakened,
-        string title = "DMARC: p=quarantine → p=none.") => new()
+        string title = "DMARC: p=quarantine → p=none.", string rule = "policy_loosened", string evidence = "drift:dr-1") => new()
     {
         TenantId = ids.TenantId,
         ClientId = ids.ClientId,
         DomainId = ids.DomainId,
         SourceId = FindingSourceIds.DnsScan,
         Type = type,
-        Rule = "policy_loosened",
+        Rule = rule,
         Severity = severity,
         Title = title,
         DedupKey = "dns:" + ids.DomainId + ":dmarc",
-        EvidenceRef = "drift:dr-1",
+        EvidenceRef = evidence,
         ExpectedRef = "snapshot:before",
     };
 

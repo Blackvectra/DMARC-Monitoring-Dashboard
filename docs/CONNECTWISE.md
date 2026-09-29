@@ -136,7 +136,8 @@ run cannot file.
 see it: the DMARC record of `acme.example`, say, or that domain's reports
 having stopped. The same drift another night files nothing. What changes on
 the finding while a tech has the ticket open is a note on that ticket: worse
-(`Severity warning → critical`), a different kind of wrong, resolved by its
+(`Severity warning → critical`), a different kind of wrong (`Changed: DMARC:
+the record was removed.`), resolved by its
 source (`Close this ticket if nothing else is needed`), back again, and what
 a person decided in the dashboard - acknowledged, marked, excepted, a
 remediation stage. A failed observation is not a note; it changes nothing

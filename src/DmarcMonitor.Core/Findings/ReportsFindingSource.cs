@@ -145,7 +145,8 @@ public sealed class ReportsFindingSource(string databasePath, TimeProvider? cloc
             {
                 var dns = readings.GetValueOrDefault(domain.Name);
                 bool? asks = dns is { Status: DnsCheckStatus.Ok } ? dns.DmarcRecord is not null && dns.DmarcRua.Length > 0 : null;
-                var days = ((int)silent.TotalDays).ToString(CultureInfo.InvariantCulture);
+                // No day count in the title: it would change every night and read as a
+                // new condition each time. How long is first_observed_at's to say.
                 await _lifecycle.ObserveAsync(new Observation
                 {
                     TenantId = tenantId,
@@ -156,7 +157,7 @@ public sealed class ReportsFindingSource(string databasePath, TimeProvider? cloc
                     Rule = asks == false ? "rua_gone" : "quiet",
                     Severity = asks == false ? "critical" : "warning",
                     Title = domain.Name + ": no report has covered it since "
-                        + seen.LastEnd.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + " (" + days + " days), after reports in "
+                        + seen.LastEnd.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ", after reports in "
                         + seen.Weeks.ToString(CultureInfo.InvariantCulture) + " of the 5 weeks before"
                         + (asks == false ? ", and its DMARC record no longer asks for any." : "."),
                     DedupKey = DedupKey(domain.Id),

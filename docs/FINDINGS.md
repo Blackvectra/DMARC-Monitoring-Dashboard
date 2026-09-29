@@ -50,7 +50,10 @@ at the row in the client's own file that holds the record text or the report
 what a resolving read has to serve. The organization's database holds no
 record value and no report body, so a copy of it says what was found and not
 what the client publishes. The title is a derived line (`DMARC: p=quarantine
-→ p=none.`), never the record.
+→ p=none.`, `SPF: a term was removed, -all → ~all.`), never the record: a
+policy, a percentage, an alignment mode and the `all` qualifier are
+enumerations; an address or a mechanism is the record, and the drift event in
+the client's file keeps the full sentence for the DNS changes page.
 
 ---
 
@@ -201,7 +204,9 @@ finding's id; the ticket's number is written back on the finding's history.
 Each of these is a test in `src/DmarcMonitor.Core.Tests/Findings`, and
 changing the behaviour means changing the test:
 
-- the same condition observed twice is one finding with one observed event;
+- the same condition observed twice is one finding with one observed event,
+  and a different kind of wrong at the same type and severity is recorded on
+  it rather than updated silently;
 - a failed observation marks findings unknown and resolves nothing;
 - a successful observation without the condition resolves after the type's
   threshold, and a sighting in between restarts the count;
@@ -218,6 +223,8 @@ changing the behaviour means changing the test:
   it and resolves the drift together; a receiver's report is the evidence a
   policy is in force; fourteen days without one is verified by DNS only;
 - reports stop only while the collector was listening, and never for an
-  organization whose mailbox as a whole went quiet;
+  organization whose mailbox as a whole went quiet; a collector run with
+  errors, or an import with a failed file, is recorded as a failed collection
+  the source does not trust;
 - a destination hears about each change once, and a PSA files one ticket per
   finding however many nights see it.

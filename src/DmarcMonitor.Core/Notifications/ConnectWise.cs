@@ -361,7 +361,7 @@ internal static class ConnectWiseTickets
         return evt.Kind switch
         {
             FindingEventKinds.Observed => evt.FromValue is null,
-            FindingEventKinds.Reopened or FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged => true,
+            FindingEventKinds.Reopened or FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged or FindingEventKinds.ConditionChanged => true,
             _ => false,
         };
     }
@@ -428,6 +428,7 @@ internal static class ConnectWiseTickets
             FindingEventKinds.Reopened => "Seen again after its source had resolved it",
             FindingEventKinds.SeverityChanged => $"Severity {evt.FromValue ?? "?"} → {evt.ToValue ?? "?"}: {OneLine(finding.Title)}",
             FindingEventKinds.TypeChanged => $"Now {evt.ToValue ?? "?"}: {OneLine(finding.Title)}",
+            FindingEventKinds.ConditionChanged => $"Changed: {OneLine(finding.Title)}",
             FindingEventKinds.SourceResolved => "Resolved by its source",
             FindingEventKinds.Acknowledged => $"Acknowledged in DMARC Monitor by {by}",
             FindingEventKinds.AnalystStateChanged => $"Marked {evt.ToValue ?? "?"} in DMARC Monitor by {by}",
@@ -439,12 +440,12 @@ internal static class ConnectWiseTickets
         };
 
         var lines = new List<string> { $"{headline} at {When(evt.At)}." };
-        if (evt.Note is { Length: > 0 } note && evt.Kind is not (FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged))
+        if (evt.Note is { Length: > 0 } note && evt.Kind is not (FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged or FindingEventKinds.ConditionChanged))
         {
             lines.Add(OneLine(note));
         }
         if (evt.Kind == FindingEventKinds.SourceResolved) { lines.Add("Close this ticket if nothing else is needed."); }
-        if (evt.Kind is FindingEventKinds.Reopened or FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged) { AddRecord(lines, drift); }
+        if (evt.Kind is FindingEventKinds.Reopened or FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged or FindingEventKinds.ConditionChanged) { AddRecord(lines, drift); }
 
         lines.Add("");
         lines.Add($"Source: DMARC Monitor, finding {finding.FindingId}, event {evt.Id}");

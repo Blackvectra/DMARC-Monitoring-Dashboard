@@ -81,17 +81,18 @@ public sealed class ReportsFindingSourceTests : IDisposable
         Assert.Equal(Regular, finding.Domain);
         Assert.Equal(ReportsFindingSource.DedupKey(_regular.DomainId), finding.DedupKey);
         Assert.Equal("report:" + await NewestReportIdAsync(_regular.ClientId, _regular.DomainId), finding.EvidenceRef);
-        Assert.Equal("regular.example: no report has covered it since 2026-09-12 (17 days), after reports in 5 of the 5 weeks before.", finding.Title);
+        Assert.Equal("regular.example: no report has covered it since 2026-09-12, after reports in 5 of the 5 weeks before.", finding.Title);
         Assert.Equal(SourceStates.Active, finding.SourceState);
         Assert.True(finding.InQueue);
 
-        // Another night of silence is the same finding, seen again.
+        // Another night of silence is the same finding, seen again, and not a change.
         _clock.Now = Now.AddDays(1);
         await _source.ObserveOrganizationAsync(_regular.TenantId);
         var again = Assert.Single(await _findings.ListAsync(new FindingFilter { TenantId = _regular.TenantId }));
         Assert.Equal(finding.Id, again.Id);
         Assert.Equal(2, again.ObservationCount);
-        Assert.Contains("(18 days)", again.Title, StringComparison.Ordinal);
+        Assert.Equal(finding.Title, again.Title);
+        Assert.Equal(FindingEventKinds.Observed, Assert.Single(await _findings.EventsAsync(again.Id)).Kind);
     }
 
     [Fact]
@@ -211,7 +212,7 @@ public sealed class ReportsFindingSourceTests : IDisposable
         Assert.Equal(raised.Id, reopened.Id);
         Assert.Equal(SourceStates.Active, reopened.SourceState);
         Assert.Equal(1, reopened.ReopenedCount);
-        Assert.Contains("since 2026-09-28 (9 days), after reports in 4 of the 5 weeks before", reopened.Title, StringComparison.Ordinal);
+        Assert.Contains("since 2026-09-28, after reports in 4 of the 5 weeks before", reopened.Title, StringComparison.Ordinal);
     }
 
     [Fact]

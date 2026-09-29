@@ -197,21 +197,9 @@ public sealed class RemediationFindingSource(string databasePath, TimeProvider? 
 
         if (HasEffectivenessEvidence(payload.ChangeType))
         {
-            var waiting = await _lifecycle.StageRemediationAsync(verified.Id, RemediationStages.EffectivenessPending, FindingSourceIds.Remediation,
-                "Waiting for a receiver's report covering a period after the change to show the policy it applied.", ct: ct).ConfigureAwait(false) ?? verified;
-            await _lifecycle.ObserveAsync(new Observation
-            {
-                TenantId = waiting.TenantId,
-                ClientId = waiting.ClientId,
-                DomainId = waiting.DomainId,
-                SourceId = FindingSourceIds.Remediation,
-                Type = waiting.Type,
-                Rule = waiting.Rule,
-                Severity = "info",
-                Title = Retitle(waiting.Title, "DNS verified; awaiting a receiver's report."),
-                DedupKey = waiting.DedupKey,
-                At = now,
-            }, ct).ConfigureAwait(false);
+            await _lifecycle.StageRemediationAsync(verified.Id, RemediationStages.EffectivenessPending, FindingSourceIds.Remediation,
+                "Waiting for a receiver's report covering a period after the change to show the policy it applied.",
+                title: Retitle(verified.Title, "DNS verified; awaiting a receiver's report."), ct: ct).ConfigureAwait(false);
             return;
         }
 

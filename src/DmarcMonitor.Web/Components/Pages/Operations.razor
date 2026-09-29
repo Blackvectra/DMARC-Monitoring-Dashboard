@@ -492,6 +492,7 @@ else
         FindingEventKinds.Observed => e.FromValue is null ? "New" : "Seen again after a failed observation",
         FindingEventKinds.SeverityChanged => $"Severity {e.FromValue} → {e.ToValue}",
         FindingEventKinds.TypeChanged => $"Now {e.ToValue}",
+        FindingEventKinds.ConditionChanged => "Changed",
         FindingEventKinds.SourceUnknown => "Could not be observed",
         FindingEventKinds.ObservationAbsent => "Not seen",
         FindingEventKinds.SourceResolved => "Resolved by its source",

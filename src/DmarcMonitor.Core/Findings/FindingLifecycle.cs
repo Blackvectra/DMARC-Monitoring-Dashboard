@@ -140,6 +140,22 @@ public sealed class FindingLifecycle(
                 fromValue: existing.Type, toValue: updated.Type, note: updated.Title, ct: ct).ConfigureAwait(false);
         }
 
+        // The same finding, a different kind of wrong at the same type and
+        // severity: a loosened record that is then removed, a different term
+        // taken out of SPF. Silently updating the row would leave the change
+        // feed, a destination and a ticket believing nothing had happened.
+        // Only when nothing above already said so, and never for the same
+        // condition seen again.
+        var moved = !string.Equals(existing.Rule, updated.Rule, StringComparison.Ordinal)
+            || !string.Equals(existing.Title, updated.Title, StringComparison.Ordinal)
+            || (observation.EvidenceRef is not null && !string.Equals(existing.EvidenceRef, updated.EvidenceRef, StringComparison.Ordinal));
+        if (moved && outcome == ObserveOutcome.Unchanged)
+        {
+            outcome = ObserveOutcome.Changed;
+            await Store.AppendEventAsync(updated, FindingEventKinds.ConditionChanged, observation.SourceId, at,
+                fromValue: existing.Rule, toValue: updated.Rule, note: updated.Title, ct: ct).ConfigureAwait(false);
+        }
+
         await Store.UpdateAsync(updated, ct).ConfigureAwait(false);
         return new Observed(await ReloadAsync(updated, ct).ConfigureAwait(false), outcome);
     }
@@ -391,9 +407,10 @@ public sealed class FindingLifecycle(
         return expired;
     }
 
-    /// <summary>Moves a finding along the remediation chain, or off it with null.</summary>
+    /// <summary>Moves a finding along the remediation chain, or off it with null; retitles it in the same step when asked.</summary>
     public async Task<Finding?> StageRemediationAsync(
-        string id, string? stage, string actor, string? note = null, string? tenantId = null, CancellationToken ct = default)
+        string id, string? stage, string actor, string? note = null, string? tenantId = null, string? title = null,
+        CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(actor);
         if (stage is not null && !RemediationStages.IsKnown(stage))
@@ -405,7 +422,12 @@ public sealed class FindingLifecycle(
         if (finding is null) { return null; }
 
         var now = _clock.GetUtcNow();
-        var updated = finding with { RemediationStage = stage, UpdatedAt = now };
+        var updated = finding with
+        {
+            RemediationStage = stage,
+            Title = string.IsNullOrWhiteSpace(title) ? finding.Title : title.Trim(),
+            UpdatedAt = now,
+        };
         await Store.AppendEventAsync(updated, FindingEventKinds.RemediationStaged, actor, now,
             fromValue: finding.RemediationStage, toValue: stage, note: note, ct: ct).ConfigureAwait(false);
         await Store.UpdateAsync(updated, ct).ConfigureAwait(false);

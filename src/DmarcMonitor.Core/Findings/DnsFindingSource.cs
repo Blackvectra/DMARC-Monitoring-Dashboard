@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using DmarcMonitor.Core.Dns;
@@ -53,6 +54,94 @@ public sealed class DnsFindingSource(string databasePath, TimeProvider? clock = 
         text is null
             ? AbsentRef
             : "rec:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.Trim()))).ToLowerInvariant();
+
+    /// <summary>
+    /// The finding's title: what changed, in the record's own vocabulary and
+    /// never its contents. A policy, a percentage, an alignment mode and the
+    /// all qualifier are enumerations; an address or a mechanism is the
+    /// record, and stays in the client's file behind the evidence. The drift
+    /// event keeps the full summary for the DNS changes page.
+    /// </summary>
+    public static string TitleFor(DriftChange change)
+    {
+        ArgumentNullException.ThrowIfNull(change);
+        var label = change.RecordType switch
+        {
+            "spf" => "SPF",
+            "dmarc" => "DMARC",
+            "mta-sts" => "MTA-STS",
+            "tls-rpt" => "TLS-RPT",
+            _ => change.RecordType.ToUpperInvariant(),
+        };
+
+        switch (change.Rule)
+        {
+            case "record_removed": return label + ": the record was removed.";
+            case "record_published": return label + ": a record was published.";
+            case "record_changed": return label + ": the record changed.";
+            case "rewritten": return label + ": the record was rewritten with the same meaning.";
+            case "no_longer_parses": return label + ": the record no longer parses.";
+            case "multiple_records": return "SPF: more than one record is published, so every SPF check fails.";
+        }
+
+        return change.RecordType switch
+        {
+            "spf" => SpfTitle(change),
+            "dmarc" => DmarcTitle(change),
+            _ => label + ": the record changed.",
+        };
+    }
+
+    private static string SpfTitle(DriftChange change)
+    {
+        var before = change.OldValue is null ? null : SpfRecord.Parse(change.OldValue);
+        var after = change.NewValue is null ? null : SpfRecord.Parse(change.NewValue);
+        if (before is not { IsValid: true } || after is not { IsValid: true }) { return "SPF: the record changed."; }
+
+        var oldTerms = before.Terms.Where(t => t.Name != "all").Select(t => t.Raw).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var newTerms = after.Terms.Where(t => t.Name != "all").Select(t => t.Raw).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var removed = oldTerms.Except(newTerms, StringComparer.OrdinalIgnoreCase).Count();
+        var added = newTerms.Except(oldTerms, StringComparer.OrdinalIgnoreCase).Count();
+        var oldAll = before.All?.Raw ?? "(no all)";
+        var newAll = after.All?.Raw ?? "(no all)";
+
+        var parts = new List<string>();
+        if (removed > 0) { parts.Add(removed == 1 ? "a term was removed" : removed.ToString(CultureInfo.InvariantCulture) + " terms were removed"); }
+        if (added > 0) { parts.Add(added == 1 ? "a term was added" : added.ToString(CultureInfo.InvariantCulture) + " terms were added"); }
+        if (!string.Equals(oldAll, newAll, StringComparison.OrdinalIgnoreCase)) { parts.Add(oldAll + " → " + newAll); }
+        return parts.Count == 0 ? "SPF: the record changed." : "SPF: " + string.Join(", ", parts) + ".";
+    }
+
+    private static string DmarcTitle(DriftChange change)
+    {
+        var before = change.OldValue is null ? null : DmarcRecord.Parse(change.OldValue);
+        var after = change.NewValue is null ? null : DmarcRecord.Parse(change.NewValue);
+        if (before is not { IsValid: true } || after is not { IsValid: true }) { return "DMARC: the record changed."; }
+
+        static string Show(string value) => value.Length == 0 ? "(none)" : value;
+        var parts = new List<string>();
+        if (!string.Equals(before.Policy, after.Policy, StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add("p=" + Show(before.Policy) + " → p=" + Show(after.Policy));
+        }
+        if (!string.Equals(before.EffectiveSubdomainPolicy, after.EffectiveSubdomainPolicy, StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add("sp=" + Show(before.EffectiveSubdomainPolicy) + " → sp=" + Show(after.EffectiveSubdomainPolicy));
+        }
+        if (before.Percent != after.Percent)
+        {
+            parts.Add("pct=" + before.Percent.ToString(CultureInfo.InvariantCulture) + " → pct=" + after.Percent.ToString(CultureInfo.InvariantCulture));
+        }
+        if (after.Rua.Length == 0 && before.Rua.Length > 0) { parts.Add("reports (rua) removed"); }
+        else if (change.Rule is "rua_removed") { parts.Add("a report address was taken away"); }
+        else if (change.Rule is "rua_changed" || !string.Equals(before.Rua, after.Rua, StringComparison.OrdinalIgnoreCase)) { parts.Add("report address changed"); }
+        if (before.StrictDkim != after.StrictDkim || before.StrictSpf != after.StrictSpf)
+        {
+            parts.Add("alignment adkim=" + (before.StrictDkim ? "s" : "r") + "/aspf=" + (before.StrictSpf ? "s" : "r") + " → adkim="
+                + (after.StrictDkim ? "s" : "r") + "/aspf=" + (after.StrictSpf ? "s" : "r"));
+        }
+        return parts.Count == 0 ? "DMARC: the record changed." : "DMARC: " + string.Join(", ", parts) + ".";
+    }
 
     /// <summary>The finding type a change raises, from the rule that decided its severity.</summary>
     public static string TypeFor(DriftChange change)
@@ -166,7 +255,7 @@ public sealed class DnsFindingSource(string databasePath, TimeProvider? clock = 
         Type = TypeFor(change),
         Rule = change.Rule,
         Severity = change.Severity,
-        Title = change.Summary,
+        Title = TitleFor(change),
         DedupKey = DedupKey(save.DomainId!, change.RecordType),
         EvidenceRef = change.EventId is null ? null : "drift:" + change.EventId,
         ExpectedRef = RecordRef(change.OldValue),

@@ -212,14 +212,20 @@ public sealed class ReportImporter(
 
         // A completed import is a collection: what is not in the database now
         // did not arrive, which the reports source has to know before it can
-        // call any domain quiet. Not for a run stopped part way, which read
-        // nothing in full, and never at the cost of the import itself.
+        // call any domain quiet. Only a clean one, though: a file that could
+        // not be read may have held the one domain's reports, so an import
+        // with failures is recorded as a failed collection, naming the first.
+        // Not for a run stopped part way, which read nothing in full, and
+        // never at the cost of the import itself.
         if (seen > 0 && !stoppedEarly && File.Exists(_store.DatabasePath))
         {
+            var problem = failed > 0
+                ? $"{failed.ToString(System.Globalization.CultureInfo.InvariantCulture)} report(s) or file(s) could not be imported: {errors.FirstOrDefault() ?? "see the import's output"}"
+                : null;
             try
             {
                 await new FindingSourceRegistry(_store.DatabasePath).RecordForOrganizationAsync(
-                    _store.Organization, FindingSourceIds.Reports, succeeded: true, error: null,
+                    _store.Organization, FindingSourceIds.Reports, succeeded: problem is null, error: problem,
                     ReportsFindingSource.ExpectedEveryHours, ct: ct).ConfigureAwait(false);
             }
             catch (SqliteException ex)

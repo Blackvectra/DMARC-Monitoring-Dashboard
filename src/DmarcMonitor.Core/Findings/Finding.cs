@@ -71,6 +71,9 @@ public static class FindingEventKinds
     public const string Observed = "Observed";
     public const string SeverityChanged = "SeverityChanged";
     public const string TypeChanged = "TypeChanged";
+
+    /// <summary>The same finding, a different kind of wrong: its rule, title or evidence moved at the same type and severity.</summary>
+    public const string ConditionChanged = "ConditionChanged";
     public const string SourceUnknown = "SourceUnknown";
     public const string ObservationAbsent = "ObservationAbsent";
     public const string SourceResolved = "SourceResolved";
@@ -92,7 +95,7 @@ public static class FindingEventKinds
     /// </summary>
     public static readonly IReadOnlyList<string> Delivering =
     [
-        Observed, SeverityChanged, TypeChanged, SourceUnknown, SourceResolved, Reopened,
+        Observed, SeverityChanged, TypeChanged, ConditionChanged, SourceUnknown, SourceResolved, Reopened,
         Acknowledged, AnalystStateChanged, ExceptionApplied, ExceptionExpired, ExceptionEnded, RemediationStaged,
     ];
 

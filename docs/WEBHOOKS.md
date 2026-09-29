@@ -28,7 +28,7 @@ above the destination's minimum severity:
 | change | `eventKind` |
 |---|---|
 | first seen, or seen again after a failed observation | `Observed` |
-| worse, or a different kind of wrong | `SeverityChanged`, `TypeChanged` |
+| worse, a different type, or a different kind of wrong at the same type and severity (a loosened record that is then removed) | `SeverityChanged`, `TypeChanged`, `ConditionChanged` |
 | the source could not observe it, so nothing is known | `SourceUnknown` |
 | the source no longer sees it | `SourceResolved` |
 | back after the source had resolved it | `Reopened` |

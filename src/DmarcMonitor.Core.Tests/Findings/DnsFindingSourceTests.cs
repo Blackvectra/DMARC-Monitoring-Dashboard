@@ -141,6 +141,53 @@ public sealed class DnsFindingSourceTests : IDisposable
         Assert.Equal(SourceStates.Resolved, Assert.Single(await _findings.ListAsync(new FindingFilter { TenantId = _acme.TenantId })).SourceState);
     }
 
+    /// <summary>
+    /// A title says what changed in the record's own vocabulary and never
+    /// carries the record: an SPF term or a report address is the client's
+    /// data, in the client's file, behind the evidence pointer.
+    /// </summary>
+    [Fact]
+    public async Task TheTitleNamesTheChangeAndNeverTheRecord()
+    {
+        await _dns.SaveAsync(Domain, Reading(spf: "v=spf1 include:_spf.mail.example include:send.example -all"));
+        await _dns.SaveAsync(Domain, Reading(spf: "v=spf1 include:_spf.mail.example ~all"));
+        await _dns.SaveAsync(Domain, Reading(spf: "v=spf1 include:_spf.mail.example ~all", dmarc: "v=DMARC1; p=quarantine; rua=mailto:elsewhere@other.example"));
+
+        var findings = await _findings.ListAsync(new FindingFilter { TenantId = _acme.TenantId });
+        var spf = Assert.Single(findings, f => f.DedupKey == DnsFindingSource.DedupKey(_acme.DomainId, "spf"));
+        var dmarc = Assert.Single(findings, f => f.DedupKey == DnsFindingSource.DedupKey(_acme.DomainId, "dmarc"));
+
+        Assert.Equal("SPF: a term was removed, -all → ~all.", spf.Title);
+        Assert.Equal("term_removed", spf.Rule);
+        Assert.Equal("DMARC: a report address was taken away.", dmarc.Title);
+        Assert.Equal("rua_removed", dmarc.Rule);
+
+        // The full sentence, with the values, stays on the drift event in the client's file.
+        var drift = await new DnsDriftStore(_dbPath).ListAsync(_acme.TenantId);
+        Assert.Contains(drift, d => d.Summary.Contains("include:send.example", StringComparison.Ordinal));
+        Assert.Contains(drift, d => d.Summary.Contains("mailto:d@msp.example", StringComparison.Ordinal));
+        Assert.DoesNotContain("send.example", OrganizationFileText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("mailto:", OrganizationFileText(), StringComparison.Ordinal);
+    }
+
+    /// <summary>A loosened record that is then removed: the same critical finding, and the change is recorded rather than silent.</summary>
+    [Fact]
+    public async Task ADifferentKindOfWrongAtTheSameSeverityIsRecordedOnTheFinding()
+    {
+        await _dns.SaveAsync(Domain, Reading());
+        await _dns.SaveAsync(Domain, Reading(dmarc: Loosened));
+        await _dns.SaveAsync(Domain, Reading(dmarc: null));
+
+        var finding = Assert.Single(await _findings.ListAsync(new FindingFilter { TenantId = _acme.TenantId }));
+        Assert.Equal(FindingTypes.DmarcPolicyWeakened, finding.Type);
+        Assert.Equal("critical", finding.Severity);
+        Assert.Equal("record_removed", finding.Rule);
+        Assert.Equal("DMARC: the record was removed.", finding.Title);
+        var changed = Assert.Single(await _findings.EventsAsync(finding.Id), e => e.Kind == FindingEventKinds.ConditionChanged);
+        Assert.Equal("policy_loosened", changed.FromValue);
+        Assert.Equal("record_removed", changed.ToValue);
+    }
+
     [Fact]
     public async Task AFailedReadMarksTheDomainsFindingsUnknownAndResolvesNothing()
     {

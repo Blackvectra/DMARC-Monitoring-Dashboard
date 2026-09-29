@@ -240,9 +240,22 @@ public static class IngestCommand
 
             // The mailbox was read and what it held is stored: from here on,
             // a domain nothing arrived for is a domain nothing was sent for,
-            // which is what the reports source needs before it can say so. A
-            // dry run stored nothing, so it vouches for nothing.
-            if (!dryRun) { await RecordCollectionAsync(dbPath, organization, null, ct).ConfigureAwait(false); }
+            // which is what the reports source needs before it can say so.
+            // Only when that is true of the whole run. A message that could
+            // not be stored may have been the one domain's report; a run in
+            // which nothing was addressed here stored nothing; and a run that
+            // stopped at its cap left a backlog nobody has looked at. The
+            // first two are recorded as the failures they are, the third
+            // vouches for nothing, and a dry run stored nothing at all.
+            if (!dryRun && !result.StoppedEarly)
+            {
+                var problem = result.Errors.Count > 0
+                    ? $"{result.Errors.Count} message(s) could not be stored: {result.Errors[0]}"
+                    : result.UnattributedCount > 0 && result.IngestedCount == 0 && result.DuplicateCount == 0
+                        ? "no report was addressed to a recognized address, so nothing was stored"
+                        : null;
+                await RecordCollectionAsync(dbPath, organization, problem, ct).ConfigureAwait(false);
+            }
 
             Report(result, stored, dryRun);
             if (!dryRun) { await WarnUnassignedAsync(store, ct).ConfigureAwait(false); }

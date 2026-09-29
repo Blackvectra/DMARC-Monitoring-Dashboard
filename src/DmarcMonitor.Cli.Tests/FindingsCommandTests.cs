@@ -58,6 +58,37 @@ public sealed class FindingsCommandTests : IDisposable
         Assert.Contains("local: 0 domain(s) quiet", output, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A file that could not be read may have held the one domain's reports,
+    /// so an import with failures vouches for nothing: recorded as a failed
+    /// collection naming the file, and the reports engine observes nothing
+    /// until a clean one.
+    /// </summary>
+    [Fact]
+    public async Task AnImportWithAFailedFileIsAFailedCollectionTheReportsSourceDoesNotTrust()
+    {
+        var folder = Path.Combine(_dir, "reports");
+        Directory.CreateDirectory(folder);
+        await File.WriteAllBytesAsync(Path.Combine(folder, "r-1.xml"), Report("r-1"));
+        await File.WriteAllBytesAsync(Path.Combine(folder, "damaged.xml.gz"), [0x1f, 0x8b, 0x08, 0x00, 0x42, 0x42]);
+
+        Assert.Equal(1, await ImportCommand.RunAsync(["--from", folder, "--db", _db], CancellationToken.None));
+
+        var (source, health) = Assert.Single(await new FindingSourceRegistry(_db).HealthAsync(null));
+        Assert.Equal(FindingSourceIds.Reports, source.Kind);
+        Assert.Equal(SourceHealth.Failed, health);
+        Assert.Contains("damaged.xml.gz", source.LastError, StringComparison.Ordinal);
+
+        var (code, output, _) = await RunAsync(["observe", "--db", _db]);
+        Assert.Equal(0, code);
+        Assert.Contains("local: reports not observed, the last collection failed", output, StringComparison.Ordinal);
+
+        // A clean import afterwards is a collection again.
+        File.Delete(Path.Combine(folder, "damaged.xml.gz"));
+        Assert.Equal(0, await ImportCommand.RunAsync(["--from", folder, "--db", _db], CancellationToken.None));
+        Assert.Equal(SourceHealth.Healthy, Assert.Single(await new FindingSourceRegistry(_db).HealthAsync(null)).Health);
+    }
+
     [Fact]
     public async Task SomethingOtherThanObserveOrListIsUsage()
     {
