@@ -33,6 +33,7 @@ public sealed class DnsFindingSource(string databasePath, TimeProvider? clock = 
     private const string AbsentRef = "rec:absent";
 
     private readonly FindingLifecycle _lifecycle = new(databasePath, clock);
+    private readonly RemediationFindingSource _remediation = new(databasePath, clock);
 
     /// <summary>What one stored reading did to the domain's findings.</summary>
     /// <param name="Observed">Findings the reading showed, new or again.</param>
@@ -94,6 +95,7 @@ public sealed class DnsFindingSource(string databasePath, TimeProvider? clock = 
         var current = Current(published, status);
         var changes = save.Drift.ToDictionary(c => c.RecordType, c => c, StringComparer.Ordinal);
         var handled = new HashSet<string>(StringComparer.Ordinal);
+        var applied = await _remediation.ExpectedAsync(save.TenantId, save.ClientId, save.DomainId, ct).ConfigureAwait(false);
         int observed = 0, absent = 0;
 
         foreach (var finding in await _lifecycle.Store.OpenForScopeAsync(save.TenantId, save.ClientId, FindingSourceIds.DnsScan, save.DomainId, ct).ConfigureAwait(false))
@@ -138,9 +140,19 @@ public sealed class DnsFindingSource(string databasePath, TimeProvider? clock = 
         foreach (var change in save.Drift)
         {
             if (handled.Contains(change.RecordType)) { continue; }
+            if (applied.TryGetValue(change.RecordType, out var expected)
+                && string.Equals(RecordRef(change.NewValue), expected, StringComparison.Ordinal))
+            {
+                // The value this product wrote, arriving in DNS: not drift.
+                // The change's own finding is verified by this read, below.
+                continue;
+            }
             await _lifecycle.ObserveAsync(Observation(save, change, now), ct).ConfigureAwait(false);
             observed++;
         }
+
+        // A change this product applied is verified by the same read.
+        await _remediation.ObserveDomainAsync(save.TenantId, save.ClientId, save.DomainId, current, now, ct).ConfigureAwait(false);
 
         return new Recorded(observed, absent, 0);
     }
@@ -163,7 +175,7 @@ public sealed class DnsFindingSource(string databasePath, TimeProvider? clock = 
     };
 
     /// <summary>What each record says in this reading; a record not published is absent from the map.</summary>
-    private static Dictionary<string, string> Current(PublishedRecords published, DnsCheckStatus status)
+    internal static Dictionary<string, string> Current(PublishedRecords published, DnsCheckStatus status)
     {
         var current = new Dictionary<string, string>(StringComparer.Ordinal);
         if (status == DnsCheckStatus.NoSuchDomain) { return current; }

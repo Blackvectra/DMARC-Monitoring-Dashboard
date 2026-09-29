@@ -81,6 +81,7 @@ public static class FindingEventKinds
     public const string ExceptionExpired = "ExceptionExpired";
     public const string ExceptionEnded = "ExceptionEnded";
     public const string RemediationStaged = "RemediationStaged";
+    public const string ExpectedChanged = "ExpectedChanged";
     public const string TicketCreated = "TicketCreated";
     public const string TicketUpdated = "TicketUpdated";
 

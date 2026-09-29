@@ -96,6 +96,23 @@ public sealed class FindingStore(string databasePath)
         return await reader.ReadAsync(ct).ConfigureAwait(false) ? Read(reader) : null;
     }
 
+    /// <summary>
+    /// The finding a source's key names, whichever organization it is in:
+    /// for an engine following up something it raised itself, by an id only
+    /// it made. Never for a page.
+    /// </summary>
+    public async Task<Finding?> FindBySourceKeyAsync(string sourceId, string dedupKey, CancellationToken ct = default)
+    {
+        await using var db = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = db.CreateCommand();
+        command.CommandText = $"SELECT {Columns} {From} WHERE f.source_id = $source AND f.dedup_key = $key";
+        command.Parameters.AddWithValue("$source", sourceId);
+        command.Parameters.AddWithValue("$key", dedupKey);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        return await reader.ReadAsync(ct).ConfigureAwait(false) ? Read(reader) : null;
+    }
+
     /// <summary>Findings a source still has open in one scope: active or unknown, never resolved.</summary>
     public async Task<IReadOnlyList<Finding>> OpenForScopeAsync(
         string tenantId, string clientId, string sourceId, string? domainId = null, CancellationToken ct = default)

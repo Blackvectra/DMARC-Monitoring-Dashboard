@@ -412,6 +412,48 @@ public sealed class FindingLifecycle(
         return await ReloadAsync(updated, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A source resolved the finding for a reason it can name - a change
+    /// verified, a change rolled back - rather than by counting absent
+    /// observations.
+    /// </summary>
+    public async Task<Finding> ResolveBySourceAsync(Finding finding, string note, DateTimeOffset? at = null, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        ArgumentException.ThrowIfNullOrWhiteSpace(note);
+        if (string.Equals(finding.SourceState, SourceStates.Resolved, StringComparison.Ordinal)) { return finding; }
+
+        var when = at ?? _clock.GetUtcNow();
+        var updated = finding with { SourceState = SourceStates.Resolved, SourceResolvedAt = when, UpdatedAt = when };
+        await Store.AppendEventAsync(updated, FindingEventKinds.SourceResolved, finding.SourceId, when,
+            fromValue: finding.SourceState, toValue: SourceStates.Resolved, note: note, ct: ct).ConfigureAwait(false);
+        await Store.UpdateAsync(updated, ct).ConfigureAwait(false);
+        return await ReloadAsync(updated, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Changes what a resolving observation has to match: a person, or a
+    /// change this product applied, has decided what the record should now
+    /// serve. Recorded, because it moves the goalposts.
+    /// </summary>
+    public async Task<Finding?> SetExpectedAsync(
+        string id, string expectedRef, string actor, string? note = null, string? tenantId = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedRef);
+        ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+
+        var finding = await Store.GetAsync(id, tenantId, ct: ct).ConfigureAwait(false);
+        if (finding is null) { return null; }
+        if (string.Equals(finding.ExpectedRef, expectedRef, StringComparison.Ordinal)) { return finding; }
+
+        var now = _clock.GetUtcNow();
+        var updated = finding with { ExpectedRef = expectedRef, UpdatedAt = now };
+        await Store.AppendEventAsync(updated, FindingEventKinds.ExpectedChanged, actor, now,
+            fromValue: finding.ExpectedRef, toValue: expectedRef, note: note, ct: ct).ConfigureAwait(false);
+        await Store.UpdateAsync(updated, ct).ConfigureAwait(false);
+        return await ReloadAsync(updated, ct).ConfigureAwait(false);
+    }
+
     // ---- helpers -------------------------------------------------------------------
 
     private FindingTypeDefinition Definition(string type, string sourceId)
