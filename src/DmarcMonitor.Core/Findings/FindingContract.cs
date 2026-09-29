@@ -74,6 +74,33 @@ public sealed record FindingContract
 
     public static FindingContract? FromJson(string json) => JsonSerializer.Deserialize<FindingContract>(json, Json);
 
+    /// <summary>The type of the test event dmarc notify test sends; a receiver ignores it.</summary>
+    public const string PingType = "PING";
+
+    /// <summary>
+    /// A test event in this shape, so a receiver can be proved before there
+    /// is a finding to send: every field a real one carries, about nothing.
+    /// </summary>
+    public static FindingContract Ping(string tenantId, string tenantSlug, DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid().ToString(),
+        FindingId = "ping",
+        SourceId = "dmarc-monitor",
+        TenantId = tenantId,
+        Organization = new FindingContractOrganization(tenantId, tenantSlug),
+        Client = new FindingContractClient("", "", ""),
+        DedupKey = "ping",
+        Type = PingType,
+        Severity = "info",
+        Title = "A test event from dmarc notify test. Nothing changed.",
+        ObservedAt = now,
+        LastObservedAt = now,
+        SourceState = SourceStates.Resolved,
+        AnalystState = AnalystStates.Closed,
+        EventKind = "Ping",
+        EventAt = now,
+    };
+
     /// <summary>The contract for one event on a finding.</summary>
     /// <param name="linkBase">The dashboard's address, or null for no link.</param>
     public static FindingContract For(Finding finding, FindingEvent change, string tenantSlug, string? linkBase)

@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
 using DmarcMonitor.Core.Updates;
@@ -26,10 +28,18 @@ public sealed record DeliveryRun(string TenantSlug, string Destination, int Deli
 public sealed record ConnectWiseCheck(bool Worked, string Message);
 
 /// <summary>
-/// Sends each organization's new DNS drift to its destinations, and remembers
+/// Sends each organization's findings to its destinations, and remembers
 /// what went.
 /// </summary>
 /// <remarks>
+/// <para>
+/// A destination on the finding contract is told about each change on a
+/// finding - first seen, worse, resolved by its source, back again, what a
+/// person decided - once, as dmarc-monitor.finding.v1; one on the older
+/// event contract is told about each DNS change, as before. A ConnectWise
+/// destination gets one ticket per finding, keyed by the finding's id, and
+/// a note on that ticket for what changes while a tech has it open.
+/// </para>
 /// <para>
 /// Oldest first, and a run stops at the first failure. An endpoint that is
 /// down fails every request the same way, so trying the other 499 only says
@@ -59,6 +69,10 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly WebhookStore _store = new(databasePath, secrets, clock);
     private readonly ClientSettingsStore _settings = new(databasePath);
+    private readonly FindingStore _findings = new(databasePath);
+    private readonly ClientDatabases _files = new(databasePath);
+
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     /// <summary>Delivers what is waiting, for one organization or for every one that has a destination.</summary>
     public async Task<IReadOnlyList<DeliveryRun>> SendAsync(string? tenantSlug = null, CancellationToken ct = default)
@@ -90,17 +104,29 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
         var credential = await _store.CredentialAsync(hook, ct).ConfigureAwait(false);
         if (credential is null) { return await MissingKeyAsync(hook, ct).ConfigureAwait(false); }
 
-        var ping = new WebhookEvent
+        // In the shape the destination has asked for, so what it proves is
+        // that it can read what it will be sent.
+        string body, id;
+        if (hook.SendsFindings)
         {
-            Id = Guid.NewGuid().ToString(),
-            Type = WebhookEvent.PingType,
-            OccurredAt = _clock.GetUtcNow(),
-            Organization = new WebhookOrganization(hook.TenantId, hook.TenantSlug),
-            Summary = "A test event from dmarc notify test. Nothing changed.",
-        };
+            var ping = FindingContract.Ping(hook.TenantId, hook.TenantSlug, _clock.GetUtcNow());
+            (body, id) = (ping.ToJson(), ping.Id);
+        }
+        else
+        {
+            var ping = new WebhookEvent
+            {
+                Id = Guid.NewGuid().ToString(),
+                Type = WebhookEvent.PingType,
+                OccurredAt = _clock.GetUtcNow(),
+                Organization = new WebhookOrganization(hook.TenantId, hook.TenantSlug),
+                Summary = "A test event from dmarc notify test. Nothing changed.",
+            };
+            (body, id) = (ping.ToJson(), ping.Id);
+        }
 
         using var http = CreateClient();
-        var (_, error) = await PostAsync(http, credential, ping, ct).ConfigureAwait(false);
+        var (_, error) = await PostAsync(http, credential, body, id, ct).ConfigureAwait(false);
         await RecordOutcomeAsync(hook, error, ct).ConfigureAwait(false);
         return new DeliveryRun(hook.TenantSlug, hook.Destination, error is null ? 1 : 0, error is null ? 0 : 1, 0, error);
     }
@@ -198,14 +224,29 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
         var credential = await _store.CredentialAsync(hook, ct).ConfigureAwait(false);
         if (credential is null) { return await MissingKeyAsync(hook, ct).ConfigureAwait(false); }
 
-        var pending = await PendingAsync(hook, ct).ConfigureAwait(false);
+        // What goes, and the id each message carries: a finding event, or a
+        // DNS change for a destination on the older contract.
+        List<(string EventId, string ClientId, string Body)> pending;
+        if (hook.SendsFindings)
+        {
+            pending = (await UndeliveredAsync(hook, ct).ConfigureAwait(false))
+                .Select(c => (c.Event.Id, c.Finding.ClientId, FindingContract.For(c.Finding, c.Event, hook.TenantSlug, hook.LinkBase).ToJson()))
+                .ToList();
+        }
+        else
+        {
+            pending = (await PendingAsync(hook, ct).ConfigureAwait(false))
+                .Select(e => (e.Event.Id, e.ClientId, e.Event.ToJson()))
+                .ToList();
+        }
+
         int delivered = 0, failed = 0;
         string? error = null;
 
-        foreach (var item in pending)
+        foreach (var (eventId, clientId, body) in pending)
         {
-            var (status, problem) = await PostAsync(http, credential, item.Event, ct).ConfigureAwait(false);
-            await RecordAttemptAsync(hook, item, status, problem, null, null, ct).ConfigureAwait(false);
+            var (status, problem) = await PostAsync(http, credential, body, eventId, ct).ConfigureAwait(false);
+            await RecordAttemptAsync(hook, eventId, clientId, status, problem, null, null, ct).ConfigureAwait(false);
 
             if (problem is not null)
             {
@@ -250,6 +291,137 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
 
         var client = new ConnectWiseClient(http, credential);
         var companies = await _settings.ForOrganizationAsync(hook.TenantId, ClientSettingsStore.ConnectWiseCompany, ct).ConfigureAwait(false);
+
+        return hook.SendsFindings
+            ? await FileFindingsAsync(hook, client, settings, companies, ct).ConfigureAwait(false)
+            : await FileEventsAsync(hook, client, settings, companies, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Each undelivered change on a finding, into the finding's ticket.</summary>
+    private async Task<DeliveryRun> FileFindingsAsync(
+        Webhook hook, ConnectWiseClient client, ConnectWiseSettings settings, IReadOnlyDictionary<string, string> companies, CancellationToken ct)
+    {
+        var pending = await UndeliveredAsync(hook, ct).ConfigureAwait(false);
+
+        var unmapped = new SortedSet<string>(StringComparer.Ordinal);
+        int delivered = 0, failed = 0;
+        string? error = null;
+
+        foreach (var change in pending)
+        {
+            var finding = change.Finding;
+            if (!companies.TryGetValue(finding.ClientId, out var mapped)
+                || !int.TryParse(mapped, NumberStyles.None, CultureInfo.InvariantCulture, out var companyId))
+            {
+                unmapped.Add(finding.ClientSlug.Length > 0 ? finding.ClientSlug : finding.ClientId);
+                continue;
+            }
+
+            try
+            {
+                var ticketId = await FileFindingAsync(hook, client, settings, change, companyId, ct).ConfigureAwait(false);
+                await RecordAttemptAsync(hook, change.Event.Id, finding.ClientId, 200, null, finding.Id,
+                    ticketId?.ToString(CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
+                delivered++;
+            }
+            catch (ConnectWiseException ex)
+            {
+                await RecordAttemptAsync(hook, change.Event.Id, finding.ClientId, ex.Status, ex.Message, finding.Id, null, ct).ConfigureAwait(false);
+                failed++;
+                error = ex.Message;
+                break;
+            }
+        }
+
+        if (delivered > 0 || error is not null)
+        {
+            await RecordOutcomeAsync(hook, error, ct).ConfigureAwait(false);
+        }
+
+        return new DeliveryRun(hook.TenantSlug, hook.Destination, delivered, failed, pending.Count - delivered, error)
+        {
+            Unmapped = [.. unmapped],
+        };
+    }
+
+    /// <summary>
+    /// One change on a finding into ConnectWise: a note on the finding's
+    /// ticket while a tech has it open; a new ticket, naming the old one if
+    /// there was one, when the finding is new, back or worse; nothing filed
+    /// for what a closed ticket does not need to hear. Returns the ticket
+    /// the finding is on, if any.
+    /// </summary>
+    private async Task<int?> FileFindingAsync(
+        Webhook hook, ConnectWiseClient client, ConnectWiseSettings settings, FindingChange change, int companyId, CancellationToken ct)
+    {
+        var (evt, finding) = change;
+        var contract = FindingContract.For(finding, evt, hook.TenantSlug, hook.LinkBase);
+        var drift = await DriftAsync(finding.ClientId, finding.EvidenceRef, ct).ConfigureAwait(false);
+
+        var previous = await LatestTicketAsync(hook, finding.Id, ct).ConfigureAwait(false);
+        if (previous is { } open)
+        {
+            var ticket = await client.GetTicketAsync(open, ct).ConfigureAwait(false);
+            if (ticket is { Closed: false })
+            {
+                if (ConnectWiseTickets.IsNoteworthy(evt))
+                {
+                    await client.AddNoteAsync(open, ConnectWiseTickets.Note(contract, evt, drift), ct).ConfigureAwait(false);
+                    await NoteTicketAsync(finding, FindingEventKinds.TicketUpdated, open, settings.Board, hook.Destination, ct).ConfigureAwait(false);
+                }
+                return open;
+            }
+        }
+
+        if (!ConnectWiseTickets.OpensTicket(evt)) { return previous; }
+
+        // A create whose answer was lost on the way back is already there,
+        // carrying this event's marker: found rather than filed twice.
+        var marker = ConnectWiseTickets.Marker(evt.Id);
+        var existing = await client.FindTicketAsync(marker, ct).ConfigureAwait(false);
+        if (existing is not null)
+        {
+            await NoteTicketAsync(finding, FindingEventKinds.TicketCreated, existing.Id, settings.Board, hook.Destination, ct).ConfigureAwait(false);
+            return existing.Id;
+        }
+
+        var created = await client.CreateTicketAsync(new NewTicket(
+            ConnectWiseTickets.Summary(contract, marker),
+            settings.Board,
+            companyId,
+            settings.Status,
+            settings.PriorityFor(contract.Severity),
+            ConnectWiseTickets.Description(contract, drift, previousTicket: previous)), ct).ConfigureAwait(false);
+        await NoteTicketAsync(finding, FindingEventKinds.TicketCreated, created.Id, settings.Board, hook.Destination, ct).ConfigureAwait(false);
+        return created.Id;
+    }
+
+    /// <summary>The ticket, on the finding's own history, so a page can show its number.</summary>
+    private Task<FindingEvent> NoteTicketAsync(Finding finding, string kind, int ticketId, string board, string destination, CancellationToken ct) =>
+        _findings.AppendEventAsync(finding, kind, "connectwise", _clock.GetUtcNow(),
+            toValue: ticketId.ToString(CultureInfo.InvariantCulture),
+            note: $"Ticket #{ticketId.ToString(CultureInfo.InvariantCulture)} on '{board}' at {destination}.",
+            payloadJson: JsonSerializer.Serialize(new { ticket = ticketId, board, destination }, Json), ct: ct);
+
+    /// <summary>The record before and after, for a ticket, from the drift event the finding points at in the client's file.</summary>
+    private async Task<WebhookDnsDrift?> DriftAsync(string clientId, string? evidenceRef, CancellationToken ct)
+    {
+        const string prefix = "drift:";
+        if (evidenceRef is null || !evidenceRef.StartsWith(prefix, StringComparison.Ordinal)) { return null; }
+
+        await using var db = await _files.OpenAsync(ClientScope.Client(clientId), ["dns_drift_events"], ct: ct).ConfigureAwait(false);
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT record_type, old_value, new_value FROM dns_drift_events WHERE id = $id";
+        command.Parameters.AddWithValue("$id", evidenceRef[prefix.Length..]);
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
+        return new WebhookDnsDrift(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2));
+    }
+
+    /// <summary>Each pending DNS change, for a ConnectWise destination on the older contract.</summary>
+    private async Task<DeliveryRun> FileEventsAsync(
+        Webhook hook, ConnectWiseClient client, ConnectWiseSettings settings, IReadOnlyDictionary<string, string> companies, CancellationToken ct)
+    {
         var pending = await PendingAsync(hook, ct).ConfigureAwait(false);
 
         var unmapped = new SortedSet<string>(StringComparer.Ordinal);
@@ -269,12 +441,12 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
             try
             {
                 var ticketId = await FileAsync(hook, client, settings, item, companyId, remoteKey, ct).ConfigureAwait(false);
-                await RecordAttemptAsync(hook, item, 200, null, remoteKey, ticketId.ToString(CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
+                await RecordAttemptAsync(hook, item.Event.Id, item.ClientId, 200, null, remoteKey, ticketId.ToString(CultureInfo.InvariantCulture), ct).ConfigureAwait(false);
                 delivered++;
             }
             catch (ConnectWiseException ex)
             {
-                await RecordAttemptAsync(hook, item, ex.Status, ex.Message, remoteKey, null, ct).ConfigureAwait(false);
+                await RecordAttemptAsync(hook, item.Event.Id, item.ClientId, ex.Status, ex.Message, remoteKey, null, ct).ConfigureAwait(false);
                 failed++;
                 error = ex.Message;
                 break;
@@ -330,8 +502,21 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
     private sealed record PendingEvent(string ClientId, string DomainId, WebhookEvent Event);
 
     /// <summary>
+    /// The changes on the organization's findings nobody has delivered here
+    /// yet, oldest first: the kinds a destination hears about, on findings at
+    /// or above the destination's severity, since it was set up or the last
+    /// two weeks, whichever is later.
+    /// </summary>
+    private Task<IReadOnlyList<FindingChange>> UndeliveredAsync(Webhook hook, CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow();
+        var since = hook.CreatedAt > now - GiveUpAfter ? hook.CreatedAt : now - GiveUpAfter;
+        return _findings.UndeliveredAsync(hook.Id, hook.TenantId, since, FindingEventKinds.Delivering, Rank(hook.MinSeverity), BatchSize, ct);
+    }
+
+    /// <summary>
     /// The organization's drift nobody has delivered here yet, across every
-    /// client's file, oldest first.
+    /// client's file, oldest first: the older contract's feed.
     /// </summary>
     /// <remarks>
     /// The events are in the client files and the record of what was sent is
@@ -395,9 +580,8 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
     }
 
     private async Task<(int? Status, string? Error)> PostAsync(
-        HttpClient http, WebhookCredential credential, WebhookEvent evt, CancellationToken ct)
+        HttpClient http, WebhookCredential credential, string body, string eventId, CancellationToken ct)
     {
-        var body = evt.ToJson();
         var timestamp = _clock.GetUtcNow().ToUnixTimeSeconds();
 
         using var request = new HttpRequestMessage(HttpMethod.Post, credential.Url)
@@ -406,7 +590,7 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
         };
         request.Headers.Add(WebhookSigner.TimestampHeader, timestamp.ToString(CultureInfo.InvariantCulture));
         request.Headers.Add(WebhookSigner.SignatureHeader, WebhookSigner.Sign(credential.Secret, timestamp, body));
-        request.Headers.Add(WebhookSigner.EventIdHeader, evt.Id);
+        request.Headers.Add(WebhookSigner.EventIdHeader, eventId);
 
         try
         {
@@ -467,7 +651,7 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
     }
 
     private async Task RecordAttemptAsync(
-        Webhook hook, PendingEvent item, int? status, string? error, string? remoteKey, string? remoteId, CancellationToken ct)
+        Webhook hook, string eventId, string clientId, int? status, string? error, string? remoteKey, string? remoteId, CancellationToken ct)
     {
         await using var db = await OpenRegistryAsync(ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
@@ -486,8 +670,8 @@ public sealed class WebhookNotifier(string databasePath, ISecretStore secrets, H
             """;
         var now = WebhookStore.Stamp(_clock.GetUtcNow());
         command.Parameters.AddWithValue("$webhook", hook.Id);
-        command.Parameters.AddWithValue("$event", item.Event.Id);
-        command.Parameters.AddWithValue("$client", item.ClientId);
+        command.Parameters.AddWithValue("$event", eventId);
+        command.Parameters.AddWithValue("$client", clientId);
         command.Parameters.AddWithValue("$delivered", error is null ? now : DBNull.Value);
         command.Parameters.AddWithValue("$now", now);
         command.Parameters.AddWithValue("$status", (object?)status ?? DBNull.Value);

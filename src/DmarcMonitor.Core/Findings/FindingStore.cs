@@ -361,6 +361,57 @@ public sealed class FindingStore(string databasePath)
         return changes;
     }
 
+    /// <summary>
+    /// An organization's finding events a destination has not delivered,
+    /// oldest first: those of the kinds given, since a moment, on findings
+    /// at or above a severity rank (0 info, 1 warning, 2 critical).
+    /// </summary>
+    public async Task<IReadOnlyList<FindingChange>> UndeliveredAsync(
+        string webhookId, string tenantId, DateTimeOffset since, IReadOnlyList<string> kinds, int minRank, int limit,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(kinds);
+
+        await using var db = await OpenAsync(ct).ConfigureAwait(false);
+        await using var command = db.CreateCommand();
+
+        var where = new List<string>
+        {
+            "f.tenant_id = $tenant",
+            "e.at >= $since",
+            "CASE f.severity WHEN 'critical' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END >= $min",
+            "w.delivered_at IS NULL",
+        };
+        AddIn(command, where, "e.kind", "k", kinds);
+
+        command.CommandText = $"""
+            SELECT {Columns},
+                   e.id, e.finding_id, e.at, e.kind, e.actor, e.from_value, e.to_value, e.note, e.payload_json
+            FROM finding_events e
+            JOIN findings f ON f.id = e.finding_id
+            JOIN clients c ON c.id = f.client_id
+            LEFT JOIN domains d ON d.id = f.domain_id
+            LEFT JOIN finding_exceptions x ON x.finding_id = f.id AND x.ended_at IS NULL
+            LEFT JOIN webhook_deliveries w ON w.webhook_id = $webhook AND w.event_id = e.id
+            WHERE {string.Join(" AND ", where)}
+            ORDER BY e.at, e.rowid
+            LIMIT $limit
+            """;
+        command.Parameters.AddWithValue("$webhook", webhookId);
+        command.Parameters.AddWithValue("$tenant", tenantId);
+        command.Parameters.AddWithValue("$since", Stamp(since));
+        command.Parameters.AddWithValue("$min", minRank);
+        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 5000));
+
+        var changes = new List<FindingChange>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            changes.Add(new FindingChange(ReadEvent(reader, 37), Read(reader)));
+        }
+        return changes;
+    }
+
     // ---- exceptions -------------------------------------------------------------
 
     public async Task InsertExceptionAsync(FindingExceptionRecord exception, CancellationToken ct = default)

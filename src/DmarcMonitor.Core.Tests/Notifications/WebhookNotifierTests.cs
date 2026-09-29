@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Dns;
+using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Notifications;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
@@ -45,7 +46,7 @@ public sealed class WebhookNotifierTests : IDisposable
             .GetAwaiter().GetResult();
     }
 
-    private static PublishedRecords Reading(string domain, string dmarc = "v=DMARC1; p=quarantine; rua=mailto:d@msp.example",
+    private static PublishedRecords Reading(string domain, string? dmarc = "v=DMARC1; p=quarantine; rua=mailto:d@msp.example",
         string spf = "v=spf1 include:_spf.mail.example -all") => new()
     {
         Domain = domain,
@@ -61,10 +62,105 @@ public sealed class WebhookNotifierTests : IDisposable
         await _dns.SaveAsync(domain, Reading(domain, dmarc: "v=DMARC1; p=none; rua=mailto:d@msp.example"));
     }
 
-    private Task<Webhook> WebhookAsync(string org = "local", string minSeverity = "warning", TimeProvider? clock = null) =>
-        new WebhookStore(_dbPath, _secrets, clock).SetAsync(org, Receiver, Secret, minSeverity, "https://dmarc.msp.example/", "tester");
+    /// <summary>A destination on the older contract unless the test says otherwise: those tests are about that contract.</summary>
+    private Task<Webhook> WebhookAsync(string org = "local", string minSeverity = "warning", TimeProvider? clock = null, string payload = WebhookStore.EventVersion) =>
+        new WebhookStore(_dbPath, _secrets, clock).SetAsync(org, Receiver, Secret, minSeverity, "https://dmarc.msp.example/", "tester", payload);
 
     private WebhookNotifier Notifier(TimeProvider? clock = null) => new(_dbPath, _secrets, _http, clock);
+
+    [Fact]
+    public async Task ADestinationSetWithoutSayingGetsTheFindingContract()
+    {
+        var hook = await new WebhookStore(_dbPath, _secrets).SetAsync("local", Receiver, Secret, "warning", null, "tester");
+        Assert.Equal(WebhookStore.FindingVersion, hook.PayloadVersion);
+        Assert.True(hook.SendsFindings);
+
+        var older = await WebhookAsync(payload: WebhookStore.EventVersion);
+        Assert.Equal(hook.Id, older.Id);
+        Assert.False(older.SendsFindings);
+        await Assert.ThrowsAsync<ArgumentException>(() => WebhookAsync(payload: "finding.v2"));
+    }
+
+    [Fact]
+    public async Task AFindingIsSentAsFindingV1WithAPointerAtTheEvidenceAndNoRecordText()
+    {
+        await WebhookAsync(payload: WebhookStore.FindingVersion);
+        await LoosenedAsync();
+
+        var run = Assert.Single(await Notifier().SendAsync());
+
+        Assert.True(run.Worked, run.Error);
+        Assert.Equal(1, run.Delivered);
+        var sent = Assert.Single(_http.Sent);
+        Assert.True(WebhookSigner.Verify(Secret, long.Parse(sent.Timestamp!, System.Globalization.CultureInfo.InvariantCulture), sent.Body, sent.Signature));
+
+        var finding = FindingContract.FromJson(sent.Body)!;
+        Assert.Equal(FindingContract.CurrentSchema, finding.Schema);
+        Assert.Equal(FindingContract.Version, finding.PayloadVersion);
+        Assert.Equal(sent.EventId, finding.Id);
+        Assert.Equal(FindingEventKinds.Observed, finding.EventKind);
+        Assert.Equal(FindingSourceIds.DnsScan, finding.SourceId);
+        Assert.Equal(FindingTypes.DmarcPolicyWeakened, finding.Type);
+        Assert.Equal("policy_loosened", finding.Rule);
+        Assert.Equal("critical", finding.Severity);
+        Assert.Equal("local", finding.Organization.Slug);
+        Assert.Equal("acme.example", finding.Domain);
+        Assert.StartsWith("dns:", finding.DedupKey, StringComparison.Ordinal);
+        Assert.StartsWith("drift:", finding.EvidenceRef, StringComparison.Ordinal);
+        Assert.Equal("https://dmarc.msp.example/domains/acme.example", finding.EvidenceLink);
+        Assert.Equal(SourceStates.Active, finding.SourceState);
+        Assert.Equal(AnalystStates.Unreviewed, finding.AnalystState);
+        Assert.Equal(1, finding.ObservationCount);
+
+        // A pointer at the evidence, never the evidence: the record stays in the client's file.
+        Assert.DoesNotContain("rua=mailto", sent.Body, StringComparison.Ordinal);
+        Assert.Equal(sent.EventId, await ScalarAsync("SELECT event_id FROM webhook_deliveries"));
+    }
+
+    [Fact]
+    public async Task SeenAgainIsNotSentAgainButWhatChangesOnTheFindingIs()
+    {
+        await WebhookAsync(payload: WebhookStore.FindingVersion);
+        await _dns.SaveAsync("acme.example", Reading("acme.example"));
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: "v=DMARC1; p=quarantine; pct=50; rua=mailto:d@msp.example"));
+        Assert.Equal(1, Assert.Single(await Notifier().SendAsync()).Delivered);
+
+        // The same drift another night is the same finding, with nothing new to say.
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: "v=DMARC1; p=quarantine; pct=50; rua=mailto:d@msp.example"));
+        Assert.Equal(0, Assert.Single(await Notifier().SendAsync()).Delivered);
+        Assert.Single(_http.Sent);
+
+        // Worse, then back as it was, then gone again: each a change on the one finding.
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: null));
+        await _dns.SaveAsync("acme.example", Reading("acme.example"));
+        await _dns.SaveAsync("acme.example", Reading("acme.example", dmarc: null));
+
+        var run = Assert.Single(await Notifier().SendAsync());
+        Assert.True(run.Worked, run.Error);
+        Assert.Equal(4, run.Delivered);
+
+        var sent = _http.Sent.Skip(1).Select(s => FindingContract.FromJson(s.Body)!).ToList();
+        Assert.Equal([FindingEventKinds.SeverityChanged, FindingEventKinds.TypeChanged, FindingEventKinds.SourceResolved, FindingEventKinds.Reopened],
+            sent.Select(f => f.EventKind).ToList());
+        Assert.Single(sent.Select(f => f.FindingId).Distinct());
+        Assert.Equal(FindingContract.FromJson(_http.Sent[0].Body)!.FindingId, sent[0].FindingId);
+        Assert.Equal(5, _http.Sent.Select(s => s.EventId).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task ATestEventForAFindingDestinationIsInTheShapeItWillReceive()
+    {
+        await WebhookAsync(payload: WebhookStore.FindingVersion);
+
+        var run = await Notifier().PingAsync("local");
+
+        Assert.True(run.Worked, run.Error);
+        var ping = FindingContract.FromJson(Assert.Single(_http.Sent).Body)!;
+        Assert.Equal(FindingContract.CurrentSchema, ping.Schema);
+        Assert.Equal(FindingContract.PingType, ping.Type);
+        Assert.Equal("local", ping.Organization.Slug);
+        Assert.Equal("ping", ping.FindingId);
+    }
 
     [Fact]
     public async Task ANewChangeIsSentSignedWithWhatAReceiverNeeds()
@@ -208,7 +304,7 @@ public sealed class WebhookNotifierTests : IDisposable
     {
         FileReport("rival", "rival-client.example", "r-2");
         await WebhookAsync("local");
-        await new WebhookStore(_dbPath, _secrets).SetAsync("rival", "https://rival.example/hook", Secret, "warning", null, "tester");
+        await new WebhookStore(_dbPath, _secrets).SetAsync("rival", "https://rival.example/hook", Secret, "warning", null, "tester", WebhookStore.EventVersion);
         await LoosenedAsync("acme.example");
         await LoosenedAsync("rival-client.example");
 

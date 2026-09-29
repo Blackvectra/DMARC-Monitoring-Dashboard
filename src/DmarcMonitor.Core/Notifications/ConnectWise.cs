@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using DmarcMonitor.Core.Findings;
 using System.Text.Json.Serialization;
 
 namespace DmarcMonitor.Core.Notifications;
@@ -346,6 +347,117 @@ internal static class ConnectWiseTickets
         var room = ConnectWiseClient.SummaryLimit - suffix.Length;
         if (text.Length > room) { text = text[..(room - 1)].TrimEnd() + "…"; }
         return text + suffix;
+    }
+
+    /// <summary>
+    /// The changes that open a ticket when the finding has none open: first
+    /// seen, back after its source resolved it, or worse. Not the source
+    /// seeing it again after a failed observation, which changes nothing for
+    /// whoever closed the ticket.
+    /// </summary>
+    public static bool OpensTicket(FindingEvent evt)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        return evt.Kind switch
+        {
+            FindingEventKinds.Observed => evt.FromValue is null,
+            FindingEventKinds.Reopened or FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged => true,
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// The changes worth a note while a tech has the ticket: what changed,
+    /// what its source or a person decided. Not a failed observation, and
+    /// not the source seeing it again after one.
+    /// </summary>
+    public static bool IsNoteworthy(FindingEvent evt)
+    {
+        ArgumentNullException.ThrowIfNull(evt);
+        return evt.Kind is not (FindingEventKinds.Observed or FindingEventKinds.SourceUnknown);
+    }
+
+    /// <summary>"DMARC: client: the finding [dm:marker]", for a ticket from a finding.</summary>
+    public static string Summary(FindingContract finding, string marker)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        var who = finding.Client.Name.Length > 0 ? finding.Client.Name : finding.Domain ?? "?";
+        var suffix = " " + marker;
+        var text = $"DMARC: {who}: {OneLine(finding.Title)}";
+        var room = ConnectWiseClient.SummaryLimit - suffix.Length;
+        if (text.Length > room) { text = text[..(room - 1)].TrimEnd() + "…"; }
+        return text + suffix;
+    }
+
+    /// <summary>What a tech reads on a ticket from a finding: the finding, the record if it is one, and where the evidence is.</summary>
+    /// <param name="drift">The record before and after, for a DNS finding; null for any other.</param>
+    /// <param name="previousTicket">A closed ticket this finding had before, named so the history is one click away.</param>
+    public static string Description(FindingContract finding, WebhookDnsDrift? drift, int? previousTicket = null)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        var lines = new List<string>();
+
+        if (previousTicket is { } previous)
+        {
+            lines.Add($"Previously ticket #{previous.ToString(CultureInfo.InvariantCulture)}, since closed.");
+            lines.Add("");
+        }
+
+        lines.Add($"{(finding.Client.Name.Length > 0 ? finding.Client.Name : "Unknown client")}{(finding.Client.Slug.Length > 0 ? $" ({finding.Client.Slug})" : "")}: {finding.Domain ?? "-"}");
+        lines.Add($"Severity: {finding.Severity}");
+        lines.Add(OneLine(finding.Title));
+        AddRecord(lines, drift);
+
+        lines.Add("");
+        lines.Add($"First seen: {When(finding.ObservedAt)}; seen {finding.ObservationCount.ToString(CultureInfo.InvariantCulture)} time(s), last {When(finding.LastObservedAt)}");
+        if (finding.EvidenceLink is not null) { lines.Add($"Dashboard: {finding.EvidenceLink}"); }
+        lines.Add($"Source: DMARC Monitor, finding {finding.FindingId}");
+
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>A note on the finding's open ticket: what just changed, in a tech's words.</summary>
+    public static string Note(FindingContract finding, FindingEvent evt, WebhookDnsDrift? drift)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        ArgumentNullException.ThrowIfNull(evt);
+
+        var by = evt.Actor.Length > 0 ? evt.Actor : "somebody";
+        var headline = evt.Kind switch
+        {
+            FindingEventKinds.Reopened => "Seen again after its source had resolved it",
+            FindingEventKinds.SeverityChanged => $"Severity {evt.FromValue ?? "?"} → {evt.ToValue ?? "?"}: {OneLine(finding.Title)}",
+            FindingEventKinds.TypeChanged => $"Now {evt.ToValue ?? "?"}: {OneLine(finding.Title)}",
+            FindingEventKinds.SourceResolved => "Resolved by its source",
+            FindingEventKinds.Acknowledged => $"Acknowledged in DMARC Monitor by {by}",
+            FindingEventKinds.AnalystStateChanged => $"Marked {evt.ToValue ?? "?"} in DMARC Monitor by {by}",
+            FindingEventKinds.ExceptionApplied => $"An exception was recorded in DMARC Monitor by {by}",
+            FindingEventKinds.ExceptionExpired => "The exception on this finding has expired; it is back in the queue",
+            FindingEventKinds.ExceptionEnded => $"The exception on this finding was ended by {by}",
+            FindingEventKinds.RemediationStaged => $"Remediation: {evt.ToValue ?? "off the chain"}",
+            _ => evt.Kind,
+        };
+
+        var lines = new List<string> { $"{headline} at {When(evt.At)}." };
+        if (evt.Note is { Length: > 0 } note && evt.Kind is not (FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged))
+        {
+            lines.Add(OneLine(note));
+        }
+        if (evt.Kind == FindingEventKinds.SourceResolved) { lines.Add("Close this ticket if nothing else is needed."); }
+        if (evt.Kind is FindingEventKinds.Reopened or FindingEventKinds.SeverityChanged or FindingEventKinds.TypeChanged) { AddRecord(lines, drift); }
+
+        lines.Add("");
+        lines.Add($"Source: DMARC Monitor, finding {finding.FindingId}, event {evt.Id}");
+        return string.Join("\n", lines);
+    }
+
+    private static void AddRecord(List<string> lines, WebhookDnsDrift? drift)
+    {
+        if (drift is null) { return; }
+        lines.Add("");
+        lines.Add($"Record: {drift.RecordType.ToUpperInvariant()}");
+        lines.Add($"Was: {drift.OldValue ?? "(not published)"}");
+        lines.Add($"Now: {drift.NewValue ?? "(not published)"}");
     }
 
     /// <summary>What a tech reads: everything the alert knows, and where the evidence is.</summary>

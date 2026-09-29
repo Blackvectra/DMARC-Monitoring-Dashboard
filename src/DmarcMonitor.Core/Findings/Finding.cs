@@ -86,6 +86,17 @@ public static class FindingEventKinds
     public const string TicketUpdated = "TicketUpdated";
 
     /// <summary>
+    /// The kinds a destination is told about: what the source saw change and
+    /// what a person decided. Not an observation counted towards resolution,
+    /// not a moved expectation, and not the ticket a destination itself filed.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Delivering =
+    [
+        Observed, SeverityChanged, TypeChanged, SourceUnknown, SourceResolved, Reopened,
+        Acknowledged, AnalystStateChanged, ExceptionApplied, ExceptionExpired, ExceptionEnded, RemediationStaged,
+    ];
+
+    /// <summary>
     /// The kinds worth telling a destination about. A plain re-observation is
     /// not one: the finding's counters carry it, and a note per night on a
     /// ticket is how a ticket gets muted.
