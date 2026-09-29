@@ -94,7 +94,11 @@ in a backup or an export can be used to authenticate as anybody.
 no third-party analytics. The only outbound connections are: the mailbox being
 collected, DNS queries for the domains being monitored, HTTPS fetches of
 `mta-sts.<domain>` policy files, the DNS provider's API when a fix is applied,
-and GitHub for update checks.
+GitHub for update checks, and - only where you have set them up - the webhook
+receiver and the ConnectWise PSA you named ([`WEBHOOKS.md`](WEBHOOKS.md),
+[`CONNECTWISE.md`](CONNECTWISE.md)). What goes to those two is a DNS change:
+the client's name, the domain, the record before and after, and a link back to
+the dashboard. Never a report, never a header.
 
 That is the substantive difference from a hosted DMARC platform, and it is
 worth stating plainly to a client: with dmarcian, PowerDMARC or Sendmarc their

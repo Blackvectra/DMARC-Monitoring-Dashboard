@@ -523,6 +523,20 @@ signed JSON, after the scan. [`WEBHOOKS.md`](WEBHOOKS.md) has the contract a
 receiver checks and the commands for a server, where they must be run as the
 service account.
 
+Or as tickets in ConnectWise PSA, one per finding on the client's own company,
+with a note when it repeats:
+
+```
+dmarc notify set --org <slug> --kind connectwise --site https://api-na.myconnectwise.net \
+    --company-id <id> --client-id <guid> --public-key <key> --board "Alerts"
+dmarc notify companies --org <slug> --search "Acme"
+dmarc client set-connectwise --client acme-corp --company 1001
+dmarc notify test --org <slug> --kind connectwise --client acme-corp
+```
+
+[`CONNECTWISE.md`](CONNECTWISE.md) covers the API member, the keys, and what a
+ticket looks like. An organization may have both.
+
 ## Backups
 
     dmarc backup --to /var/backups/dmarc

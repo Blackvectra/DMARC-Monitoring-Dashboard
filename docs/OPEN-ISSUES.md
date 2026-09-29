@@ -584,6 +584,147 @@ See `docs/MSP-PLATFORM.md` for how this sits against what an MSP platform is
 expected to be. It is one table and the workflow on top of it, and four of the
 brief's ten Phase 1 items collapse into it.
 
+## 12a. Anomaly detection, as part of the alerting that 12 is missing
+
+**Area** a new nightly job over each client's file; `alerts` in
+`db/client-schema.sql`, which already names the two types this needs
+(`new_sender`, `volume_anomaly`) and which nothing writes to yet.
+**Severity** Medium on its own. High as the first thing to put through the
+alert path, because the alert path is what an MSP is paying for.
+
+An autoencoder was proposed for this. Not first, and this is why: an
+organization's month is a few thousand aggregate rows, which is enough to
+train a small network and not enough to know what it learned; and an alert
+that cannot say *why* it fired is one an on-call tech mutes within a week. The
+practice that holds up in MSP operations is the other way round - a statistic
+a human can check, wired into the on-call path, with the model earning its
+place by beating that statistic on the same data.
+
+**Phase 1 - baselines, per client, from that client's own file.** Nightly,
+after the collector, writing `alerts` rows with a `dedup_key` per
+(type, domain, day) so a re-run never fires twice:
+
+- *New failing source*: an address first seen for this client today, failing
+  DMARC, above a floor of messages. This is the impersonation case, and the
+  threat indicators already know whether the same address hit other clients -
+  that count goes in `payload_json` and raises severity.
+- *Volume anomaly*: today's count from a known source against that source's
+  own history for this client - median and MAD, not mean and standard
+  deviation, because one spike must not inflate its own baseline. Needs a
+  minimum of history (seven days) before it may fire at all.
+- *Pass-rate drop*: a domain whose authenticated share falls a set number of
+  points below its 30-day rate, which is a broken DKIM key or an SPF edit
+  before the customer notices bounces.
+
+Every alert names the client, the domain, the address, the number, the
+baseline it was compared with and the receiver that reported it. A tech can
+verify each of those in the source page in under a minute; that is the
+standard, not the model's confidence.
+
+**Phase 2 - the MSP operations side, which is most of the value.**
+
+- *Delivery*: the alerts table is read by `dmarc health` (so `OnFailure=` and
+  `dmarc-alert@` carry a critical one tonight, with nothing new to deploy) and
+  by a new `dmarc alerts` command that prints open ones and exits 1 when a
+  critical is open - the shape every RMM and PSA already knows how to poll.
+  And alerts go out the same way DNS drift already does: the signed webhook
+  ([`WEBHOOKS.md`](WEBHOOKS.md)) gains an `alert.*` event type, and the PSA
+  becomes a second destination kind on that channel - see the ConnectWise
+  section below. Into the PSA rather than into somebody's inbox.
+- *Workflow*: acknowledge, suppress with a reason and a review date, resolve.
+  This is the findings table issue 12 asks for; anomaly alerts are its first
+  rows, not a separate system.
+- *Per-client tuning*: a client whose newsletter tool sends 5,000 on the
+  first of the month is not an anomaly; the suppression above is how that is
+  remembered, in the client's own file, so it moves with the client.
+- *Reporting*: the month's alerts and how they were closed become a section
+  of the client report - "3 new senders reviewed, 1 blocked" - which is the
+  evidence of monitoring the customer is billed for.
+- *Cross-client*: the organization-wide view (one address, several clients)
+  already exists in threat intelligence; alerts feed it rather than repeat it.
+
+**The PSA is ConnectWise PSA (Manage).** Decided 28 Sep; **built the same
+day for DNS drift** (migration 0021, `docs/CONNECTWISE.md`), so the
+integration is proved against events that exist today and phase 1's alerts
+flow through it when they arrive. It cannot receive the signed generic POST -
+there is no inbound webhook-to-ticket in it - so it is reached through its
+REST API, as a second *kind* of destination on the channel `dmarc notify`
+already runs, not as a parallel system. What that reuses without change: the
+pending-events query (oldest first, stop at the first failure so a receiver
+never sees things out of order), the `webhook_deliveries` ledger, the secret
+store for the credential, the `dmarc-notify.service` schedule after each
+scan, and the `dmarc health` "stopped delivering" check. Still to do once it
+has run against the real instance: confirm the 100-character summary cap and
+the note fields against the instance's API version, and decide whether ticket
+state should be read back to resolve alerts (one way for now).
+
+- *Authentication*, as ConnectWise documents it: HTTP Basic with
+  `companyId+publicKey:privateKey`, plus a `clientId` header registered at
+  developer.connectwise.com; a request without the header is a 401. All four
+  go in the secret store under one credential ref, as the webhook's address
+  and key do. The API member they belong to gets the least the integration
+  needs - add and edit on the alert board's tickets, inquire on companies -
+  and nothing else, and the product's docs say so.
+- *Configuration*, per organization: `dmarc notify set --kind connectwise
+  --site <api host> --board <name> ...`, with the board's own default status,
+  and a severity-to-priority map (critical and warning; info is never a
+  ticket). `webhooks.tenant_id` is UNIQUE today - one destination per
+  organization - and becomes UNIQUE per (organization, kind), so a Teams
+  relay and the PSA can both be fed. That is a migration (0021), with a
+  `kind` column defaulting to `webhook`.
+- *Client to company*: an explicit mapping, `connectwise.company_id` in the
+  existing `client_settings`, set with `dmarc client set --client <slug>
+  --connectwise-company <id>` after a `dmarc notify companies --search
+  "Acme"` lookup. Never matched by name: a slug that happens to resemble a
+  company identifier would file one customer's alert on another customer's
+  account, and that is the cross-tenant bug in a new coat. An unmapped client's
+  alerts stay in the dashboard and are named by `dmarc alerts` as unfiled.
+- *One ticket per finding, not per event*: an alert's `dedup_key` maps to one
+  open ticket. A repeat while it is open adds a note (`POST
+  /service/tickets/{id}/notes`) rather than a second ticket; once a tech has
+  closed it, the next occurrence opens a new one that names the old. The
+  ticket id is kept beside the delivery record (`webhook_deliveries` gains a
+  `remote_id`), and a short marker of the event id goes in the summary so a
+  create whose answer was lost can be found again rather than repeated.
+- *The ticket itself*: `summary` (short - ConnectWise caps it; treat 100
+  characters as the limit until the build confirms it) reads `DMARC:
+  <client> - <one line>`; `initialDescription` carries the evidence the
+  alert already has - client, domain, address and its confirmed name, count,
+  baseline, reporter - and the dashboard link when `--link-base` is set.
+  Required by the API are summary, board and company; status and priority
+  fall back to the board's defaults when not mapped.
+- *Direction*: one way. The PSA is the system of record for the work, so the
+  product never closes a ticket; resolving an alert in the dashboard adds a
+  note. Reading ticket state back to resolve alerts is a later, separate
+  decision.
+- *Volume and limits*: a nightly run is a few dozen calls at most, well under
+  any published throttle (the Power Platform connector, for comparison, allows
+  100 calls a minute per connection). The channel's stop-at-first-failure
+  already handles a 429 the same as an outage: the rest wait for the next run.
+- *What leaves the box*: client name, domain, source address and its name,
+  counts and the baseline. Never a report, never a header. `DATA-HANDLING.md`'s
+  outbound list gains the ConnectWise API host; the destination is the MSP's
+  own PSA, which already holds the client's records.
+- *Proving it*: unit tests against a fake ConnectWise (the notifier already
+  takes an `HttpMessageHandler` for this), asserting the auth header, the
+  marker, the note-not-ticket path and the unmapped-client refusal; then
+  `dmarc notify test --kind connectwise` creates one ticket on a board the
+  operator names, on the real instance, and prints its number. There is no
+  public ConnectWise sandbox to run CI against, so that manual step is the
+  acceptance test and is written down as such.
+
+**Phase 3 - the autoencoder, if it earns it.** Train per organization, not
+per client (the data is too thin per client), on per-source-per-day feature
+vectors; score reconstruction error; compare against Phase 1 on the same
+month using the alerts techs actually acted on as labels. Ship it only where
+it finds something Phase 1 missed and a tech agreed was real. If that never
+happens, the answer was the baseline, and that is a fine answer.
+
+**Not to do**: alert on every DMARC failure (that is what the client report
+is for), send anything by email from the box (issue 12's reasoning), or train
+on all organizations together (one MSP's customers are not another's
+baseline, and the client files exist to keep them apart).
+
 ## 13. The client report is one document, and nothing sends it
 
 **Area** `src/DmarcMonitor.Core/Reporting/ClientReportRenderer.cs`,

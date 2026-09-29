@@ -147,6 +147,81 @@ public sealed class WebhookStoreTests : IDisposable
         Assert.False(await _store.RemoveAsync("local", "tester"));
     }
 
+    // ---- ConnectWise, the second kind ------------------------------------------
+
+    private const string CwSite = "https://api-na.myconnectwise.net";
+    private const string CwPublic = "PublicKeyAbc123";
+    private const string CwPrivate = "PrivateKeySecret987";
+    private const string CwClientId = "11111111-2222-3333-4444-555555555555";
+
+    private Task<Webhook> ConnectWiseAsync(string board = "Alerts", string privateKey = CwPrivate) =>
+        _store.SetConnectWiseAsync("local", CwSite, "NRGTS", CwPublic, privateKey, CwClientId,
+            new ConnectWiseSettings(board, "New", "Priority 1 - Emergency", null), "warning", null, "tester");
+
+    /// <summary>
+    /// The four parts of the credential go in the secret store together, the
+    /// public half included - and an organization may have a webhook and a
+    /// PSA at once, since a Teams channel and a ticket queue are both wanted.
+    /// </summary>
+    [Fact]
+    public async Task ConnectWiseKeysAreKeptOutOfTheDatabaseAndBothKindsMayCoexist()
+    {
+        var hook = await _store.SetAsync("local", SlackStyle, Secret, "warning", null, "tester");
+        var psa = await ConnectWiseAsync();
+
+        Assert.Equal(WebhookStore.ConnectWiseKind, psa.Kind);
+        Assert.Equal(CwSite, psa.Destination);
+        Assert.Equal("Alerts", psa.ConnectWise!.Board);
+        Assert.Equal("Priority 1 - Emergency", psa.ConnectWise.PriorityCritical);
+        Assert.NotEqual(hook.Id, psa.Id);
+        Assert.Equal(2, (await _store.ForOrganizationAsync("local")).Count);
+
+        var onDisk = await File.ReadAllTextAsync(_dbPath);
+        Assert.DoesNotContain(CwPrivate, onDisk, StringComparison.Ordinal);
+        Assert.DoesNotContain(CwPublic, onDisk, StringComparison.Ordinal);
+        Assert.DoesNotContain(CwClientId, onDisk, StringComparison.Ordinal);
+
+        var kept = await _secrets.GetAsync(psa.CredentialRef);
+        Assert.Contains(CwPrivate, kept, StringComparison.Ordinal);
+        Assert.Contains("v4_6_release/apis/3.0/", kept, StringComparison.Ordinal);   // the site, as the API base
+
+        Assert.True(await _store.RemoveAsync("local", "tester", WebhookStore.ConnectWiseKind));
+        Assert.Null(await _store.GetAsync("local", WebhookStore.ConnectWiseKind));
+        Assert.NotNull(await _store.GetAsync("local"));
+        Assert.Null(await _secrets.GetAsync(psa.CredentialRef));
+    }
+
+    [Fact]
+    public async Task AConnectWiseDestinationNeedsEveryPartAndAnHttpsSite()
+    {
+        var settings = new ConnectWiseSettings("Alerts");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => _store.SetConnectWiseAsync("local", "http://cw.example", "NRGTS", CwPublic, CwPrivate, CwClientId, settings, "warning", null, "tester"));
+        await Assert.ThrowsAsync<ArgumentException>(() => ConnectWiseAsync(privateKey: " "));
+        await Assert.ThrowsAsync<ArgumentException>(() => ConnectWiseAsync(board: " "));
+        await Assert.ThrowsAsync<ArgumentException>(() => _store.SetConnectWiseAsync("local", CwSite, "NRGTS", CwPublic, CwPrivate, CwClientId, settings, "urgent", null, "tester"));
+
+        Assert.Empty(await _store.ListAsync());
+    }
+
+    [Fact]
+    public async Task SettingConnectWiseAgainReplacesTheKeysAndKeepsTheHistory()
+    {
+        var first = await ConnectWiseAsync();
+        var second = await ConnectWiseAsync(board: "Escalations", privateKey: "AnotherPrivateKey321");
+
+        Assert.Equal(first.Id, second.Id);
+        Assert.NotEqual(first.CredentialRef, second.CredentialRef);
+        Assert.Null(await _secrets.GetAsync(first.CredentialRef));
+        Assert.Equal("Escalations", second.ConnectWise!.Board);
+        Assert.Single(await _store.ListAsync());
+
+        var entries = await new AuditLog(_dbPath).ListAsync();
+        Assert.Contains(entries, e => e.Action == "psa.set" && e.Detail!.Contains("Alerts", StringComparison.Ordinal));
+        Assert.Contains(entries, e => e.Action == "psa.replace" && e.Detail!.Contains("Escalations", StringComparison.Ordinal));
+        Assert.DoesNotContain(entries, e => e.Detail?.Contains("PrivateKey", StringComparison.Ordinal) == true);
+    }
+
     /// <summary>Pointing client data somewhere new is exactly what somebody asks about later.</summary>
     [Fact]
     public async Task EveryChangeIsInTheAuditLog()

@@ -6,6 +6,12 @@ small relay in front of a chat tool — anything that can check an HMAC.
 
 Without one, a weakened DMARC policy is learned about by opening the app.
 
+The same changes can be filed as tickets in ConnectWise PSA instead of, or
+as well as, being POSTed here: [`CONNECTWISE.md`](CONNECTWISE.md). It is the
+same channel with a second kind of destination, so everything below about
+when things are sent, what is not, and what `dmarc health` watches applies to
+both.
+
 ---
 
 ## What is sent, and when

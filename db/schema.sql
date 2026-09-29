@@ -520,20 +520,27 @@ INSERT INTO row_ids (table_name, next_id) VALUES
 --  the payload is built from the client's own file when it is sent.)
 -- ============================================================================
 
+-- One destination of each kind per organization. A webhook is an address
+-- given a signed POST per change; a PSA (kind 'connectwise') is reached
+-- through its API and gets a ticket per finding - see docs/CONNECTWISE.md.
 CREATE TABLE webhooks (
     id                  TEXT PRIMARY KEY,
-    tenant_id           TEXT NOT NULL UNIQUE REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id           TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    kind                TEXT NOT NULL DEFAULT 'webhook'
+                        CHECK (kind IN ('webhook','connectwise')),
     destination         TEXT NOT NULL,                 -- scheme and host only, for display
-    credential_ref      TEXT NOT NULL,                 -- the full address and signing secret, in the secret store
+    credential_ref      TEXT NOT NULL,                 -- the full address and signing secret, or the API keys, in the secret store
     min_severity        TEXT NOT NULL DEFAULT 'warning'
                         CHECK (min_severity IN ('info','warning','critical')),
     link_base           TEXT,                          -- the dashboard's address, for links; NULL sends none
+    config_json         TEXT,                          -- what is not secret: the PSA board, status and priorities
     created_at          TEXT NOT NULL,                 -- events detected before this are never sent
     created_by          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
     last_delivered_at   TEXT,
     last_error          TEXT,
-    last_error_at       TEXT
+    last_error_at       TEXT,
+    UNIQUE (tenant_id, kind)
 );
 
 CREATE TABLE webhook_deliveries (
@@ -545,10 +552,16 @@ CREATE TABLE webhook_deliveries (
     last_attempt_at     TEXT,
     last_status         INTEGER,
     last_error          TEXT,
+    -- What the event was about, as a PSA files it: one ticket per finding. A
+    -- later event with the same key is a note on that ticket while it is
+    -- open. remote_id is the ticket's number.
+    remote_key          TEXT,
+    remote_id           TEXT,
     PRIMARY KEY (webhook_id, event_id)
 );
 
 CREATE INDEX ix_webhook_deliveries_client ON webhook_deliveries(client_id);
+CREATE INDEX ix_webhook_deliveries_remote ON webhook_deliveries(webhook_id, remote_key, delivered_at);
 
 
 -- ============================================================================
@@ -614,6 +627,9 @@ VALUES ('0019', datetime('now'), 'One file per client: each client''s reports, D
 
 INSERT INTO schema_migrations (version, applied_at, description)
 VALUES ('0020', datetime('now'), 'Webhooks: somewhere to send what the product finds, and a record of which events went where, so a change in a client''s DNS reaches a person without anybody opening the app');
+
+INSERT INTO schema_migrations (version, applied_at, description)
+VALUES ('0021', datetime('now'), 'PSA destinations: a ConnectWise ticket per finding on the same channel as the webhook, so an organization may have one destination of each kind');
 
 
 -- ============================================================================
