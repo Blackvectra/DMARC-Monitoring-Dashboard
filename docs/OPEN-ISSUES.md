@@ -990,17 +990,13 @@ are the role gates on Updates and the brand name, the Settings page listing
 every organization, provider configs resolving a slug across organizations,
 SERVFAIL read as a dead SPF include, ingest never reading rule-sorted child
 folders, the interpolated tenant id, a cross-site switch of organization,
-and update.sh not checking SHA256SUMS.txt.
+and update.sh not checking SHA256SUMS.txt. Since then: the DNS apply path
+that resolved a domain by name alone, and the local trial answering to any
+Host name (both below, under Fixed).
 
 **Multi-organization installs only.** One organization, which is every install
 today, is not exposed by any of these.
 
-- **The DNS apply path resolves a domain by name alone.**
-  `RemediationService.DomainIdsAsync`, `DnsProviderConfigs.ForDomainAsync`
-  and `MtaStsStore.IdsAsync` take no tenant, so with the same domain in two
-  organizations an Apply can write with the other organization's provider
-  token and file the audit row under its client. Needs a tenant threaded from
-  the Fix page and `dmarc fix` down to the provider lookup.
 - **`dmarc client set-group` ignores `--org`** and sets the customer group on
   every client with that slug in every organization. *unverified*
 
@@ -1023,10 +1019,16 @@ today, is not exposed by any of these.
   `update-agent.sh`, readable by any local account in `/proc/<pid>/cmdline`.
   Use `curl -H @file` or a netrc. Related: `Updates:Token` lives in plain
   appsettings rather than the secret store.
-- **DNS rebinding against the local trial.** The trial's only protection is
-  "remote address is loopback", with `AllowedHosts: *`. A page in the trial
-  user's browser can rebind a name to 127.0.0.1 and read the app. Fix:
-  restrict hosts to localhost/127.0.0.1 in trial mode.
+- **`AllowedHosts` is `*` on a deployed instance.** Caddy in front forwards
+  only the names it has a site for, and the service binds 127.0.0.1, so
+  nothing reaches the app under a name it was not given; the app itself
+  accepts any. It cannot simply be narrowed, because the same app answers
+  `mta-sts.<client domain>` for every client from the Host header, so the
+  restriction has to leave that one path out. Defence in depth, not an open
+  door.
+- **`AssignDomainAsync` with no tenant** - the master account's path - takes
+  the first client with that slug when two organizations hold one. Every
+  command and page passes a tenant, so nothing reaches it today.
 - **`sp=` removal is planned as a safe fix** on every domain without checking
   the reports for failing subdomain mail, and is applied under the Tech role.
 - **The "policy served elsewhere" MTA-STS guard is Fix-page only.**
@@ -1086,3 +1088,19 @@ fail without the fix.
    list of nine: the count was windowed, the names were not.
 5. **"0 silent" while five domains had gone dark** for between 14 and 128 days.
    Silent counted only domains that had never reported, not ones that stopped.
+6. **The DNS apply path took the first domain with that name.** On an install
+   holding the same domain in two organizations, an Apply could file its audit
+   row under one organization's client and write with the other's provider
+   token; a rollback, an MTA-STS write and the public policy endpoint had the
+   same shape. A domain is now looked up inside the caller's organization, and
+   a name that two organizations hold is refused when none is named:
+   `dmarc fix`, `dmarc dns` and `dmarc mta-sts` take `--org`, the Fix page
+   passes the signed-in person's organization, a change carries the
+   organization it was made in, and the public endpoint serves nothing for a
+   name two organizations have policies for. Covered by
+   `CrossOrganizationDnsTests`, which fail without the fix.
+7. **The local trial answered to any name.** With no sign-in, the only guard was
+   that the connection came from loopback, so a web page could rebind its own
+   name to 127.0.0.1 and read the app from the trial user's browser. It now
+   answers only to `localhost`, `127.0.0.1` and `[::1]`. Covered by
+   `ProxyTests`.

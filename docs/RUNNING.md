@@ -118,6 +118,12 @@ With no `AzureAd` configured it runs in **local trial mode**: no sign-in, and
 it refuses connections from anything but this machine. Every page says so in a
 banner, and Settings says it again with the detail.
 
+"This machine" means the address and the name. A request has to come from a
+loopback address **and** be addressed to `localhost`, `127.0.0.1` or `[::1]`;
+one addressed to any other name is refused. A web page can make your browser
+send requests to `127.0.0.1` under a name it controls (DNS rebinding), and with
+no sign-in the name is the only thing left to check.
+
 ### On a server
 
 The published bundle needs the **ASP.NET Core 10 runtime** on the host — unlike
@@ -467,6 +473,12 @@ To write, the product needs to know which provider holds the zone:
     dmarc dns set --client <slug> --provider azuredns --subscription <id> --resource-group <rg> --zone <zone>
     dmarc dns test --domain example.com
     dmarc dns list
+
+A domain name or client slug that two organizations both hold is refused, not
+guessed: the write would otherwise be made with the wrong organization's
+token. Name the organization with `--org <slug>` on `dmarc fix`, `dmarc dns` and
+`dmarc mta-sts set`. With one organization, or a name only one holds, it is not
+needed.
 
 The token is read from `DMARC_DNS_SECRET`, from stdin with `--secret-stdin`,
 or at a prompt that does not echo; never from an argument. For Cloudflare use

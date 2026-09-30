@@ -1,6 +1,7 @@
 using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tenancy;
 
 namespace DmarcMonitor.Cli.Commands;
 
@@ -27,7 +28,7 @@ public static class MtaStsCommand
         // usage text says: a domain with two mail servers needs both in its
         // policy. Declared without the "...", the second one was refused as a
         // repeat, so a list named by hand could hold only one host.
-        if (Args.Reject(args, "--db", "--domain", "--mode", "--mx...", "--policy-host", "!--i-have-checked") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--org", "--domain", "--mode", "--mx...", "--policy-host", "!--i-have-checked") is var bad and not 0) { return bad; }
 
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
@@ -46,14 +47,38 @@ public static class MtaStsCommand
 
         var store = new MtaStsStore(dbPath);
 
-        return action switch
+        // Whose domain is meant. Optional while one organization holds the
+        // name; a name two organizations both hold is refused, because the
+        // policy written is the one the internet is then served for it.
+        string? tenantId = null;
+        if (Args.Value(rest, "--org") is { Length: > 0 } orgSlug)
         {
-            "list" => await ListAsync(store, ct).ConfigureAwait(false),
-            "set" => await SetAsync(store, rest, ct).ConfigureAwait(false),
-            "check" => await CheckAsync(rest, ct).ConfigureAwait(false),
-            "remove" => await RemoveAsync(store, rest, ct).ConfigureAwait(false),
-            _ => Usage($"Unknown: dmarc mta-sts {action}"),
-        };
+            var organization = await new OrganizationStore(dbPath).GetAsync(orgSlug, ct).ConfigureAwait(false);
+            if (organization is null)
+            {
+                Console.Error.WriteLine($"No organization '{orgSlug}'. See: dmarc org list");
+                return 65;
+            }
+            tenantId = organization.Id;
+        }
+
+        try
+        {
+            return action switch
+            {
+                "list" => await ListAsync(store, ct).ConfigureAwait(false),
+                "set" => await SetAsync(store, rest, tenantId, ct).ConfigureAwait(false),
+                "check" => await CheckAsync(rest, ct).ConfigureAwait(false),
+                "remove" => await RemoveAsync(store, rest, tenantId, ct).ConfigureAwait(false),
+                _ => Usage($"Unknown: dmarc mta-sts {action}"),
+            };
+        }
+        catch (AmbiguousOrganizationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            Console.Error.WriteLine("Add --org <slug>. List them with: dmarc org list");
+            return 65;
+        }
     }
 
     private static async Task<int> ListAsync(MtaStsStore store, CancellationToken ct)
@@ -124,7 +149,7 @@ public static class MtaStsCommand
         if (line.Length > 0) { yield return line.ToString(); }
     }
 
-    private static async Task<int> SetAsync(MtaStsStore store, string[] args, CancellationToken ct)
+    private static async Task<int> SetAsync(MtaStsStore store, string[] args, string? tenantId, CancellationToken ct)
     {
         var domain = Args.Value(args, "--domain");
         if (string.IsNullOrWhiteSpace(domain))
@@ -170,7 +195,7 @@ public static class MtaStsCommand
 
         try
         {
-            var policy = await store.SetAsync(domain, mode, mx, Environment.UserName, ct: ct).ConfigureAwait(false);
+            var policy = await store.SetAsync(domain, mode, mx, Environment.UserName, tenantId: tenantId, ct: ct).ConfigureAwait(false);
 
             Console.WriteLine($"Serving a {policy.Mode} policy for {domain}, id {policy.Id}.");
             Console.WriteLine();
@@ -233,12 +258,12 @@ public static class MtaStsCommand
         return 0;
     }
 
-    private static async Task<int> RemoveAsync(MtaStsStore store, string[] args, CancellationToken ct)
+    private static async Task<int> RemoveAsync(MtaStsStore store, string[] args, string? tenantId, CancellationToken ct)
     {
         var domain = Args.Value(args, "--domain");
         if (string.IsNullOrWhiteSpace(domain)) { return Usage("dmarc mta-sts remove --domain <domain>"); }
 
-        var removed = await store.RemoveAsync(domain, ct).ConfigureAwait(false);
+        var removed = await store.RemoveAsync(domain, tenantId, ct).ConfigureAwait(false);
 
         Console.WriteLine(removed
             ? $"No longer serving a policy for {domain}. Senders keep the last one until it expires, so "
@@ -273,6 +298,9 @@ public static class MtaStsCommand
               dmarc mta-sts check --domain <d>
                                 Fetch what is really being served, the way a sender does.
               dmarc mta-sts remove --domain <d>
+
+              Add --org <slug> to set or remove when two organizations hold the same domain
+              name; without it that name is refused rather than guessed.
             """);
         return 64;
     }

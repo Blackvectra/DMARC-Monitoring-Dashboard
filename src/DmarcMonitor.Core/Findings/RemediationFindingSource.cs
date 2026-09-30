@@ -327,7 +327,7 @@ public sealed class RemediationFindingSource(string databasePath, TimeProvider? 
     private async Task<AppliedChange?> ChangeAsync(string clientId, string changeId, CancellationToken ct)
     {
         await using var db = await _files.OpenAsync(ClientScope.Client(clientId), ["dns_changes"], ct: ct).ConfigureAwait(false);
-        return await RemediationService.GetChangeAsync(db, changeId, ct).ConfigureAwait(false);
+        return await RemediationService.GetChangeAsync(db, changeId, tenantId: null, ct).ConfigureAwait(false);
     }
 
     private async Task<DateTimeOffset?> DnsVerifiedAtAsync(Finding finding, CancellationToken ct)

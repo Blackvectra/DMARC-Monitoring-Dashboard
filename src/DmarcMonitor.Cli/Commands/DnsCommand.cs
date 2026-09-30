@@ -1,5 +1,6 @@
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tenancy;
 
 namespace DmarcMonitor.Cli.Commands;
 
@@ -20,7 +21,7 @@ public static class DnsCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--client", "--domain", "--provider", "--zone", "--zone-id", "--subscription", "--resource-group", "--tenant-id", "--client-id", "!--secret-stdin") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--org", "--client", "--domain", "--provider", "--zone", "--zone-id", "--subscription", "--resource-group", "--tenant-id", "--client-id", "!--secret-stdin") is var bad and not 0) { return bad; }
 
         var action = args.Length > 0 ? args[0].ToLowerInvariant() : "list";
         var rest = args.Skip(1).ToArray();
@@ -35,23 +36,48 @@ public static class DnsCommand
         var secrets = new LocalSecretStore();
         var configs = new DnsProviderConfigs(dbPath, secrets);
 
-        return action switch
+        // Whose client or domain is meant. Optional while one organization
+        // holds the name; a client slug or domain two organizations both hold
+        // is refused, not guessed, because the guess decides whose credential
+        // is stored or used.
+        string? tenantId = null;
+        if (Args.Value(rest, "--org") is { Length: > 0 } orgSlug)
         {
-            "list" => await ListAsync(configs, ct).ConfigureAwait(false),
-            "set" => await SetAsync(configs, rest, ct).ConfigureAwait(false),
-            "remove" => await RemoveAsync(configs, rest, ct).ConfigureAwait(false),
-            "test" => await TestAsync(configs, rest, ct).ConfigureAwait(false),
-            _ => Usage($"Unknown: dmarc dns {action}"),
-        };
+            var organization = await new OrganizationStore(dbPath).GetAsync(orgSlug, ct).ConfigureAwait(false);
+            if (organization is null)
+            {
+                Console.Error.WriteLine($"No organization '{orgSlug}'. See: dmarc org list");
+                return 65;
+            }
+            tenantId = organization.Id;
+        }
+
+        try
+        {
+            return action switch
+            {
+                "list" => await ListAsync(configs, tenantId, ct).ConfigureAwait(false),
+                "set" => await SetAsync(configs, rest, tenantId, ct).ConfigureAwait(false),
+                "remove" => await RemoveAsync(configs, rest, tenantId, ct).ConfigureAwait(false),
+                "test" => await TestAsync(configs, rest, tenantId, ct).ConfigureAwait(false),
+                _ => Usage($"Unknown: dmarc dns {action}"),
+            };
+        }
+        catch (AmbiguousOrganizationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            Console.Error.WriteLine("Add --org <slug>. List them with: dmarc org list");
+            return 65;
+        }
     }
 
-    private static async Task<int> ListAsync(DnsProviderConfigs configs, CancellationToken ct)
+    private static async Task<int> ListAsync(DnsProviderConfigs configs, string? tenantId, CancellationToken ct)
     {
         Console.WriteLine();
         Console.WriteLine($"  Secrets: {configs.Secrets.Description}");
         Console.WriteLine();
 
-        var all = await configs.ListAsync(ct: ct).ConfigureAwait(false);
+        var all = await configs.ListAsync(tenantId, ct).ConfigureAwait(false);
         if (all.Count == 0)
         {
             Console.WriteLine("  No DNS providers configured. Fixes can be planned but not applied.");
@@ -71,7 +97,7 @@ public static class DnsCommand
         return 0;
     }
 
-    private static async Task<int> SetAsync(DnsProviderConfigs configs, string[] args, CancellationToken ct)
+    private static async Task<int> SetAsync(DnsProviderConfigs configs, string[] args, string? tenantId, CancellationToken ct)
     {
         var client = Args.Value(args, "--client");
         var provider = Args.Value(args, "--provider")?.ToLowerInvariant();
@@ -106,7 +132,7 @@ public static class DnsCommand
 
         try
         {
-            var config = await configs.SetAsync(client, Args.Value(args, "--domain"), provider, settings, secret, ct: ct).ConfigureAwait(false);
+            var config = await configs.SetAsync(client, Args.Value(args, "--domain"), provider, settings, secret, tenantId, ct).ConfigureAwait(false);
             Console.WriteLine($"{config.Provider} set for {config.Domain ?? $"every domain of {client}"}.");
             if (config.CredentialRef is not null) { Console.WriteLine($"Credential stored as {config.CredentialRef}. {configs.Secrets.Description}"); }
             Console.WriteLine($"Check it: dmarc dns test --domain <domain>");
@@ -150,22 +176,22 @@ public static class DnsCommand
         return new string([.. chars]).Trim();
     }
 
-    private static async Task<int> RemoveAsync(DnsProviderConfigs configs, string[] args, CancellationToken ct)
+    private static async Task<int> RemoveAsync(DnsProviderConfigs configs, string[] args, string? tenantId, CancellationToken ct)
     {
         var client = Args.Value(args, "--client");
         if (string.IsNullOrWhiteSpace(client)) { return Usage("dmarc dns remove --client <slug> [--domain <d>]"); }
 
-        var removed = await configs.RemoveAsync(client, Args.Value(args, "--domain"), ct: ct).ConfigureAwait(false);
+        var removed = await configs.RemoveAsync(client, Args.Value(args, "--domain"), tenantId, ct).ConfigureAwait(false);
         Console.WriteLine(removed ? "Removed, and its credential with it." : "Nothing was configured there.");
         return 0;
     }
 
-    private static async Task<int> TestAsync(DnsProviderConfigs configs, string[] args, CancellationToken ct)
+    private static async Task<int> TestAsync(DnsProviderConfigs configs, string[] args, string? tenantId, CancellationToken ct)
     {
         var domain = Args.Value(args, "--domain");
         if (string.IsNullOrWhiteSpace(domain)) { return Usage("dmarc dns test --domain <domain>"); }
 
-        var config = await configs.ForDomainAsync(domain, ct).ConfigureAwait(false);
+        var config = await configs.ForDomainAsync(domain, tenantId, ct).ConfigureAwait(false);
         if (config is null)
         {
             Console.WriteLine($"No provider is configured for {domain}. Fixes for it can be planned but not applied.");
@@ -202,6 +228,9 @@ public static class DnsCommand
               dmarc dns set --client <slug> [--domain <d>] --provider manual
               dmarc dns remove --client <slug> [--domain <d>]
               dmarc dns test --domain <domain>
+
+              Add --org <slug> to any of these when two organizations hold the same client
+              slug or domain name; without it that name is refused rather than guessed.
 
               The credential is read from DMARC_DNS_SECRET, from stdin with --secret-stdin,
               or at a prompt. It is never taken as an argument.

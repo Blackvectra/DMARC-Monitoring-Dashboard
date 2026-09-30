@@ -109,6 +109,14 @@ public static class AuthSetup
     /// itself the evidence: somebody has deliberately put this where other
     /// machines can reach it, which is the exact situation local mode must
     /// not be in.
+    ///
+    /// The address is not the whole question, because a web page can make a
+    /// browser on this machine send a request to it under any name: point
+    /// attacker.example at 127.0.0.1 after the page has loaded (DNS
+    /// rebinding) and the page is then talking to this instance as its own
+    /// origin, from a loopback address, with no sign-in in the way. The name
+    /// the request was addressed to is the one thing the page cannot fake, so
+    /// only this machine's own names are answered.
     /// </remarks>
     public static void UseLocalModeGuard(this WebApplication app)
     {
@@ -122,16 +130,23 @@ public static class AuthSetup
             var remote = context.Connection.RemoteIpAddress;
             var isLoopback = remote is null || System.Net.IPAddress.IsLoopback(remote);
             var wasForwarded = WasForwarded(context.Request);
+            var addressedToThisMachine = IsThisMachine(context.Request.Host.Host);
 
-            if (!isLoopback || wasForwarded)
+            if (!isLoopback || wasForwarded || !addressedToThisMachine)
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                context.Response.ContentType = "text/plain; charset=utf-8";
                 await context.Response.WriteAsync(
                     "This instance is running in local trial mode, which has no sign-in, so it only "
                   + "serves the machine it runs on.\n\n"
                   + (wasForwarded
                         ? "This request came through a reverse proxy, which means it was not made from this "
                         + "machine. Local mode refuses those however they are addressed.\n\n"
+                        : "")
+                  + (!addressedToThisMachine && !wasForwarded
+                        ? "This request was addressed to a name that is not this machine's. Local mode answers "
+                        + "only to localhost, 127.0.0.1 and [::1]: a web page can point any other name at "
+                        + "127.0.0.1, and there is no sign-in here to stop it.\n\n"
                         : "")
                   + "To use it from elsewhere, configure Entra sign-in under AzureAd in appsettings.json.\n"
                   + "To deliberately run without sign-in anyway, set Auth:AllowLocalModeRemotely to true.")
@@ -141,6 +156,31 @@ public static class AuthSetup
 
             await next(context).ConfigureAwait(false);
         });
+    }
+
+    /// <summary>
+    /// Whether a Host header names this machine: localhost, or a loopback
+    /// address written out.
+    /// </summary>
+    /// <remarks>
+    /// Names only, no port: which port answered is not in question, and the
+    /// Host header's port is whatever the caller typed. An IP literal cannot
+    /// be rebound, since no DNS answer is involved in reaching it, so a
+    /// loopback address is safe to accept in any spelling .NET parses. No
+    /// header at all is accepted too: HTTP/1.0 allows it, and a page cannot
+    /// make a browser send a request with no name in it.
+    /// </remarks>
+    internal static bool IsThisMachine(string? host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) { return true; }
+
+        var name = host.Trim().TrimEnd('.');
+        if (name.Equals("localhost", StringComparison.OrdinalIgnoreCase)) { return true; }
+
+        // IPv6 arrives as "[::1]".
+        if (name.Length > 2 && name[0] == '[' && name[^1] == ']') { name = name[1..^1]; }
+
+        return System.Net.IPAddress.TryParse(name, out var address) && System.Net.IPAddress.IsLoopback(address);
     }
 
     /// <summary>

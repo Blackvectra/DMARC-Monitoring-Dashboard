@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Azure.Identity;
+using DmarcMonitor.Core.Tenancy;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Remediation;
@@ -168,26 +169,41 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
     }
 
     /// <summary>The config that applies to a domain: its own, else its client's, else null.</summary>
-    public async Task<DnsProviderConfig?> ForDomainAsync(string domain, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// The organization the domain belongs to. Null means "the only one that
+    /// has it": a name held by several organizations and given no organization
+    /// is refused, because the alternative is a provider token belonging to a
+    /// different organization's client.
+    /// </param>
+    /// <exception cref="AmbiguousOrganizationException">Several organizations hold the domain and none was named.</exception>
+    public async Task<DnsProviderConfig?> ForDomainAsync(string domain, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        var name = domain.Trim().TrimEnd('.').ToLowerInvariant();
+        // The domain is settled first, as one row, and the config is then
+        // looked up by that row's client. Joining the configs to "every
+        // domain called this" is what let a same-named domain in another
+        // organization lend its client's credential.
+        var found = await DomainDirectory.FindAsync(db, domain, tenantId, ct).ConfigureAwait(false);
+        if (found is null) { return null; }
+
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT p.id, c.slug, d2.name, p.provider, p.config_json, p.credential_ref, p.last_verified_at, p.last_error
-            FROM domains d
-            JOIN dns_provider_configs p ON p.client_id = d.client_id AND (p.domain_id = d.id OR p.domain_id IS NULL)
+            FROM dns_provider_configs p
             JOIN clients c ON c.id = p.client_id
             LEFT JOIN domains d2 ON d2.id = p.domain_id
-            WHERE d.name = $name AND p.is_enabled = 1
+            WHERE p.tenant_id = $tenant AND p.client_id = $client
+              AND (p.domain_id = $domain OR p.domain_id IS NULL) AND p.is_enabled = 1
             ORDER BY p.domain_id IS NULL
             LIMIT 1
             """;
-        command.Parameters.AddWithValue("$name", name);
+        command.Parameters.AddWithValue("$tenant", found.Value.TenantId);
+        command.Parameters.AddWithValue("$client", found.Value.ClientId);
+        command.Parameters.AddWithValue("$domain", found.Value.DomainId);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         return await reader.ReadAsync(ct).ConfigureAwait(false) ? Row(reader) : null;
@@ -198,9 +214,11 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
     /// is configured, so a plan can always be made and shown even where it
     /// cannot be applied.
     /// </summary>
-    public async Task<IDnsProvider> ProviderForAsync(string domain, CancellationToken ct = default)
+    /// <param name="tenantId">The organization the domain belongs to; see <see cref="ForDomainAsync"/>.</param>
+    /// <exception cref="AmbiguousOrganizationException">Several organizations hold the domain and none was named.</exception>
+    public async Task<IDnsProvider> ProviderForAsync(string domain, string? tenantId = null, CancellationToken ct = default)
     {
-        var config = await ForDomainAsync(domain, ct).ConfigureAwait(false);
+        var config = await ForDomainAsync(domain, tenantId, ct).ConfigureAwait(false);
         return config is null ? new ManualDnsProvider() : await BuildAsync(config, ct).ConfigureAwait(false);
     }
 
@@ -290,22 +308,44 @@ public sealed class DnsProviderConfigs(string databasePath, ISecretStore secrets
     /// "acme-corp" SQLite scanned first - so saving a provider on one
     /// organization's Settings page could delete another organization's
     /// Cloudflare token and store the new one under that organization.
+    /// The Settings page names its organization now. The command line may not,
+    /// and a slug held by several organizations with none named is refused
+    /// rather than guessed.
     /// </remarks>
+    /// <exception cref="AmbiguousOrganizationException">Several organizations have this client and none was named.</exception>
     private static async Task<(string TenantId, string TenantSlug, string ClientId)?> ClientAsync(
         SqliteConnection db, string slug, string? tenantId, CancellationToken ct)
     {
+        var wanted = slug.Trim().ToLowerInvariant();
+
         await using var command = db.CreateCommand();
         command.CommandText = """
             SELECT t.id, t.slug, c.id FROM clients c JOIN tenants t ON t.id = c.tenant_id
             WHERE c.slug = $slug AND c.deleted_at IS NULL
               AND ($tenant IS NULL OR c.tenant_id = $tenant)
-            LIMIT 1
+            ORDER BY t.slug, c.id
+            LIMIT 20
             """;
-        command.Parameters.AddWithValue("$slug", slug.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$slug", wanted);
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
+
+        (string TenantId, string TenantSlug, string ClientId)? first = null;
+        var organizations = new List<string>();
+
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
-        return (reader.GetString(0), reader.GetString(1), reader.GetString(2));
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            var organization = reader.GetString(1);
+            if (!organizations.Contains(organization, StringComparer.Ordinal)) { organizations.Add(organization); }
+            first ??= (reader.GetString(0), organization, reader.GetString(2));
+        }
+
+        if (organizations.Count > 1)
+        {
+            throw new AmbiguousOrganizationException("client", wanted, organizations);
+        }
+
+        return first;
     }
 
     private static async Task<string?> DomainIdAsync(SqliteConnection db, string clientId, string domain, CancellationToken ct)

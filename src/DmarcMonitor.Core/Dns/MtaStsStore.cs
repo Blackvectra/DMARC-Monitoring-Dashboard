@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using DmarcMonitor.Core.Tenancy;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Dns;
@@ -20,7 +21,15 @@ public sealed class MtaStsStore(string databasePath)
         new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
 
     /// <summary>The policy to serve for a domain, or null when there is none.</summary>
-    public async Task<MtaStsPolicy?> GetAsync(string domain, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// The organization the domain belongs to. Null means "the only one that
+    /// has a policy for it": when two organizations each hold a policy for the
+    /// same name and none is named, the answer is none. The public endpoint
+    /// cannot tell whose policy a sender means, and serving an arbitrary one
+    /// is how a domain ends up publishing another organization's MX list in
+    /// enforce mode.
+    /// </param>
+    public async Task<MtaStsPolicy?> GetAsync(string domain, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
@@ -33,20 +42,41 @@ public sealed class MtaStsStore(string databasePath)
             FROM mta_sts_policies p
             JOIN domains d ON d.id = p.domain_id
             WHERE d.name = $name AND d.deleted_at IS NULL
-            LIMIT 1
+              AND ($tenant IS NULL OR d.tenant_id = $tenant)
+            ORDER BY d.tenant_id, d.id
+            LIMIT 2
             """;
-        command.Parameters.AddWithValue("$name", domain.Trim().TrimEnd('.').ToLowerInvariant());
+        command.Parameters.AddWithValue("$name", DomainDirectory.Normalize(domain));
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
 
-        return new MtaStsPolicy
-        {
-            Mode = reader.GetString(0),
-            Mx = JsonSerializer.Deserialize<string[]>(reader.GetString(1)) ?? [],
-            MaxAgeSeconds = reader.GetInt32(2),
-            Id = reader.GetString(3),
-        };
+        var policy = ReadPolicy(reader);
+
+        // A second row with no organization named is a different
+        // organization's policy for the same name.
+        if (tenantId is null && await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
+
+        return policy;
+    }
+
+    private static MtaStsPolicy ReadPolicy(SqliteDataReader reader) => new()
+    {
+        Mode = reader.GetString(0),
+        Mx = JsonSerializer.Deserialize<string[]>(reader.GetString(1)) ?? [],
+        MaxAgeSeconds = reader.GetInt32(2),
+        Id = reader.GetString(3),
+    };
+
+    private static async Task<MtaStsPolicy?> GetByDomainIdAsync(SqliteConnection db, string domainId, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand();
+        command.CommandText = "SELECT mode, mx_json, max_age_seconds, policy_id FROM mta_sts_policies WHERE domain_id = $domain";
+        command.Parameters.AddWithValue("$domain", domainId);
+
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        return await reader.ReadAsync(ct).ConfigureAwait(false) ? ReadPolicy(reader) : null;
     }
 
     /// <summary>
@@ -58,9 +88,14 @@ public sealed class MtaStsStore(string databasePath)
     /// would have them re-fetching for nothing, and one that never moved
     /// would leave them on a policy that no longer exists.
     /// </remarks>
+    /// <param name="tenantId">
+    /// The organization the domain belongs to; null only when exactly one
+    /// organization has it.
+    /// </param>
+    /// <exception cref="AmbiguousOrganizationException">Several organizations hold the domain and none was named.</exception>
     public async Task<MtaStsPolicy> SetAsync(
         string domain, string mode, IReadOnlyList<string> mx, string by,
-        int maxAgeSeconds = MtaStsPolicy.DefaultMaxAgeSeconds, CancellationToken ct = default)
+        int maxAgeSeconds = MtaStsPolicy.DefaultMaxAgeSeconds, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
         ArgumentException.ThrowIfNullOrWhiteSpace(mode);
@@ -77,7 +112,7 @@ public sealed class MtaStsStore(string databasePath)
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
-        var found = await IdsAsync(db, name, ct).ConfigureAwait(false);
+        var found = await DomainDirectory.FindAsync(db, name, tenantId, ct).ConfigureAwait(false);
         if (found is null)
         {
             throw new ArgumentException(
@@ -87,7 +122,10 @@ public sealed class MtaStsStore(string databasePath)
 
         var ids = found.Value;
 
-        var existing = await GetAsync(name, ct).ConfigureAwait(false);
+        // This domain's own policy, by its id. Looked up by name it could be
+        // another organization's, and "unchanged" would then keep a stranger's
+        // policy id.
+        var existing = await GetByDomainIdAsync(db, ids.DomainId, ct).ConfigureAwait(false);
         var mxJson = JsonSerializer.Serialize(mx);
 
         // Unchanged means unchanged, id included.
@@ -133,19 +171,23 @@ public sealed class MtaStsStore(string databasePath)
         return policy;
     }
 
-    public async Task<bool> RemoveAsync(string domain, CancellationToken ct = default)
+    /// <param name="tenantId">The organization the domain belongs to; null only when exactly one organization has it.</param>
+    /// <exception cref="AmbiguousOrganizationException">Several organizations hold the domain and none was named.</exception>
+    public async Task<bool> RemoveAsync(string domain, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
         await using var db = new SqliteConnection(_connectionString);
         await db.OpenAsync(ct).ConfigureAwait(false);
 
+        // One domain's policy. By name alone this deleted the policy of every
+        // organization that held the name.
+        var found = await DomainDirectory.FindAsync(db, domain, tenantId, ct).ConfigureAwait(false);
+        if (found is null) { return false; }
+
         await using var command = db.CreateCommand();
-        command.CommandText = """
-            DELETE FROM mta_sts_policies
-            WHERE domain_id IN (SELECT id FROM domains WHERE name = $name)
-            """;
-        command.Parameters.AddWithValue("$name", domain.Trim().TrimEnd('.').ToLowerInvariant());
+        command.CommandText = "DELETE FROM mta_sts_policies WHERE domain_id = $domain";
+        command.Parameters.AddWithValue("$domain", found.Value.DomainId);
 
         return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false) > 0;
     }
@@ -180,20 +222,6 @@ public sealed class MtaStsStore(string databasePath)
         }
 
         return result;
-    }
-
-    private static async Task<(string TenantId, string ClientId, string DomainId)?> IdsAsync(
-        SqliteConnection db, string domain, CancellationToken ct)
-    {
-        await using var command = db.CreateCommand();
-        command.CommandText =
-            "SELECT tenant_id, client_id, id FROM domains WHERE name = $name AND deleted_at IS NULL LIMIT 1";
-        command.Parameters.AddWithValue("$name", domain);
-
-        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
-
-        return (reader.GetString(0), reader.GetString(1), reader.GetString(2));
     }
 
     private static string Iso(DateTimeOffset value) =>

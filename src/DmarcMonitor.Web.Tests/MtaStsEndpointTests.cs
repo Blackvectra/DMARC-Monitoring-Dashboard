@@ -16,11 +16,11 @@ namespace DmarcMonitor.Web.Tests;
 /// needed authentication, and a missing policy started answering senders with
 /// a redirect to a login screen.
 /// </summary>
-public sealed class MtaStsEndpointTests : IClassFixture<UnauthenticatedApp>
+public sealed class MtaStsEndpointTests : IClassFixture<PublicEndpointApp>
 {
-    private readonly UnauthenticatedApp _app;
+    private readonly PublicEndpointApp _app;
 
-    public MtaStsEndpointTests(UnauthenticatedApp app) => _app = app;
+    public MtaStsEndpointTests(PublicEndpointApp app) => _app = app;
 
     private HttpClient Client() => _app.CreateClient(new WebApplicationFactoryClientOptions
     {
@@ -75,4 +75,17 @@ public sealed class MtaStsEndpointTests : IClassFixture<UnauthenticatedApp>
 
         Assert.DoesNotContain("local-signin", response.Headers.Location?.ToString() ?? "", StringComparison.Ordinal);
     }
+}
+
+/// <summary>
+/// An instance that answers to names other than its own, which is what serving
+/// MTA-STS means: <c>mta-sts.&lt;client domain&gt;</c> for every client, from the
+/// Host header. Local trial mode answers only to localhost, so it cannot stand
+/// in for this; a server with the local-mode guard switched off, and no sign-in
+/// configured, can - and its default authentication is the one that redirects
+/// to a login page, which is the failure these tests exist to keep out.
+/// </summary>
+public sealed class PublicEndpointApp : UnauthenticatedApp
+{
+    protected override string AllowLocalModeRemotely => "true";
 }

@@ -1,5 +1,6 @@
 using System.Net;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Web.Auth;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
@@ -68,6 +69,67 @@ public sealed class ProxyTests : IClassFixture<UnauthenticatedApp>
         Assert.Contains("Auth:AllowLocalModeRemotely", body, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("attacker.example")]
+    [InlineData("attacker.example:5000")]
+    // Names built to look local to a person reading them.
+    [InlineData("localhost.attacker.example")]
+    [InlineData("127.0.0.1.attacker.example")]
+    [InlineData("dmarc.internal")]
+    public async Task RefusesARequestAddressedToAnyNameButThisMachines(string host)
+    {
+        // DNS rebinding: a page points its own name at 127.0.0.1 after it has
+        // loaded, and the browser then sends this instance requests from a
+        // loopback address, addressed to that name. The address check passes.
+        // The name is the one thing the page cannot fake.
+        var client = Client();
+        client.DefaultRequestHeaders.Host = host;
+
+        var response = await client.GetAsync("/");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Contains("addressed to a name that is not this machine's", body, StringComparison.Ordinal);
+
+        // Plain text, and the name the caller chose is never repeated back.
+        Assert.StartsWith("text/plain", response.Content.Headers.ContentType?.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("attacker", body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("localhost")]
+    [InlineData("LOCALHOST")]
+    [InlineData("localhost:5000")]
+    [InlineData("127.0.0.1")]
+    [InlineData("127.0.0.1:5000")]
+    [InlineData("[::1]:5000")]
+    public async Task StillServesTheNamesThisMachineIsReachedBy(string host)
+    {
+        var client = Client();
+        client.DefaultRequestHeaders.Host = host;
+
+        var response = await client.GetAsync("/");
+
+        Assert.NotEqual(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("localhost", true)]
+    [InlineData("localhost.", true)]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("127.1.2.3", true)]
+    [InlineData("[::1]", true)]
+    [InlineData("::1", true)]
+    [InlineData("example.com", false)]
+    [InlineData("localhost.example.com", false)]
+    [InlineData("10.0.0.5", false)]
+    [InlineData("[2001:db8::1]", false)]
+    [InlineData("0.0.0.0", false)]
+    public void OnlyLoopbackNamesAreThisMachine(string? host, bool expected) =>
+        Assert.Equal(expected, AuthSetup.IsThisMachine(host));
+
     [Fact]
     public async Task AnOrdinaryLocalRequestIsStillServed()
     {
@@ -80,10 +142,17 @@ public sealed class ProxyTests : IClassFixture<UnauthenticatedApp>
 }
 
 /// <summary>The app with no Entra configured, which is what local trial mode means.</summary>
-public sealed class UnauthenticatedApp : WebApplicationFactory<Program>
+public class UnauthenticatedApp : WebApplicationFactory<Program>
 {
     private readonly string _dbPath =
         Path.Combine(Path.GetTempPath(), $"dmarc-proxy-{Guid.NewGuid():N}.db");
+
+    /// <summary>
+    /// Whether the local-mode guard is switched off, as it is on a server that
+    /// has been told to serve beyond loopback. Off here, because the trial is
+    /// what these tests are about.
+    /// </summary>
+    protected virtual string AllowLocalModeRemotely => "false";
 
     public UnauthenticatedApp() =>
         new ReportStore(_dbPath).InitializeAsync(DatabaseSchema.Sql).GetAwaiter().GetResult();
@@ -95,7 +164,7 @@ public sealed class UnauthenticatedApp : WebApplicationFactory<Program>
         // Explicitly not configured, which is the state these are about.
         builder.UseSetting("AzureAd:TenantId", "");
         builder.UseSetting("AzureAd:ClientId", "");
-        builder.UseSetting("Auth:AllowLocalModeRemotely", "false");
+        builder.UseSetting("Auth:AllowLocalModeRemotely", AllowLocalModeRemotely);
     }
 
     protected override void Dispose(bool disposing)

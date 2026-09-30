@@ -3,6 +3,7 @@ using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Rollout;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tenancy;
 
 namespace DmarcMonitor.Cli.Commands;
 
@@ -20,7 +21,7 @@ public static class FixCommand
     {
         // A mistyped flag used to be ignored, which changed what the
         // command did without saying so. See Args.Reject.
-        if (Args.Reject(args, "--db", "--domain", "--policy", "--pct", "--sp", "--reason", "--by", "--rollback", "--verify", "--tls-rpt-to", "--transport", "!--all", "!--apply", "!--history", "!--dead-includes", "!--no-verify") is var bad and not 0) { return bad; }
+        if (Args.Reject(args, "--db", "--org", "--domain", "--policy", "--pct", "--sp", "--reason", "--by", "--rollback", "--verify", "--tls-rpt-to", "--transport", "!--all", "!--apply", "!--history", "!--dead-includes", "!--no-verify") is var bad and not 0) { return bad; }
 
         var dbPath = Args.Value(args, "--db") ?? "dmarc.db";
 
@@ -36,19 +37,35 @@ public static class FixCommand
         var configs = new DnsProviderConfigs(dbPath, new LocalSecretStore());
         var by = Args.Value(args, "--by") ?? Environment.UserName;
 
+        // Whose domains this is about. Optional while one organization holds a
+        // name; a name that two organizations hold is refused rather than
+        // guessed, because the guess decides whose DNS credential the write
+        // is made with.
+        string? tenantId = null;
+        if (Args.Value(args, "--org") is { Length: > 0 } orgSlug)
+        {
+            var organization = await new OrganizationStore(dbPath).GetAsync(orgSlug, ct).ConfigureAwait(false);
+            if (organization is null)
+            {
+                Console.Error.WriteLine($"No organization '{orgSlug}'. See: dmarc org list");
+                return 65;
+            }
+            tenantId = organization.Id;
+        }
+
         if (Args.Flag(args, "--history"))
         {
-            return await HistoryAsync(service, Args.Value(args, "--domain"), ct).ConfigureAwait(false);
+            return await HistoryAsync(service, Args.Value(args, "--domain"), tenantId, ct).ConfigureAwait(false);
         }
 
         if (Args.Value(args, "--rollback") is { } changeId)
         {
-            return await RollBackAsync(service, configs, changeId, by, Args.Value(args, "--reason"), ct).ConfigureAwait(false);
+            return await RollBackAsync(service, configs, changeId, by, Args.Value(args, "--reason"), tenantId, ct).ConfigureAwait(false);
         }
 
         if (Args.Value(args, "--verify") is { } verifyId)
         {
-            return await VerifyAsync(service, verifyId, ct).ConfigureAwait(false);
+            return await VerifyAsync(service, verifyId, tenantId, ct).ConfigureAwait(false);
         }
 
         var domain = Args.Value(args, "--domain");
@@ -65,9 +82,12 @@ public static class FixCommand
             return 64;
         }
 
-        var domains = all
-            ? (await new TriageService(dbPath).GetAsync(ct: ct).ConfigureAwait(false)).Select(t => t.Domain).ToList()
-            : [domain!.Trim().ToLowerInvariant()];
+        // Each domain travels with the organization it belongs to, so that a
+        // name two organizations hold is acted on once for each, with that
+        // organization's own provider, and never as one of them by accident.
+        List<(string Domain, string? TenantId)> domains = all
+            ? await AllTargetsAsync(dbPath, tenantId, ct).ConfigureAwait(false)
+            : [(domain!.Trim().ToLowerInvariant(), tenantId)];
 
         // Checked here rather than left to Args.Int, whose silent fallback is
         // the wrong shape for a safety limit. It returns 100 for anything that
@@ -97,18 +117,38 @@ public static class FixCommand
         }
 
         var worst = 0;
-        foreach (var d in domains)
+        foreach (var (d, domainTenant) in domains)
         {
             ct.ThrowIfCancellationRequested();
-            worst = Math.Max(worst, await FixDomainAsync(d, args, policy, percent, apply, by, reason, lookup, service, configs, dbPath, ct).ConfigureAwait(false));
+            try
+            {
+                worst = Math.Max(worst, await FixDomainAsync(d, domainTenant, args, policy, percent, apply, by, reason, lookup, service, configs, dbPath, ct).ConfigureAwait(false));
+            }
+            catch (AmbiguousOrganizationException ex)
+            {
+                Console.Error.WriteLine($"    {ex.Message}");
+                Console.Error.WriteLine("    Add --org <slug>. List them with: dmarc org list");
+                worst = Math.Max(worst, 64);
+            }
         }
 
         Console.WriteLine();
         return worst;
     }
 
+    /// <summary>Every domain the triage knows, each with the organization it belongs to.</summary>
+    private static async Task<List<(string Domain, string? TenantId)>> AllTargetsAsync(
+        string dbPath, string? tenantId, CancellationToken ct)
+    {
+        var organizations = (await new OrganizationStore(dbPath).ListAsync(ct).ConfigureAwait(false))
+            .ToDictionary(o => o.Slug, o => o.Id, StringComparer.OrdinalIgnoreCase);
+
+        return [.. (await new TriageService(dbPath).GetAsync(tenantId: tenantId, ct: ct).ConfigureAwait(false))
+            .Select(t => (t.Domain, (string?)(organizations.TryGetValue(t.Organization, out var id) ? id : tenantId)))];
+    }
+
     private static async Task<int> FixDomainAsync(
-        string domain, string[] args, string? policy, int percent, bool apply, string by, string reason,
+        string domain, string? tenantId, string[] args, string? policy, int percent, bool apply, string by, string reason,
         DnsLookup lookup, RemediationService service, DnsProviderConfigs configs, string dbPath, CancellationToken ct)
     {
         Console.WriteLine();
@@ -153,12 +193,12 @@ public static class FixCommand
         // planner checks by fetching it.
         if (!explicitOnly || Args.Flag(args, "--transport"))
         {
-            plans.AddRange(await TransportAsync(domain, published, args, dbPath, ct).ConfigureAwait(false));
+            plans.AddRange(await TransportAsync(domain, tenantId, published, args, dbPath, ct).ConfigureAwait(false));
         }
 
         if (policy is null)
         {
-            await SuggestPolicyAsync(domain, published, dbPath, ct).ConfigureAwait(false);
+            await SuggestPolicyAsync(domain, tenantId, published, dbPath, ct).ConfigureAwait(false);
         }
 
         if (plans.Count == 0)
@@ -167,12 +207,12 @@ public static class FixCommand
             return 0;
         }
 
-        var provider = await configs.ProviderForAsync(domain, ct).ConfigureAwait(false);
+        var provider = await configs.ProviderForAsync(domain, tenantId, ct).ConfigureAwait(false);
         var worst = 0;
 
         foreach (var plan in plans)
         {
-            var outcome = await service.ApplyAsync(plan, provider, apply, by, reason, ct).ConfigureAwait(false);
+            var outcome = await service.ApplyAsync(plan, provider, apply, by, reason, tenantId, ct).ConfigureAwait(false);
             Print(plan, outcome);
 
             if (outcome.Applied && outcome.ChangeId is not null && !Args.Flag(args, "--no-verify"))
@@ -198,7 +238,7 @@ public static class FixCommand
     /// enforcement with the lights off.
     /// </remarks>
     private static async Task<List<ChangePlan>> TransportAsync(
-        string domain, PublishedRecords published, string[] args, string dbPath, CancellationToken ct)
+        string domain, string? tenantId, PublishedRecords published, string[] args, string dbPath, CancellationToken ct)
     {
         var plans = new List<ChangePlan>();
 
@@ -220,7 +260,7 @@ public static class FixCommand
         // record alone - so it has to come from this product's own record of
         // the policy. Fetching without it built "v=STSv1; id=", which no
         // sender accepts.
-        var known = await new MtaStsStore(dbPath).GetAsync(domain, ct).ConfigureAwait(false);
+        var known = await new MtaStsStore(dbPath).GetAsync(domain, tenantId, ct).ConfigureAwait(false);
         var served = await new MtaStsFetcher().FetchAsync(domain, known?.Id ?? "", ct).ConfigureAwait(false);
         if (!served.Reachable && string.IsNullOrWhiteSpace(published.MtaStsRecord))
         {
@@ -241,9 +281,9 @@ public static class FixCommand
     /// Says when the reports say a domain is ready to advance, so the
     /// decision is made with the evidence in front of whoever makes it.
     /// </summary>
-    private static async Task SuggestPolicyAsync(string domain, PublishedRecords published, string dbPath, CancellationToken ct)
+    private static async Task SuggestPolicyAsync(string domain, string? tenantId, PublishedRecords published, string dbPath, CancellationToken ct)
     {
-        var row = (await new TriageService(dbPath).GetAsync(ct: ct).ConfigureAwait(false))
+        var row = (await new TriageService(dbPath).GetAsync(tenantId: tenantId, ct: ct).ConfigureAwait(false))
             .FirstOrDefault(t => t.Domain.Equals(domain, StringComparison.OrdinalIgnoreCase));
         if (row is null) { return; }
 
@@ -310,9 +350,9 @@ public static class FixCommand
         else if (outcome.DryRun && !plan.IsNoop) { Console.WriteLine($"             dry run via {outcome.Provider}. Add --apply --reason \"...\" to write it."); }
     }
 
-    private static async Task<int> HistoryAsync(RemediationService service, string? domain, CancellationToken ct)
+    private static async Task<int> HistoryAsync(RemediationService service, string? domain, string? tenantId, CancellationToken ct)
     {
-        var history = await service.HistoryAsync(domain, ct: ct).ConfigureAwait(false);
+        var history = await service.HistoryAsync(domain, tenantId: tenantId, ct: ct).ConfigureAwait(false);
         if (history.Count == 0)
         {
             Console.WriteLine(domain is null ? "No changes have been applied yet." : $"No changes have been applied to {domain}.");
@@ -334,7 +374,7 @@ public static class FixCommand
     }
 
     private static async Task<int> RollBackAsync(
-        RemediationService service, DnsProviderConfigs configs, string changeId, string by, string? reason, CancellationToken ct)
+        RemediationService service, DnsProviderConfigs configs, string changeId, string by, string? reason, string? tenantId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(reason))
         {
@@ -342,22 +382,25 @@ public static class FixCommand
             return 64;
         }
 
-        var change = await service.GetChangeAsync(changeId, ct).ConfigureAwait(false);
+        var change = await service.GetChangeAsync(changeId, tenantId, ct).ConfigureAwait(false);
         if (change is null)
         {
             Console.Error.WriteLine($"No change {changeId}. See: dmarc fix --history");
             return 66;
         }
 
-        var provider = await configs.ProviderForAsync(change.Domain, ct).ConfigureAwait(false);
-        var outcome = await service.RollBackAsync(change.Id, provider, by, reason, ct).ConfigureAwait(false);
+        // The provider of the organization the change was made in, taken from
+        // the change itself. Looked up by the domain's name alone it could be
+        // another organization's.
+        var provider = await configs.ProviderForAsync(change.Domain, change.TenantId, ct).ConfigureAwait(false);
+        var outcome = await service.RollBackAsync(change.Id, provider, by, reason, change.TenantId, ct).ConfigureAwait(false);
         Console.WriteLine(outcome.Message);
         return outcome.Applied ? 0 : 1;
     }
 
-    private static async Task<int> VerifyAsync(RemediationService service, string changeId, CancellationToken ct)
+    private static async Task<int> VerifyAsync(RemediationService service, string changeId, string? tenantId, CancellationToken ct)
     {
-        var change = await service.GetChangeAsync(changeId, ct).ConfigureAwait(false);
+        var change = await service.GetChangeAsync(changeId, tenantId, ct).ConfigureAwait(false);
         if (change is null)
         {
             Console.Error.WriteLine($"No change {changeId}. See: dmarc fix --history");
@@ -376,6 +419,7 @@ public static class FixCommand
         Console.Error.WriteLine("""
             dmarc fix --domain <domain> [--apply --reason "..."]     plan (or apply) the safe fixes for one domain
             dmarc fix --all [--apply --reason "..."]                 the same for every domain
+            add --org <slug> to any of these when two organizations hold the same domain name
             dmarc fix --domain <domain> --policy quarantine|reject [--pct <n>]
             dmarc fix --domain <domain> --sp                         only the subdomain policy
             dmarc fix --domain <domain> --dead-includes              only includes that resolve to nothing
