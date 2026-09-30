@@ -76,7 +76,23 @@ public sealed class ReleaseChannel(HttpClient? client = null)
         ArgumentException.ThrowIfNullOrWhiteSpace(repository);
         ArgumentException.ThrowIfNullOrWhiteSpace(running);
 
-        var releases = await ListAsync(repository, token, ct).ConfigureAwait(false);
+        var named = NormalizeRepository(repository);
+        if (named is null)
+        {
+            // Said as what is wrong with the setting. Sent to GitHub as it
+            // stood, it came back "not found ... an access token is needed",
+            // which sends a person off to make a token for a public repository.
+            var shown = repository.Trim().Length > 80 ? repository.Trim()[..80] + "..." : repository.Trim();
+            var problem = $"Updates:Repository is \"{shown}\", which is not a GitHub repository. Write it as owner/name.";
+            return new UpdateStatus
+            {
+                Running = running,
+                Problem = problem,
+                Summary = $"Running {running}. Could not check for updates: {problem}",
+            };
+        }
+
+        var releases = await ListAsync(named, token, ct).ConfigureAwait(false);
 
         if (releases.Problem is not null)
         {
@@ -134,6 +150,67 @@ public sealed class ReleaseChannel(HttpClient? client = null)
                 : $"Running {running}, which is the newest release on the {channel} channel.",
         };
     }
+
+    /// <summary>
+    /// The "owner/name" a setting means, however it was written.
+    /// </summary>
+    /// <remarks>
+    /// The setting is meant to be "owner/name". What gets put in a settings
+    /// file is whatever was in the address bar, and after publishing a release
+    /// that is the release page. So the repository's address, that page, a
+    /// clone address and the SSH form are all read as the repository they
+    /// name, and anything else is null rather than a guess.
+    ///
+    /// Also what keeps the setting from choosing a different GitHub API path
+    /// than the release list: only two plain names ever reach the request.
+    /// </remarks>
+    /// <returns>"owner/name", or null when the setting is not a GitHub repository.</returns>
+    public static string? NormalizeRepository(string? setting)
+    {
+        var text = (setting ?? "").Trim();
+        var fromAddress = false;
+
+        if (text.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase))
+        {
+            text = text["git@github.com:".Length..];
+        }
+        else if (text.Contains("://", StringComparison.Ordinal)
+                 || text.StartsWith("github.com/", StringComparison.OrdinalIgnoreCase)
+                 || text.StartsWith("www.github.com/", StringComparison.OrdinalIgnoreCase))
+        {
+            // An address: it has to be GitHub's, and the repository is the
+            // first two parts of its path. Anything after that - releases/tag/v2.0.2,
+            // tree/main, a query, a fragment - is where on the repository the
+            // person happened to be.
+            var address = text.Contains("://", StringComparison.Ordinal) ? text : "https://" + text;
+            if (!Uri.TryCreate(address, UriKind.Absolute, out var uri)
+                || uri.Scheme is not ("http" or "https")
+                || !(uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
+                     || uri.Host.Equals("www.github.com", StringComparison.OrdinalIgnoreCase)))
+            {
+                return null;
+            }
+
+            text = uri.AbsolutePath;
+            fromAddress = true;
+        }
+
+        var parts = text.Trim('/').Split('/');
+
+        // "owner/name" typed plainly has exactly two parts. A longer path only
+        // means something after an address, where the rest was a page.
+        if (parts.Length < 2 || (parts.Length > 2 && !fromAddress)) { return null; }
+
+        var owner = parts[0];
+        var name = parts[1].EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? parts[1][..^4] : parts[1];
+
+        return IsPlainName(owner) && IsPlainName(name) ? $"{owner}/{name}" : null;
+    }
+
+    private static bool IsPlainName(string name) =>
+        name.Length > 0
+        && name is not ("." or "..")
+        && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-');
 
     /// <summary>
     /// Whether one version is newer than another.

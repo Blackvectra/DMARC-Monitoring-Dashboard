@@ -3,6 +3,7 @@
 @using DmarcMonitor.Core.Updates
 @using DmarcMonitor.Web.Data
 @using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.Extensions.Hosting.WindowsServices
 @inject IConfiguration Configuration
 @inject ReleaseChannel Releases
 @inject UpdateSpool Spool
@@ -38,7 +39,15 @@
             <tr>
                 <td>Installing</td>
                 <td>
-                    @if (!Spool.IsAvailable)
+                    @if (!Spool.IsAvailable && IsWindowsDownload)
+                    {
+                        @* The zip has no update agent and no shell scripts, so the Linux
+                           instruction below sends somebody looking for a file that is not there. *@
+                        <span class="muted">not from here. This copy is updated by downloading the newer
+                            <code>DMARC-Monitor-Windows.zip</code> from the release page and carrying
+                            <code>dmarc.db</code> across; the README in the download's folder has the steps.</span>
+                    }
+                    else if (!Spool.IsAvailable)
                     {
                         <span class="muted">not set up on this machine. Releases can be listed but not
                             installed from here — run <code>deploy/install-update-agent.sh</code>.</span>
@@ -73,8 +82,10 @@
 {
     <div class="empty">
         <h2>Not checking for releases</h2>
-        <p>Set <code>Updates:Repository</code> in <code>appsettings.Production.json</code> to be told
-           when a newer version exists.</p>
+        <p>Set <code>Updates:Repository</code> to <code>owner/name</code> on GitHub, in <code>appsettings.json</code>
+           beside the application (a server keeps its own in <code>appsettings.Production.json</code>), and
+           restart it, to be told when a newer version exists. Settings are read when it starts, so
+           saving the file is not enough.</p>
     </div>
 }
 else if (_status is null)
@@ -156,6 +167,9 @@ else
     private bool Busy;
 
     private bool Configured => !string.IsNullOrWhiteSpace(Configuration["Updates:Repository"]);
+
+    /// <summary>The unzipped download run by hand, as opposed to a Windows service install.</summary>
+    private static bool IsWindowsDownload => OperatingSystem.IsWindows() && !WindowsServiceHelpers.IsWindowsService();
     private string Channel => Configuration["Updates:Channel"] ?? ReleaseChannel.Stable;
 
     private string ProgressClass => _progress?.State switch

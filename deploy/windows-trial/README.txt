@@ -63,6 +63,35 @@ nothing to sign in to - which is also why this copy should not be put on a
 server. For that, see docs/DEPLOYING.md.
 
 
+TURNING ON SIGN-IN (OPTIONAL)
+-----------------------------
+The banner across the top stays until Microsoft sign-in is configured. It has
+no setting of its own: filling in AzureAd:TenantId and AzureAd:ClientId in
+appsettings.json (next to DmarcMonitor.Web.exe) is what turns it off.
+
+Sign-in decides who sees what by Entra group, so it needs a little more than
+the two IDs. The short version:
+
+  1. Register an app for this machine only: Web platform, redirect URIs
+       http://localhost:5000/signin-oidc
+       http://localhost:5000/signout-callback-oidc
+     and tick "ID tokens" under Authentication.
+  2. Create a security group, add yourself, and under the app's Token
+     configuration add a groups claim of "Groups assigned to the
+     application" (NOT "Security groups"), then assign the group to the app
+     under Enterprise applications > Users and groups.
+  3. In appsettings.json put the two IDs under "AzureAd", and the group's
+     Object ID as "MasterGroupId" under "Auth".
+  4. Restart, and browse to http://localhost:5000 (not 127.0.0.1).
+
+With sign-in on, the browser no longer opens by itself, and a newer version
+no longer brings an older dmarc.db up to date when it starts (see "When a
+newer version comes out", below).
+
+To go back, blank the two AzureAd values. The full version, with the reasons,
+is "Turning on sign-in in the trial" in docs/RUNNING.md in the repository.
+
+
 PUTTING YOUR OWN DATA IN
 ------------------------
 Reports arrive as .xml.gz or .zip attachments on DMARC mail. Either:
@@ -116,7 +145,9 @@ but to carry it across:
 
 It brings the database up to whatever the new version needs, by itself, and
 says in its window what it changed. Your reports, clients and settings come
-with it.
+with it. (Not once Microsoft sign-in is turned on: then run .\dmarc.exe
+init-db in the new folder before step 3, and copy appsettings.json across
+too.)
 
 
 IF THE PORT IS ALREADY TAKEN

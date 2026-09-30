@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using DmarcMonitor.Core.Tenancy;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -70,6 +71,74 @@ public sealed class OrgContext(
             .Where(c => c.Type is "groups" or "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups")
             .Select(c => c.Value)];
 
+    /// <summary>
+    /// Whether Microsoft left the group list out of this person's token because
+    /// they are in too many groups for it to carry.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This app signs in with the ID-token flow, and for that flow Entra stops
+    /// listing groups above a handful (Microsoft documents five or six). It
+    /// does not send a truncated list; it sends none, plus a marker:
+    /// <c>hasgroups</c> for the implicit flow, <c>_claim_names</c> naming
+    /// <c>groups</c> for the others.
+    /// </para>
+    /// <para>
+    /// The person who set this up is very likely to be in more groups than
+    /// that - an engineer at a provider belongs to a group for everything - and
+    /// without this check the result is indistinguishable from never having
+    /// been added to the master group: the same "No organization" page, after
+    /// they have added themselves to it. So the page asks for this first.
+    /// </para>
+    /// </remarks>
+    public static bool GroupsOmitted(ClaimsPrincipal user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+
+        // Groups present means nothing was left out, whatever else is there.
+        if (GroupIds(user).Count > 0) { return false; }
+
+        foreach (var claim in user.Claims)
+        {
+            if (claim.Type == "hasgroups"
+                && bool.TryParse(claim.Value, out var has) && has)
+            {
+                return true;
+            }
+
+            if (claim.Type == "_claim_names" && NamesGroups(claim.Value)) { return true; }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the value of a <c>_claim_names</c> claim - a JSON object such as
+    /// <c>{"groups":"src1"}</c> - has a <c>groups</c> entry.
+    /// </summary>
+    private static bool NamesGroups(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("groups", out _);
+        }
+        catch (JsonException)
+        {
+            // Not the shape Entra sends. Not evidence of anything.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="GroupsOmitted"/> for whoever is signed in now.
+    /// </summary>
+    public async Task<bool> GroupsOmittedAsync()
+    {
+        var state = await auth.GetAuthenticationStateAsync().ConfigureAwait(false);
+        return GroupsOmitted(state.User);
+    }
 }
 
 /// <summary>The endpoint that records a switch of organization.</summary>

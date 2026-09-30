@@ -1026,6 +1026,20 @@ today, is not exposed by any of these.
   `mta-sts.<client domain>` for every client from the Host header, so the
   restriction has to leave that one path out. Defence in depth, not an open
   door.
+- **A person in more than about five Entra groups reaches the app with none**
+  (found while turning on sign-in in the Windows trial, not by the audit).
+  Sign-in uses the ID-token flow, for which Entra sends no groups claim above
+  a handful - its documentation says five in one place and six in another -
+  and a `hasgroups` marker instead. The "No organization" page now says when
+  this is the reason, and DEPLOYING.md §5 and RUNNING.md recommend "Groups
+  assigned to the application", which keeps the count to what was assigned.
+  Not resolved: the app does not ask Microsoft Graph for the full list,
+  because the ID-token flow gives it no access token to ask with, and that
+  option is unavailable on Entra ID Free. Doing it properly means the
+  authorization-code flow with a certificate (limit 200, and `_claim_names`
+  says where to look) or app roles in place of groups. Either changes the
+  sign-in registration every install already has, so it is a decision rather
+  than a patch.
 - **`AssignDomainAsync` with no tenant** - the master account's path - takes
   the first client with that slug when two organizations hold one. Every
   command and page passes a tenant, so nothing reaches it today.

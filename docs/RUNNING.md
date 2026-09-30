@@ -41,6 +41,54 @@ and says so in a banner on every page. That makes it safe on a laptop and
 wrong on a server — for a server, see [`DEPLOYING.md`](DEPLOYING.md), which
 starts from the same application with sign-in configured.
 
+### Turning on sign-in in the trial
+
+The banner has no switch of its own. It is on for as long as `AzureAd:TenantId`
+and `AzureAd:ClientId` are blank, because it is how anyone using the app can
+tell that nobody is being checked; filling them in is what turns it off. With
+them comes the whole sign-in model - access decided by Entra groups - so the
+group in step 2 is not optional. Sign-in over `http://localhost:5000` works in
+Edge and Chrome, which accept the sign-in cookies on `localhost`, and Entra
+accepts an `http` redirect URI for `localhost` and for nothing else.
+
+1. **A separate app registration for this machine.** Not the one a server
+   uses: Microsoft advises against leaving `localhost` redirect URIs on a
+   registration that also serves production. Web platform, this directory
+   only, redirect URIs `http://localhost:5000/signin-oidc` and
+   `http://localhost:5000/signout-callback-oidc`, and **ID tokens** ticked under
+   Authentication. Entra ignores the port when it matches a `localhost`
+   address, the path is case-sensitive, and the app builds the redirect URI from
+   the address in the browser bar - so browse to `localhost`, not `127.0.0.1`.
+2. **A group, and the groups claim.** Create a security group, add yourself
+   to it directly, and copy its Object ID. Under the registration's **Token
+   configuration** add a groups claim of **Groups assigned to the
+   application**, then assign the group to the app under **Enterprise
+   applications → Users and groups**. Not "Security groups": with the ID-token
+   sign-in this app uses, Entra sends no groups at all to anyone in more than
+   about five (see [`DEPLOYING.md`](DEPLOYING.md#5-sign-in)).
+3. **`appsettings.json`**, beside `DmarcMonitor.Web.exe`. `MasterGroupId` is not
+   in the shipped file; add it inside `Auth`:
+
+   ```json
+   "AzureAd": { "TenantId": "<Directory (tenant) ID>", "ClientId": "<Application (client) ID>" },
+   "Auth":    { "MasterGroupId": "<the group's Object ID>" }
+   ```
+
+4. Restart with `Start DMARC Monitor.cmd`, open <http://localhost:5000>, and
+   sign in. Group membership is read from the token when you sign in, so sign
+   out and back in after changing it.
+
+Two things stop being done for you once sign-in is on, because both were only
+ever done for a trial: the browser no longer opens by itself, and a newer
+build no longer brings an older `dmarc.db` up to date when it starts. After
+copying `dmarc.db` into a new download's folder, run `.\dmarc.exe init-db`
+there once before starting it, as a server's `update.sh` does.
+
+**No organization** after signing in means the token did not carry a group
+the app knows. The page says which of the two it was: you are in none of them,
+or Entra left the list out for being too long (fix: step 2). To go back to local
+mode, blank the two `AzureAd` values and restart.
+
 ## Quickest possible start from the command line
 
 No mailbox, no app registration, no configuration. Enough to see whether the

@@ -172,9 +172,27 @@
                 <h2>No organization</h2>
                 <p>You are signed in, but you are not in the security group of any organization here, so there
                    is nothing you can see.</p>
-                <p class="muted">Ask whoever runs this to add you to an organization's group in Microsoft Entra,
-                   or to the master group named in <code>Auth:MasterGroupId</code>. Sign out and back in once
-                   they have.</p>
+                @if (_groupsOmitted)
+                {
+                    @* Told apart from the plain case, because the fix is different and
+                       the plain advice sends somebody who is already in the group round
+                       in a circle. *@
+                    <p><strong>Microsoft left your group list out of the sign-in token.</strong> It does that when a
+                       person is in more groups than the token can carry - for an app that signs in this way,
+                       more than about five - and it sends none at all rather than the first few. Adding you to
+                       another group will not help.</p>
+                    <p class="muted">Ask whoever runs this to open the app registration's <em>Token configuration</em>,
+                       set the groups claim to <em>Groups assigned to the application</em>, and assign the master
+                       group and each organization's group to the app under <em>Enterprise applications</em>
+                       (<em>Users and groups</em>). Only those groups are then listed, so the count stays small.
+                       Sign out and back in afterwards.</p>
+                }
+                else
+                {
+                    <p class="muted">Ask whoever runs this to add you to an organization's group in Microsoft Entra,
+                       or to the master group named in <code>Auth:MasterGroupId</code>. Sign out and back in once
+                       they have.</p>
+                }
             </div>
         }
         else
@@ -224,11 +242,17 @@
         _ => "",
     };
 
+    private bool _groupsOmitted;
+
     protected override async Task OnInitializedAsync()
     {
         try
         {
             _access = await Org.GetAsync();
+
+            // Only asked of someone with nothing to see: it changes what the
+            // page says to them, and nobody else.
+            _groupsOmitted = _access is { HasAccess: false } && await Org.GroupsOmittedAsync();
         }
         catch (Exception)
         {
