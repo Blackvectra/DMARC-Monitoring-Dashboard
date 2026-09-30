@@ -21,9 +21,10 @@
 
 <PageTitle>@Domain — DMARC Monitor</PageTitle>
 
-<header class="page-head">
+<header class="page-head domain-page-head">
     <div>
-        <p class="crumb"><a href="">Triage</a> / @Domain</p>
+        <p class="crumb"><a href="">Domain health</a> <span aria-hidden="true">/</span> @Domain</p>
+        <p class="domain-eyebrow">Domain assessment</p>
         <h1>@Domain</h1>
         @* Not when the client is named after the domain, which is what
            onboarding by domain name produces for most of them: the heading
@@ -34,6 +35,10 @@
              && !_detail.ClientName.Equals(Domain, StringComparison.OrdinalIgnoreCase))
         {
             <p class="sub">@_detail.ClientName</p>
+        }
+        @if (_detail is not null)
+        {
+            <p class="domain-context">Report window: last @_days days <span aria-hidden="true">·</span> @_detail.Sources.Count source IPs observed</p>
         }
     </div>
     <div class="head-actions">
@@ -109,7 +114,9 @@ else if (_detail is null)
 }
 else
 {
-    <section class="callout @Css(_detail.Level)">
+    <div class="domain-page">
+    <section class="callout domain-alert @Css(_detail.Level)">
+        <span class="domain-alert-label">Current assessment</span>
         <h2>@(string.IsNullOrEmpty(_detail.Headline) ? "Nothing needs doing." : _detail.Headline)</h2>
         <p>@Explain(_detail)</p>
     </section>
@@ -170,7 +177,8 @@ else
         <div class="domain-priority-grid">
             @if (_detail.SigningUnaligned.Count > 0)
             {
-            <a href="#unaligned" class="domain-priority">
+            <a href="#unaligned" class="domain-priority priority-act">
+                <small class="priority-kicker">DKIM alignment</small>
                 <strong>@_detail.SigningUnaligned.Count</strong>
                 <span>Signing for another domain</span>
                 <small>Check the vendor's branded DKIM setup</small>
@@ -179,13 +187,15 @@ else
             else
             {
             <div class="domain-priority quiet">
+                <small class="priority-kicker">DKIM alignment</small>
                 <strong>0</strong><span>Signing for another domain</span>
                 <small>No such source in this window</small>
             </div>
             }
             @if (_detail.Forwarders.Count > 0)
             {
-            <a href="#forwarded" class="domain-priority">
+            <a href="#forwarded" class="domain-priority priority-watch">
+                <small class="priority-kicker">Mail path</small>
                 <strong>@_detail.Forwarders.Count</strong>
                 <span>Possible forwarding paths</span>
                 <small>Confirm the route before changing anything</small>
@@ -194,13 +204,15 @@ else
             else
             {
             <div class="domain-priority quiet">
+                <small class="priority-kicker">Mail path</small>
                 <strong>0</strong><span>Possible forwarding paths</span>
                 <small>No such source in this window</small>
             </div>
             }
             @if (_detail.Impersonating.Count > 0)
             {
-            <a href="#impersonating" class="domain-priority">
+            <a href="#impersonating" class="domain-priority priority-urgent">
+                <small class="priority-kicker">Authentication</small>
                 <strong>@_detail.Impersonating.Count</strong>
                 <span>Unauthenticated sources</span>
                 <small>Identify legitimate senders and investigate the rest</small>
@@ -209,6 +221,7 @@ else
             else
             {
             <div class="domain-priority quiet">
+                <small class="priority-kicker">Authentication</small>
                 <strong>0</strong><span>Unauthenticated sources</span>
                 <small>No such source in this window</small>
             </div>
@@ -956,7 +969,7 @@ else
                     <tr><th>Receiver</th><th class="num">Reports</th><th class="num">Share</th><th>Last</th></tr>
                 </thead>
                 <tbody>
-                    @foreach (var r in _detail.Reporters)
+                    @foreach (var r in _detail.Reporters.Take(_showAllReporters ? int.MaxValue : 10))
                     {
                         <tr class="@(r.HasGoneQuiet ? "warn" : "")">
                             <td>
@@ -970,11 +983,18 @@ else
                     }
                 </tbody>
             </table></div>
+            @if (_detail.Reporters.Count > 10)
+            {
+                <button class="linkish" @onclick="() => _showAllReporters = !_showAllReporters">
+                    @(_showAllReporters ? "Show fewer receivers" : $"Show {_detail.Reporters.Count - 10} more receivers")
+                </button>
+            }
             <p class="sub">Share is of every message ever reported for this domain, and the list is the whole
                history rather than the window: a receiver that stopped before the window began would not
                appear in it at all, which is exactly the case worth seeing.</p>
         }
     </section>
+    </div>
 }
 
 @code {
@@ -1031,6 +1051,7 @@ else
     private bool _showAllForwarders;
     private bool _showAllImpersonating;
     private bool _showAllMisconfigured;
+    private bool _showAllReporters;
     private int _days = 30;
 
     protected override Task OnParametersSetAsync() => LoadAsync();
