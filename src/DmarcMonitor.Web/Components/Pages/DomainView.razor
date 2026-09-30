@@ -155,9 +155,66 @@ else
         </div>
         <div class="figure">
             <span class="figure-n">@_detail.Sources.Count</span>
-            <span class="figure-l">sending sources</span>
+            <span class="figure-l">source IPs observed</span>
         </div>
     </div>
+
+    <section class="domain-priorities" aria-labelledby="priority-heading">
+        <div class="domain-priorities-head">
+            <div>
+                <h2 id="priority-heading">What to investigate</h2>
+                <p class="sub">Start with mail that may need a sender or gateway change. Open a source for the underlying evidence.</p>
+            </div>
+            <span class="muted">Last @_days days</span>
+        </div>
+        <div class="domain-priority-grid">
+            @if (_detail.SigningUnaligned.Count > 0)
+            {
+            <a href="#unaligned" class="domain-priority">
+                <strong>@_detail.SigningUnaligned.Count</strong>
+                <span>Signing for another domain</span>
+                <small>Check the vendor's branded DKIM setup</small>
+            </a>
+            }
+            else
+            {
+            <div class="domain-priority quiet">
+                <strong>0</strong><span>Signing for another domain</span>
+                <small>No such source in this window</small>
+            </div>
+            }
+            @if (_detail.Forwarders.Count > 0)
+            {
+            <a href="#forwarded" class="domain-priority">
+                <strong>@_detail.Forwarders.Count</strong>
+                <span>Possible forwarding paths</span>
+                <small>Confirm the route before changing anything</small>
+            </a>
+            }
+            else
+            {
+            <div class="domain-priority quiet">
+                <strong>0</strong><span>Possible forwarding paths</span>
+                <small>No such source in this window</small>
+            </div>
+            }
+            @if (_detail.Impersonating.Count > 0)
+            {
+            <a href="#impersonating" class="domain-priority">
+                <strong>@_detail.Impersonating.Count</strong>
+                <span>Unauthenticated sources</span>
+                <small>Identify legitimate senders and investigate the rest</small>
+            </a>
+            }
+            else
+            {
+            <div class="domain-priority quiet">
+                <strong>0</strong><span>Unauthenticated sources</span>
+                <small>No such source in this window</small>
+            </div>
+            }
+        </div>
+    </section>
 
     @*
         Two small figures side by side rather than one above the other.
@@ -173,9 +230,11 @@ else
         They stack again under 900px, where side by side would make both
         unreadable.
     *@
-    @if (_breakdown is { Total: > 0 } || _detail.Failing > 0)
+    @if (_breakdown is { Total: > 0 } || _detail.Failing > 0 || _series is { Count: > 0 })
     {
-        <div class="figure-pair">
+        <details class="domain-charts">
+            <summary>Traffic and disposition charts <span>Explore the daily trend and receiver actions</span></summary>
+            <div class="figure-pair">
             @if (_breakdown is { Total: > 0 })
             {
                 @* The split the pass rate above cannot give: of this domain's
@@ -202,16 +261,17 @@ else
                     }
                 </div>
             }
-        </div>
-    }
+            </div>
 
     @* The shape of the domain over time, which no total can show. A domain
        that was fine until Tuesday and has been rejecting a third of its mail
        since reads as "97% passing" in the figures above: true, and useless.
        Full width, because a thirty-day series needs the horizontal room. *@
-    @if (_series is not null && _series.Count > 0)
-    {
-        <VolumeChart Points="_series" Caption="@($"Mail per day, last {_days} days")" />
+            @if (_series is not null && _series.Count > 0)
+            {
+                <VolumeChart Points="_series" Caption="@($"Mail per day, last {_days} days")" />
+            }
+        </details>
     }
 
     @*
@@ -226,18 +286,6 @@ else
         before following any of them.
     *@
     <nav class="jump" aria-label="Sections of this page">
-        @if (_detail.SigningUnaligned.Count > 0)
-        {
-            <a href="#unaligned" class="jump-alert">@_detail.SigningUnaligned.Count signing unaligned</a>
-        }
-        @if (_detail.Forwarders.Count > 0)
-        {
-            <a href="#forwarded">@_detail.ForwardedFailures.ToString("N0") broken in transit</a>
-        }
-        @if (_detail.Impersonating.Count > 0)
-        {
-            <a href="#impersonating">@_detail.Impersonating.Count unauthenticated</a>
-        }
         @if (_detail.Misconfigured.Count > 0)
         {
             <a href="#failing">@_detail.Misconfigured.Count failing</a>
@@ -269,14 +317,13 @@ else
            described as an impersonator - and an operator who believes that
            goes and weakens a record to make the number move. *@
         <section id="forwarded">
-            <h2>Broken in transit by a gateway</h2>
+            <h2>Possible gateway or forwarding failures</h2>
             <p class="sub">
-                @_detail.ForwardedFailures.ToString("N0") message(s) of this domain's own mail. A gateway
-                received them, added its banner and sent them on: the banner changes the message so the
-                signature no longer verifies, and the forwarding changes the envelope so SPF no longer
-                passes. <strong>No DNS record fixes this.</strong> At
-                <code>p=@_detail.Policy</code> @(_detail.Policy == "none" ? "it is only being reported"
-                    : "this mail is being lost") — the receiver cannot tell it from forgery either.
+                @_detail.ForwardedFailures.ToString("N0") failed message(s) match a forwarding or gateway
+                pattern: they carry this domain's signature, but it did not verify at the receiver.
+                This suggests a message may have changed in transit; aggregate reports cannot prove
+                which product changed it. <strong>No DNS record fixes a signature changed after signing.</strong>
+                Check message headers and the actual route before changing DNS.
             </p>
             <div class="table-scroll"><table class="triage">
                 <thead>
@@ -284,32 +331,27 @@ else
                         <th>Source</th>
                         <th>How it was identified</th>
                         <th class="num">Sent</th>
-                        <th class="num">Broken</th>
+                        <th class="num">Failed</th>
                         <th>Last seen</th>
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var s in _detail.Forwarders)
+                    @foreach (var s in _detail.Forwarders.Take(_showAllForwarders ? int.MaxValue : 10))
                     {
                         <tr class="warn">
                             <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
                             <td>
-                                @* Named where it can be, and otherwise the
-                                   evidence itself. A hosted gateway re-sends
-                                   with the customer's own envelope domain, so
-                                   most of them cannot be named - what gives
-                                   them away is this domain's own broken
-                                   signature on mail from a relay that carries
-                                   other customers too. Saying so beats a dash. *@
                                 @if (s.GatewayName is { Length: > 0 } named)
                                 {
-                                    <span>@named</span>
+                                    <strong>@named</strong>
                                 }
                                 else
                                 {
-                                    <span class="muted">
-                                        unnamed relay — carries this domain's own broken signature, and
-                                        @s.OtherClients other client@(s.OtherClients == 1 ? "" : "s")
+                                    <strong>Provider unverified</strong>
+                                    <span class="source-evidence">
+                                        Signature for @Domain failed;
+                                        @s.OtherClients other client@(s.OtherClients == 1 ? "" : "s") also
+                                        reported this IP. Check headers and DNS before identifying a gateway.
                                     </span>
                                 }
                             </td>
@@ -320,11 +362,16 @@ else
                     }
                 </tbody>
             </table></div>
+            @if (_detail.Forwarders.Count > 10)
+            {
+                <button class="linkish" @onclick="() => _showAllForwarders = !_showAllForwarders">
+                    @(_showAllForwarders ? "Show fewer sources" : $"Show {_detail.Forwarders.Count - 10} more sources")
+                </button>
+            }
             <p class="sub">
-                What helps: have the gateway stop modifying the body, or deliver to the mailbox without a
-                re-send. Neither is a DNS change, and neither is urgent unless the mail is being lost. What
-                does not help is relaxing alignment or lowering the policy — the signature is broken, not
-                misaligned.
+                If a gateway is confirmed, check whether it modifies the body or re-sends mail. Compare
+                receiver disposition before calling it lost. A DNS change alone will not repair a
+                signature that was changed after signing.
             </p>
         </section>
     }
@@ -334,15 +381,13 @@ else
         <section id="impersonating">
             <h2>Sending as @Domain without authenticating</h2>
             <p class="sub">
-                Proved nothing when they failed@(_detail.ForwardedFailures > 0
-                    ? ", and not the gateway traffic above" : "").
+                These sources did not authenticate when they failed@(_detail.ForwardedFailures > 0
+                    ? "; the possible forwarding paths are listed separately above" : "").
                 @(_detail.Spoofing.Count switch
                 {
-                    0 => "Either a service nobody recorded, or somebody sending as this domain.",
-                    1 => "One of these is also sending as other clients, which is one actor working through a "
-                       + "book rather than a service nobody recorded.",
-                    var n => $"{n} of these are also sending as other clients, which is one actor working "
-                           + "through a book rather than services nobody recorded.",
+                    0 => "This could be an unrecorded service or unauthorized mail; investigate before labeling it.",
+                    1 => "One IP also appears against another client. That raises priority, but does not identify an actor.",
+                    var n => $"{n} IPs also appear against other clients. That raises priority, but does not identify an actor.",
                 })
             </p>
             <div class="table-scroll"><table class="triage">
@@ -356,7 +401,7 @@ else
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var s in _detail.Impersonating)
+                    @foreach (var s in _detail.Impersonating.Take(_showAllImpersonating ? int.MaxValue : 10))
                     {
                         <tr class="@(s.OtherClients > 0 ? "urgent" : "act")">
                             <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
@@ -377,6 +422,12 @@ else
                     }
                 </tbody>
             </table></div>
+            @if (_detail.Impersonating.Count > 10)
+            {
+                <button class="linkish" @onclick="() => _showAllImpersonating = !_showAllImpersonating">
+                    @(_showAllImpersonating ? "Show fewer sources" : $"Show {_detail.Impersonating.Count - 10} more sources")
+                </button>
+            }
         </section>
     }
 
@@ -400,7 +451,7 @@ else
                 @(_detail.SigningUnaligned.Count == 1 ? "it does" : "they do") not.
                 @if (_detail.Policy is "reject" or "quarantine")
                 {
-                    <strong> At p=@_detail.Policy that mail is being lost right now.</strong>
+                    <strong> Check receiver disposition before concluding that it was blocked.</strong>
                 }
             </p>
 
@@ -507,8 +558,8 @@ else
     {
         <section id="failing">
             <h2>This domain's own mail, failing</h2>
-            <p class="sub">Real services, signing as themselves rather than as @Domain. This is mail
-               being lost, and it is the work to do before enforcing.</p>
+            <p class="sub">Sources with evidence of authentication for another domain. Confirm each
+               service and its sending configuration before strengthening enforcement.</p>
             <div class="table-scroll"><table class="triage">
                 <thead>
                     <tr>
@@ -520,7 +571,7 @@ else
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var s in _detail.Misconfigured)
+                    @foreach (var s in _detail.Misconfigured.Take(_showAllMisconfigured ? int.MaxValue : 10))
                     {
                         <tr class="act">
                             <td><SourceLabel Address="@s.SourceIp" Name="@s.Display" /></td>
@@ -541,6 +592,12 @@ else
                     }
                 </tbody>
             </table></div>
+            @if (_detail.Misconfigured.Count > 10)
+            {
+                <button class="linkish" @onclick="() => _showAllMisconfigured = !_showAllMisconfigured">
+                    @(_showAllMisconfigured ? "Show fewer sources" : $"Show {_detail.Misconfigured.Count - 10} more sources")
+                </button>
+            }
         </section>
     }
 
@@ -971,6 +1028,9 @@ else
     private string? _error;
     private bool _loading = true;
     private bool _showAllClean;
+    private bool _showAllForwarders;
+    private bool _showAllImpersonating;
+    private bool _showAllMisconfigured;
     private int _days = 30;
 
     protected override Task OnParametersSetAsync() => LoadAsync();
