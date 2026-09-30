@@ -525,12 +525,12 @@ public sealed class PageTests : IClassFixture<SeededApp>
         var html = await Client().GetStringAsync("/domains/signed.example");
 
         Assert.Contains("id=\"forwarded\"", html, StringComparison.Ordinal);
-        Assert.Contains("Broken in transit by a gateway", html, StringComparison.Ordinal);
+        Assert.Contains("Possible gateway or forwarding failures", html, StringComparison.Ordinal);
         // The catalog's name, which is what every other page calls it.
         Assert.Contains("INKY", html, StringComparison.Ordinal);
 
         // And the sentence that stops the wrong fix being attempted.
-        Assert.Contains("No DNS record fixes this", html, StringComparison.Ordinal);
+        Assert.Contains("No DNS record fixes a signature changed after signing", html, StringComparison.Ordinal);
     }
 
     [Fact]
