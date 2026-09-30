@@ -918,14 +918,79 @@ section[id] { scroll-margin-top: 16px; }
 .crumb { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
 .crumb a { color: var(--muted); }
 
-.figures { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+.figures {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+}
 .figure {
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
     box-shadow: var(--shadow);
-    padding: 12px 16px; min-width: 140px;
+    padding: 12px 16px; min-width: 0;
 }
 .figure-n { display: block; font-size: 22px; font-weight: 600; letter-spacing: -.02em; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .figure-l { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+/* The first screen is a decision surface; the long evidence tables remain
+   available below, with only their first ten rows visible by default. */
+.domain-priorities {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 16px;
+    margin-bottom: 14px;
+}
+.domain-priorities-head {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.domain-priorities-head h2 { font-size: 15px; }
+.domain-priorities-head .sub { margin: 2px 0 0; }
+.domain-priorities-head > span { white-space: nowrap; font-size: 12px; }
+.domain-priority-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.domain-priority {
+    display: grid;
+    align-content: start;
+    gap: 2px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+}
+a.domain-priority:hover { text-decoration: none; border-color: var(--accent); background: var(--accent-bg); }
+.domain-priority strong { font-size: 23px; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.domain-priority span { font-weight: 600; }
+.domain-priority small { color: var(--muted); font-size: 12px; }
+.domain-priority.quiet { opacity: .65; }
+.domain-charts {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    margin-bottom: 18px;
+}
+.domain-charts > summary { padding: 10px 14px; cursor: pointer; font-weight: 600; }
+.domain-charts > summary span { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
+.domain-charts[open] > summary { border-bottom: 1px solid var(--line); }
+.domain-charts > .figure-pair, .domain-charts > .chart { margin: 14px; }
+.source-evidence { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; max-width: 52ch; }
+
+@media (max-width: 900px) {
+    .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .domain-priority-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+    .figures { grid-template-columns: 1fr 1fr; }
+    .figure { padding: 10px; }
+    .figure-n { font-size: 18px; overflow-wrap: anywhere; }
+    .domain-priorities-head { display: block; }
+    .domain-charts > summary span { display: block; margin-left: 18px; }
+}
 
 /* The headers of a message a failure report is about. Monospaced and scrolled
    rather than wrapped: these are evidence, and a Received chain rewrapped to
