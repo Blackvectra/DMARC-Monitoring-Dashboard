@@ -1001,7 +1001,27 @@ main:has(.domain-page) { max-width: none; }
     letter-spacing: .09em;
     text-transform: uppercase;
 }
-.domain-page-head h1 { font-size: clamp(27px, 2.2vw, 36px); font-weight: 700; letter-spacing: -.035em; }
+.domain-page-head h1 {
+    display: inline-block;
+    font-size: clamp(27px, 2.2vw, 36px);
+    font-weight: 700;
+    letter-spacing: -.035em;
+    margin-right: 11px;
+}
+.domain-state {
+    display: inline-block;
+    vertical-align: 5px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--dim-bg);
+    color: var(--muted);
+}
+.domain-state.urgent { background: var(--urgent-bg); color: var(--urgent); }
+.domain-state.act { background: var(--act-bg); color: var(--act); }
+.domain-state.watch { background: var(--watch-bg); color: var(--watch); }
+.domain-state.ontrack, .domain-state.fine { background: var(--fine-bg); color: var(--fine); }
 .domain-context { color: var(--muted); font-size: 12px; margin-top: 6px; }
 .domain-context span { padding-inline: 6px; }
 .domain-page-head .head-actions {
