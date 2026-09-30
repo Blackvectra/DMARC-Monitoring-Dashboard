@@ -3,6 +3,7 @@ using System.Text.Json;
 using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Findings;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tenancy;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Remediation;
@@ -47,7 +48,8 @@ public sealed record AppliedChange(
     string? Reason,
     bool IsPropagated,
     DateTimeOffset? RolledBackAt,
-    string? RollbackReason);
+    string? RollbackReason,
+    string TenantId = "");
 
 /// <summary>
 /// Applies plans, and keeps the record of having done so.
@@ -100,16 +102,37 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     /// <param name="confirm">Required to write anything. Absent, this is a dry run.</param>
     /// <param name="appliedBy">Who is doing this, for the audit trail.</param>
     /// <param name="reason">Why, in a sentence. Goes on the client's report as the reason for the change.</param>
+    /// <param name="tenantId">
+    /// The organization the domain belongs to, and the same one the provider
+    /// was chosen for. Null means "the only organization that has it": a name
+    /// held by several organizations and given none is refused, because the
+    /// audit row would be filed under one client and the write made with
+    /// another's credential.
+    /// </param>
     public async Task<ApplyOutcome> ApplyAsync(
-        ChangePlan plan, IDnsProvider provider, bool confirm, string appliedBy, string reason, CancellationToken ct = default)
+        ChangePlan plan, IDnsProvider provider, bool confirm, string appliedBy, string reason,
+        string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(provider);
 
         DomainIds? ids;
-        await using (var registry = await _files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false))
+        try
         {
-            ids = await DomainIdsAsync(registry, plan.Domain, ct).ConfigureAwait(false);
+            await using var registry = await _files.OpenRegistryAsync(write: false, ct).ConfigureAwait(false);
+            ids = await DomainIdsAsync(registry, plan.Domain, tenantId, ct).ConfigureAwait(false);
+        }
+        catch (AmbiguousOrganizationException ex)
+        {
+            // Before anything is stored or any provider is touched.
+            return new ApplyOutcome
+            {
+                Plan = plan,
+                DryRun = !confirm,
+                Provider = provider.Name,
+                Error = ex.Message,
+                Message = $"Not applied: {ex.Message}",
+            };
         }
 
         // Stored first, whatever happens next. The domain has to be known to
@@ -339,7 +362,7 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         var visible = false;
         var found = await _files.FirstAsync(ClientScope.Organization(null), write: true, async (db, _, token) =>
         {
-            var change = await GetChangeAsync(db, changeId, token).ConfigureAwait(false);
+            var change = await GetChangeAsync(db, changeId, tenantId: null, token).ConfigureAwait(false);
             if (change is null) { return false; }
 
             visible = await VerifyAsync(db, change, timeout, poll, token).ConfigureAwait(false);
@@ -410,7 +433,13 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
     /// old value a second time over whatever came after it is a new change,
     /// not an undo.
     /// </remarks>
-    public async Task<ApplyOutcome> RollBackAsync(string changeId, IDnsProvider provider, string by, string reason, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// The organization the change belongs to. A change from another
+    /// organization is reported as not found, so a caller holding an id it was
+    /// never shown cannot use it.
+    /// </param>
+    public async Task<ApplyOutcome> RollBackAsync(
+        string changeId, IDnsProvider provider, string by, string reason, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(changeId);
         ArgumentNullException.ThrowIfNull(provider);
@@ -418,7 +447,7 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         ApplyOutcome? outcome = null;
         var found = await _files.FirstAsync(ClientScope.Organization(null), write: true, async (db, _, token) =>
         {
-            var change = await GetChangeAsync(db, changeId, token).ConfigureAwait(false);
+            var change = await GetChangeAsync(db, changeId, tenantId, token).ConfigureAwait(false);
             if (change is null) { return false; }
 
             outcome = await RollBackAsync(db, change, provider, by, reason, token).ConfigureAwait(false);
@@ -540,12 +569,13 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         return result;
     }
 
-    public async Task<AppliedChange?> GetChangeAsync(string changeId, CancellationToken ct = default)
+    /// <param name="tenantId">One organization's change, or null for any. A change from another organization is not found.</param>
+    public async Task<AppliedChange?> GetChangeAsync(string changeId, string? tenantId = null, CancellationToken ct = default)
     {
         AppliedChange? change = null;
         await _files.FirstAsync(ClientScope.Organization(null), write: false, async (db, _, token) =>
         {
-            change = await GetChangeAsync(db, changeId, token).ConfigureAwait(false);
+            change = await GetChangeAsync(db, changeId, tenantId, token).ConfigureAwait(false);
             return change is not null;
         }, ct).ConfigureAwait(false);
         return change;
@@ -555,17 +585,21 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
 
     private const string ChangeSelect = """
         SELECT ch.id, ch.plan_id, d.name, c.slug, ch.record_name, ch.record_type, ch.previous_value, ch.new_value,
-               ch.provider, ch.applied_at, ch.applied_by, ch.reason, ch.is_propagated, ch.rolled_back_at, ch.rollback_reason
+               ch.provider, ch.applied_at, ch.applied_by, ch.reason, ch.is_propagated, ch.rolled_back_at, ch.rollback_reason,
+               ch.tenant_id
         FROM dns_changes ch
         JOIN domains d ON d.id = ch.domain_id
         JOIN clients c ON c.id = ch.client_id
         """;
 
-    internal static async Task<AppliedChange?> GetChangeAsync(SqliteConnection db, string changeId, CancellationToken ct)
+    internal static async Task<AppliedChange?> GetChangeAsync(
+        SqliteConnection db, string changeId, string? tenantId, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
-        command.CommandText = ChangeSelect + " WHERE ch.id = $id OR ch.id LIKE $prefix LIMIT 1";
+        command.CommandText = ChangeSelect
+            + " WHERE (ch.id = $id OR ch.id LIKE $prefix) AND ($tenant IS NULL OR ch.tenant_id = $tenant) LIMIT 1";
         command.Parameters.AddWithValue("$id", changeId);
+        command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
         // Ids are long; the first eight characters are what an operator
         // reads off a screen, and unique enough at this table's size.
         command.Parameters.AddWithValue("$prefix", changeId.Length >= 8 ? changeId + "%" : changeId);
@@ -589,7 +623,8 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
         r.IsDBNull(11) ? null : r.GetString(11),
         r.GetInt64(12) == 1,
         r.IsDBNull(13) ? null : When(r.GetString(13)),
-        r.IsDBNull(14) ? null : r.GetString(14));
+        r.IsDBNull(14) ? null : r.GetString(14),
+        r.GetString(15));
 
     private static async Task<string> StorePlanAsync(SqliteConnection db, DomainIds ids, ChangePlan plan, string by, CancellationToken ct)
     {
@@ -637,15 +672,11 @@ public sealed class RemediationService(string databasePath, DnsLookup? lookup = 
 
     private readonly record struct DomainIds(string TenantId, string ClientId, string DomainId);
 
-    private static async Task<DomainIds?> DomainIdsAsync(SqliteConnection db, string domain, CancellationToken ct)
+    /// <exception cref="AmbiguousOrganizationException">Several organizations hold the domain and none was named.</exception>
+    private static async Task<DomainIds?> DomainIdsAsync(SqliteConnection db, string domain, string? tenantId, CancellationToken ct)
     {
-        await using var command = db.CreateCommand();
-        command.CommandText = "SELECT tenant_id, client_id, id FROM domains WHERE name = $name AND deleted_at IS NULL LIMIT 1";
-        command.Parameters.AddWithValue("$name", domain.Trim().TrimEnd('.').ToLowerInvariant());
-
-        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) { return null; }
-        return new DomainIds(reader.GetString(0), reader.GetString(1), reader.GetString(2));
+        var found = await DomainDirectory.FindAsync(db, domain, tenantId, ct).ConfigureAwait(false);
+        return found is { } m ? new DomainIds(m.TenantId, m.ClientId, m.DomainId) : null;
     }
 
     /// <summary>

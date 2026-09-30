@@ -235,7 +235,7 @@ app.MapGet("/.well-known/mta-sts.txt", async (
         return Results.NotFound();
     }
 
-    var policy = await policies.GetAsync(host["mta-sts.".Length..], ct).ConfigureAwait(false);
+    var policy = await policies.GetAsync(host["mta-sts.".Length..], ct: ct).ConfigureAwait(false);
     if (policy is null) { return Results.NotFound(); }
 
     // text/plain is what the RFC requires, and senders check it.

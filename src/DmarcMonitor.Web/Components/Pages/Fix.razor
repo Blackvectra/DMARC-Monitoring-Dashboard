@@ -650,7 +650,7 @@ else
         _busy = true;
         try
         {
-            var outcome = await Fixes.ApplyAsync(plan, await WhoAsync(), reason);
+            var outcome = await Fixes.ApplyAsync(plan, await WhoAsync(), reason, _tenant);
             Set(outcome.Message, isError: !outcome.Applied);
         }
         catch (Exception ex)
@@ -681,7 +681,7 @@ else
         _busy = true;
         try
         {
-            Set(await Fixes.CreatePolicyAsync(domain, await WhoAsync()), isError: false);
+            Set(await Fixes.CreatePolicyAsync(domain, await WhoAsync(), _tenant), isError: false);
         }
         catch (Exception ex)
         {
@@ -703,7 +703,7 @@ else
         _busy = true;
         try
         {
-            var outcome = await Fixes.RollBackAsync(changeId, await WhoAsync(), reason);
+            var outcome = await Fixes.RollBackAsync(changeId, await WhoAsync(), reason, _tenant);
             Set(outcome.Message, isError: !outcome.Applied);
         }
         catch (Exception ex)

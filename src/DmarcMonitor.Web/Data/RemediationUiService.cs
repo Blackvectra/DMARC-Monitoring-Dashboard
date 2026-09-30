@@ -1,6 +1,7 @@
 using DmarcMonitor.Core.Dns;
 using DmarcMonitor.Core.Remediation;
 using DmarcMonitor.Core.Rollout;
+using DmarcMonitor.Core.Tenancy;
 
 namespace DmarcMonitor.Web.Data;
 
@@ -161,7 +162,7 @@ public sealed class RemediationUiService(
             // the fetched file - RFC 8461 policy files do not carry it. Fetch
             // without it and every plan announces "v=STSv1; id=", which is not
             // a record a sender will accept.
-            var known = await _policies.GetAsync(domain, ct);
+            var known = await _policies.GetAsync(domain, tenantId, ct);
 
             // Fetched only when there is a reason to think a policy exists.
             //
@@ -239,15 +240,23 @@ public sealed class RemediationUiService(
         string? providerError = null;
         try
         {
-            var provider = await providers.ProviderForAsync(domain, ct);
+            var provider = await providers.ProviderForAsync(domain, tenantId, ct);
             providerName = provider.Name;
             canApply = provider.CanWrite;
+        }
+        catch (AmbiguousOrganizationException ex)
+        {
+            // Two organizations hold this name and the caller named neither.
+            // Nothing is offered to apply, because there is no telling whose
+            // provider it would be made with.
+            providerName = "manual";
+            providerError = ex.Message;
         }
         catch (InvalidOperationException ex)
         {
             // Configured but unusable: the secret is missing or unreadable.
             // Said on the page rather than hidden behind a disabled button.
-            providerName = (await providers.ForDomainAsync(domain, ct))?.Provider ?? "manual";
+            providerName = (await providers.ForDomainAsync(domain, tenantId, ct))?.Provider ?? "manual";
             providerError = ex.Message;
         }
 
@@ -270,10 +279,24 @@ public sealed class RemediationUiService(
         };
     }
 
-    public async Task<ApplyOutcome> ApplyAsync(ChangePlan plan, string by, string reason, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// The caller's organization. The provider is chosen for it and the change
+    /// is filed in it; a domain name two organizations hold is refused when
+    /// none is given.
+    /// </param>
+    public async Task<ApplyOutcome> ApplyAsync(ChangePlan plan, string by, string reason, string? tenantId = null, CancellationToken ct = default)
     {
-        var provider = await providers.ProviderForAsync(plan.Domain, ct);
-        var outcome = await remediation.ApplyAsync(plan, provider, confirm: true, by, reason, ct);
+        IDnsProvider provider;
+        try
+        {
+            provider = await providers.ProviderForAsync(plan.Domain, tenantId, ct);
+        }
+        catch (AmbiguousOrganizationException ex)
+        {
+            return new ApplyOutcome { Plan = plan, Error = ex.Message, Message = $"Not applied: {ex.Message}" };
+        }
+
+        var outcome = await remediation.ApplyAsync(plan, provider, confirm: true, by, reason, tenantId, ct);
 
         if (outcome.Applied && outcome.ChangeId is not null)
         {
@@ -286,12 +309,17 @@ public sealed class RemediationUiService(
         return outcome;
     }
 
-    public async Task<ApplyOutcome> RollBackAsync(string changeId, string by, string reason, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// The caller's organization. A change from another organization is not
+    /// found, and the provider is the one belonging to the organization the
+    /// change was made in.
+    /// </param>
+    public async Task<ApplyOutcome> RollBackAsync(string changeId, string by, string reason, string? tenantId = null, CancellationToken ct = default)
     {
-        var change = await remediation.GetChangeAsync(changeId, ct)
+        var change = await remediation.GetChangeAsync(changeId, tenantId, ct)
             ?? throw new ArgumentException($"No change {changeId}.", nameof(changeId));
-        var provider = await providers.ProviderForAsync(change.Domain, ct);
-        return await remediation.RollBackAsync(change.Id, provider, by, reason, ct);
+        var provider = await providers.ProviderForAsync(change.Domain, change.TenantId, ct);
+        return await remediation.RollBackAsync(change.Id, provider, by, reason, change.TenantId, ct);
     }
 
     /// <summary>
@@ -322,7 +350,8 @@ public sealed class RemediationUiService(
     /// is exactly the failure this mode exists to catch before it matters.
     /// </para>
     /// </remarks>
-    public async Task<string> CreatePolicyAsync(string domain, string by, CancellationToken ct = default)
+    /// <param name="tenantId">The caller's organization; a domain name two organizations hold is refused when none is given.</param>
+    public async Task<string> CreatePolicyAsync(string domain, string by, string? tenantId = null, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(domain);
 
@@ -336,7 +365,15 @@ public sealed class RemediationUiService(
                  + "Check the domain receives mail at all before publishing one.";
         }
 
-        var policy = await _policies.SetAsync(domain, MtaStsMode.Testing, [.. mx], by, ct: ct).ConfigureAwait(false);
+        MtaStsPolicy policy;
+        try
+        {
+            policy = await _policies.SetAsync(domain, MtaStsMode.Testing, [.. mx], by, tenantId: tenantId, ct: ct).ConfigureAwait(false);
+        }
+        catch (AmbiguousOrganizationException ex)
+        {
+            return $"Not created: {ex.Message}";
+        }
 
         return $"Policy created for {domain} in testing mode, listing {string.Join(", ", policy.Mx)}. "
              + "Testing reports failures and delivers the mail anyway, so nothing is at risk yet — "
