@@ -209,7 +209,7 @@ if [[ ! -f "$INGEST_ENV" ]]; then
 # Give every instance its own DMARC_ORGANIZATION. Domains belong to an
 # organization, so a mailbox collected under the wrong one makes a second copy
 # of a customer's domain instead of filing into theirs - and says nothing,
-# while the real domain stops growing. `dmarc reachability` flags a name held
+# while the real domain stops growing. \`dmarc reachability\` flags a name held
 # by more than one organization.
 DMARC_MAILBOX=dmarc@example.com
 DMARC_TENANT_ID=
@@ -224,6 +224,10 @@ DMARC_REPORTING_DOMAIN=
 # Optional. The organization a domain nobody has seen before is filed under
 # (dmarc org list). Default: local. A known domain keeps its own.
 DMARC_ORGANIZATION=
+# Optional. The mailbox folders to read, separated by semicolons. Default:
+# Inbox and the folders directly inside it. Keep the single quotes: a
+# backslash is part of a folder's name, and without them systemd drops it.
+#DMARC_FOLDERS='DMARC\client-a.example;Inbox'
 ENV
     chmod 0600 "$INGEST_ENV"
     echo "  wrote ${INGEST_ENV} (fill it in, then enable dmarc-ingest.timer)"

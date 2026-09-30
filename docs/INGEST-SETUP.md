@@ -232,16 +232,31 @@ as above, which keeps the backslash in bash, PowerShell and cmd alike. With
 more than one mailbox, each instance's own `/etc/dmarc-ingest-<instance>.env`
 carries its own `DMARC_FOLDERS`.
 
-On Windows, add the line to `C:\dmarc\ingest.cmd`, above the line that runs
+`bootstrap.sh` writes the line into `/etc/dmarc-ingest.env` for you, quoted,
+from one `--folder` for each name:
+
+```bash
+sudo ./deploy/bootstrap.sh --host <your host> --folder "DMARC\client-a.example" --folder "DMARC\client-b.example" --folder Inbox
+```
+
+On Windows, `bootstrap.ps1` writes it into `C:\dmarc\ingest.cmd` from
+`-Folders`:
+
+```powershell
+.\bootstrap.ps1 -HostName <your host> -Folders "DMARC\client-a.example", "DMARC\client-b.example", Inbox
+```
+
+Or add the line to `C:\dmarc\ingest.cmd` yourself, above the line that runs
 `dmarc.exe`. A backslash needs no quoting there:
 
 ```
 set "DMARC_FOLDERS=DMARC\client-a.example;DMARC\client-b.example;Inbox"
 ```
 
-`bootstrap.ps1` rewrites that file with only the settings it knows about, so
-put the line back after running it again, or set `DMARC_FOLDERS` as a system
-environment variable instead, which it leaves alone.
+Running `bootstrap.ps1` again keeps the line, however it got there, and
+changes it only when given `-Folders`. A `DMARC_FOLDERS` set as a system
+environment variable still works, but only while `ingest.cmd` has no line of
+its own.
 
 A `--folder` on the command line wins over `DMARC_FOLDERS`. Either way, the run
 prints the folders it was told to read before it starts, and `folders read` at
