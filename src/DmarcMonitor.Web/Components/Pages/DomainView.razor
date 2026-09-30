@@ -26,6 +26,10 @@
         <p class="crumb"><a href="">Domain health</a> <span aria-hidden="true">/</span> @Domain</p>
         <p class="domain-eyebrow">Domain assessment</p>
         <h1>@Domain</h1>
+        @if (_detail is not null)
+        {
+            <span class="domain-state @Css(_detail.Level)">@StatusLabel(_detail.Level)</span>
+        }
         @* Not when the client is named after the domain, which is what
            onboarding by domain name produces for most of them: the heading
            otherwise prints the same string three times running, once in the
@@ -1333,5 +1337,14 @@ else
         TriageLevel.Watch => "watch",
         TriageLevel.OnTrack => "ontrack",
         _ => "fine",
+    };
+
+    private static string StatusLabel(TriageLevel level) => level switch
+    {
+        TriageLevel.Urgent => "Action needed",
+        TriageLevel.Act => "Needs review",
+        TriageLevel.Watch => "Monitor",
+        TriageLevel.OnTrack => "On track",
+        _ => "Healthy",
     };
 }
