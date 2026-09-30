@@ -513,7 +513,16 @@ jobs:
             --url http://127.0.0.1:5099/hook --secret-stdin "${ctl[@]}"
           sudo -H -u dmarc dmarc notify test --org local "${ctl[@]}"
           cat /tmp/received
-          grep -q '^v1=[0-9a-f]\{64\} {.*"type":"ping"' /tmp/received
+          # A destination set today receives dmarc-monitor.finding.v1, so its
+          # test event is finding-shaped: type PING (docs/WEBHOOKS.md).
+          grep -q '^v1=[0-9a-f]\{64\} {"schema":"dmarc-monitor.finding.v1".*"type":"PING"' /tmp/received
+
+          # The older contract is kept for a destination that asks for it,
+          # and its test event is the older ping.
+          openssl rand -hex 32 | sudo -H -u dmarc dmarc notify set --org local \
+            --url http://127.0.0.1:5099/hook --secret-stdin --payload event.v1 "${ctl[@]}"
+          sudo -H -u dmarc dmarc notify test --org local "${ctl[@]}"
+          grep -q '^v1=[0-9a-f]\{64\} {"schema":"dmarc-monitor.event.v1".*"type":"ping"' /tmp/received
 
           # The key must be readable from inside ProtectHome=true and
           # ProtectSystem=strict. Nothing has drifted, so nothing is sent -
