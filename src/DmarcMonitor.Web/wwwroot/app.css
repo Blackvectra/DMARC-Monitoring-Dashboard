@@ -783,6 +783,68 @@ section[id] { scroll-margin-top: 16px; }
 .good { color: var(--fine); }
 .bad  { color: var(--urgent); }
 
+/* ---- sortable headers -------------------------------------------------- */
+
+/*
+    A column header that is a control looks like the header it was: same grey,
+    same weight, no border. Pressing it orders by that column and pressing it
+    again reverses it; the arrow says which, and aria-sort on the <th> says the
+    same to a screen reader. The column that is ordering the table is in the
+    full text color so "what is this sorted by" does not need the arrow found.
+*/
+.triage th button.sort {
+    font: inherit; color: inherit; background: none; border: 0; padding: 0;
+    cursor: pointer; white-space: nowrap;
+}
+.triage th button.sort:hover,
+.triage th[aria-sort] button.sort { color: var(--text); }
+.triage th button.sort .arrow { font-size: 9px; margin-left: 4px; }
+
+/* A cell as narrow as its content, for a label or a chip that should never wrap. */
+.triage .shrink { width: 1%; white-space: nowrap; }
+.sources td .count { white-space: nowrap; display: inline-block; }
+
+/* ---- a sender with several addresses ----------------------------------- */
+
+/*
+    One row for the sender, its addresses one click away. A <details> rather
+    than state held by the page: it works before the page is interactive, it
+    keeps its open/closed state when the table is re-sorted, and a keyboard
+    reaches it without anything being written.
+*/
+.addresses { margin-top: 3px; }
+.addresses > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.addresses[open] > summary { color: var(--text); }
+/* Address, label, detail: three columns shared by every line, so the labels
+   and the details line up down the list instead of each wrapping on its own. */
+.addresses ul {
+    list-style: none; margin: 6px 0 2px;
+    display: grid; grid-template-columns: max-content max-content 1fr;
+    gap: 7px 10px; align-items: baseline;
+}
+.addresses li {
+    display: grid; grid-template-columns: subgrid; grid-column: 1 / -1;
+    align-items: baseline; font-size: 12px;
+}
+@media (max-width: 860px) {
+    .addresses ul, .addresses li { grid-template-columns: 1fr; gap: 2px; }
+    .addresses ul { gap: 9px; }
+}
+.addresses .reverse { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; }
+
+/* Who it reached, and the rest of the list folded rather than wrapping a
+   fourteen-domain provider down the page. */
+.reach .domains { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+details.more { display: inline; }
+details.more > summary { display: inline; cursor: pointer; color: var(--accent); list-style: none; }
+details.more > summary::-webkit-details-marker { display: none; }
+
+/* What the labels mean, once, rather than as a sentence on every row. */
+.key { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); }
+.key > summary { cursor: pointer; }
+.key dl { margin: 8px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; align-items: baseline; max-width: 100ch; }
+.key dd { margin: 0; }
+
 /* ---- record chips ------------------------------------------------------ */
 
 /*
@@ -800,13 +862,27 @@ section[id] { scroll-margin-top: 16px; }
     means the resolver answered and there was no record, and it has to keep
     meaning only that.
 */
-/* Five chips, not three, since MTA-STS and TLS-RPT joined them - and two of
-   the five have long names. Wrapping rather than widening: this column sits
-   between the domain and the policy, and letting it grow to fit
-   "MTA-STS ✓ TLS-RPT ✓" on one line pushes everything worth reading off the
-   right of the table. Authentication ends up on the first line and transport
-   on the second, which is the order they are built in anyway. */
-.records { display: flex; flex-wrap: wrap; row-gap: 3px; max-width: 15rem; }
+/* Five chips on one line. They used to wrap onto a second one, when the
+   column sat between a domain and a policy and the table had a Client column
+   beside them; with the client folded under the domain there is room, and a
+   row that is one line tall is a table that fits more domains on a screen.
+   Narrower than that they wrap again, authentication on the first line and
+   transport on the second, which is the order they are built in anyway. */
+.records { display: flex; flex-wrap: nowrap; align-items: center; }
+
+/* One line needs the table to be about 975px wide, which is a viewport of
+   about 1270px once the sidebar and the page's margins are out of it. Below
+   that they wrap. The minimum width is what keeps them at two lines: without
+   it a narrow table squeezes the column to its widest chip and the five stand
+   in a column of their own. */
+@media (max-width: 1270px) {
+    .records { flex-wrap: wrap; row-gap: 3px; min-width: 11rem; max-width: 15rem; }
+}
+
+/* Nothing has been read yet: one quiet strip of names and dashes rather than
+   five outlined boxes saying the same thing on every row. The page above says
+   why, and the chips fill in as readings arrive. */
+.records.unread .chip { border-color: transparent; padding-left: 2px; padding-right: 2px; }
 
 .chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -840,6 +916,27 @@ section[id] { scroll-margin-top: 16px; }
 }
 .dns-state .linkish { margin-top: 0; }
 .dns-state code { background: var(--sunken); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+
+/* ---- the domains table -------------------------------------------------- */
+
+/* Whose domain it is, under its name, where nothing else says. */
+.client-line { display: block; color: var(--muted); font-size: 12px; }
+
+/*
+    A client's heading inside the one table, not a table of its own. It is a
+    row so the columns below it are the columns above it; set apart by space
+    above and a rule beneath rather than by a band, which on a page of twenty
+    would be twenty bands.
+*/
+.triage tr.group th {
+    padding: 18px 10px 6px; font-size: 13px; font-weight: 600; color: var(--text);
+    border-bottom: 1px solid var(--line); white-space: normal;
+}
+.triage tbody tr.group:hover { background: transparent; }
+.triage tr.group:first-child th { padding-top: 6px; }
+
+/* A domain under a heading is a little inside it. */
+.triage tr.headed td:nth-child(2) { padding-left: 24px; }
 
 /* ---- volume bars ------------------------------------------------------- */
 

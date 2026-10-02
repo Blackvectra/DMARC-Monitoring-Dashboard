@@ -145,6 +145,43 @@ public sealed class CorrelationServiceTests : IDisposable
         Assert.False(source.IsCrossClient);
     }
 
+    /// <summary>
+    /// Which parties, not only how many: the page groups addresses into
+    /// senders, and what a sender reached is the union of what its addresses
+    /// did. A client and an unfiled domain are told apart even when one is
+    /// named like the other.
+    /// </summary>
+    [Fact]
+    public async Task NamesTheParties()
+    {
+        await StoreAsync("a.example", "alpha", Row("203.0.113.9", 5, "fail", "a.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("203.0.113.9", 5, "fail", "b.example", "fail"));
+        await StoreUnassignedAsync("c.example", Row("203.0.113.9", 5, "fail", "c.example", "fail"));
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(["client:alpha", "client:beta", "domain:c.example"], source!.PartyKeys);
+        Assert.Equal(source.IndependentParties, source.PartyKeys.Count);
+    }
+
+    [Fact]
+    public async Task TwoDomainsOfOneClientAreOnePartyKey()
+    {
+        // One customer with two domains is one party. A sender that hit both
+        // has not worked through two customers.
+        await StoreAsync("one.example", "pair", Row("203.0.113.9", 5, "fail", "one.example", "fail"));
+        await StoreUnassignedAsync("two.example", Row("203.0.113.9", 5, "fail", "two.example", "fail"));
+        await _store.AssignDomainAsync("two.example", "pair");
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(["client:pair"], source!.PartyKeys);
+        Assert.Equal(2, source.DomainCount);
+        Assert.False(source.IsCrossClient);
+    }
+
     // ---- the regression this file exists for ---------------------------------
 
     [Fact]

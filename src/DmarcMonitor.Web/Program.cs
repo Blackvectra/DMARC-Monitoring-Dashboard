@@ -91,6 +91,11 @@ builder.Services.AddScoped<ReportUiService>();
 // every row on every render.
 builder.Services.AddScoped<DnsStatusService>();
 
+// Names for the sources a page is showing, and the one control that looks the
+// missing ones up now. The nightly job normally does this; a Windows trial has
+// no scheduler.
+builder.Services.AddScoped<SourceNamingService>();
+
 // The zone-file box on the domain page: the one input an operator can give
 // this that it cannot fetch for itself.
 builder.Services.AddScoped<ZoneAuditUiService>();

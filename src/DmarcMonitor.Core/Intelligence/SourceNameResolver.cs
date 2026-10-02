@@ -57,6 +57,30 @@ public sealed class SourceNameResolver(SourceNameStore store, DnsLookup dns)
     public async Task<SourceNameRun> RunAsync(int limit = 500, CancellationToken ct = default)
     {
         var addresses = await _store.NeedingLookupAsync(limit, ct: ct).ConfigureAwait(false);
+        return await ResolveAsync(addresses, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Looks up the addresses among these that are due, worst first, and
+    /// leaves every other address alone.
+    /// </summary>
+    /// <remarks>
+    /// For a page that has a table of addresses in front of somebody and no
+    /// nightly job behind it - the Windows trial has no scheduler - where
+    /// "name the ones on screen" is the useful unit and "name the busiest 500
+    /// in the estate" may name none of them.
+    /// </remarks>
+    public async Task<SourceNameRun> RunAsync(
+        IReadOnlyCollection<string> among, int limit, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(among);
+
+        var addresses = await _store.NeedingLookupAsync(limit, among: among, ct: ct).ConfigureAwait(false);
+        return await ResolveAsync(addresses, ct).ConfigureAwait(false);
+    }
+
+    private async Task<SourceNameRun> ResolveAsync(IReadOnlyList<string> addresses, CancellationToken ct)
+    {
         if (addresses.Count == 0) { return new SourceNameRun(0, 0, 0); }
 
         var named = 0;

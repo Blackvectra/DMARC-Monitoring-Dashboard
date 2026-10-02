@@ -423,9 +423,24 @@ Who belongs where is decided by Entra security groups, which the token has
 to carry:
 
 - Under the app registration, **Token configuration → Add groups claim →
-  Security groups**, with the group ID as the claim value. Without this the
-  token names no groups, everybody signed in belongs to nothing, and the
-  page says so.
+  Groups assigned to the application**, with the group ID as the claim value
+  for the ID token. Without a groups claim the token names no groups,
+  everybody signed in belongs to nothing, and the page says so.
+
+  **Choose "Security groups" only if everyone who signs in is in five groups
+  or fewer.** This app signs in with the ID-token flow, and for that flow
+  Microsoft stops listing groups above a handful (its documentation says five
+  in one place and six in another). It does not send the first few: it sends
+  none, and a `hasgroups` marker in their place. An engineer at a provider is
+  in far more groups than that, so the person setting this up is the one who
+  reaches "No organization" whichever group they are added to - the page says
+  when this is the reason. "Groups assigned to the application" lists only the
+  groups assigned to this app, so the count is however many you assigned.
+
+  Assign each group under **Enterprise applications → DMARC Monitor → Users
+  and groups → Add user/group**. That needs Entra ID P1, like assigning a
+  group to restrict sign-in, and it is direct membership only: a person has to
+  be in the assigned group itself, not in a group nested inside it.
 - Create one security group per organization, and one master group for the
   people who run the whole thing. Copy each group's **Object ID**.
 - Tell the app the master group: `Auth:MasterGroupId` in

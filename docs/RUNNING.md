@@ -41,6 +41,54 @@ and says so in a banner on every page. That makes it safe on a laptop and
 wrong on a server — for a server, see [`DEPLOYING.md`](DEPLOYING.md), which
 starts from the same application with sign-in configured.
 
+### Turning on sign-in in the trial
+
+The banner has no switch of its own. It is on for as long as `AzureAd:TenantId`
+and `AzureAd:ClientId` are blank, because it is how anyone using the app can
+tell that nobody is being checked; filling them in is what turns it off. With
+them comes the whole sign-in model - access decided by Entra groups - so the
+group in step 2 is not optional. Sign-in over `http://localhost:5000` works in
+Edge and Chrome, which accept the sign-in cookies on `localhost`, and Entra
+accepts an `http` redirect URI for `localhost` and for nothing else.
+
+1. **A separate app registration for this machine.** Not the one a server
+   uses: Microsoft advises against leaving `localhost` redirect URIs on a
+   registration that also serves production. Web platform, this directory
+   only, redirect URIs `http://localhost:5000/signin-oidc` and
+   `http://localhost:5000/signout-callback-oidc`, and **ID tokens** ticked under
+   Authentication. Entra ignores the port when it matches a `localhost`
+   address, the path is case-sensitive, and the app builds the redirect URI from
+   the address in the browser bar - so browse to `localhost`, not `127.0.0.1`.
+2. **A group, and the groups claim.** Create a security group, add yourself
+   to it directly, and copy its Object ID. Under the registration's **Token
+   configuration** add a groups claim of **Groups assigned to the
+   application**, then assign the group to the app under **Enterprise
+   applications → Users and groups**. Not "Security groups": with the ID-token
+   sign-in this app uses, Entra sends no groups at all to anyone in more than
+   about five (see [`DEPLOYING.md`](DEPLOYING.md#5-sign-in)).
+3. **`appsettings.json`**, beside `DmarcMonitor.Web.exe`. `MasterGroupId` is not
+   in the shipped file; add it inside `Auth`:
+
+   ```json
+   "AzureAd": { "TenantId": "<Directory (tenant) ID>", "ClientId": "<Application (client) ID>" },
+   "Auth":    { "MasterGroupId": "<the group's Object ID>" }
+   ```
+
+4. Restart with `Start DMARC Monitor.cmd`, open <http://localhost:5000>, and
+   sign in. Group membership is read from the token when you sign in, so sign
+   out and back in after changing it.
+
+Two things stop being done for you once sign-in is on, because both were only
+ever done for a trial: the browser no longer opens by itself, and a newer
+build no longer brings an older `dmarc.db` up to date when it starts. After
+copying `dmarc.db` into a new download's folder, run `.\dmarc.exe init-db`
+there once before starting it, as a server's `update.sh` does.
+
+**No organization** after signing in means the token did not carry a group
+the app knows. The page says which of the two it was: you are in none of them,
+or Entra left the list out for being too long (fix: step 2). To go back to local
+mode, blank the two `AzureAd` values and restart.
+
 ## Quickest possible start from the command line
 
 No mailbox, no app registration, no configuration. Enough to see whether the
@@ -148,6 +196,45 @@ Environment variables win, and double underscore is the separator:
 log, because a relative path resolves against whatever directory the service
 was started in — which is rarely the one you expect, and produces an empty
 dashboard rather than an error.
+
+### Reading the two long lists
+
+**Domain health** is one table of every domain. Type to find one by domain or
+client; press a column to order by it, and again to reverse it; press a policy
+count ("4 p=none") to see only those. Each column opens on the order its
+pressing asks for — Volume on the busiest, Passing on the worst, Last report on
+whoever has gone quiet.
+
+A client with more than one domain gets a heading, and its domains sit under it
+while the table is ordered by name. Ordered by anything else it is one list
+across every client: pressing "Passing" asks which domains are worst, not which
+are worst within each client. The Records column is drawn from the last stored
+DNS reading and stays quiet until one exists — **Read DNS now**, or the nightly
+scan.
+
+**Sending sources** is one row per sender, not per address: a mail provider's
+fourteen addresses are one row, and a hosting provider's four addresses working
+through three customers are one row showing how many unrelated clients it
+reached. The addresses stay one click away, because blocking is done by address.
+Each row says in words what it looks like, and the key under the counts says what
+each means:
+
+| Looks like | It means |
+|---|---|
+| **Cross-client** | authenticated nothing, against several unrelated clients |
+| **Unauthenticated** | authenticated nothing, against one client so far |
+| **Unaligned service** | a real service, authenticating as its own domain rather than the client's |
+| **Own sending path** | passes for the client elsewhere; these are signatures broken in transit |
+
+**Spanning clients** is not a fifth kind: it is several addresses at one
+operator reaching clients that have nothing to do with each other, which no
+single address shows. A mail provider is never counted as one.
+
+Names come from reverse DNS, checked against the name's own forward records
+before a vendor's name is used, and never decide a verdict. They are filled in by
+the nightly scan (`dmarc intel --names`). Where there is no nightly scan — the
+Windows trial — the page says how many are missing and an operator can press
+**Look up names now**, which does up to 40 of the addresses on screen.
 
 ### Before it is reachable by anyone else
 

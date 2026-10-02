@@ -105,6 +105,32 @@ public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
     }
 
     [Fact]
+    public async Task SomebodyWhoseTokenLeftTheirGroupsOutIsToldThatNotToJoinAnotherGroup()
+    {
+        // The person who set this up is the likeliest to be in too many groups
+        // for Entra to list. Told only to "ask to be added", they add
+        // themselves to the master group, sign in again, and get the same page.
+        var client = As("engineer@example.com");
+        client.DefaultRequestHeaders.Add(TestAuthHandler.HasGroupsHeader, "true");
+
+        var html = await client.GetStringAsync("/");
+
+        Assert.Contains("No organization", html, StringComparison.Ordinal);
+        Assert.Contains("left your group list out", html, StringComparison.Ordinal);
+        Assert.Contains("Groups assigned to the application", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("acme.com", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SomebodyWhoIsSimplyInNoGroupIsNotToldTheirGroupsWereLeftOut()
+    {
+        var html = await As("stranger@example.com", "33333333-3333-3333-3333-333333333333").GetStringAsync("/");
+
+        Assert.Contains("No organization", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("left your group list out", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AnotherOrganizationsDomainPageConfirmsNothing()
     {
         // The same page a domain nobody has reported on gets, so the URL
@@ -582,6 +608,9 @@ internal sealed class TestAuthHandler(
     public const string GroupsHeader = "X-Test-Groups";
     public const string OrgHeader = "X-Test-Org";
 
+    /// <summary>Present means: the token carries Entra's "too many groups to list" marker.</summary>
+    public const string HasGroupsHeader = "X-Test-HasGroups";
+
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
         if (!Request.Headers.TryGetValue(UserHeader, out var user) || string.IsNullOrEmpty(user))
@@ -604,6 +633,12 @@ internal sealed class TestAuthHandler(
         if (Request.Headers.TryGetValue(OrgHeader, out var org) && !string.IsNullOrEmpty(org))
         {
             claims.Add(new Claim(OrgContext.ChoiceClaim, org.ToString()));
+        }
+
+        // What the implicit flow sends in place of a group list that will not fit.
+        if (Request.Headers.ContainsKey(HasGroupsHeader))
+        {
+            claims.Add(new Claim("hasgroups", "true"));
         }
 
         var identity = new ClaimsIdentity(claims, SchemeName);
