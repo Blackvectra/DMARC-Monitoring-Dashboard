@@ -113,6 +113,46 @@ public sealed class SourceNameStoreTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// A page asks about the addresses it is showing. The estate's busiest
+    /// unnamed addresses may be somebody else's, and a button that spent its
+    /// lookups on those would leave the table in front of the person who
+    /// pressed it exactly as it was.
+    /// </summary>
+    [Fact]
+    public async Task OnlyTheAddressesAskedAboutAreDue()
+    {
+        await StoreRowsAsync("192.0.2.70", "192.0.2.71", "192.0.2.72");
+
+        var due = await _store.NeedingLookupAsync(among: ["192.0.2.71", "192.0.2.72", "198.51.100.200"]);
+
+        // 192.0.2.70 is due but was not asked about; 198.51.100.200 was asked
+        // about but appears in no report.
+        Assert.Equal(["192.0.2.71", "192.0.2.72"], due.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnAddressAlreadyNamedIsNotDueEvenWhenAskedAbout()
+    {
+        await StoreRowsAsync("192.0.2.80", "192.0.2.81");
+        await _store.SaveAsync("192.0.2.80", "mail.example", answered: true, forwardConfirmed: true);
+
+        var due = await _store.NeedingLookupAsync(among: ["192.0.2.80", "192.0.2.81"]);
+
+        Assert.Equal(["192.0.2.81"], due);
+    }
+
+    [Fact]
+    public async Task AskingAboutNothingIsDueNothing()
+    {
+        await StoreRowsAsync("192.0.2.90");
+
+        // An empty list means "none of them", not "no restriction": the
+        // difference is a button that looks up the whole estate when a page
+        // with no failing sources was open.
+        Assert.Empty(await _store.NeedingLookupAsync(among: []));
+    }
+
+    /// <summary>
     /// What a report cannot recognize yet: failing sources never looked up,
     /// or named but never checked. A report built before the names are in
     /// says so rather than quietly knowing less.

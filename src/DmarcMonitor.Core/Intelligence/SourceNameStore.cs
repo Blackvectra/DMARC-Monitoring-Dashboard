@@ -175,14 +175,27 @@ public sealed class SourceNameStore(string databasePath)
     /// recognized as a mail filter would be judged without its name.
     /// </para>
     /// </remarks>
+    /// <param name="among">
+    /// Only these addresses, or null for every address in every report. A page
+    /// asks about the ones it is showing: the estate's busiest unnamed
+    /// addresses may belong to another organization, and a button that spent
+    /// its lookups on those would leave the table in front of the person who
+    /// pressed it exactly as it was. At most 500 are considered, which is more
+    /// than any page lists.
+    /// </param>
     public async Task<IReadOnlyList<string>> NeedingLookupAsync(
         int limit = 500,
         TimeSpan? maxAge = null,
         TimeSpan? retryAfter = null,
+        IReadOnlyCollection<string>? among = null,
         CancellationToken ct = default)
     {
         var age = maxAge ?? TimeSpan.FromDays(30);
         var retry = retryAfter ?? TimeSpan.FromDays(1);
+
+        var only = among?.Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => a.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(500).ToList();
+        if (only is { Count: 0 }) { return []; }
 
         // Names are the organization's; the addresses to name are in every
         // client's file.
@@ -190,14 +203,31 @@ public sealed class SourceNameStore(string databasePath)
             ClientScope.Organization(null), ["aggregate_records"], ct: ct).ConfigureAwait(false);
 
         await using var command = db.CreateCommand();
-        command.CommandText = """
+
+        // The same "is it due" test as ever, parenthesized so narrowing to the
+        // addresses asked about cannot be undone by the ORs inside it.
+        var restriction = "";
+        if (only is not null)
+        {
+            var names = new List<string>(only.Count);
+            for (var i = 0; i < only.Count; i++)
+            {
+                names.Add($"$a{i}");
+                command.Parameters.AddWithValue($"$a{i}", only[i]);
+            }
+
+            restriction = $"AND r.source_ip IN ({string.Join(",", names)})";
+        }
+
+        command.CommandText = $"""
             SELECT r.source_ip
             FROM aggregate_records r
             LEFT JOIN source_names n ON n.ip = r.source_ip
-            WHERE n.ip IS NULL
+            WHERE (n.ip IS NULL
                OR (n.answered = 1 AND n.checked_at < $stale)
                OR (n.answered = 0 AND n.checked_at < $retry)
-               OR (n.reverse_name IS NOT NULL AND n.forward_confirmed IS NULL)
+               OR (n.reverse_name IS NOT NULL AND n.forward_confirmed IS NULL))
+              {restriction}
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             LIMIT $limit

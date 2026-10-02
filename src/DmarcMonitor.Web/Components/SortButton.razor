@@ -1,0 +1,42 @@
+@*
+    A column header that orders its table.
+
+    Pressing it orders by that column and pressing it again reverses the order;
+    the arrow says which, and the page puts aria-sort on the header cell around
+    this so a screen reader hears the same thing. It is a real button: it is
+    reached with the keyboard, and it is announced as something that can be
+    pressed rather than as a word that happens to be underlined.
+
+    One component rather than a copy per page, because the first page to get
+    one of these was also the first to have the arrow slip out of step with the
+    order.
+*@
+
+<button type="button" class="sort" @onclick="OnPress">
+    @Label
+    @if (Active)
+    {
+        <span class="arrow" aria-hidden="true">@(Descending ? "▼" : "▲")</span>
+    }
+</button>
+
+@code {
+    /// <summary>The column's name.</summary>
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+
+    /// <summary>Whether the table is ordered by this column now.</summary>
+    [Parameter] public bool Active { get; set; }
+
+    /// <summary>Which way it runs; only drawn when <see cref="Active"/>.</summary>
+    [Parameter] public bool Descending { get; set; }
+
+    [Parameter] public EventCallback OnPress { get; set; }
+
+    /// <summary>
+    /// The value for aria-sort on the header cell holding this button: nothing
+    /// at all unless this is the column in use, because "none" on every other
+    /// column is noise a screen reader reads out.
+    /// </summary>
+    public static string? AriaSort(bool active, bool descending) =>
+        !active ? null : descending ? "descending" : "ascending";
+}

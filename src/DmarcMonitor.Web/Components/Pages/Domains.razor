@@ -13,13 +13,13 @@
 @inject DnsStatusService DnsStatus
 @rendermode InteractiveServer
 
-<PageTitle>Domains — DMARC Monitor</PageTitle>
+<PageTitle>Domain health — DMARC Monitor</PageTitle>
 
 <header class="page-head">
     <div>
-        <h1>Domains</h1>
-        <p class="sub">Every domain alphabetically, for looking one up. Triage is the same set ordered by
-           what needs doing, which is the one to open when you do not already know what you are after.</p>
+        <h1>Domain health</h1>
+        <p class="sub">Every domain in one table: look one up by name, or press a column to put the ones that
+           are failing, quiet or still at p=none first. The dashboard ranks the same set by what needs doing.</p>
     </div>
     <div class="head-actions">
         @if (_clients.Count > 1 && _access?.RestrictedClient is null)
@@ -73,14 +73,14 @@
         else if (_stale > 0)
         {
             <span class="muted">
-                DNS last read @Ago(_lastRead).
+                DNS last read @TimeAgo.Days(_lastRead).
                 @_stale of @_rows.Count domain@(_rows.Count == 1 ? "" : "s") not read in the last
                 @RecordStatus.StaleAfterDays days — the nightly scan may not be running.
             </span>
         }
         else
         {
-            <span class="muted">DNS last read @Ago(_lastRead).</span>
+            <span class="muted">DNS last read @TimeAgo.Days(_lastRead).</span>
         }
 
         @if (_access is { CanOperate: true } && Db.Exists)
@@ -118,136 +118,186 @@ else if (_rows.Count == 0)
 }
 else
 {
-    <div class="list-controls">
+    @* The policy counts are the filter, as the severity counts are on the
+       dashboard: "how many are still at p=none" is the question this page is
+       opened to answer, and a number with no way to see those domains is a
+       label rather than a tool. *@
+    <div class="counts">
+        <button type="button" class="count @(_policy is null ? "on" : "")"
+                aria-pressed="@((_policy is null).ToString().ToLowerInvariant())"
+                @onclick="() => FilterPolicy(null)">@InScope.Count all</button>
+
+        @foreach (var policy in Policies)
+        {
+            var n = InScope.Count(r => r.Policy == policy);
+            @if (n > 0)
+            {
+                var chosen = _policy == policy;
+                <button type="button" class="count @PolicyCss(policy) @(chosen ? "on" : "")"
+                        aria-pressed="@chosen.ToString().ToLowerInvariant()"
+                        @onclick="() => FilterPolicy(policy)">@n p=@policy</button>
+            }
+        }
+
+        @if (!string.IsNullOrWhiteSpace(_filter) || _policy is not null)
+        {
+            <span class="muted">@Filtered.Count of @InScope.Count</span>
+        }
+
         <input class="find" type="search" placeholder="Filter by domain or client"
                aria-label="Filter by domain or client"
                @bind="_filter" @bind:event="oninput" />
 
-        <label class="toggle">
-            <input type="checkbox" @bind="_byClient" />
-            Group by client
-        </label>
-
-        @if (!string.IsNullOrWhiteSpace(_filter) || !string.IsNullOrEmpty(_client))
+        @* Only where there is something to group: a book of one client per
+           domain gains nothing from it. Off while the table is ordered by
+           anything but name, and says why - a box that is ticked and does
+           nothing reads as broken. *@
+        @if (_clients.Any(c => c.Domains > 1))
         {
-            <span class="muted">@Filtered.Count of @_rows.Count</span>
+            <label class="toggle" title="@(_sort == DomainSort.Domain ? "Put a client's domains together under its name." : "Off while the table is ordered by another column.")">
+                <input type="checkbox" @bind="_byClient" disabled="@(_sort != DomainSort.Domain)" />
+                Group by client
+            </label>
         }
     </div>
 
     @if (Filtered.Count == 0)
     {
-        <p class="muted">Nothing matches “@_filter”.</p>
-    }
-    else if (_byClient && string.IsNullOrEmpty(_client))
-    {
-        @* One section per customer. This is the view that matters as the book
-           grows: an MSP is asked "how is Acme doing", not "how is
-           acme.example doing", and a flat alphabetical list of eighty domains
-           cannot answer that without the reader doing the grouping by eye.
-           Across organizations the grouping is by organization first, so two
-           customers with the same name in different organizations do not
-           collapse into one heading. *@
-        @foreach (var group in Filtered
-            .GroupBy(r => (AcrossOrganizations ? r.Organization + " / " : "") + r.ClientName)
-            .OrderBy(g => g.Key, StringComparer.Ordinal))
-        {
-            <section>
-                <h2>
-                    @(string.IsNullOrWhiteSpace(group.Key) ? "Unassigned" : group.Key)
-                    <span class="pill">@group.Count() domain(s)</span>
-                </h2>
-                @DomainTable(group)
-            </section>
-        }
+        @* A filter that matches nothing has to say so. An empty table under a
+           search box reads as "no domains", which is not what happened. *@
+        <p class="muted">
+            Nothing matches.
+            <button class="linkish" @onclick="ClearFilters">Show all @InScope.Count</button>
+        </p>
     }
     else
     {
-        @DomainTable(Filtered)
+        @* One table, whatever the grouping. It used to be one per client, so
+           twenty clients meant twenty header rows and twenty sets of columns
+           that each sized themselves to their own contents - none of them
+           lined up with the one above. A client's heading is a row in this
+           table instead. *@
+        <div class="table-scroll">
+            <table class="triage domains">
+                <thead>
+                    <tr>
+                        <th class="shrink" aria-sort="@Aria(DomainSort.Status)">@SortHeader("Status", DomainSort.Status)</th>
+                        <th aria-sort="@Aria(DomainSort.Domain)">@SortHeader("Domain", DomainSort.Domain)</th>
+                        @if (AcrossOrganizations) { <th>Organization</th> }
+                        <th>Records</th>
+                        <th aria-sort="@Aria(DomainSort.Policy)">@SortHeader("Policy", DomainSort.Policy)</th>
+                        <th class="num" aria-sort="@Aria(DomainSort.Volume)">@SortHeader("Volume", DomainSort.Volume)</th>
+                        <th class="num" aria-sort="@Aria(DomainSort.Passing)">@SortHeader("Passing", DomainSort.Passing)</th>
+                        <th class="num" aria-sort="@Aria(DomainSort.Sources)">@SortHeader("Sources", DomainSort.Sources)</th>
+                        <th aria-sort="@Aria(DomainSort.LastReport)">@SortHeader("Last report", DomainSort.LastReport)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var line in Lines)
+                    {
+                        @if (line.Heading is not null)
+                        {
+                            <tr class="group" @key="line.Key">
+                                <th colspan="@Columns" scope="rowgroup">
+                                    @line.Heading
+                                    <span class="pill">@line.Count domains</span>
+                                </th>
+                            </tr>
+                        }
+                        else
+                        {
+                            var row = line.Row!;
+                            var chips = RecordStatus.For(Dns(row.Domain));
+
+                            @* Nothing read yet is one quiet fact, not five
+                               boxes: the banner above says why, and a column of
+                               outlined dashes eighty rows deep is noise. The
+                               chips are still there for the reading to fill in
+                               and for a screen reader to be told. *@
+                            var unread = chips.All(c => c.State == RecordState.Unknown);
+
+                            <tr class="@(line.Headed ? "headed" : "")" @key="@($"{row.Organization}/{row.Domain}")">
+                                <td class="shrink">
+                                    @* A word for a screen reader, and the
+                                       headline for anybody hovering: the dot
+                                       alone is a color. *@
+                                    <span class="pip @Css(row.Level)" role="img"
+                                          aria-label="@(string.IsNullOrWhiteSpace(row.Headline) ? Label(row.Level) : $"{Label(row.Level)}: {row.Headline}")"
+                                          title="@(string.IsNullOrWhiteSpace(row.Headline) ? Label(row.Level) : row.Headline)"></span>
+                                </td>
+                                <td>
+                                    <a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a>
+                                    @* Whose it is, where it is not already said:
+                                       not under a client's heading, and not when
+                                       the client is only the domain over again,
+                                       which onboarding by domain makes most of
+                                       them. *@
+                                    @if (!line.Headed && NamesAClient(row))
+                                    {
+                                        <span class="client-line">@row.ClientName</span>
+                                    }
+                                </td>
+                                @if (AcrossOrganizations) { <td class="muted">@row.Organization</td> }
+                                <td>
+                                    <div class="records @(unread ? "unread" : "")">
+                                        @* Each chip carries its own name and its own shape,
+                                           not only a color: about one man in twelve cannot
+                                           tell the red from the green, and a column of
+                                           eighty rows distinguished by hue alone is a
+                                           column that person cannot read at all. *@
+                                        @foreach (var chip in chips)
+                                        {
+                                            @* role="img" so the label is what gets read.
+                                               Without it a screen reader announces "SPF"
+                                               and stops - the state is carried by a glyph
+                                               and a color, and both are hidden from it.
+                                               title is the same sentence for a pointer. *@
+                                            <span class="chip @chip.Css @(chip.Stale ? "stale" : "")"
+                                                  role="img" aria-label="@($"{chip.Label} for {row.Domain}: {chip.Title}")"
+                                                  title="@chip.Title">
+                                                <span class="chip-name">@chip.Label</span><span class="chip-mark">@chip.Glyph</span>
+                                            </span>
+                                        }
+                                    </div>
+                                </td>
+                                <td><code>p=@row.Policy</code></td>
+                                <td class="num vol">
+                                    <span class="vol-count">@row.Messages.ToString("N0")</span>
+                                    @* Ranks the column by eye; the number above it is
+                                       what anybody reads for the quantity. Scaled
+                                       against the largest row on screen, so filtering
+                                       to one client rescales to that client rather
+                                       than leaving every bar a sliver of the busiest
+                                       domain in the book. *@
+                                    <span class="vol-bar" aria-hidden="true">
+                                        <span style="width:@Width(row.Messages)%"></span>
+                                    </span>
+                                </td>
+                                <td class="num">
+                                    @if (row.Messages > 0)
+                                    {
+                                        <span class="@(row.PassRate < 95 ? "bad" : "good")">@row.PassRate%</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="muted">—</span>
+                                    }
+                                </td>
+                                <td class="num">@row.Sources</td>
+                                <td class="when">@TimeAgo.Days(row.LastReport)</td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
     }
 }
 
-@* One definition, rendered either once or once per client. Two copies of a
-   table drift, and the columns here are the ones somebody compares across
-   rows. *@
-@{
-    RenderFragment DomainTable(IEnumerable<DomainTriage> rows) =>
-    @<div class="table-scroll">
-        <table class="triage">
-            <thead>
-                <tr>
-                    <th></th>
-                    <th>Domain</th>
-                    @if (!_byClient && AcrossOrganizations) { <th>Organization</th> }
-                    @if (!_byClient) { <th>Client</th> }
-                    <th>Records</th>
-                    <th>Policy</th>
-                    <th class="num">Volume</th>
-                    <th class="num">Passing</th>
-                    <th class="num">Sources</th>
-                    <th>Last report</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var row in rows)
-                {
-                    <tr>
-                        <td><span class="pip @Css(row.Level)" title="@row.Headline"></span></td>
-                        <td><a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a></td>
-                        @if (!_byClient && AcrossOrganizations) { <td class="muted">@row.Organization</td> }
-                        @if (!_byClient) { <td class="muted">@row.ClientName</td> }
-                        <td class="records">
-                            @* Each chip carries its own name and its own shape,
-                               not only a color: about one man in twelve cannot
-                               tell the red from the green, and a column of
-                               eighty rows distinguished by hue alone is a
-                               column that person cannot read at all. *@
-                            @foreach (var chip in RecordStatus.For(Dns(row.Domain)))
-                            {
-                                @* role="img" so the label is what gets read.
-                                   Without it a screen reader announces "SPF"
-                                   and stops - the state is carried by a glyph
-                                   and a color, and both are hidden from it.
-                                   title is the same sentence for a pointer. *@
-                                <span class="chip @chip.Css @(chip.Stale ? "stale" : "")"
-                                      role="img" aria-label="@($"{chip.Label} for {row.Domain}: {chip.Title}")"
-                                      title="@chip.Title">
-                                    <span class="chip-name">@chip.Label</span><span class="chip-mark">@chip.Glyph</span>
-                                </span>
-                            }
-                        </td>
-                        <td><code>p=@row.Policy</code></td>
-                        <td class="num vol">
-                            <span class="vol-count">@row.Messages.ToString("N0")</span>
-                            @* Ranks the column by eye; the number above it is
-                               what anybody reads for the quantity. Scaled
-                               against the largest row on screen, so filtering
-                               to one client rescales to that client rather
-                               than leaving every bar a sliver of the busiest
-                               domain in the book. *@
-                            <span class="vol-bar" aria-hidden="true">
-                                <span style="width:@Width(row.Messages)%"></span>
-                            </span>
-                        </td>
-                        <td class="num">
-                            @if (row.Messages > 0)
-                            {
-                                <span class="@(row.PassRate < 95 ? "bad" : "good")">@row.PassRate%</span>
-                            }
-                            else
-                            {
-                                <span class="muted">—</span>
-                            }
-                        </td>
-                        <td class="num">@row.Sources</td>
-                        <td class="muted">@Ago(row.LastReport)</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
-    </div>;
-}
-
 @code {
+    /// <summary>The policies there are, weakest first, which is the order the counts read in.</summary>
+    private static readonly string[] Policies = ["none", "quarantine", "reject"];
+
     private OrganizationAccess? _access;
     private IReadOnlyList<ReportStore.ClientSummary> _clients = [];
     private IReadOnlyList<DomainTriage>? _rows;
@@ -260,10 +310,15 @@ else
     private string? _error;
     private string _filter = "";
     private string _client = "";
+    private string? _policy;
     private int _days = 30;
     private bool _byClient;
+    private DomainSort _sort = DomainSort.Domain;
+    private bool _descending;
 
     private bool AcrossOrganizations => _access is { IsMaster: true, Current: null, Visible.Count: > 1 };
+
+    private int Columns => 8 + (AcrossOrganizations ? 1 : 0);
 
     /// <summary>
     /// What is stored about a domain's DNS, or an unread one.
@@ -303,41 +358,66 @@ else
     /// </remarks>
     private string Width(long messages)
     {
-        _ = Filtered;   // whose computation is also what sets the scale
+        _ = Lines;   // whose computation is also what sets the scale
         return Chart.Percent(Chart.BarWidth(messages, _busiest));
     }
 
-    // Alphabetical, not by urgency. Triage already ranks; this exists to find
-    // a named domain, and a list that reorders itself as data changes is the
-    // wrong tool for that.
-    //
-    // Memoized because one render reads it several times - the count, the
-    // grouping, the rows, and the scale every volume bar is drawn against -
-    // and recomputing the filter inside the loop that the filter produced
-    // makes the page quadratic in the size of the book.
-    private (string Filter, string Client, object? Source) _filteredFrom = ("", "", null);
-    private IReadOnlyList<DomainTriage> _filtered = [];
+    // The domains in the chosen client, before any narrowing by typing: what
+    // the counts are counts of. Counting what the box has left would make the
+    // numbers jump while somebody types.
+    private (string Client, object? Source) _scopedFrom = ("", null);
+    private IReadOnlyList<DomainTriage> _scoped = [];
 
-    private IReadOnlyList<DomainTriage> Filtered
+    private IReadOnlyList<DomainTriage> InScope
     {
         get
         {
-            var from = (_filter, _client, (object?)_rows);
-            if (_filteredFrom != from)
+            var from = (_client, (object?)_rows);
+            if (_scopedFrom != from)
             {
-                _filtered = _rows is null ? []
-                    : [.. _rows
-                        .Where(r => string.IsNullOrEmpty(_client) || r.ClientSlug.Equals(_client, StringComparison.OrdinalIgnoreCase))
-                        .Where(r => string.IsNullOrWhiteSpace(_filter)
-                                 || r.Domain.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-                                 || r.ClientName.Contains(_filter, StringComparison.OrdinalIgnoreCase))
-                        .OrderBy(r => r.Domain, StringComparer.Ordinal)];
-                _busiest = _filtered.Count == 0 ? 0 : _filtered.Max(r => r.Messages);
-                _filteredFrom = from;
+                _scoped = _rows is null ? []
+                    : [.. _rows.Where(r => string.IsNullOrEmpty(_client)
+                        || r.ClientSlug.Equals(_client, StringComparison.OrdinalIgnoreCase))];
+                _scopedFrom = from;
             }
 
-            return _filtered;
+            return _scoped;
         }
+    }
+
+    // Memoized because one render reads it several times - the count, the
+    // emptiness check, the rows, and the scale every volume bar is drawn
+    // against - and recomputing the filter inside the loop that the filter
+    // produced makes the page quadratic in the size of the book.
+    private (string Filter, string? Policy, DomainSort Sort, bool Descending, bool ByClient, bool Across, object? Scoped) _linesFrom
+        = ("", null, DomainSort.Domain, false, false, false, null);
+    private IReadOnlyList<DomainTriage> _filtered = [];
+    private IReadOnlyList<DomainLine> _lines = [];
+
+    private void Rebuild()
+    {
+        var from = (_filter, _policy, _sort, _descending, _byClient, AcrossOrganizations, (object?)InScope);
+        if (_linesFrom == from) { return; }
+
+        var needle = _filter.Trim();
+        _filtered = [.. InScope
+            .Where(r => _policy is null || r.Policy == _policy)
+            .Where(r => needle.Length == 0
+                     || r.Domain.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                     || r.ClientName.Contains(needle, StringComparison.OrdinalIgnoreCase))];
+        _busiest = _filtered.Count == 0 ? 0 : _filtered.Max(r => r.Messages);
+        _lines = DomainList.Layout(_filtered, _sort, _descending, _byClient, AcrossOrganizations);
+        _linesFrom = from;
+    }
+
+    private IReadOnlyList<DomainTriage> Filtered
+    {
+        get { Rebuild(); return _filtered; }
+    }
+
+    private IReadOnlyList<DomainLine> Lines
+    {
+        get { Rebuild(); return _lines; }
     }
 
     protected override Task OnInitializedAsync() => LoadAsync();
@@ -369,6 +449,10 @@ else
             if (_access.RestrictedClient is { } only) { _client = only; }
 
             _rows = await Triage.GetAsync(_days, tenant, _access.RestrictedClient);
+
+            // A policy filter on something the new window no longer has would
+            // leave an empty table and a count of zero to explain it.
+            if (_policy is not null && _rows.All(r => r.Policy != _policy)) { _policy = null; }
 
             // Read from storage, never resolved here: a table of eighty rows
             // would otherwise be eighty DNS lookups per render, each able to
@@ -448,18 +532,47 @@ else
         _scanMessage = outcome;
     }
 
-    private static string Ago(DateTimeOffset? when)
-    {
-        if (when is null) { return "never"; }
+    private void FilterPolicy(string? policy) => _policy = _policy == policy ? null : policy;
 
-        var days = (int)(DateTimeOffset.UtcNow - when.Value).TotalDays;
-        return days switch
-        {
-            <= 0 => "today",
-            1 => "yesterday",
-            _ => $"{days} days ago",
-        };
+    private void ClearFilters()
+    {
+        _filter = "";
+        _policy = null;
     }
+
+    /// <summary>
+    /// Orders by a column; pressing the one already chosen reverses it.
+    /// </summary>
+    /// <remarks>
+    /// A column opens on the order somebody pressing it is asking for - see
+    /// <see cref="DomainList.StartsDescending"/> - rather than always on the
+    /// same side.
+    /// </remarks>
+    private void SortBy(DomainSort column)
+    {
+        if (_sort == column)
+        {
+            _descending = !_descending;
+            return;
+        }
+
+        _sort = column;
+        _descending = DomainList.StartsDescending(column);
+    }
+
+    private string? Aria(DomainSort column) => SortButton.AriaSort(_sort == column, _descending);
+
+    private RenderFragment SortHeader(string label, DomainSort column) =>
+        @<SortButton Label="@label" Active="@(_sort == column)" Descending="_descending" OnPress="() => SortBy(column)" />;
+
+    /// <summary>
+    /// Whether the client is worth printing under the domain: it has a name,
+    /// it is a client rather than the waiting room, and it is not just the
+    /// domain over again.
+    /// </summary>
+    private static bool NamesAClient(DomainTriage row) =>
+        !string.IsNullOrWhiteSpace(row.ClientName)
+        && !string.Equals(row.ClientName, row.Domain, StringComparison.OrdinalIgnoreCase);
 
     private static string Css(TriageLevel level) => level switch
     {
@@ -468,5 +581,22 @@ else
         TriageLevel.Watch => "watch",
         TriageLevel.OnTrack => "ontrack",
         _ => "fine",
+    };
+
+    private static string Label(TriageLevel level) => level switch
+    {
+        TriageLevel.Urgent => "Urgent",
+        TriageLevel.Act => "Act",
+        TriageLevel.Watch => "Watch",
+        TriageLevel.OnTrack => "On track",
+        _ => "Fine",
+    };
+
+    /// <summary>Not enforcing is the one to look at; enforcing is the goal, and a rollout in between is information.</summary>
+    private static string PolicyCss(string policy) => policy switch
+    {
+        "reject" => "fine",
+        "quarantine" => "ontrack",
+        _ => "watch",
     };
 }

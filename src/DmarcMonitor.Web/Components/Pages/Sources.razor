@@ -1,20 +1,22 @@
 @page "/sources"
 @using DmarcMonitor.Core.Intelligence
+@using DmarcMonitor.Core.Tenancy
 @using DmarcMonitor.Web.Data
 @using DmarcMonitor.Web.Auth
 @inject CorrelationService Correlation
+@inject SourceNamingService Naming
 @inject ReportStoreConnection Db
 @inject OrgContext Org
 @rendermode InteractiveServer
 
-<PageTitle>Sources — DMARC Monitor</PageTitle>
+<PageTitle>Sending sources — DMARC Monitor</PageTitle>
 
 <header class="page-head">
     <div>
-        <h1>Failing sources</h1>
-        <p class="sub">Everything sending as a client domain without authenticating, ranked by how many
-           clients it is hitting. A source against one domain is noise; the same source against three
-           unrelated businesses is somebody running a campaign.</p>
+        <h1>Sending sources</h1>
+        <p class="sub">Mail sent as your clients' domains that failed authentication, one row per sender. One
+           address against one domain is usually noise; the same sender reaching several unrelated clients
+           is somebody working through a list.</p>
     </div>
     <div class="head-actions">
         <label>
@@ -55,178 +57,472 @@ else if (_rows.Count == 0)
 }
 else
 {
-    @if (_operators.Count > 0)
-    {
-        @* One operator, several addresses, customers unrelated to each other.
-           Above the per-address table because the table cannot show it: four
-           rows at one hosting provider against three customers read as four
-           unrelated findings, and changing address between customers costs
-           nothing on a VPS host. *@
-        <section class="callout urgent">
-            <h2>@_operators.Count operator(s) using several addresses across your customers</h2>
-            <p>
-                The same operator, reaching customers that have nothing to do with each other. Each
-                address below is listed again in the table underneath — blocking is done by address —
-                but the pattern is only visible here.
-            </p>
+    @* Where the names come from, and how many are still missing. On the page
+       rather than only in a tooltip, because a column of bare addresses with
+       no word about why is a page that looks unfinished - and the Windows
+       trial has no nightly job to fill them in. *@
+    <div class="dns-state">
+        @if (_looking)
+        {
+            <span class="muted">Looking up names…</span>
+        }
+        else if (_lookupMessage is not null)
+        {
+            <span class="muted">@_lookupMessage</span>
+        }
+        else
+        {
+            <span class="muted">@NamesSummary</span>
+        }
 
-            <table class="triage">
+        @if (_access is { CanOperate: true } && _due > 0 && !_looking)
+        {
+            <button class="linkish" @onclick="LookUpAsync">Look up names now</button>
+        }
+    </div>
+
+    @* The counts are the key and the filter in one: each says what its label
+       means, how many senders carry it, and shows only those when pressed. *@
+    <div class="counts">
+        <button type="button" class="count @(_reading is null && !_spanning ? "on" : "")"
+                aria-pressed="@((_reading is null && !_spanning).ToString().ToLowerInvariant())"
+                @onclick="ClearFilters">@_groups.Count all</button>
+
+        @foreach (var reading in Readings)
+        {
+            var n = _groups.Count(g => g.Reading == reading);
+            @if (n > 0)
+            {
+                var chosen = _reading == reading;
+                <button type="button" class="count @Css(reading) @(chosen ? "on" : "")"
+                        aria-pressed="@chosen.ToString().ToLowerInvariant()"
+                        title="@Gist(reading)"
+                        @onclick="() => Filter(reading)">@n @Label(reading)</button>
+            }
+        }
+
+        @if (_spanningCount > 0)
+        {
+            @* Not a fifth kind of source: a property a sender can have on top of
+               any of them. Several addresses at one operator, reaching clients
+               that have nothing to do with each other - which no row of one
+               address can show. *@
+            <button type="button" class="count urgent @(_spanning ? "on" : "")"
+                    aria-pressed="@_spanning.ToString().ToLowerInvariant()"
+                    title="Several addresses at one operator, against clients that have nothing to do with each other."
+                    @onclick="ToggleSpanning">@_spanningCount spanning clients</button>
+        }
+
+        <input class="find" type="search" placeholder="Find a sender or domain"
+               aria-label="Find a sender, address or domain"
+               @bind="_filter" @bind:event="oninput" />
+
+        <label class="toggle">
+            <input type="checkbox" @bind="_grouped" @bind:after="Regroup" />
+            Group by sender
+        </label>
+    </div>
+
+    <details class="key">
+        <summary>What the labels mean</summary>
+        <dl>
+            @foreach (var reading in Readings)
+            {
+                <dt><span class="count @Css(reading)">@Label(reading)</span></dt>
+                <dd>@Explain(reading)</dd>
+            }
+        </dl>
+    </details>
+
+    @if (Shown.Count == 0)
+    {
+        @* A filter that matches nothing has to say so. An empty table under a
+           search box reads as "nothing is failing", which is not what happened. *@
+        <p class="muted">
+            Nothing matches.
+            <button class="linkish" @onclick="ClearFilters">Show all @_groups.Count</button>
+        </p>
+    }
+    else
+    {
+        <div class="table-scroll">
+            <table class="triage sources">
                 <thead>
                     <tr>
-                        <th>Operator</th>
-                        <th class="num">Addresses</th>
-                        <th class="num">Domains</th>
-                        <th>Seen against</th>
-                        <th class="num">Failed</th>
+                        <th aria-sort="@Aria(SenderSort.Severity)">@SortHeader("Looks like", SenderSort.Severity)</th>
+                        <th aria-sort="@Aria(SenderSort.Sender)">@SortHeader("Sender", SenderSort.Sender)</th>
+                        <th class="num" aria-sort="@Aria(SenderSort.Failed)">@SortHeader("Failed", SenderSort.Failed)</th>
+                        @* "Parties", not "Clients": a domain still in the
+                           Unassigned bucket counts for itself here, so the
+                           number is not always a count of customers. *@
+                        <th aria-sort="@Aria(SenderSort.Reach)">@SortHeader("Seen against", SenderSort.Reach)</th>
+                        <th aria-sort="@Aria(SenderSort.LastSeen)">@SortHeader("Last seen", SenderSort.LastSeen)</th>
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var o in _operators)
+                    @foreach (var g in Shown)
                     {
-                        <tr class="@Css(o.Verdict)">
-                            <td>
-                                <span class="source-name">@o.Name</span>
-                                <code class="source-ip muted">@o.Domain</code>
+                        <tr @key="g.Key">
+                            @* A word, not a dot: the kind of source is the
+                               thing being read, and a color that carries it
+                               alone is a column about one man in twelve
+                               cannot read. *@
+                            <td class="shrink">
+                                <span class="count @Css(g.Reading)" title="@Gist(g.Reading)">@Label(g.Reading)</span>
                             </td>
-                            <td class="num">@o.AddressCount</td>
-                            <td class="num"><strong class="bad">@o.Domains.Count</strong></td>
-                            <td class="muted">@string.Join(", ", o.Domains)</td>
-                            <td class="num">@o.FailedMessages.ToString("N0")</td>
+                            <td>
+                                @if (!g.IsGroup)
+                                {
+                                    @* The name first and the address under it,
+                                       because the name is what the row is about
+                                       and the address is how to look it up. An
+                                       unnamed source prints exactly as it always
+                                       did - one line, the address. *@
+                                    <SourceLabel Address="@g.Sources[0].SourceIp" Name="@g.Name" />
+                                }
+                                else
+                                {
+                                    <span class="source-name">@g.Name</span>
+                                    @if (g.Domain is not null && !string.Equals(g.Domain, g.Name, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <code class="source-ip muted">@g.Domain</code>
+                                    }
+                                    @* The addresses stay one click away rather
+                                       than gone: they are the identity, and
+                                       blocking is done by address. *@
+                                    <details class="addresses">
+                                        <summary>@g.AddressCount addresses@(NamesUnconfirmed(g) ? " · names not confirmed" : "")</summary>
+                                        <ul>
+                                            @foreach (var s in g.Sources)
+                                            {
+                                                <li>
+                                                    <a href="@($"/sources/{Uri.EscapeDataString(s.SourceIp)}")"><code>@s.SourceIp</code></a>
+                                                    <span class="count @Css(s.Reading)" title="@Gist(s.Reading)">@Label(s.Reading)</span>
+                                                    <span class="muted">
+                                                        @s.FailedMessages.ToString("N0") failed · @Shorten(s.Domains)
+                                                        @* What the address says it is, as it says it. Kept here
+                                                           rather than only behind the vendor name because the
+                                                           hostname often carries the one fact that explains the
+                                                           row - "unverified-forwarding" - which a vendor label
+                                                           folds away. *@
+                                                        @if (!string.IsNullOrWhiteSpace(s.ReverseName))
+                                                        {
+                                                            <br /><span class="reverse">@s.ReverseName</span>
+                                                        }
+                                                    </span>
+                                                </li>
+                                            }
+                                        </ul>
+                                    </details>
+                                }
+                            </td>
+                            <td class="num">@g.FailedMessages.ToString("N0")</td>
+                            <td class="reach">
+                                @* IndependentParties, not a count of clients:
+                                   it is the number the verdict was reached on.
+                                   Every domain still in the Unassigned bucket
+                                   counts for itself - two domains waiting
+                                   there are no more related than two
+                                   belonging to different customers. *@
+                                <span class="@(IsWide(g) ? "bad" : "muted")">
+                                    <strong>@g.IndependentParties</strong> @(g.IndependentParties == 1 ? "party" : "parties")
+                                </span>
+                                <span class="domains">
+                                    @string.Join(", ", g.Domains.Take(DomainsShown))
+                                    @if (g.Domains.Count > DomainsShown)
+                                    {
+                                        <text>&nbsp;</text>
+                                        <details class="more">
+                                            <summary>+@(g.Domains.Count - DomainsShown) more</summary>
+                                            @string.Join(", ", g.Domains.Skip(DomainsShown))
+                                        </details>
+                                    }
+                                </span>
+                            </td>
+                            <td class="when">@TimeAgo.Days(g.LastSeen)</td>
                         </tr>
                     }
                 </tbody>
             </table>
-        </section>
-    }
+        </div>
 
-    @if (_crossClient.Count > 0)
-    {
-        <section class="callout urgent">
-            <h2>@_crossClient.Count source(s) hitting more than one client</h2>
-            <p>
-                Only a platform watching several clients can see this. A single-tenant tool shows each
-                domain owner their own reports and never sees the other company's data, so it cannot
-                notice the same source working through several businesses.
-            </p>
-        </section>
+        @if (_rows.Count >= Limit)
+        {
+            @* The query stops at the worst two hundred addresses. Said, rather
+               than leaving a list that ends where the query did and reads as
+               complete. *@
+            <p class="muted">Showing the @Limit worst addresses in this window. A shorter window shows fewer, and different, ones.</p>
+        }
     }
-
-    <table class="triage">
-        <thead>
-            <tr>
-                <th></th>
-                <th>Source</th>
-                @* "Parties", not "Clients": a domain still in the Unassigned
-                   bucket counts for itself here, so the number is not always a
-                   count of customers. *@
-                <th class="num">Parties</th>
-                <th class="num">Failed</th>
-                <th>Seen against</th>
-                <th>What it looks like</th>
-            </tr>
-        </thead>
-        <tbody>
-            @foreach (var row in _rows)
-            {
-                <tr class="@Css(row.Verdict)">
-                    <td><span class="pip @Css(row.Verdict)"></span></td>
-                    @* The name first and the address under it, because the
-                       name is what the row is about and the address is how to
-                       look it up. An unnamed source prints exactly as it
-                       always did - one line, the address - so the worst case
-                       here is the old case rather than a gap where a name
-                       should be. *@
-                    <td><SourceLabel Address="@row.SourceIp" Name="@row.Display" /></td>
-                    @* IndependentParties, not ClientCount, because that is the
-                       number the verdict was reached on. Every domain still in
-                       the Unassigned bucket counts for itself - two domains
-                       waiting there are no more related than two belonging to
-                       different customers - so on a fresh install, where
-                       everything is unassigned, ClientCount is 1 for every row
-                       in the table. Printing it put "against 1 unrelated
-                       clients" beside a row flagged for hitting several. *@
-                    <td class="num">
-                        @if (row.IsCrossClient)
-                        {
-                            <strong class="bad">@row.IndependentParties</strong>
-                        }
-                        else
-                        {
-                            <span class="muted">@row.IndependentParties</span>
-                        }
-                    </td>
-                    <td class="num">@row.FailedMessages.ToString("N0")</td>
-                    <td class="muted">@string.Join(", ", row.Domains)</td>
-                    <td>@Explain(row)</td>
-                </tr>
-            }
-        </tbody>
-    </table>
 }
 
 @code {
+    /// <summary>The most addresses the query returns, worst first.</summary>
+    private const int Limit = 200;
+
+    /// <summary>How many domains a row names before the rest fold away.</summary>
+    private const int DomainsShown = 3;
+
+    /// <summary>Worst first, which is the order the counts read in.</summary>
+    private static readonly SourceReading[] Readings =
+    [
+        SourceReading.CrossClient,
+        SourceReading.Unauthenticated,
+        SourceReading.Unaligned,
+        SourceReading.OwnSendingPath,
+    ];
+
+    private OrganizationAccess? _access;
     private IReadOnlyList<FailingSource>? _rows;
-    private IReadOnlyList<FailingSource> _crossClient = [];
-    private IReadOnlyList<FailingOperator> _operators = [];
+    private IReadOnlyList<SenderGroup> _groups = [];
+    private int _spanningCount;
     private string? _error;
     private int _days = 30;
+
+    private bool _grouped = true;
+    private string _filter = "";
+    private SourceReading? _reading;
+    private bool _spanning;
+    private SenderSort _sort = SenderSort.Severity;
+    private bool _descending = true;
+
+    private int _due;
+    private bool _looking;
+    private string? _lookupMessage;
+
+    // Memoized because one render reads it several times - the emptiness
+    // check, the rows - and ordering a few hundred groups on each read would
+    // make the page quadratic in the length of its own list.
+    private (string Filter, SourceReading? Reading, bool Spanning, SenderSort Sort, bool Descending, object? Source) _shownFrom
+        = ("", null, false, SenderSort.Severity, true, null);
+    private IReadOnlyList<SenderGroup> _shown = [];
+
+    private IReadOnlyList<SenderGroup> Shown
+    {
+        get
+        {
+            var from = (_filter, _reading, _spanning, _sort, _descending, (object?)_groups);
+            if (_shownFrom != from)
+            {
+                var needle = _filter.Trim();
+                _shown = SenderGroup.Order(
+                    _groups
+                        .Where(g => _reading is null || g.Reading == _reading)
+                        .Where(g => !_spanning || g.SpansClients)
+                        .Where(g => needle.Length == 0 || Matches(g, needle)),
+                    _sort, _descending);
+                _shownFrom = from;
+            }
+
+            return _shown;
+        }
+    }
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
     private async Task LoadAsync()
     {
         _error = null;
-        if (!Db.Exists) { _rows = Array.Empty<FailingSource>(); return; }
+        _lookupMessage = null;
+        if (!Db.Exists) { _rows = Array.Empty<FailingSource>(); _groups = []; return; }
 
         try
         {
             // Across this organization's clients, which is the point of the
             // page, and never across organizations, which would be a leak.
-            var access = await Org.GetAsync();
-            _rows = await Correlation.GetFailingSourcesAsync(_days, tenantId: access.TenantId, clientSlug: access.RestrictedClient);
-            _crossClient = [.. _rows.Where(r => r.IsCrossClient)];
-            _operators = CorrelationService.ByOperator(_rows);
+            _access = await Org.GetAsync();
+            _rows = await Correlation.GetFailingSourcesAsync(
+                _days, Limit, tenantId: _access.TenantId, clientSlug: _access.RestrictedClient);
+            Regroup();
         }
         catch (Exception ex)
         {
             _rows = Array.Empty<FailingSource>();
-            _crossClient = [];
-            _operators = [];
+            _groups = [];
             _error = ex.Message;
+            return;
+        }
+
+        // Optional, so its failing must not take the table down with it.
+        try
+        {
+            _due = await Naming.DueAsync([.. _rows.Select(r => r.SourceIp)]);
+        }
+        catch (Exception)
+        {
+            _due = 0;
         }
     }
 
-    private static string Css(SourceVerdict verdict) => verdict switch
+    private void Regroup()
     {
-        SourceVerdict.CrossClientImpersonation => "urgent",
-        SourceVerdict.Unauthenticated => "act",
-        _ => "watch",
+        _groups = _rows is null ? [] : SenderGroup.Build(_rows, _grouped);
+        _spanningCount = _groups.Count(g => g.SpansClients);
+
+        // A filter on something that no longer exists would show an empty
+        // table, with no chip lit to say what it was filtered by.
+        if (_spanningCount == 0) { _spanning = false; }
+        if (_reading is { } chosen && _groups.All(g => g.Reading != chosen)) { _reading = null; }
+    }
+
+    /// <summary>
+    /// Looks up the names of the addresses on the page that have none.
+    /// </summary>
+    /// <remarks>
+    /// The nightly job is what normally does this. The button exists because
+    /// the Windows trial has no scheduler, and a table of bare addresses with
+    /// nothing on the page to say why reads as a feature that does not work.
+    /// </remarks>
+    private async Task LookUpAsync()
+    {
+        if (_access is not { CanOperate: true } || _looking || _rows is null) { return; }
+
+        _looking = true;
+        _lookupMessage = null;
+        string outcome;
+
+        try
+        {
+            var run = await Naming.LookUpAsync(_access.TenantId, _access.User, [.. _rows.Select(r => r.SourceIp)]);
+            outcome = run is null ? "There is no database to store a name in." : run.Value.Describe();
+        }
+        catch (Exception ex)
+        {
+            outcome = $"Could not look names up: {ex.Message}";
+        }
+        finally
+        {
+            _looking = false;
+        }
+
+        // Reloaded first, because LoadAsync clears the message and regroups:
+        // what is shown has to describe the names now on screen.
+        await LoadAsync();
+        _lookupMessage = outcome + (_due > 0
+            ? $" {_due} more are due; a press does at most {SourceNamingService.LookupLimit}."
+            : "");
+    }
+
+    private string NamesSummary
+    {
+        get
+        {
+            var total = _rows?.Count ?? 0;
+            var named = _rows?.Count(r => !string.IsNullOrWhiteSpace(r.ReverseName)) ?? 0;
+
+            return _due > 0
+                ? $"{named} of {total} addresses have a name; {_due} have not been looked up yet — a server install does that nightly."
+                : named < total
+                    ? $"{named} of {total} addresses have a name. The rest have no reverse DNS, which is ordinary for a sender that does not publish one."
+                    : $"All {total} addresses are named.";
+        }
+    }
+
+    private void Filter(SourceReading reading) => _reading = _reading == reading ? null : reading;
+
+    private void ToggleSpanning() => _spanning = !_spanning;
+
+    private void ClearFilters()
+    {
+        _reading = null;
+        _spanning = false;
+        _filter = "";
+    }
+
+    /// <summary>
+    /// Sorts by a column; pressing the one already chosen reverses it.
+    /// </summary>
+    /// <remarks>
+    /// Names start A to Z and everything else starts largest first, because
+    /// those are the orders somebody pressing the header is asking for.
+    /// </remarks>
+    private void SortBy(SenderSort column)
+    {
+        if (_sort == column)
+        {
+            _descending = !_descending;
+            return;
+        }
+
+        _sort = column;
+        _descending = column != SenderSort.Sender;
+    }
+
+    private string? Aria(SenderSort column) => SortButton.AriaSort(_sort == column, _descending);
+
+    private RenderFragment SortHeader(string label, SenderSort column) =>
+        @<SortButton Label="@label" Active="@(_sort == column)" Descending="_descending" OnPress="() => SortBy(column)" />;
+
+    private static bool Matches(SenderGroup g, string needle) =>
+        g.Name.Contains(needle, StringComparison.OrdinalIgnoreCase)
+        || (g.Domain?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false)
+        || g.Domains.Any(d => d.Contains(needle, StringComparison.OrdinalIgnoreCase))
+        || g.Clients.Any(c => c.Contains(needle, StringComparison.OrdinalIgnoreCase))
+        || g.Sources.Any(s => s.SourceIp.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                           || (s.ReverseName?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false));
+
+    /// <summary>Whether the number of parties is the finding: red for a reach that is itself the story.</summary>
+    /// <remarks>
+    /// A mail provider's fourteen addresses against fourteen domains is the
+    /// size of the provider, not an alarm, so a group is red only where it
+    /// spans clients; a single address is red where it was seen against
+    /// several.
+    /// </remarks>
+    private static bool IsWide(SenderGroup g) => g.IsGroup ? g.SpansClients : g.Sources[0].IsCrossClient;
+
+    private static bool NamesUnconfirmed(SenderGroup g) => g.Sources.Any(s => !s.NameConfirmed);
+
+    private static string Shorten(IReadOnlyList<string> items) =>
+        items.Count <= DomainsShown
+            ? string.Join(", ", items)
+            : $"{string.Join(", ", items.Take(DomainsShown))} +{items.Count - DomainsShown} more";
+
+    private static string Label(SourceReading reading) => reading switch
+    {
+        SourceReading.CrossClient => "Cross-client",
+        SourceReading.Unauthenticated => "Unauthenticated",
+        SourceReading.Unaligned => "Unaligned service",
+        _ => "Own sending path",
+    };
+
+    private static string Css(SourceReading reading) => reading switch
+    {
+        SourceReading.CrossClient => "urgent",
+        SourceReading.Unauthenticated => "act",
+        SourceReading.Unaligned => "watch",
+        _ => "",
+    };
+
+    /// <summary>The hover text: enough to read a row without opening the key.</summary>
+    private static string Gist(SourceReading reading) => reading switch
+    {
+        SourceReading.CrossClient => "No authentication at all, against several unrelated clients.",
+        SourceReading.Unauthenticated => "No authentication at all, against one client so far.",
+        SourceReading.Unaligned => "Authenticates, but as the provider rather than as the client.",
+        _ => "Passes elsewhere for these domains; signatures broken in transit here.",
     };
 
     /// <summary>
-    /// Deliberately cautious wording. Calling a client's own marketing
-    /// platform an attacker is how an operator blocks their own invoices.
+    /// The key's sentences, said once. Deliberately cautious wording: calling a
+    /// client's own marketing platform an attacker is how an operator blocks
+    /// their own invoices.
     /// </summary>
-    private static string Explain(FailingSource row) => row.Verdict switch
+    private static string Explain(SourceReading reading) => reading switch
     {
-        SourceVerdict.CrossClientImpersonation =>
-            $"Authenticated nothing, against {row.IndependentParties} unrelated "
-          + $"{(row.IndependentParties == 1 ? "party" : "parties")}. "
+        SourceReading.CrossClient =>
+            "Authenticated nothing for anyone, and was seen against several unrelated parties. "
           + "One would be noise; several is somebody working through a list.",
 
-        SourceVerdict.Unauthenticated =>
-            "Authenticated nothing. Either a service nobody recorded, or somebody sending as this domain.",
+        SourceReading.Unauthenticated =>
+            "Authenticated nothing for anyone, and seen against one party so far. "
+          + "Either a service nobody recorded, or somebody sending as this domain.",
 
-        // A source that has passed but names no other domain is one of the
-        // client's own sending paths breaking in transit, not a third party
-        // signing as itself. Without this branch the sentence reads
-        // "Authenticated for  rather than the domain it sends as".
-        _ when row.AuthenticatedFor.Count == 0 =>
-            $"Has sent authenticated mail for all {row.DomainCount} of these domains, so it is one of their "
-          + "own sending paths. These failures are signatures broken in transit, not somebody sending as them.",
+        SourceReading.Unaligned =>
+            "Authenticated, but for the provider's own domain rather than the client's. "
+          + "Almost always a real service nobody set up to sign as the client, not an attack.",
 
         _ =>
-            $"Authenticated for {string.Join(", ", row.AuthenticatedFor)} rather than the domain it sends as. "
-          + "Almost always a real service set up with the provider's own domain, not an attack.",
+            "Has sent authenticated mail for every domain it fails against, so it is one of the client's "
+          + "own sending paths. These failures are signatures broken in transit, not somebody sending as them.",
     };
 }

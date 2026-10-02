@@ -113,14 +113,24 @@ internal sealed partial class LivePage : IAsyncDisposable
     /// the section that mentions <paramref name="inSectionWith"/> where a page
     /// has a button per row.
     /// </summary>
-    public async Task ClickAsync(string text, string? inSectionWith = null)
+    public Task ClickAsync(string text, string? inSectionWith = null) =>
+        ClickAsync(label => label == text, $"\"{text}\"", inSectionWith);
+
+    /// <summary>
+    /// Presses the one button whose label satisfies <paramref name="matches"/>.
+    /// For a button whose label carries a number that moves with the data
+    /// ("3 Unauthenticated"), or an arrow that appears once it is chosen.
+    /// </summary>
+    /// <param name="matches">Given the button's text, trimmed and with runs of white space made single spaces.</param>
+    /// <param name="what">What was looked for, for the message when there is not exactly one.</param>
+    public async Task ClickAsync(Func<string, bool> matches, string what, string? inSectionWith = null)
     {
         await _host.Dispatcher.InvokeAsync(async () =>
         {
             var tree = _host.Read();
             var buttons = tree.Elements
                 .Where(e => e.Name == "button" && e.Handlers.ContainsKey("onclick"))
-                .Where(e => e.Text.Trim() == text)
+                .Where(e => matches(Tidy().Replace(e.Text.Trim(), " ")))
                 .Where(e => inSectionWith is null
                     || (e.Nearest("section")?.Text.Contains(inSectionWith, StringComparison.Ordinal) ?? false))
                 .ToList();
@@ -128,7 +138,7 @@ internal sealed partial class LivePage : IAsyncDisposable
             if (buttons.Count != 1)
             {
                 throw new InvalidOperationException(
-                    $"Expected one \"{text}\" button{(inSectionWith is null ? "" : $" beside {inSectionWith}")}, "
+                    $"Expected one {what} button{(inSectionWith is null ? "" : $" beside {inSectionWith}")}, "
                     + $"found {buttons.Count}. The page:\n{tree.Html}");
             }
 
@@ -137,6 +147,57 @@ internal sealed partial class LivePage : IAsyncDisposable
 
         ThrowIfFailed();
     }
+
+    /// <summary>
+    /// Types into the input labelled <paramref name="label"/>: the event a
+    /// browser sends for each change to one that updates as you type.
+    /// </summary>
+    public async Task TypeAsync(string label, string value)
+    {
+        await _host.Dispatcher.InvokeAsync(async () =>
+        {
+            var tree = _host.Read();
+            var input = tree.Elements.SingleOrDefault(e =>
+                    e.Name == "input"
+                    && e.Attributes.GetValueOrDefault("aria-label") == label
+                    && e.Handlers.ContainsKey("oninput"))
+                ?? throw new InvalidOperationException($"No input labelled \"{label}\". The page:\n{tree.Html}");
+
+            await _host.DispatchEventAsync(input.Handlers["oninput"], null, new ChangeEventArgs { Value = value });
+        });
+
+        ThrowIfFailed();
+    }
+
+    /// <summary>
+    /// Ticks or clears the checkbox whose label reads <paramref name="label"/>.
+    /// </summary>
+    public async Task ToggleAsync(string label, bool on)
+    {
+        await _host.Dispatcher.InvokeAsync(async () =>
+        {
+            var tree = _host.Read();
+            var boxes = tree.Elements
+                .Where(e => e.Name == "input"
+                    && e.Attributes.GetValueOrDefault("type") == "checkbox"
+                    && e.Handlers.ContainsKey("onchange")
+                    && (e.Nearest("label")?.Text.Contains(label, StringComparison.Ordinal) ?? false))
+                .ToList();
+
+            if (boxes.Count != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Expected one checkbox labelled \"{label}\", found {boxes.Count}. The page:\n{tree.Html}");
+            }
+
+            await _host.DispatchEventAsync(boxes[0].Handlers["onchange"], null, new ChangeEventArgs { Value = on });
+        });
+
+        ThrowIfFailed();
+    }
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex Tidy();
 
     /// <summary>
     /// Sends the change a browser sends when the select offering
