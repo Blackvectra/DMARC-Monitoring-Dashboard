@@ -155,6 +155,34 @@ public sealed class CorrelationServiceTests : IDisposable
         Assert.Equal(SourceVerdict.CrossClientImpersonation, source.Verdict);
     }
 
+    /// <summary>
+    /// What the cut at the limit keeps, since a sender is built from the
+    /// addresses that survive it: the widest-reaching first, then the busiest,
+    /// and among equals the same ones every time.
+    /// </summary>
+    [Fact]
+    public async Task TheLimitKeepsTheWidestThenTheBusiestAndAmongEqualsTheSameOnesEveryTime()
+    {
+        // Three addresses that reached one party and sent one message each...
+        foreach (var ip in new[] { "203.0.113.3", "203.0.113.2", "203.0.113.1" })
+        {
+            await StoreUnassignedAsync("only.example", Row(ip, 1, "fail", "only.example", "fail"));
+        }
+
+        // ...one that was busier, and one that reached two parties.
+        await StoreUnassignedAsync("only.example", Row("203.0.113.60", 9, "fail", "only.example", "fail"));
+        await StoreUnassignedAsync("wide-a.example", Row("203.0.113.50", 1, "fail", "wide-a.example", "fail"));
+        await StoreUnassignedAsync("wide-b.example", Row("203.0.113.50", 1, "fail", "wide-b.example", "fail"));
+
+        var service = new CorrelationService(_dbPath);
+
+        var first = await service.GetFailingSourcesAsync(limit: 3);
+        var again = await service.GetFailingSourcesAsync(limit: 3);
+
+        Assert.Equal(["203.0.113.50", "203.0.113.60", "203.0.113.1"], first.Select(s => s.SourceIp));
+        Assert.Equal(first.Select(s => s.SourceIp), again.Select(s => s.SourceIp));
+    }
+
     [Fact]
     public async Task OneUnassignedDomainIsStillOnlyOneParty()
     {
