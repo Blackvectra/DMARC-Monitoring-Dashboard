@@ -45,7 +45,16 @@
                            instruction below sends somebody looking for a file that is not there. *@
                         <span class="muted">not from here. This copy is updated by downloading the newer
                             <code>DMARC-Monitor-Windows.zip</code> from the release page and carrying
-                            <code>dmarc.db</code> across; the README in the download's folder has the steps.</span>
+                            <code>dmarc.db</code> and the <code>dmarc-clients</code> folder beside it across
+                            (the reports are in that folder); the README in the download's folder has the steps.</span>
+                    }
+                    else if (!Spool.IsAvailable && OperatingSystem.IsWindows())
+                    {
+                        @* Installed as a Windows service by bootstrap.ps1: there is no
+                           update agent for it yet, and the shell script below is not on
+                           this machine. *@
+                        <span class="muted">not from here on Windows yet. Releases can be listed; to install one,
+                            stop the service and run <code>bootstrap.ps1 -Release &lt;tag&gt;</code>.</span>
                     }
                     else if (!Spool.IsAvailable)
                     {
@@ -83,9 +92,9 @@
     <div class="empty">
         <h2>Not checking for releases</h2>
         <p>Set <code>Updates:Repository</code> to <code>owner/name</code> on GitHub, in <code>appsettings.json</code>
-           beside the application (a server keeps its own in <code>appsettings.Production.json</code>), and
-           restart it, to be told when a newer version exists. Settings are read when it starts, so
-           saving the file is not enough.</p>
+           beside the application (a server keeps its own in <code>appsettings.Production.json</code>) to
+           be told when a newer version exists. Saving the file is normally enough: reload this page. If it
+           still says this, restart the application, which always works.</p>
     </div>
 }
 else if (_status is null)
@@ -170,6 +179,7 @@ else
 
     /// <summary>The unzipped download run by hand, as opposed to a Windows service install.</summary>
     private static bool IsWindowsDownload => OperatingSystem.IsWindows() && !WindowsServiceHelpers.IsWindowsService();
+
     private string Channel => Configuration["Updates:Channel"] ?? ReleaseChannel.Stable;
 
     private string ProgressClass => _progress?.State switch

@@ -142,10 +142,27 @@ internal sealed partial class LivePage : IAsyncDisposable
                     + $"found {buttons.Count}. The page:\n{tree.Html}");
             }
 
+            ThrowIfDisabled(buttons[0], $"the {what} button", tree);
+
             await _host.DispatchEventAsync(buttons[0].Handlers["onclick"], null, new MouseEventArgs());
         });
 
         ThrowIfFailed();
+    }
+
+    /// <summary>
+    /// A browser does not send a click, a keystroke or a change to a control
+    /// that is disabled, so a test that does has tested something no person
+    /// can do. A false boolean attribute is never in the tree, so presence is
+    /// the whole question.
+    /// </summary>
+    private static void ThrowIfDisabled(Element control, string what, Tree tree)
+    {
+        if (control.Attributes.ContainsKey("disabled"))
+        {
+            throw new InvalidOperationException(
+                $"{what} is disabled, so a browser would not send the event. The page:\n{tree.Html}");
+        }
     }
 
     /// <summary>
@@ -162,6 +179,8 @@ internal sealed partial class LivePage : IAsyncDisposable
                     && e.Attributes.GetValueOrDefault("aria-label") == label
                     && e.Handlers.ContainsKey("oninput"))
                 ?? throw new InvalidOperationException($"No input labelled \"{label}\". The page:\n{tree.Html}");
+
+            ThrowIfDisabled(input, $"the input labelled \"{label}\"", tree);
 
             await _host.DispatchEventAsync(input.Handlers["oninput"], null, new ChangeEventArgs { Value = value });
         });
@@ -190,6 +209,8 @@ internal sealed partial class LivePage : IAsyncDisposable
                     $"Expected one checkbox labelled \"{label}\", found {boxes.Count}. The page:\n{tree.Html}");
             }
 
+            ThrowIfDisabled(boxes[0], $"the checkbox labelled \"{label}\"", tree);
+
             await _host.DispatchEventAsync(boxes[0].Handlers["onchange"], null, new ChangeEventArgs { Value = on });
         });
 
@@ -211,6 +232,8 @@ internal sealed partial class LivePage : IAsyncDisposable
         {
             var tree = _host.Read();
             var select = Select(tree, offering);
+            ThrowIfDisabled(select, $"the select offering \"{offering}\"", tree);
+
             await _host.DispatchEventAsync(select.Handlers["onchange"], null, new ChangeEventArgs { Value = value });
         });
 

@@ -92,9 +92,11 @@ holds the address, so it is used for reading and never for judging. The sources
 page prints a vendor's name — "Microsoft 365", "Avanan (Check Point Harmony)" —
 only where the name's own forward records point back at the address; a name that
 does not is shown as the hostname it claims, and a sender claiming to be a mail
-provider is kept apart from the real ones rather than lost among them. Every
-verdict still comes from what was signed and how many unrelated clients the
-address was seen against. `SenderCatalog` additionally groups by providers'
+provider is kept apart from the real ones rather than lost among them. What an
+address looks like still comes from what was signed and how many unrelated
+clients it was seen against. Names do decide who addresses are grouped with
+(by the domain their name claims), and so whether a sender is flagged as
+spanning clients - which is why a group of unconfirmed claims says so. `SenderCatalog` additionally groups by providers'
 published ranges, because a wrong PTR-derived label — "Microsoft 365" on an
 intruder's line — is worse than a bare IP address. One real domain had 630
 "sources" in a month; 618 were Microsoft load balancers.

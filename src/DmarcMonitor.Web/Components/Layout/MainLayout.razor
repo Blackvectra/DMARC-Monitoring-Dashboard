@@ -181,17 +181,24 @@
                        person is in more groups than the token can carry - for an app that signs in this way,
                        more than about five - and it sends none at all rather than the first few. Adding you to
                        another group will not help.</p>
-                    <p class="muted">Ask whoever runs this to open the app registration's <em>Token configuration</em>,
-                       set the groups claim to <em>Groups assigned to the application</em>, and assign the master
-                       group and each organization's group to the app under <em>Enterprise applications</em>
-                       (<em>Users and groups</em>). Only those groups are then listed, so the count stays small.
-                       Sign out and back in afterwards.</p>
+                    <p class="muted">Ask whoever runs this to open the app registration's <em>Token configuration</em>
+                       and set the groups claim to <em>Groups assigned to the application</em> (that needs
+                       Microsoft Entra ID P1), then to assign <strong>every</strong> group this app uses to the app
+                       under <em>Enterprise applications</em> &rarr; <em>Users and groups</em>: the master group, each
+                       organization's admin, engineer, tech and viewer groups, and any customer's login group. A group
+                       that is not assigned there is not listed, and nobody who is in it only through another group
+                       is listed for it. Only your direct memberships of assigned groups are counted, so if you are in
+                       more than about five of them, keep one group per organization - the strongest. Sign out and
+                       back in afterwards.</p>
                 }
                 else
                 {
                     <p class="muted">Ask whoever runs this to add you to an organization's group in Microsoft Entra,
                        or to the master group named in <code>Auth:MasterGroupId</code>. Sign out and back in once
-                       they have.</p>
+                       they have. If you are already in the right group, check that it is assigned to this app
+                       (<em>Enterprise applications</em> &rarr; <em>Users and groups</em>) when the groups claim is set to
+                       <em>Groups assigned to the application</em>, and that you are in it directly rather than
+                       through another group.</p>
                 }
             </div>
         }

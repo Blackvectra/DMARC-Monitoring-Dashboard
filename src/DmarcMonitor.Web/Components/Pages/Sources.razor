@@ -62,27 +62,20 @@ else
        no word about why is a page that looks unfinished - and the Windows
        trial has no nightly job to fill them in. *@
     <div class="dns-state">
-        @if (_looking)
-        {
-            <span class="muted">Looking up names…</span>
-        }
-        else if (_lookupMessage is not null)
-        {
-            <span class="muted">@_lookupMessage</span>
-        }
-        else
-        {
-            <span class="muted">@NamesSummary</span>
-        }
+        @* A status region, so the outcome of a press is announced to somebody
+           who cannot see it appear. *@
+        <span class="muted" role="status">@(_looking ? "Looking up names…" : _lookupMessage ?? NamesSummary)</span>
 
-        @if (_access is { CanOperate: true } && _due > 0 && !_looking)
+        @* Disabled while it runs rather than removed: a button that vanishes
+           under the keyboard drops focus to the top of the page. *@
+        @if (_access is { CanOperate: true } && _due > 0)
         {
-            <button class="linkish" @onclick="LookUpAsync">Look up names now</button>
+            <button class="linkish" disabled="@_looking" @onclick="LookUpAsync">Look up names now</button>
         }
     </div>
 
-    @* The counts are the key and the filter in one: each says what its label
-       means, how many senders carry it, and shows only those when pressed. *@
+    @* Each count says how many senders carry a label and, pressed, shows only
+       those. What the labels mean is the key below. *@
     <div class="counts">
         <button type="button" class="count @(_reading is null && !_spanning ? "on" : "")"
                 aria-pressed="@((_reading is null && !_spanning).ToString().ToLowerInvariant())"
@@ -123,7 +116,7 @@ else
         </label>
     </div>
 
-    <details class="key">
+    <details class="label-key">
         <summary>What the labels mean</summary>
         <dl>
             @foreach (var reading in Readings)
@@ -152,9 +145,6 @@ else
                         <th aria-sort="@Aria(SenderSort.Severity)">@SortHeader("Looks like", SenderSort.Severity)</th>
                         <th aria-sort="@Aria(SenderSort.Sender)">@SortHeader("Sender", SenderSort.Sender)</th>
                         <th class="num" aria-sort="@Aria(SenderSort.Failed)">@SortHeader("Failed", SenderSort.Failed)</th>
-                        @* "Parties", not "Clients": a domain still in the
-                           Unassigned bucket counts for itself here, so the
-                           number is not always a count of customers. *@
                         <th aria-sort="@Aria(SenderSort.Reach)">@SortHeader("Seen against", SenderSort.Reach)</th>
                         <th aria-sort="@Aria(SenderSort.LastSeen)">@SortHeader("Last seen", SenderSort.LastSeen)</th>
                     </tr>
@@ -168,7 +158,7 @@ else
                                alone is a column about one man in twelve
                                cannot read. *@
                             <td class="shrink">
-                                <span class="count @Css(g.Reading)" title="@Gist(g.Reading)">@Label(g.Reading)</span>
+                                <span class="count @Css(g.Reading)" title="@Gist(g)">@Label(g.Reading)</span>
                             </td>
                             <td>
                                 @if (!g.IsGroup)
@@ -224,7 +214,7 @@ else
                                    counts for itself - two domains waiting
                                    there are no more related than two
                                    belonging to different customers. *@
-                                <span class="@(IsWide(g) ? "bad" : "muted")">
+                                <span class="@(g.ReachIsTheFinding ? "bad" : "muted")">
                                     <strong>@g.IndependentParties</strong> @(g.IndependentParties == 1 ? "party" : "parties")
                                 </span>
                                 <span class="domains">
@@ -248,29 +238,40 @@ else
 
         @if (_rows.Count >= Limit)
         {
-            @* The query stops at the worst two hundred addresses. Said, rather
-               than leaving a list that ends where the query did and reads as
-               complete. *@
-            <p class="muted">Showing the @Limit worst addresses in this window. A shorter window shows fewer, and different, ones.</p>
+            @* The query stops at the widest-reaching, busiest addresses. Said,
+               rather than leaving a list that ends where the query did and
+               reads as complete - and the senders built from the addresses
+               it kept may be missing some of their own. *@
+            <p class="muted">
+                Showing the @Limit widest-reaching, busiest addresses in this window; a sender's row can be
+                missing addresses that fell below that. A shorter window shows fewer, and different, ones.
+            </p>
         }
     }
 }
 
 @code {
-    /// <summary>The most addresses the query returns, worst first.</summary>
-    private const int Limit = 200;
+    /// <summary>
+    /// The most addresses the query returns, widest-reaching and then busiest
+    /// first.
+    /// </summary>
+    /// <remarks>
+    /// Applied to addresses, before they are grouped, so it is the senders that
+    /// rotate addresses - one message each, to a different client each - that
+    /// fall off the end first. High enough that a real estate does not reach
+    /// it in a month; the page says so when it does.
+    /// </remarks>
+    private const int Limit = 1000;
 
     /// <summary>How many domains a row names before the rest fold away.</summary>
     private const int DomainsShown = 3;
 
-    /// <summary>Worst first, which is the order the counts read in.</summary>
-    private static readonly SourceReading[] Readings =
-    [
-        SourceReading.CrossClient,
-        SourceReading.Unauthenticated,
-        SourceReading.Unaligned,
-        SourceReading.OwnSendingPath,
-    ];
+    /// <summary>
+    /// Worst first, which is the order the counts read in. From the enum, whose
+    /// order is its meaning, so a reading added there is in the counts and the
+    /// key the same day.
+    /// </summary>
+    private static readonly SourceReading[] Readings = [.. Enum.GetValues<SourceReading>().OrderDescending()];
 
     private OrganizationAccess? _access;
     private IReadOnlyList<FailingSource>? _rows;
@@ -309,7 +310,7 @@ else
                     _groups
                         .Where(g => _reading is null || g.Reading == _reading)
                         .Where(g => !_spanning || g.SpansClients)
-                        .Where(g => needle.Length == 0 || Matches(g, needle)),
+                        .Where(g => g.Matches(needle)),
                     _sort, _descending);
                 _shownFrom = from;
             }
@@ -346,13 +347,20 @@ else
         // Optional, so its failing must not take the table down with it.
         try
         {
-            _due = await Naming.DueAsync([.. _rows.Select(r => r.SourceIp)]);
+            _due = await Naming.DueAsync(BusiestFirst());
         }
         catch (Exception)
         {
             _due = 0;
         }
     }
+
+    /// <summary>
+    /// The addresses on the page, the busiest first. A press looks up as many
+    /// as it can, so the ones somebody is looking at hardest go first.
+    /// </summary>
+    private string[] BusiestFirst() =>
+        [.. (_rows ?? []).OrderByDescending(r => r.FailedMessages).ThenBy(r => r.SourceIp, StringComparer.Ordinal).Select(r => r.SourceIp)];
 
     private void Regroup()
     {
@@ -383,7 +391,7 @@ else
 
         try
         {
-            var run = await Naming.LookUpAsync(_access.TenantId, _access.User, [.. _rows.Select(r => r.SourceIp)]);
+            var run = await Naming.LookUpAsync(_access.TenantId, _access.User, BusiestFirst());
             outcome = run is null ? "There is no database to store a name in." : run.Value.Describe();
         }
         catch (Exception ex)
@@ -410,10 +418,15 @@ else
             var total = _rows?.Count ?? 0;
             var named = _rows?.Count(r => !string.IsNullOrWhiteSpace(r.ReverseName)) ?? 0;
 
+            // "Due", not "not looked up": a name stored a month ago, or never
+            // checked against its forward records, is due again while the
+            // address still counts as named. And "no name was found", not "no
+            // reverse DNS": an address whose reverse zone timed out reads the
+            // same, and the page cannot tell them apart.
             return _due > 0
-                ? $"{named} of {total} addresses have a name; {_due} have not been looked up yet — a server install does that nightly."
+                ? $"{named} of {total} addresses have a name; {_due} are due a lookup — a server install does that nightly."
                 : named < total
-                    ? $"{named} of {total} addresses have a name. The rest have no reverse DNS, which is ordinary for a sender that does not publish one."
+                    ? $"{named} of {total} addresses have a name. No name was found for the rest, which is ordinary for a sender that does not publish one."
                     : $"All {total} addresses are named.";
         }
     }
@@ -453,23 +466,6 @@ else
     private RenderFragment SortHeader(string label, SenderSort column) =>
         @<SortButton Label="@label" Active="@(_sort == column)" Descending="_descending" OnPress="() => SortBy(column)" />;
 
-    private static bool Matches(SenderGroup g, string needle) =>
-        g.Name.Contains(needle, StringComparison.OrdinalIgnoreCase)
-        || (g.Domain?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false)
-        || g.Domains.Any(d => d.Contains(needle, StringComparison.OrdinalIgnoreCase))
-        || g.Clients.Any(c => c.Contains(needle, StringComparison.OrdinalIgnoreCase))
-        || g.Sources.Any(s => s.SourceIp.Contains(needle, StringComparison.OrdinalIgnoreCase)
-                           || (s.ReverseName?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false));
-
-    /// <summary>Whether the number of parties is the finding: red for a reach that is itself the story.</summary>
-    /// <remarks>
-    /// A mail provider's fourteen addresses against fourteen domains is the
-    /// size of the provider, not an alarm, so a group is red only where it
-    /// spans clients; a single address is red where it was seen against
-    /// several.
-    /// </remarks>
-    private static bool IsWide(SenderGroup g) => g.IsGroup ? g.SpansClients : g.Sources[0].IsCrossClient;
-
     private static bool NamesUnconfirmed(SenderGroup g) => g.Sources.Any(s => !s.NameConfirmed);
 
     private static string Shorten(IReadOnlyList<string> items) =>
@@ -477,12 +473,17 @@ else
             ? string.Join(", ", items)
             : $"{string.Join(", ", items.Take(DomainsShown))} +{items.Count - DomainsShown} more";
 
+    // Every reading is spelled out, and one nobody wrote down throws instead of
+    // falling into the last arm: the benign one, which is the wrong label to
+    // wear by accident. The key draws all of them, so a reading added to the
+    // enum fails the first page test rather than shipping as "Own sending path".
     private static string Label(SourceReading reading) => reading switch
     {
         SourceReading.CrossClient => "Cross-client",
         SourceReading.Unauthenticated => "Unauthenticated",
         SourceReading.Unaligned => "Unaligned service",
-        _ => "Own sending path",
+        SourceReading.OwnSendingPath => "Own sending path",
+        _ => throw new ArgumentOutOfRangeException(nameof(reading), reading, null),
     };
 
     private static string Css(SourceReading reading) => reading switch
@@ -490,7 +491,8 @@ else
         SourceReading.CrossClient => "urgent",
         SourceReading.Unauthenticated => "act",
         SourceReading.Unaligned => "watch",
-        _ => "",
+        SourceReading.OwnSendingPath => "",
+        _ => throw new ArgumentOutOfRangeException(nameof(reading), reading, null),
     };
 
     /// <summary>The hover text: enough to read a row without opening the key.</summary>
@@ -499,8 +501,20 @@ else
         SourceReading.CrossClient => "No authentication at all, against several unrelated clients.",
         SourceReading.Unauthenticated => "No authentication at all, against one client so far.",
         SourceReading.Unaligned => "Authenticates, but as the provider rather than as the client.",
-        _ => "Passes elsewhere for these domains; signatures broken in transit here.",
+        SourceReading.OwnSendingPath => "Passes elsewhere for these domains; signatures broken in transit here.",
+        _ => throw new ArgumentOutOfRangeException(nameof(reading), reading, null),
     };
+
+    /// <summary>
+    /// The hover for a row. A sender whose addresses each reached one party but
+    /// together reached several reads "Unauthenticated", the worst of its
+    /// addresses; saying "against one client" beside "3 parties" would be the
+    /// row contradicting itself.
+    /// </summary>
+    private static string Gist(SenderGroup g) =>
+        g.Reading == SourceReading.Unauthenticated && g.IndependentParties > 1
+            ? $"Its worst addresses authenticated nothing, each against one party; together the addresses reached {g.IndependentParties}."
+            : Gist(g.Reading);
 
     /// <summary>
     /// The key's sentences, said once. Deliberately cautious wording: calling a
@@ -514,15 +528,18 @@ else
           + "One would be noise; several is somebody working through a list.",
 
         SourceReading.Unauthenticated =>
-            "Authenticated nothing for anyone, and seen against one party so far. "
-          + "Either a service nobody recorded, or somebody sending as this domain.",
+            "Authenticated nothing for anyone, and each address seen against one party so far. "
+          + "Either a service nobody recorded, or somebody sending as this domain. "
+          + "A sender whose addresses each reached one party but together reached several is also flagged as spanning clients.",
 
         SourceReading.Unaligned =>
             "Authenticated, but for the provider's own domain rather than the client's. "
           + "Almost always a real service nobody set up to sign as the client, not an attack.",
 
-        _ =>
-            "Has sent authenticated mail for every domain it fails against, so it is one of the client's "
-          + "own sending paths. These failures are signatures broken in transit, not somebody sending as them.",
+        SourceReading.OwnSendingPath =>
+            "Has sent authenticated mail for every domain it fails against in this window, so it is one of the "
+          + "client's own sending paths. These failures are signatures broken in transit, not somebody sending as them.",
+
+        _ => throw new ArgumentOutOfRangeException(nameof(reading), reading, null),
     };
 }

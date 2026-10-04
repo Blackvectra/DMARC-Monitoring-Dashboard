@@ -42,17 +42,27 @@ public sealed class SourceNamingService(DatabaseInfo database, AuditLog audit, D
     /// long enough ago to ask again, or named but never checked against their
     /// own forward records.
     /// </summary>
+    /// <param name="addresses">
+    /// Addresses the page has already read from reports in the caller's own
+    /// scope. Only the names table is consulted, so asking costs the same for
+    /// a customer's login as for a master's and opens nobody's reports.
+    /// </param>
     public async Task<int> DueAsync(IReadOnlyCollection<string> addresses, CancellationToken ct = default)
     {
         if (addresses.Count == 0 || !File.Exists(database.Path)) { return 0; }
 
-        return (await _store.NeedingLookupAsync(among: addresses, ct: ct).ConfigureAwait(false)).Count;
+        return (await _store.DueAmongAsync(addresses, ct: ct).ConfigureAwait(false)).Count;
     }
 
     /// <summary>
-    /// Looks up the busiest of these addresses that are due.
+    /// Looks up the first of these addresses that are due, in the order given.
     /// </summary>
     /// <param name="tenantId">The organization the addresses belong to, for the audit entry.</param>
+    /// <param name="addresses">
+    /// Read from reports in the caller's own scope, busiest first: a press
+    /// names as many as it can, and the ones somebody is looking at hardest
+    /// should be among them.
+    /// </param>
     /// <returns>What the run did, or null when there is no database to store a name in.</returns>
     public async Task<SourceNameRun?> LookUpAsync(
         string? tenantId, string actor, IReadOnlyCollection<string> addresses, CancellationToken ct = default)

@@ -112,44 +112,111 @@ public sealed class SourceNameStoreTests : IAsyncLifetime
         Assert.Equal(["192.0.2.50"], due);
     }
 
+    // ---- the addresses a page is showing -------------------------------------
+
     /// <summary>
-    /// A page asks about the addresses it is showing. The estate's busiest
-    /// unnamed addresses may be somebody else's, and a button that spent its
-    /// lookups on those would leave the table in front of the person who
-    /// pressed it exactly as it was.
+    /// A page asks about the addresses it is showing, in the order it wants
+    /// them looked up. The estate's busiest unnamed addresses may be somebody
+    /// else's, and a button that spent its lookups on those would leave the
+    /// table in front of the person who pressed it exactly as it was.
     /// </summary>
     [Fact]
-    public async Task OnlyTheAddressesAskedAboutAreDue()
+    public async Task OnlyTheAddressesAskedAboutAreCheckedAndInTheOrderGiven()
     {
         await StoreRowsAsync("192.0.2.70", "192.0.2.71", "192.0.2.72");
 
-        var due = await _store.NeedingLookupAsync(among: ["192.0.2.71", "192.0.2.72", "198.51.100.200"]);
+        var due = await _store.DueAmongAsync(["192.0.2.72", "192.0.2.71"]);
 
-        // 192.0.2.70 is due but was not asked about; 198.51.100.200 was asked
-        // about but appears in no report.
-        Assert.Equal(["192.0.2.71", "192.0.2.72"], due.Order(StringComparer.Ordinal));
+        // 192.0.2.70 is due too, but nobody asked about it.
+        Assert.Equal(["192.0.2.72", "192.0.2.71"], due);
+    }
+
+    /// <summary>
+    /// What makes the page cheap and keeps it inside its own scope: whether
+    /// an address is due is a question about the names table alone. It does
+    /// not open anybody's reports, so a customer's page cannot be made to
+    /// read the whole installation by asking it.
+    /// </summary>
+    [Fact]
+    public async Task AskingNeverOpensTheReports()
+    {
+        // No report has ever mentioned this address, and it is due all the same.
+        Assert.Equal(["198.51.100.200"], await _store.DueAmongAsync(["198.51.100.200"]));
     }
 
     [Fact]
     public async Task AnAddressAlreadyNamedIsNotDueEvenWhenAskedAbout()
     {
-        await StoreRowsAsync("192.0.2.80", "192.0.2.81");
         await _store.SaveAsync("192.0.2.80", "mail.example", answered: true, forwardConfirmed: true);
 
-        var due = await _store.NeedingLookupAsync(among: ["192.0.2.80", "192.0.2.81"]);
+        var due = await _store.DueAmongAsync(["192.0.2.80", "192.0.2.81"]);
 
         Assert.Equal(["192.0.2.81"], due);
     }
 
     [Fact]
+    public async Task ANameThatWasNeverCheckedIsDueEvenWhenFresh()
+    {
+        await _store.SaveAsync("192.0.2.82", "never-checked.example", answered: true);
+        await _store.SaveAsync("192.0.2.83", "checked.example", answered: true, forwardConfirmed: false);
+        await _store.SaveAsync("192.0.2.84", null, answered: true);
+
+        Assert.Equal(["192.0.2.82"], await _store.DueAmongAsync(["192.0.2.82", "192.0.2.83", "192.0.2.84"]));
+    }
+
+    [Fact]
+    public async Task AnAnswerIsAskedAgainOnceItIsOldEnough()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _store.SaveAsync("192.0.2.85", "old.example", answered: true, checkedAt: now.AddDays(-40), forwardConfirmed: true);
+        await _store.SaveAsync("192.0.2.86", "recent.example", answered: true, checkedAt: now.AddDays(-2), forwardConfirmed: true);
+
+        Assert.Equal(["192.0.2.85"], await _store.DueAmongAsync(["192.0.2.85", "192.0.2.86"]));
+    }
+
+    [Fact]
+    public async Task AnAddressWhoseZoneDidNotAnswerIsRetriedSoonerThanOneThatSaidNo()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _store.SaveAsync("192.0.2.87", null, answered: false, checkedAt: now.AddDays(-2));
+        await _store.SaveAsync("192.0.2.88", null, answered: false, checkedAt: now.AddHours(-1));
+        await _store.SaveAsync("192.0.2.89", null, answered: true, checkedAt: now.AddDays(-2));
+
+        Assert.Equal(["192.0.2.87"], await _store.DueAmongAsync(["192.0.2.87", "192.0.2.88", "192.0.2.89"]));
+    }
+
+    [Fact]
+    public async Task AskingAboutTheSameAddressTwiceCountsItOnce()
+    {
+        Assert.Equal(["192.0.2.91"], await _store.DueAmongAsync(["192.0.2.91", " 192.0.2.91 ", "", "192.0.2.91"]));
+    }
+
+    [Fact]
+    public async Task TheLimitCutsTheListAfterTheOrderIsApplied()
+    {
+        var due = await _store.DueAmongAsync(["192.0.2.95", "192.0.2.94", "192.0.2.93"], limit: 2);
+
+        Assert.Equal(["192.0.2.95", "192.0.2.94"], due);
+    }
+
+    [Fact]
+    public async Task NoMoreThanFiveHundredAreConsidered()
+    {
+        var many = Enumerable.Range(0, 700).Select(i => $"10.2.{i / 256}.{i % 256}").ToList();
+
+        var due = await _store.DueAmongAsync(many, limit: 10_000);
+
+        Assert.Equal(500, due.Count);
+        Assert.Equal(many.Take(500), due);
+    }
+
+    [Fact]
     public async Task AskingAboutNothingIsDueNothing()
     {
-        await StoreRowsAsync("192.0.2.90");
-
         // An empty list means "none of them", not "no restriction": the
         // difference is a button that looks up the whole estate when a page
         // with no failing sources was open.
-        Assert.Empty(await _store.NeedingLookupAsync(among: []));
+        Assert.Empty(await _store.DueAmongAsync([]));
     }
 
     /// <summary>

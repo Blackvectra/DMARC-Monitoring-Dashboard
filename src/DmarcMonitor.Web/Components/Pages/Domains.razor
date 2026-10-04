@@ -26,7 +26,7 @@
         {
             <label>
                 Client
-                <select @bind="_client" aria-label="Client">
+                <select @bind="_client" @bind:after="ClientChanged" aria-label="Client">
                     <option value="">All clients</option>
                     @foreach (var c in _clients)
                     {
@@ -152,16 +152,32 @@ else
            domain gains nothing from it. Off while the table is ordered by
            anything but name, and says why - a box that is ticked and does
            nothing reads as broken. *@
-        @if (_clients.Any(c => c.Domains > 1))
+        @if (DomainList.CanGroup(InScope))
         {
             <label class="toggle" title="@(_sort == DomainSort.Domain ? "Put a client's domains together under its name." : "Off while the table is ordered by another column.")">
                 <input type="checkbox" @bind="_byClient" disabled="@(_sort != DomainSort.Domain)" />
                 Group by client
+                @* In the label itself, not only the title: a title is for a pointer,
+                   and the person who cannot tick the box from the keyboard is the one
+                   who most needs to be told why. *@
+                @if (_sort != DomainSort.Domain)
+                {
+                    <span class="muted">— off while the table is ordered by another column</span>
+                }
             </label>
         }
     </div>
 
-    @if (Filtered.Count == 0)
+    @if (InScope.Count == 0)
+    {
+        @* A client with nothing to show: no filter to clear, and a button that
+           said "show all 0" would do nothing. *@
+        <p class="muted">
+            This client has no active domains.
+            <button class="linkish" @onclick="ShowAllClients">Show all clients</button>
+        </p>
+    }
+    else if (Filtered.Count == 0)
     {
         @* A filter that matches nothing has to say so. An empty table under a
            search box reads as "no domains", which is not what happened. *@
@@ -192,8 +208,14 @@ else
                         <th aria-sort="@Aria(DomainSort.LastReport)">@SortHeader("Last report", DomainSort.LastReport)</th>
                     </tr>
                 </thead>
-                <tbody>
-                    @foreach (var line in Lines)
+                @* A tbody for each client that has a heading, so that the
+                   heading's scope="rowgroup" covers its own rows and not
+                   everything below it - in a single tbody a reader that honours
+                   it applies the first heading to every later domain. *@
+                @foreach (var block in Blocks)
+                {
+                <tbody @key="block.Key">
+                    @foreach (var line in block.Lines)
                     {
                         @if (line.Heading is not null)
                         {
@@ -216,7 +238,7 @@ else
                                and for a screen reader to be told. *@
                             var unread = chips.All(c => c.State == RecordState.Unknown);
 
-                            <tr class="@(line.Headed ? "headed" : "")" @key="@($"{row.Organization}/{row.Domain}")">
+                            <tr class="@(line.Headed ? "headed" : "")" @key="@RowKey(row)">
                                 <td class="shrink">
                                     @* A word for a screen reader, and the
                                        headline for anybody hovering: the dot
@@ -225,7 +247,7 @@ else
                                           aria-label="@(string.IsNullOrWhiteSpace(row.Headline) ? Label(row.Level) : $"{Label(row.Level)}: {row.Headline}")"
                                           title="@(string.IsNullOrWhiteSpace(row.Headline) ? Label(row.Level) : row.Headline)"></span>
                                 </td>
-                                <td>
+                                <td class="domain-col">
                                     <a href="@($"domains/{Uri.EscapeDataString(row.Domain)}")">@row.Domain</a>
                                     @* Whose it is, where it is not already said:
                                        not under a client's heading, and not when
@@ -289,6 +311,7 @@ else
                         }
                     }
                 </tbody>
+                }
             </table>
         </div>
     }
@@ -393,6 +416,7 @@ else
         = ("", null, DomainSort.Domain, false, false, false, null);
     private IReadOnlyList<DomainTriage> _filtered = [];
     private IReadOnlyList<DomainLine> _lines = [];
+    private IReadOnlyList<Block> _blocks = [];
 
     private void Rebuild()
     {
@@ -407,8 +431,57 @@ else
                      || r.ClientName.Contains(needle, StringComparison.OrdinalIgnoreCase))];
         _busiest = _filtered.Count == 0 ? 0 : _filtered.Max(r => r.Messages);
         _lines = DomainList.Layout(_filtered, _sort, _descending, _byClient, AcrossOrganizations);
+        _blocks = BlocksOf(_lines);
         _linesFrom = from;
     }
+
+    /// <summary>A run of lines that share a tbody: a client's heading and its domains, or domains with no heading.</summary>
+    private sealed record Block(string Key, IReadOnlyList<DomainLine> Lines);
+
+    /// <summary>
+    /// Splits the table into the groups of rows a screen reader should read a
+    /// heading over: each heading opens one with its own domains, and domains
+    /// that have no heading share one until the next heading comes.
+    /// </summary>
+    private static List<Block> BlocksOf(IReadOnlyList<DomainLine> lines)
+    {
+        var blocks = new List<Block>();
+        var current = new List<DomainLine>();
+        var loose = 0;
+
+        void Close()
+        {
+            if (current.Count == 0) { return; }
+
+            // Unique among its siblings, which a repeated key would not be: two
+            // runs of loose domains can sit either side of a heading.
+            var key = current[0].Heading is not null ? $"heading:{current[0].Key}" : $"loose:{loose++}";
+            blocks.Add(new Block(key, current));
+            current = [];
+        }
+
+        foreach (var line in lines)
+        {
+            // A heading starts a block; so does the first domain after a block
+            // of headed ones, which is no longer under that heading.
+            var opensBlock = line.Heading is not null
+                || (current.Count > 0 && current[0].Heading is not null && !line.Headed);
+            if (opensBlock) { Close(); }
+
+            current.Add(line);
+        }
+
+        Close();
+        return blocks;
+    }
+
+    /// <summary>
+    /// What identifies a domain's row: the organization it is in and its name.
+    /// Both, because two organizations can manage the same name, and the
+    /// organization by what it is rather than what it is called, because two
+    /// can share a name. A repeated key makes the page refuse to redraw.
+    /// </summary>
+    private static string RowKey(DomainTriage row) => $"{row.TenantId}/{row.Domain}";
 
     private IReadOnlyList<DomainTriage> Filtered
     {
@@ -420,10 +493,16 @@ else
         get { Rebuild(); return _lines; }
     }
 
+    private IReadOnlyList<Block> Blocks
+    {
+        get { Rebuild(); return _blocks; }
+    }
+
     protected override Task OnInitializedAsync() => LoadAsync();
 
     private async Task LoadAsync()
     {
+        var first = _rows is null;
         _error = null;
 
         // Whatever the last refresh reported describes a reading that has now
@@ -441,18 +520,19 @@ else
                 .Where(c => c.Slug != ReportStore.UnassignedClientSlug || c.Domains > 0)];
             if (!string.IsNullOrEmpty(_client) && _clients.All(c => c.Slug != _client)) { _client = ""; }
 
-            // Grouped by default once there is something to group: a book of
-            // one client per domain gains nothing from it, a book of clients
-            // with several domains each is unreadable without it.
-            if (_rows is null) { _byClient = _clients.Count > 1 && _clients.Any(c => c.Domains > 1); }
-
             if (_access.RestrictedClient is { } only) { _client = only; }
 
             _rows = await Triage.GetAsync(_days, tenant, _access.RestrictedClient);
 
-            // A policy filter on something the new window no longer has would
-            // leave an empty table and a count of zero to explain it.
-            if (_policy is not null && _rows.All(r => r.Policy != _policy)) { _policy = null; }
+            // Grouped by default once there is something to group: a book of
+            // one client per domain gains nothing from it, a book of clients
+            // with several domains each is unreadable without it.
+            if (first) { _byClient = DomainList.CanGroup(_rows); }
+
+            // A policy filter on something the new window no longer has - or
+            // that the chosen client never had - would leave an empty table and
+            // a count of zero to explain it.
+            if (_policy is not null && InScope.All(r => r.Policy != _policy)) { _policy = null; }
 
             // Read from storage, never resolved here: a table of eighty rows
             // would otherwise be eighty DNS lookups per render, each able to
@@ -533,6 +613,18 @@ else
     }
 
     private void FilterPolicy(string? policy) => _policy = _policy == policy ? null : policy;
+
+    /// <summary>
+    /// A different client was chosen. A policy filter it cannot satisfy is
+    /// dropped: pressed on "p=none" and then moved to a client whose domains
+    /// all enforce, the table would be empty with no chip lit to say why.
+    /// </summary>
+    private void ClientChanged()
+    {
+        if (_policy is not null && InScope.All(r => r.Policy != _policy)) { _policy = null; }
+    }
+
+    private void ShowAllClients() => _client = "";
 
     private void ClearFilters()
     {

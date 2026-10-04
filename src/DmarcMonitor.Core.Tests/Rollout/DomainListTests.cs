@@ -12,22 +12,25 @@ namespace DmarcMonitor.Core.Tests.Rollout;
 /// </summary>
 public sealed class DomainListTests
 {
+    /// <param name="tenant">The organization's identity; its name unless said otherwise, since two can share a name.</param>
     private static DomainTriage Domain(
         string name, string? client = null, long messages = 100, long passing = 100,
         string policy = "none", int sources = 1, TriageLevel level = TriageLevel.Fine,
-        DateTimeOffset? lastReport = null, string slug = "", string organization = "") => new()
-    {
-        Domain = name,
-        ClientName = client ?? name,
-        ClientSlug = slug,
-        Organization = organization,
-        Messages = messages,
-        Passing = passing,
-        Policy = policy,
-        Sources = sources,
-        Level = level,
-        LastReport = lastReport,
-    };
+        DateTimeOffset? lastReport = null, string slug = "", string organization = "", string? tenant = null) => new()
+        {
+            Domain = name,
+            ClientName = client ?? name,
+            ClientSlug = slug,
+            Organization = organization,
+            TenantId = tenant ?? organization,
+            Messages = messages,
+            Passing = passing,
+            Failing = messages - passing,
+            Policy = policy,
+            Sources = sources,
+            Level = level,
+            LastReport = lastReport,
+        };
 
     private static string[] Names(IEnumerable<DomainLine> lines) =>
         [.. lines.Where(l => l.Row is not null).Select(l => l.Row!.Domain)];
@@ -179,6 +182,46 @@ public sealed class DomainListTests
         Assert.Equal(["a.example", "c.example", "b.example"], Names(lines));
     }
 
+    /// <summary>
+    /// Organizations are told apart by what they are, not by what they are
+    /// called, and the schema lets two share a name. Told apart by name, their
+    /// same-slugged clients were one block with one heading and the domains of
+    /// both inside it.
+    /// </summary>
+    [Fact]
+    public void TwoOrganizationsWithTheSameNameAreStillTwoBlocks()
+    {
+        var lines = DomainList.Layout([
+            Domain("a.example", client: "Contoso", slug: "contoso", organization: "Acme IT", tenant: "t1"),
+            Domain("b.example", client: "Contoso", slug: "contoso", organization: "Acme IT", tenant: "t2"),
+            Domain("c.example", client: "Contoso", slug: "contoso", organization: "Acme IT", tenant: "t1"),
+            Domain("d.example", client: "Contoso", slug: "contoso", organization: "Acme IT", tenant: "t2"),
+        ], DomainSort.Domain, descending: false, grouped: true, acrossOrganizations: true);
+
+        var headings = lines.Where(l => l.Heading is not null).ToList();
+
+        Assert.Equal(2, headings.Count);
+        Assert.All(headings, h => Assert.Equal(2, h.Count));
+        Assert.NotEqual(headings[0].Key, headings[1].Key);
+        Assert.Equal(["a.example", "c.example", "b.example", "d.example"], Names(lines));
+    }
+
+    /// <summary>
+    /// The same domain can be managed by two organizations. Equal rows are
+    /// never reshuffled, whichever order they arrived in.
+    /// </summary>
+    [Fact]
+    public void ADomainBothOrganizationsManageIsOrderedTheSameWhicheverArrivedFirst()
+    {
+        var one = Domain("shared.example", organization: "Acme IT", tenant: "t1");
+        var two = Domain("shared.example", organization: "Acme IT", tenant: "t2");
+
+        var forwards = DomainList.Order([one, two], DomainSort.Domain, descending: false);
+        var backwards = DomainList.Order([two, one], DomainSort.Domain, descending: false);
+
+        Assert.Equal(forwards.Select(d => d.TenantId), backwards.Select(d => d.TenantId));
+    }
+
     [Fact]
     public void ADescendingNameOrderReversesTheBlocksAndTheDomainsInThem()
     {
@@ -187,6 +230,68 @@ public sealed class DomainListTests
         ], DomainSort.Domain, descending: true, grouped: true, acrossOrganizations: false);
 
         Assert.Equal(["d.example", "c.example", "b.example", "a.example"], Names(lines));
+    }
+
+    // ---- whether there is anything to group ------------------------------------
+
+    [Fact]
+    public void GroupingIsWorthOfferingWhenSomeClientHasSeveralDomainsAndThereIsMoreThanOneClient()
+    {
+        Assert.True(DomainList.CanGroup([
+            Domain("a.example", client: "Pair", slug: "pair"),
+            Domain("b.example", client: "Pair", slug: "pair"),
+            Domain("c.example", client: "Solo", slug: "solo"),
+        ]));
+    }
+
+    [Fact]
+    public void ItIsNotWhenEveryClientHasOneDomain()
+    {
+        Assert.False(DomainList.CanGroup([
+            Domain("a.example", slug: "a"), Domain("b.example", slug: "b"), Domain("c.example", slug: "c"),
+        ]));
+    }
+
+    /// <summary>
+    /// One client's several domains under that client's name say nothing the
+    /// table does not already.
+    /// </summary>
+    [Fact]
+    public void ItIsNotWhenThereIsOnlyOneClient()
+    {
+        Assert.False(DomainList.CanGroup([
+            Domain("a.example", client: "Pair", slug: "pair"),
+            Domain("b.example", client: "Pair", slug: "pair"),
+            Domain("c.example", client: "Pair", slug: "pair"),
+        ]));
+    }
+
+    /// <summary>
+    /// Judged from the domains a person is given. A customer's login is given
+    /// its own, so what other clients of the same organization have cannot
+    /// decide whether this person is offered a box to tick.
+    /// </summary>
+    [Fact]
+    public void ItDoesNotDependOnClientsWhoseDomainsAreNotInView()
+    {
+        DomainTriage[] whatTheCustomerIsGiven = [Domain("a.example", client: "Acme", slug: "acme")];
+
+        Assert.False(DomainList.CanGroup(whatTheCustomerIsGiven));
+    }
+
+    [Fact]
+    public void TwoOrganizationsWithAClientOfTheSameSlugEachAreTwoClients()
+    {
+        Assert.False(DomainList.CanGroup([
+            Domain("a.example", client: "Acme", slug: "acme", tenant: "t1"),
+            Domain("b.example", client: "Acme", slug: "acme", tenant: "t2"),
+        ]));
+
+        Assert.True(DomainList.CanGroup([
+            Domain("a.example", client: "Acme", slug: "acme", tenant: "t1"),
+            Domain("b.example", client: "Acme", slug: "acme", tenant: "t1"),
+            Domain("c.example", client: "Acme", slug: "acme", tenant: "t2"),
+        ]));
     }
 
     // ---- ordering ------------------------------------------------------------
@@ -215,6 +320,26 @@ public sealed class DomainListTests
         Assert.Equal(
             ["urgent.example", "act.example", "watch.example", "ontrack.example", "fine.example"],
             ordered.Select(d => d.Domain));
+    }
+
+    /// <summary>
+    /// Status is "the order the dashboard ranks them in", and between two
+    /// equally urgent domains the dashboard opens the one losing more mail.
+    /// Falling to the name instead put a domain losing three messages above one
+    /// losing thirty thousand. The tie-break does not flip with the column.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AmongEquallyUrgentDomainsTheOneLosingMoreMailComesFirst(bool descending)
+    {
+        var ordered = DomainList.Order([
+            Domain("aaa.example", level: TriageLevel.Urgent, messages: 100, passing: 97),
+            Domain("zzz.example", level: TriageLevel.Urgent, messages: 40_000, passing: 10_000),
+            Domain("mmm.example", level: TriageLevel.Urgent, messages: 500, passing: 400),
+        ], DomainSort.Status, descending);
+
+        Assert.Equal(["zzz.example", "mmm.example", "aaa.example"], ordered.Select(d => d.Domain));
     }
 
     [Fact]

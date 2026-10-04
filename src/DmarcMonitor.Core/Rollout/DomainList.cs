@@ -69,6 +69,25 @@ public static class DomainList
         sort is DomainSort.Status or DomainSort.Volume or DomainSort.Sources;
 
     /// <summary>
+    /// Whether putting a client's domains together would show anything: there
+    /// is more than one client among these, and at least one of them has more
+    /// than one domain.
+    /// </summary>
+    /// <remarks>
+    /// Asked of the domains in view and not of every client an organization
+    /// has. A customer's login sees its own domains only, and whether it is
+    /// offered a way to group them must not turn on how many domains somebody
+    /// else's clients have.
+    /// </remarks>
+    public static bool CanGroup(IEnumerable<DomainTriage> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        var clients = rows.GroupBy(r => (r.TenantId, r.ClientSlug)).ToList();
+        return clients.Count > 1 && clients.Any(g => g.Count() > 1);
+    }
+
+    /// <summary>
     /// The table as it should be drawn.
     /// </summary>
     /// <param name="rows">The domains to show, already filtered.</param>
@@ -137,7 +156,13 @@ public static class DomainList
         return lines;
     }
 
-    /// <summary>Orders domains, ties always by name so equal rows never reshuffle.</summary>
+    /// <summary>Orders domains, ties always the same way so equal rows never reshuffle.</summary>
+    /// <remarks>
+    /// Ties fall to the name, and to who owns it when two organizations manage
+    /// the same one; neither flips with the direction. Between two equally
+    /// urgent domains, the one losing more mail comes first, as it does on the
+    /// dashboard.
+    /// </remarks>
     public static IReadOnlyList<DomainTriage> Order(IEnumerable<DomainTriage> rows, DomainSort sort, bool descending)
     {
         ArgumentNullException.ThrowIfNull(rows);
@@ -158,7 +183,22 @@ public static class DomainList
             var primary = Primary(a, b, sort);
             if (primary != 0) { return sign * primary; }
 
-            return string.Compare(a.Domain, b.Domain, StringComparison.OrdinalIgnoreCase);
+            if (sort == DomainSort.Status)
+            {
+                var lost = b.Failing.CompareTo(a.Failing);
+                if (lost != 0) { return lost; }
+            }
+
+            var name = string.Compare(a.Domain, b.Domain, StringComparison.OrdinalIgnoreCase);
+            if (name != 0) { return name; }
+
+            // One domain name can belong to two organizations, and the list can
+            // be sorted unstably: without this, equal rows may swap on a redraw.
+            var organization = string.Compare(a.Organization, b.Organization, StringComparison.OrdinalIgnoreCase);
+            if (organization != 0) { return organization; }
+
+            var tenant = string.CompareOrdinal(a.TenantId, b.TenantId);
+            return tenant != 0 ? tenant : string.CompareOrdinal(a.ClientSlug, b.ClientSlug);
         });
 
         return list;
@@ -197,9 +237,11 @@ public static class DomainList
     /// <remarks>
     /// The slug where there is one, because two clients can share a name; the
     /// organization too when looking across several, because two organizations
-    /// can each have a client of the same name and slug.
+    /// can each have a client of the same slug. The organization by its
+    /// identity: two can also share a name, and keyed by the name their
+    /// same-slugged clients were one block under one heading.
     /// </remarks>
     private static string ClientKey(DomainTriage row, bool acrossOrganizations) =>
-        (acrossOrganizations ? row.Organization : "") + "\u001f"
+        (acrossOrganizations ? (row.TenantId.Length > 0 ? row.TenantId : row.Organization) : "") + "\u001f"
         + (row.ClientSlug.Length > 0 ? row.ClientSlug : ClientName(row, acrossOrganizations));
 }

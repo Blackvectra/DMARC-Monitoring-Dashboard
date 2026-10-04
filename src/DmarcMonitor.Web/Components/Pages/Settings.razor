@@ -124,7 +124,8 @@
        in its Entra security groups see those and nothing else: admins run its settings, engineers raise
        DMARC policies, techs assign domains and repair SPF and DKIM, viewers read. Setting a group here
        does nothing until the app registration's token configuration includes the <code>groups</code>
-       claim.</p>
+       claim - and, if that claim is <em>Groups assigned to the application</em>, until the group is
+       assigned to the app under <em>Enterprise applications</em> &rarr; <em>Users and groups</em>.</p>
 
     @if (_organizations is null)
     {

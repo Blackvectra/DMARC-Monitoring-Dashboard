@@ -175,28 +175,12 @@ public sealed class SourceNameStore(string databasePath)
     /// recognized as a mail filter would be judged without its name.
     /// </para>
     /// </remarks>
-    /// <param name="among">
-    /// Only these addresses, or null for every address in every report. A page
-    /// asks about the ones it is showing: the estate's busiest unnamed
-    /// addresses may belong to another organization, and a button that spent
-    /// its lookups on those would leave the table in front of the person who
-    /// pressed it exactly as it was. At most 500 are considered, which is more
-    /// than any page lists.
-    /// </param>
     public async Task<IReadOnlyList<string>> NeedingLookupAsync(
         int limit = 500,
         TimeSpan? maxAge = null,
         TimeSpan? retryAfter = null,
-        IReadOnlyCollection<string>? among = null,
         CancellationToken ct = default)
     {
-        var age = maxAge ?? TimeSpan.FromDays(30);
-        var retry = retryAfter ?? TimeSpan.FromDays(1);
-
-        var only = among?.Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => a.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase).Take(500).ToList();
-        if (only is { Count: 0 }) { return []; }
-
         // Names are the organization's; the addresses to name are in every
         // client's file.
         await using var db = await new ClientDatabases(_databasePath).OpenAsync(
@@ -204,37 +188,17 @@ public sealed class SourceNameStore(string databasePath)
 
         await using var command = db.CreateCommand();
 
-        // The same "is it due" test as ever, parenthesized so narrowing to the
-        // addresses asked about cannot be undone by the ORs inside it.
-        var restriction = "";
-        if (only is not null)
-        {
-            var names = new List<string>(only.Count);
-            for (var i = 0; i < only.Count; i++)
-            {
-                names.Add($"$a{i}");
-                command.Parameters.AddWithValue($"$a{i}", only[i]);
-            }
-
-            restriction = $"AND r.source_ip IN ({string.Join(",", names)})";
-        }
-
         command.CommandText = $"""
             SELECT r.source_ip
             FROM aggregate_records r
             LEFT JOIN source_names n ON n.ip = r.source_ip
-            WHERE (n.ip IS NULL
-               OR (n.answered = 1 AND n.checked_at < $stale)
-               OR (n.answered = 0 AND n.checked_at < $retry)
-               OR (n.reverse_name IS NOT NULL AND n.forward_confirmed IS NULL))
-              {restriction}
+            WHERE {DueCondition}
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             LIMIT $limit
             """;
 
-        command.Parameters.AddWithValue("$stale", Iso(DateTimeOffset.UtcNow - age));
-        command.Parameters.AddWithValue("$retry", Iso(DateTimeOffset.UtcNow - retry));
+        AddDueParameters(command, maxAge, retryAfter);
         command.Parameters.AddWithValue("$limit", limit);
 
         var result = new List<string>();
@@ -245,6 +209,106 @@ public sealed class SourceNameStore(string databasePath)
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Which of these addresses are due a lookup, in the order they were
+    /// given, up to <paramref name="limit"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// For a page that has a table of addresses in front of somebody and no
+    /// nightly job behind it - the Windows trial has no scheduler - where
+    /// "name the ones on screen" is the useful unit and "name the busiest 500
+    /// in the estate" may name none of them. The caller says which addresses
+    /// and in what order; this answers only whether each is due.
+    /// </para>
+    /// <para>
+    /// A question about the names table alone. It does not open anybody's
+    /// reports, which is the point: the addresses come from a query the page
+    /// has already scoped to the person looking, and asking again through the
+    /// whole installation's files to check them would make a customer's page
+    /// cost what the biggest organization's does, and give it a connection to
+    /// everyone's mail with nothing but a WHERE clause between them.
+    /// </para>
+    /// <para>
+    /// So the addresses must have come from such a query. Nothing here checks
+    /// that they appear in a report; a caller that passes whatever a person
+    /// typed would be asking the resolver about arbitrary addresses. At most
+    /// 500 are considered, which is more than any page lists.
+    /// </para>
+    /// </remarks>
+    public async Task<IReadOnlyList<string>> DueAmongAsync(
+        IEnumerable<string> addresses,
+        int limit = 500,
+        TimeSpan? maxAge = null,
+        TimeSpan? retryAfter = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(addresses);
+
+        var wanted = addresses
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .Select(a => a.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .Take(500)
+            .ToList();
+        if (wanted.Count == 0) { return []; }
+
+        await using var db = new SqliteConnection(_connectionString);
+        await db.OpenAsync(ct).ConfigureAwait(false);
+
+        await using var command = db.CreateCommand();
+
+        // The addresses as a table with their place in the list, so the answer
+        // can come back in the order they were asked for.
+        var rows = new List<string>(wanted.Count);
+        for (var i = 0; i < wanted.Count; i++)
+        {
+            rows.Add($"($a{i}, {i})");
+            command.Parameters.AddWithValue($"$a{i}", wanted[i]);
+        }
+
+        command.CommandText = $"""
+            WITH wanted(ip, position) AS (VALUES {string.Join(",", rows)})
+            SELECT w.ip
+            FROM wanted w
+            LEFT JOIN source_names n ON n.ip = w.ip
+            WHERE {DueCondition}
+            ORDER BY w.position
+            LIMIT $limit
+            """;
+
+        AddDueParameters(command, maxAge, retryAfter);
+        command.Parameters.AddWithValue("$limit", limit);
+
+        var due = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            due.Add(reader.GetString(0));
+        }
+
+        return due;
+    }
+
+    /// <summary>
+    /// Whether an address is due a lookup, over a row of <c>source_names</c>
+    /// aliased <c>n</c> that is absent for an address nobody has asked about.
+    /// One definition for the nightly pass and for a page, so they cannot
+    /// disagree about what "not looked up yet" means.
+    /// </summary>
+    private const string DueCondition = """
+        (n.ip IS NULL
+           OR (n.answered = 1 AND n.checked_at < $stale)
+           OR (n.answered = 0 AND n.checked_at < $retry)
+           OR (n.reverse_name IS NOT NULL AND n.forward_confirmed IS NULL))
+        """;
+
+    private static void AddDueParameters(SqliteCommand command, TimeSpan? maxAge, TimeSpan? retryAfter)
+    {
+        command.Parameters.AddWithValue("$stale", Iso(DateTimeOffset.UtcNow - (maxAge ?? TimeSpan.FromDays(30))));
+        command.Parameters.AddWithValue("$retry", Iso(DateTimeOffset.UtcNow - (retryAfter ?? TimeSpan.FromDays(1))));
     }
 
     /// <summary>

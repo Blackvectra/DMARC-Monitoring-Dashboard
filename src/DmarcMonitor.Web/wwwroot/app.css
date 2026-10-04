@@ -43,7 +43,9 @@
        at the same weight as its outer border makes a grid rather than a list. */
     --line-soft: #f0f0f1;
     --text: #18181b;
-    --muted: #71717a;
+    /* 4.8:1 on --sunken, where the code in a table cell sits; the grey this
+       replaced (#71717a) was 4.4 there. */
+    --muted: #6b6b74;
     --dim: #a1a1aa;
     --hover: #f4f4f5;
 
@@ -66,6 +68,15 @@
     --ontrack-bg: var(--accent-bg);
     --dim-bg: #f4f4f5;
     --warn: var(--watch);   /* used by .warn-inline */
+
+    /* The same four, for WORDS. The full colors above are right for a dot or
+       a chart segment and too pale to read as text on their own tint: 2.8 to
+       4.4 against the 4.5 that reading needs. Each of these clears 4.5 on its
+       tint. */
+    --urgent-ink: #b91c1c;
+    --act-ink:    #c2410c;
+    --watch-ink:  #854d0e;
+    --fine-ink:   #15803d;
 
     --warn-bg: #fffbeb;
     --warn-line: #fde68a;
@@ -94,7 +105,7 @@
     --side-2:      #1e2138;   /* hover, and the fold headers */
     --side-text:   #e6e7ee;
     --side-muted:  #9498b4;
-    --side-dim:    #6b7094;
+    --side-dim:    #8388ab;   /* 5.1:1 on the rail, 4.6 on its hover; the #6b7094 it replaced was 3.7 and 3.3 */
     --side-line:   #272a45;
     --side-accent: #8b93f8;   /* readable on the rail, where --accent is not */
     --side-on:     #ffffff;   /* the active label, brighter than --side-text */
@@ -126,6 +137,7 @@
     --watch: #facc15;   --watch-bg: #2a2410;
     --fine: #4ade80;    --fine-bg: #0f2a1a;
     --dim-bg: #1f1f23;
+    --urgent-ink: var(--urgent);  --act-ink: var(--act);  --watch-ink: var(--watch);  --fine-ink: var(--fine);
 
     --warn-bg: #2a2410;
     --warn-line: #4d3f12;
@@ -280,10 +292,10 @@ select {
     border: 1px solid transparent; background: var(--dim-bg); color: var(--muted);
     line-height: 1.5;
 }
-.count.urgent { background: var(--urgent-bg); color: var(--urgent); }
-.count.act    { background: var(--act-bg);    color: var(--act); }
-.count.watch  { background: var(--watch-bg);  color: var(--watch); }
-.count.fine   { background: var(--fine-bg);   color: var(--fine); }
+.count.urgent { background: var(--urgent-bg); color: var(--urgent-ink); }
+.count.act    { background: var(--act-bg);    color: var(--act-ink); }
+.count.watch  { background: var(--watch-bg);  color: var(--watch-ink); }
+.count.fine   { background: var(--fine-bg);   color: var(--fine-ink); }
 .count.ontrack{ background: var(--ontrack-bg); color: var(--ontrack); }
 
 /*
@@ -322,16 +334,6 @@ button.count.on:not(.urgent):not(.act):not(.watch):not(.fine):not(.ontrack) {
        flex line pushes it into its own row with a ragged gap. */
     .find { margin-left: 0; width: 100%; }
 }
-
-/* The row above a list: what to show, and how to group it. */
-.list-controls {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
-}
-.list-controls .find { margin-left: 0; }
 
 .toggle {
     display: flex;
@@ -691,7 +693,10 @@ section[id] { scroll-margin-top: 16px; }
 .link-button:hover:not(:disabled) { text-decoration: underline; }
 .link-button:disabled { color: var(--dim); cursor: default; }
 
-.source-name { display: block; font-weight: 500; }
+/* A name is whatever the address's owner wrote, and a hostname with no hyphen
+   in it has nowhere to break: one of 200 characters made the cell, and with it
+   the table, wider than the screen. */
+.source-name { display: block; font-weight: 500; overflow-wrap: anywhere; }
 
 .source-ip {
     /* Block so it sits under the name, but only as wide as the address.
@@ -780,7 +785,7 @@ section[id] { scroll-margin-top: 16px; }
 /* No colored stripe down the first column any more: the pip and the
    ordering say it, and eighteen stripes made the list look like a warning. */
 
-.good { color: var(--fine); }
+.good { color: var(--fine-ink); }
 .bad  { color: var(--urgent); }
 
 /* ---- sortable headers -------------------------------------------------- */
@@ -799,6 +804,20 @@ section[id] { scroll-margin-top: 16px; }
 .triage th button.sort:hover,
 .triage th[aria-sort] button.sort { color: var(--text); }
 .triage th button.sort .arrow { font-size: 9px; margin-left: 4px; }
+
+/*
+    Where focus is. The ring everything else gets is a glow at 18% opacity, which
+    is fine on a field and cannot be found on a row of small controls - and these
+    are the controls somebody reaching them from the keyboard is moving between.
+    A plain outline in the accent color is, in both themes.
+*/
+.triage th button.sort:focus-visible,
+button.count:focus-visible,
+.label-key > summary:focus-visible,
+.addresses > summary:focus-visible,
+details.more > summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: none; border-radius: 4px;
+}
 
 /* A cell as narrow as its content, for a label or a chip that should never wrap. */
 .triage .shrink { width: 1%; white-space: nowrap; }
@@ -839,11 +858,13 @@ details.more { display: inline; }
 details.more > summary { display: inline; cursor: pointer; color: var(--accent); list-style: none; }
 details.more > summary::-webkit-details-marker { display: none; }
 
-/* What the labels mean, once, rather than as a sentence on every row. */
-.key { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); }
-.key > summary { cursor: pointer; }
-.key dl { margin: 8px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; align-items: baseline; max-width: 100ch; }
-.key dd { margin: 0; }
+/* What the labels mean, once, rather than as a sentence on every row. Named for
+   what it is: .key is the chart legend's, and a shared name made this one a
+   flex row with the definitions beside the summary. */
+.label-key { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); }
+.label-key > summary { cursor: pointer; }
+.label-key dl { margin: 8px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; align-items: baseline; max-width: 100ch; }
+.label-key dd { margin: 0; }
 
 /* ---- record chips ------------------------------------------------------ */
 
@@ -901,7 +922,7 @@ details.more > summary::-webkit-details-marker { display: none; }
 .chip.weak       { background: var(--watch-bg);  color: var(--watch);  border-color: var(--watch-bg); }
 .chip.missing    { background: var(--urgent-bg); color: var(--urgent); border-color: var(--urgent-bg); }
 .chip.unreadable { background: var(--dim-bg);    color: var(--muted);  border-color: var(--line); }
-.chip.unknown    { background: transparent;      color: var(--dim);    border-color: var(--line); }
+.chip.unknown    { background: transparent;      color: var(--muted);  border-color: var(--line); }
 
 /* A reading too old to stand behind. Faded rather than recolored: the state
    it found is still the best information there is, it is just not news. */
@@ -933,10 +954,13 @@ details.more > summary::-webkit-details-marker { display: none; }
     border-bottom: 1px solid var(--line); white-space: normal;
 }
 .triage tbody tr.group:hover { background: transparent; }
-.triage tr.group:first-child th { padding-top: 6px; }
+/* Every heading opens a tbody of its own, so that what a heading is a heading
+   FOR is its own rows and not everything below it. Only the first sits close
+   to the header. */
+.triage tbody:first-of-type tr.group:first-child th { padding-top: 6px; }
 
 /* A domain under a heading is a little inside it. */
-.triage tr.headed td:nth-child(2) { padding-left: 24px; }
+.triage tr.headed td.domain-col { padding-left: 24px; }
 
 /* ---- volume bars ------------------------------------------------------- */
 

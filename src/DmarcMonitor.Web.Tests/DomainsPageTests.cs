@@ -69,8 +69,39 @@ public sealed class DomainsPageTests : IClassFixture<BookApp>
         Assert.Contains("Charlie LLC", html, StringComparison.Ordinal);
 
         // signed.example is pulled up under acme.com rather than staying
-        // where the alphabet would put it, at the bottom.
-        Assert.True(InOrder(html, "Acme Corp", "acme.com", "signed.example", "bravo.example", "Charlie LLC", "charlie.example", "delta.example"), html);
+        // where the alphabet would put it, at the bottom. From the table: the
+        // picker above it has an "Acme Corp" of its own to be found first.
+        var table = html[html.IndexOf("<tbody", StringComparison.Ordinal)..];
+        Assert.True(InOrder(table, "Acme Corp", "acme.com", "signed.example", "bravo.example", "Charlie LLC", "charlie.example", "delta.example"), table);
+    }
+
+    /// <summary>
+    /// A heading is a heading for its own rows. In one tbody, a reader that
+    /// honours scope="rowgroup" applies the first heading to every domain below
+    /// it, so Bravo would be read as Acme's and Charlie's as both.
+    /// </summary>
+    [Fact]
+    public async Task EachHeadingOpensATbodyOfItsOwnSoItIsAHeadingOnlyForItsOwnRows()
+    {
+        var html = await PageAsync();
+
+        // Acme's block, Bravo alone, Charlie's block.
+        var bodies = html.Split("<tbody").Skip(1).ToList();
+        Assert.Equal(3, bodies.Count);
+
+        var acme = bodies.Single(b => b.Contains("acme.com", StringComparison.Ordinal));
+        Assert.Contains("signed.example", acme, StringComparison.Ordinal);
+        Assert.Equal(1, Headings(acme));
+        Assert.StartsWith("<tr class=\"group\"", acme[acme.IndexOf("<tr", StringComparison.Ordinal)..], StringComparison.Ordinal);
+
+        var bravo = bodies.Single(b => b.Contains("bravo.example", StringComparison.Ordinal));
+        Assert.Equal(0, Headings(bravo));
+        Assert.DoesNotContain("acme.com", bravo, StringComparison.Ordinal);
+        Assert.DoesNotContain("charlie.example", bravo, StringComparison.Ordinal);
+
+        var charlie = bodies.Single(b => b.Contains("charlie.example", StringComparison.Ordinal));
+        Assert.Contains("delta.example", charlie, StringComparison.Ordinal);
+        Assert.Equal(1, Headings(charlie));
     }
 
     [Fact]
@@ -183,10 +214,16 @@ public sealed class DomainsPageTests : IClassFixture<BookApp>
 
         await page.ClickAsync(label => label.StartsWith("Volume", StringComparison.Ordinal), "the Volume header");
 
-        // Said, rather than a box that is ticked and does nothing.
+        // Said, rather than a box that is ticked and does nothing - on the page
+        // as well as on hover, for somebody who does not use a pointer.
         var html = await page.HtmlAsync();
         Assert.Contains("Off while the table is ordered by another column.", html, StringComparison.Ordinal);
+        Assert.Contains("— off while the table is ordered by another column", html, StringComparison.Ordinal);
         Assert.Contains("disabled", Regex.Match(html, @"<input[^>]*type=""checkbox""[^>]*>").Value, StringComparison.Ordinal);
+
+        // And one a person cannot use, which the test helper no longer lets a test
+        // pretend to: a browser sends nothing to a disabled box.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => page.ToggleAsync("Group by client", on: true));
     }
 
     [Fact]
@@ -264,10 +301,31 @@ public sealed class DomainsPageTests : IClassFixture<BookApp>
 
         var html = await page.HtmlAsync();
         Assert.Equal(0, Headings(html));
+        Assert.Equal(1, html.Split("<tbody").Length - 1);
         Assert.True(InOrder(html, "acme.com", "bravo.example", "charlie.example", "delta.example", "signed.example"), html);
 
         // And every domain says whose it is, since nothing else does.
         Assert.Contains("Acme Corp", Row(html, "signed.example"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Pressed on "p=none" and then moved to a client whose domains all enforce,
+    /// the table was empty with no chip lit to say what was filtering it.
+    /// </summary>
+    [Fact]
+    public async Task MovingToAClientWhoseDomainsAllEnforceDropsAPolicyFilterItCannotMeet()
+    {
+        await using var page = await LivePage.OpenAsync<DomainsPage>(_app);
+
+        await page.ClickAsync(label => label.EndsWith("p=none", StringComparison.Ordinal), "the p=none count");
+        Assert.DoesNotContain("acme.com", await page.HtmlAsync(), StringComparison.Ordinal);
+
+        await page.ChooseAsync("acme-corp", "acme-corp");
+
+        var html = await page.HtmlAsync();
+        Assert.DoesNotContain("Nothing matches.", html, StringComparison.Ordinal);
+        Assert.Contains("acme.com", html, StringComparison.Ordinal);
+        Assert.Contains("signed.example", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -283,6 +341,154 @@ public sealed class DomainsPageTests : IClassFixture<BookApp>
         await page.ChooseAsync("7", "90");
         await page.ClickAsync(label => label.StartsWith("Volume", StringComparison.Ordinal), "the Volume header");
         Assert.Contains("bravo.example", await page.HtmlAsync(), StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// A client with nothing in it. The picker lists it, and choosing it left a
+/// table that said "Nothing matches" beside a button reading "Show all 0".
+/// </summary>
+public sealed class EmptyClientTests : IClassFixture<EmptyClientApp>
+{
+    private readonly EmptyClientApp _app;
+
+    public EmptyClientTests(EmptyClientApp app) => _app = app;
+
+    [Fact]
+    public async Task AClientWithNoDomainsSaysSoAndOffersAllClients()
+    {
+        await using var page = await LivePage.OpenAsync<DomainsPage>(_app);
+
+        await page.ChooseAsync("empty-co", "empty-co");
+
+        var html = await page.HtmlAsync();
+        Assert.Contains("This client has no active domains.", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Show all 0", html, StringComparison.Ordinal);
+
+        await page.ClickAsync("Show all clients");
+
+        var all = await page.HtmlAsync();
+        Assert.DoesNotContain("This client has no active domains.", all, StringComparison.Ordinal);
+        Assert.Contains("acme.com", all, StringComparison.Ordinal);
+    }
+}
+
+public sealed class EmptyClientApp : SeededApp
+{
+    public EmptyClientApp() => new ReportStore(DatabasePath).CreateClientAsync("Empty Co").GetAwaiter().GetResult();
+}
+
+/// <summary>
+/// Two organizations that are called the same thing and look after a domain of
+/// the same name, each for a client of the same slug.
+/// </summary>
+/// <remarks>
+/// Neither the organization's name nor its client's slug is unique across the
+/// install - the schema asks for them to be unique only within an organization.
+/// A master looking at every organization at once meets both, and the page that
+/// told the organizations apart by name drew them fine and died on the first
+/// column somebody pressed.
+/// </remarks>
+public sealed class TwinOrganizationsTests : IClassFixture<TwinOrganizationsApp>
+{
+    private readonly TwinOrganizationsApp _app;
+
+    public TwinOrganizationsTests(TwinOrganizationsApp app) => _app = app;
+
+    private static int Headings(string html) => html.Split("scope=\"rowgroup\"").Length - 1;
+
+    [Fact]
+    public async Task TwoOrganizationsWithTheSameNameAreTwoBlocksAndTheTableStillRedraws()
+    {
+        await using var page = await LivePage.OpenAsync<DomainsPage>(_app);
+
+        // Acme Corp from the seed, and Contoso once in each organization.
+        var html = await page.HtmlAsync();
+        Assert.Equal(3, Headings(html));
+        Assert.Equal(2, html.Split("Acme IT / Contoso").Length - 1);
+        Assert.Equal(2, html.Split(">shared.example<").Length - 1);
+
+        // Flat, where the two shared.example rows sit side by side...
+        await page.ClickAsync(label => label.StartsWith("Volume", StringComparison.Ordinal), "the Volume header");
+        var flat = await page.HtmlAsync();
+        Assert.Equal(0, Headings(flat));
+        Assert.Equal(2, flat.Split(">shared.example<").Length - 1);
+
+        // ...and again, which is the draw that compares them with themselves:
+        // a repeated key is only found when the same rows are drawn twice.
+        await page.ClickAsync(label => label.StartsWith("Volume", StringComparison.Ordinal), "the Volume header");
+        Assert.Equal(2, (await page.HtmlAsync()).Split(">shared.example<").Length - 1);
+
+        await page.ClickAsync(label => label.StartsWith("Domain", StringComparison.Ordinal), "the Domain header");
+        Assert.Equal(3, Headings(await page.HtmlAsync()));
+    }
+}
+
+public sealed class TwinOrganizationsColumnsTests : IClassFixture<TwinOrganizationsApp>
+{
+    private readonly TwinOrganizationsApp _app;
+
+    public TwinOrganizationsColumnsTests(TwinOrganizationsApp app) => _app = app;
+
+    /// <summary>
+    /// A master looking across organizations gets a column the others do not,
+    /// and the table's width is written down twice: the header's cells and the
+    /// span of a client's heading. Nothing but this checks they still agree.
+    /// </summary>
+    [Fact]
+    public async Task EveryRowHasAsManyCellsAsTheHeaderAndAHeadingSpansThemAll()
+    {
+        await using var page = await LivePage.OpenAsync<DomainsPage>(_app);
+        var html = await page.HtmlAsync();
+
+        var head = html[html.IndexOf("<thead", StringComparison.Ordinal)..html.IndexOf("</thead>", StringComparison.Ordinal)];
+        var columns = Regex.Count(head, "<th[ >]");
+
+        // Eight, and the organization's.
+        Assert.Equal(9, columns);
+        Assert.Contains(">Organization<", head, StringComparison.Ordinal);
+
+        var body = html[html.IndexOf("<tbody", StringComparison.Ordinal)..];
+        var rows = body.Split("</tr>", StringSplitOptions.RemoveEmptyEntries).Where(r => r.Contains("<tr", StringComparison.Ordinal)).ToList();
+        Assert.NotEmpty(rows);
+
+        foreach (var row in rows)
+        {
+            if (row.Contains("class=\"group\"", StringComparison.Ordinal))
+            {
+                Assert.Contains($"colspan=\"{columns}\"", row, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Equal(columns, Regex.Count(row, "<td[ >]"));
+            }
+        }
+    }
+}
+
+public sealed class TwinOrganizationsApp : SeededApp
+{
+    public TwinOrganizationsApp() => Extend().GetAwaiter().GetResult();
+
+    private async Task Extend()
+    {
+        var orgs = new DmarcMonitor.Core.Tenancy.OrganizationStore(DatabasePath);
+
+        // The same name, told apart by their slugs.
+        var first = await orgs.CreateAsync("Acme IT", slug: "acme-it-a");
+        var second = await orgs.CreateAsync("Acme IT", slug: "acme-it-b");
+
+        foreach (var (slug, tenant) in new[] { ("acme-it-a", first!.Id), ("acme-it-b", second!.Id) })
+        {
+            var store = new ReportStore(DatabasePath, slug);
+
+            await BookApp.StoreAsync(store, "shared.example", passing: 10, failing: 0);
+            await BookApp.StoreAsync(store, $"only-{slug}.example", passing: 10, failing: 0);
+
+            var client = await store.CreateClientAsync("Contoso", slug: "contoso");
+            await store.AssignDomainAsync("shared.example", client!, tenant);
+            await store.AssignDomainAsync($"only-{slug}.example", client!, tenant);
+        }
     }
 }
 

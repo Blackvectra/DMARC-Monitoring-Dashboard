@@ -49,15 +49,12 @@ public sealed class SenderGroup
         Clients = [.. sources.SelectMany(s => s.Clients).Distinct(StringComparer.OrdinalIgnoreCase)
                              .OrderBy(c => c, StringComparer.Ordinal)];
         LastSeen = sources.Where(s => s.LastSeen is not null).Max(s => s.LastSeen);
-        Verdict = sources.Max(s => s.Verdict);
         Reading = sources.Max(s => s.Reading);
 
-        // The union where the rows carry it, the largest count where they do
-        // not. Never a sum: two addresses that both hit one client reached
-        // one party.
-        IndependentParties = sources.Any(s => s.PartyKeys.Count > 0)
-            ? sources.SelectMany(s => s.PartyKeys).Distinct(StringComparer.OrdinalIgnoreCase).Count()
-            : sources.Max(s => s.IndependentParties);
+        // The union of what the addresses reached. Never a sum: two addresses
+        // that both hit one client reached one party. Never the largest of
+        // them either, which misses the parties they did not share.
+        IndependentParties = sources.SelectMany(s => s.PartyKeys).Distinct(StringComparer.Ordinal).Count();
     }
 
     /// <summary>What identifies the group: stable between renders, unique within a list.</summary>
@@ -70,7 +67,12 @@ public sealed class SenderGroup
     /// </summary>
     public string Name { get; }
 
-    /// <summary>The registrable domain the addresses' names share, e.g. colocrossing.com. Null for a lone address.</summary>
+    /// <summary>
+    /// The registrable domain the addresses' names share, e.g.
+    /// colocrossing.com; for a vendor that answers from several, its main one
+    /// (<c>google.com</c> for a group made of google.com and googlemail.com
+    /// addresses, whichever came first). Null for a lone address.
+    /// </summary>
     public string? Domain { get; }
 
     /// <summary>What the catalogue says it is, when every address is confirmed as that vendor's.</summary>
@@ -89,17 +91,12 @@ public sealed class SenderGroup
     /// <summary>How many unrelated parties the sender reached, counted once each.</summary>
     public int IndependentParties { get; }
 
-    /// <summary>
-    /// The worst verdict any of its addresses earned.
-    /// </summary>
+    /// <summary>The worst reading among its addresses; see <see cref="FailingSource.Reading"/>.</summary>
     /// <remarks>
     /// The group does not get a softer reading than its members. One address
     /// authenticating for itself does not excuse the three beside it that
     /// authenticated nothing.
     /// </remarks>
-    public SourceVerdict Verdict { get; }
-
-    /// <summary>The worst reading among its addresses; see <see cref="FailingSource.Reading"/>.</summary>
     public SourceReading Reading { get; }
 
     /// <summary>
@@ -116,10 +113,52 @@ public sealed class SenderGroup
     /// breaking signatures across five customers is a real finding, and one an
     /// MSP is uniquely placed to notice.
     ///
+    /// Marketing platforms count too, and that is a choice rather than an
+    /// oversight. A SendGrid or a Mailchimp that fails for four clients is
+    /// usually four clients who each set it up unaligned, and the row says so
+    /// in its reading (Unaligned, which sorts below the unauthenticated
+    /// senders). But a phisher renting the same platform to send as four of
+    /// them reads identically in a report, and which customers really use the
+    /// platform is something the reports do not carry. So the row keeps both
+    /// facts in view - what it authenticated as, and how many parties it
+    /// reached - rather than guessing which one the reader needs.
+    ///
     /// Parties rather than domains: one client with two domains is one party,
     /// and an operator that hit both is not working through a list.
     /// </remarks>
     public bool SpansClients => IsGroup && Kind != SourceKind.MailProvider && IndependentParties > 1;
+
+    /// <summary>
+    /// Whether how many parties it reached is the finding, and so worth
+    /// drawing attention to: a sender spanning clients, or a lone address seen
+    /// against several.
+    /// </summary>
+    /// <remarks>
+    /// A mail provider's fourteen addresses against fourteen domains is the
+    /// size of the provider, not an alarm - which is why a group is notable
+    /// only where it spans clients, and a lone address where it was seen
+    /// against several.
+    /// </remarks>
+    public bool ReachIsTheFinding => IsGroup ? SpansClients : Sources[0].IsCrossClient;
+
+    /// <summary>
+    /// Whether this sender is what somebody typed into a search box: its name
+    /// or domain, a domain or client it reached, or any of its addresses or the
+    /// names they reverse to. Case does not matter; nothing typed matches all.
+    /// </summary>
+    public bool Matches(string? needle)
+    {
+        if (string.IsNullOrWhiteSpace(needle)) { return true; }
+
+        var text = needle.Trim();
+
+        return Name.Contains(text, StringComparison.OrdinalIgnoreCase)
+            || (Domain?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false)
+            || Domains.Any(d => d.Contains(text, StringComparison.OrdinalIgnoreCase))
+            || Clients.Any(c => c.Contains(text, StringComparison.OrdinalIgnoreCase))
+            || Sources.Any(s => s.SourceIp.Contains(text, StringComparison.OrdinalIgnoreCase)
+                             || (s.ReverseName?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false));
+    }
 
     /// <summary>
     /// Groups failing sources by who operates them.
@@ -143,16 +182,21 @@ public sealed class SenderGroup
     /// was Microsoft.
     /// </para>
     /// <para>
-    /// Names that reduce to a reverse zone (<c>in-addr.arpa</c>) say nothing
-    /// about an operator and are never grouped on; each such address stays a
-    /// row of its own.
+    /// Names that reduce to a reverse zone (<c>in-addr.arpa</c>), or to
+    /// something that looks like a country's registry (<c>ne.jp</c>), say
+    /// nothing about an operator and are never grouped on; each such address
+    /// stays a row of its own. Two ISPs of one country share the registry, and
+    /// are not one sender.
     /// </para>
     /// </remarks>
     public static IReadOnlyList<SenderGroup> Build(IEnumerable<FailingSource> sources, bool group = true)
     {
         ArgumentNullException.ThrowIfNull(sources);
 
-        var buckets = new Dictionary<string, List<FailingSource>>(StringComparer.OrdinalIgnoreCase);
+        // Ordinal, like the query that produced the rows: it keeps 2001:DB8::1
+        // and 2001:db8::1 apart, and folding them would turn two rows into a
+        // "group". Every other key is already lower case.
+        var buckets = new Dictionary<string, List<FailingSource>>(StringComparer.Ordinal);
         var order = new List<string>();
 
         foreach (var source in sources)
@@ -184,8 +228,12 @@ public sealed class SenderGroup
 
             // Null only for a list that names one address twice, which the
             // query cannot produce; the address then stands in for the domain
-            // rather than the page failing to draw.
-            var domain = SourceCatalog.OrganizationalDomain(members[0].ReverseName);
+            // rather than the page failing to draw. The vendor's main domain
+            // where it has several, so the label does not depend on which
+            // address came first.
+            var domain = SourceCatalog.OrganizationalDomain(members[0].ReverseName) is { } claimed
+                ? SourceCatalog.CanonicalDomain(claimed)
+                : null;
 
             // Named for the vendor only when every address in it is confirmed
             // as the vendor's. One unconfirmed member is a claim, and naming
@@ -235,8 +283,11 @@ public sealed class SenderGroup
 
         // Nothing to group on. A reverse zone is not an operator: without this
         // every address whose PTR is only its own reverse name falls into one
-        // bucket per leading octet.
-        if (domain is null || domain.EndsWith(".arpa", StringComparison.OrdinalIgnoreCase))
+        // bucket per leading octet. Neither is a country's registry, which is
+        // what a suffix missing from the catalogue's list reduces to.
+        if (domain is null
+            || domain.EndsWith(".arpa", StringComparison.OrdinalIgnoreCase)
+            || SourceCatalog.LooksLikeAPublicSuffix(domain))
         {
             return $"ip:{source.SourceIp}";
         }
@@ -251,7 +302,10 @@ public sealed class SenderGroup
             return $"provider:{provider.Name}";
         }
 
-        return $"domain:{domain}";
+        // And the same for every other vendor that answers from two domains:
+        // an address under contabo.net and one under contaboserver.net are one
+        // sender, which two keys would have kept as two rows of the same name.
+        return $"domain:{SourceCatalog.CanonicalDomain(domain)}";
     }
 
     /// <summary>

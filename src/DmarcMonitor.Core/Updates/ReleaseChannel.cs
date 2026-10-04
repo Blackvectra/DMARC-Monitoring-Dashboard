@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -82,7 +83,7 @@ public sealed class ReleaseChannel(HttpClient? client = null)
             // Said as what is wrong with the setting. Sent to GitHub as it
             // stood, it came back "not found ... an access token is needed",
             // which sends a person off to make a token for a public repository.
-            var shown = repository.Trim().Length > 80 ? repository.Trim()[..80] + "..." : repository.Trim();
+            var shown = Shown(repository);
             var problem = $"Updates:Repository is \"{shown}\", which is not a GitHub repository. Write it as owner/name.";
             return new UpdateStatus
             {
@@ -158,8 +159,10 @@ public sealed class ReleaseChannel(HttpClient? client = null)
     /// The setting is meant to be "owner/name". What gets put in a settings
     /// file is whatever was in the address bar, and after publishing a release
     /// that is the release page. So the repository's address, that page, a
-    /// clone address and the SSH form are all read as the repository they
-    /// name, and anything else is null rather than a guess.
+    /// clone address in any of its forms (https, git, ssh, and the scp-style
+    /// <c>git@github.com:owner/name</c>) and the API's own address for it are
+    /// all read as the repository they name, and anything else is null rather
+    /// than a guess.
     ///
     /// Also what keeps the setting from choosing a different GitHub API path
     /// than the release list: only two plain names ever reach the request.
@@ -167,12 +170,18 @@ public sealed class ReleaseChannel(HttpClient? client = null)
     /// <returns>"owner/name", or null when the setting is not a GitHub repository.</returns>
     public static string? NormalizeRepository(string? setting)
     {
-        var text = (setting ?? "").Trim();
+        // Invisible characters ride along when an address is copied from a web
+        // page or a chat message - a zero-width space, a byte-order mark. They
+        // are not whitespace to Trim, they do not show, and they are never part
+        // of a name, so a setting that carries one looked right and was refused.
+        var text = string.Concat((setting ?? "").Where(c => char.GetUnicodeCategory(c) != UnicodeCategory.Format)).Trim();
         var fromAddress = false;
 
-        if (text.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase))
+        var scp = ScpPrefixes.FirstOrDefault(prefix => text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+        if (scp is not null)
         {
-            text = text["git@github.com:".Length..];
+            text = text[scp.Length..];
         }
         else if (text.Contains("://", StringComparison.Ordinal)
                  || text.StartsWith("github.com/", StringComparison.OrdinalIgnoreCase)
@@ -183,15 +192,30 @@ public sealed class ReleaseChannel(HttpClient? client = null)
             // tree/main, a query, a fragment - is where on the repository the
             // person happened to be.
             var address = text.Contains("://", StringComparison.Ordinal) ? text : "https://" + text;
-            if (!Uri.TryCreate(address, UriKind.Absolute, out var uri)
-                || uri.Scheme is not ("http" or "https")
-                || !(uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
-                     || uri.Host.Equals("www.github.com", StringComparison.OrdinalIgnoreCase)))
+            if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https" or "ssh" or "git"))
+            {
+                return null;
+            }
+
+            var web = uri.Scheme is "http" or "https";
+            var host = uri.Host.ToLowerInvariant();
+            var api = web && host == "api.github.com";
+
+            if (!(host is "github.com" or "www.github.com" || api || (uri.Scheme == "ssh" && host == "ssh.github.com")))
             {
                 return null;
             }
 
             text = uri.AbsolutePath;
+
+            // The API's own address for a repository: /repos/owner/name, and
+            // whatever follows. Nothing else on that host names one.
+            if (api)
+            {
+                if (!text.StartsWith("/repos/", StringComparison.Ordinal)) { return null; }
+                text = text["/repos".Length..];
+            }
+
             fromAddress = true;
         }
 
@@ -204,7 +228,52 @@ public sealed class ReleaseChannel(HttpClient? client = null)
         var owner = parts[0];
         var name = parts[1].EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? parts[1][..^4] : parts[1];
 
-        return IsPlainName(owner) && IsPlainName(name) ? $"{owner}/{name}" : null;
+        return IsPlainName(owner) && IsPlainName(name) && !NotAnOwner.Contains(owner) ? $"{owner}/{name}" : null;
+    }
+
+    /// <summary>The scp-style clone addresses, <c>git@github.com:owner/name.git</c>.</summary>
+    private static readonly string[] ScpPrefixes = ["git@github.com:", "git@ssh.github.com:"];
+
+    /// <summary>
+    /// Pages of github.com whose address looks like a repository's and is not
+    /// one: <c>github.com/orgs/acme/repositories</c>, <c>github.com/settings/tokens</c>.
+    /// GitHub reserves these as names, so no owner is called any of them.
+    /// </summary>
+    /// <remarks>
+    /// Read as "orgs/acme" the first of those went to GitHub, came back not
+    /// found, and was answered with "an access token is needed" - the
+    /// misdirection that reading a pasted address was meant to end.
+    /// </remarks>
+    private static readonly HashSet<string> NotAnOwner = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "about", "account", "apps", "codespaces", "collections", "contact", "copilot", "customer-stories",
+        "dashboard", "enterprise", "events", "explore", "features", "issues", "join", "login", "logout",
+        "marketplace", "new", "notifications", "organizations", "orgs", "pricing", "pulls", "readme", "search",
+        "security", "sessions", "settings", "signup", "sponsors", "stars", "support", "topics", "trending",
+        "users", "watching",
+    };
+
+    /// <summary>
+    /// The setting as it is written back to the person, for a page every staff
+    /// login can read: cut short, and without the user-and-password part of an
+    /// address, since a token pasted into one is what that part usually is.
+    /// </summary>
+    private static string Shown(string setting)
+    {
+        var text = setting.Trim();
+        var scheme = text.IndexOf("://", StringComparison.Ordinal);
+
+        if (scheme >= 0)
+        {
+            var start = scheme + 3;
+            var end = text.IndexOf('/', start);
+            var authority = end < 0 ? text[start..] : text[start..end];
+            var at = authority.LastIndexOf('@');
+
+            if (at >= 0) { text = text[..start] + text[(start + at + 1)..]; }
+        }
+
+        return text.Length > 80 ? text[..80] + "..." : text;
     }
 
     private static bool IsPlainName(string name) =>

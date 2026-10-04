@@ -1032,8 +1032,12 @@ today, is not exposed by any of these.
   a handful - its documentation says five in one place and six in another -
   and a `hasgroups` marker instead. The "No organization" page now says when
   this is the reason, and DEPLOYING.md §5 and RUNNING.md recommend "Groups
-  assigned to the application", which keeps the count to what was assigned.
-  Not resolved: the app does not ask Microsoft Graph for the full list,
+  assigned to the application", which counts only a person's direct memberships
+  of groups assigned to the app. That keeps the count down but does not remove
+  the limit (somebody in more than about five assigned groups still gets the
+  marker), needs every group the app uses to be assigned (one left out is
+  silently absent, and the app cannot tell that from being in no group), and
+  needs Entra ID P1. Not resolved: the app does not ask Microsoft Graph for the full list,
   because the ID-token flow gives it no access token to ask with, and that
   option is unavailable on Entra ID Free. Doing it properly means the
   authorization-code flow with a certificate (limit 200, and `_claim_names`

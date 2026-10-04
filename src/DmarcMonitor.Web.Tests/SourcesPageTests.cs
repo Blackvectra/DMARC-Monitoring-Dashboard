@@ -127,8 +127,46 @@ public sealed class SourcesPageTests : IClassFixture<SendersApp>
     {
         var html = await Client().GetStringAsync("/sources");
 
-        Assert.Contains("have not been looked up yet", html, StringComparison.Ordinal);
+        // "Due", which covers a name that is old or never checked as well as an
+        // address nobody has asked about: "40 of 40 have a name; 40 have not been
+        // looked up" was a sentence that contradicted itself.
+        Assert.Contains("are due a lookup", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("have not been looked up yet", html, StringComparison.Ordinal);
         Assert.Contains("Look up names now", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// What the lookup says is announced to somebody who cannot see it change,
+    /// and the key is not the chart legend's: they once shared a class name,
+    /// and with it a flex row that put the definitions beside the summary.
+    /// </summary>
+    [Fact]
+    public async Task TheStatusIsAnAnnouncedRegionAndTheKeyHasAHookOfItsOwn()
+    {
+        var html = await Client().GetStringAsync("/sources");
+
+        Assert.Contains("role=\"status\"", html, StringComparison.Ordinal);
+        Assert.Contains("<details class=\"label-key\">", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("class=\"key\"", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A sender whose addresses each reached one party but together reached
+    /// three reads Unauthenticated, the worst of them. Its hover must not say
+    /// "against one client so far" beside a red "3 parties".
+    /// </summary>
+    [Fact]
+    public async Task ASenderSpanningClientsSaysSoOnHoverRatherThanContradictingItsOwnRow()
+    {
+        var row = Row(await Client().GetStringAsync("/sources"), "hostile.example");
+
+        // The row's own label, not the per-address ones inside it.
+        var label = System.Text.RegularExpressions.Regex.Match(
+            row, "<span class=\"count act\" title=\"([^\"]+)\">Unauthenticated</span>");
+
+        Assert.True(label.Success, row);
+        Assert.Contains("together the addresses reached 3", label.Groups[1].Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("one client so far", label.Groups[1].Value, StringComparison.Ordinal);
     }
 
     // ---- using it ------------------------------------------------------------
@@ -329,6 +367,35 @@ public sealed class SourceNameLookupTests : IClassFixture<SendersApp>
         Assert.Contains("Looked up 4 source(s)", after, StringComparison.Ordinal);
         Assert.DoesNotContain("Look up names now", after, StringComparison.Ordinal);
         Assert.True((await store.GetAsync(["203.0.113.99"])).ContainsKey("203.0.113.99"));
+    }
+}
+
+/// <summary>
+/// The same press, read from the audit log. Its own fixture, like the lookup
+/// above, because the press writes and a second one would find nothing left to do.
+/// </summary>
+public sealed class SourceNameLookupAuditTests : IClassFixture<SendersApp>
+{
+    private readonly SendersApp _app;
+
+    public SourceNameLookupAuditTests(SendersApp app) => _app = app;
+
+    /// <summary>
+    /// It reaches outside the machine, so a burst of lookups against somebody's
+    /// resolver has to be attributable to whoever kept pressing the button.
+    /// </summary>
+    [Fact]
+    public async Task APressIsInTheAuditLogAgainstWhoPressedIt()
+    {
+        await using var page = await LivePage.OpenAsync<Sources>(_app);
+
+        await page.ClickAsync("Look up names now");
+
+        var entry = Assert.Single(
+            await new DmarcMonitor.Core.Tenancy.AuditLog(_app.DatabasePath).ListAsync(),
+            e => e.Action == "sources.names");
+        Assert.Equal("operator@example.com", entry.Actor);
+        Assert.Contains("4 address(es)", entry.Detail, StringComparison.Ordinal);
     }
 }
 
