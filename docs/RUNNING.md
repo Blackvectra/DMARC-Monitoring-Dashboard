@@ -555,9 +555,13 @@ wrong answer:
   decides what happens to failing mail, never whether it fails, so changing it
   alone must cost nothing — and measured the other way it appeared to cost 9.
 - **A message the stored row cannot account for is set aside, not counted.** A
-  message can carry several DKIM signatures and the store keeps one. Where
-  replaying the row disagrees with what the receiver did, the receiver is
-  right, the row is excluded from every figure, and the count is stated.
+  message can carry several DKIM signatures and the store keeps one: a passing
+  signature that lines up with the From domain if there is one, otherwise any
+  passing one. Where replaying the row still disagrees with what the receiver
+  did, the receiver is right, the row is excluded from every figure, and the
+  count is stated. (Reports stored before the store chose by alignment kept the
+  first passing signature, which for a Google Workspace domain is Google's own;
+  see the note in `OPEN-ISSUES.md` on filling such a database again.)
 
 ---
 

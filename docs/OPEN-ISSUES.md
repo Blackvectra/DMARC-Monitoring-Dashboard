@@ -1086,6 +1086,7 @@ today, is not exposed by any of these.
 | `ClientReportRenderer` | The report's domain table does not mention `pct`, though the domain page does | Carry `Pct` through and say "on N% of mail", same wording as `DomainView` |
 | `ClientCommand` | Prints "Added X as 'slug'" while the Clients page says "filed as" | Pick one phrasing |
 | `ReportPeriod` | An explicit `--month` can select the current, incomplete month and the report does not say so | Say "covers 1–17 Sep, in progress" when the period has not ended |
+| `ReportStore` | Records stored before the store chose between several passing signatures by alignment (see "Fixed today", 8) keep the first passing one, which for a Google Workspace domain is `google.com`'s own. The raw reports are not kept, only a hash, and a report already stored is skipped when read again, so nothing can re-derive them in place | Read the original report files into a new database. An in-place repair would need the raw reports kept |
 
 ---
 
@@ -1122,3 +1123,15 @@ fail without the fix.
    name to 127.0.0.1 and read the app from the trial user's browser. It now
    answers only to `localhost`, `127.0.0.1` and `[::1]`. Covered by
    `ProxyTests`.
+8. **A record signed twice was filed under the wrong signature.** A Google
+   Workspace message carries two DKIM results, `google.com`'s own and the
+   domain's key, and both verify. The store kept the first passing one, which
+   is Google's and does not align with the From domain, so a row said its pass
+   rested on a signer that is not the domain's. `dmarc simulate` read DKIM-only
+   mail signed that way as unexplained and left it out, and read mail passing
+   both ways as resting on SPF alone: on a real Google Workspace domain it
+   reported mail as SPF-alone that the receivers had passed on DKIM as well.
+   The store now keeps a passing result that aligns with the From domain if
+   there is one, then any passing one, then the first, for DKIM and SPF alike.
+   Covered by `ReportStoreTests`, which fail without the fix; records already
+   stored keep the earlier choice (see "Smaller things").
