@@ -569,11 +569,11 @@ public sealed class DomainDetailService(string databasePath)
         // from the source tables and then described it to the operator in the
         // same breath as forwarded failures - on the live data, 19 of
         // acme.example's 84 messages, which is its own mail servers.
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT COALESCE(SUM(message_count), 0),
                    COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
                    COALESCE(SUM(CASE WHEN dmarc_result <> 'pass'
-                                      AND override_reason IS NOT NULL AND override_reason <> ''
+                                      AND {PolicyOverrides.ExcusedSql()}
                                      THEN message_count END), 0)
             FROM aggregate_records
             WHERE domain_id = $domain AND date_begin >= $since
@@ -590,7 +590,7 @@ public sealed class DomainDetailService(string databasePath)
         SqliteConnection db, string domainId, string domain, string since, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT r.source_ip,
                    SUM(r.message_count),
                    SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count ELSE 0 END),
@@ -646,12 +646,13 @@ public sealed class DomainDetailService(string databasePath)
                      CASE WHEN r.spf_auth_result = 'pass' THEN NULLIF(r.spf_domain, '') END), ''), '')
             FROM aggregate_records r
             WHERE r.domain_id = $domain AND r.date_begin >= $since
-              -- Overridden FAILURES only. A mailing list breaking
+              -- Excused FAILURES only. A mailing list breaking
               -- authentication is expected and buries the findings that
               -- matter, so it stays out; a source whose mail passed and merely
-              -- carried a receiver note belongs in the table like any other.
+              -- carried a receiver note belongs in the table like any other,
+              -- and so does one whose reason excuses nothing.
               AND NOT (r.dmarc_result <> 'pass'
-                       AND r.override_reason IS NOT NULL AND r.override_reason <> '')
+                       AND {PolicyOverrides.ExcusedSql("r")})
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             """;

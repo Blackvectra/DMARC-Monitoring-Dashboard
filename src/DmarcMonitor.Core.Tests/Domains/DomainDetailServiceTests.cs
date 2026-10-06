@@ -50,6 +50,25 @@ public sealed class DomainDetailServiceTests : IDisposable
           </record>
         """;
 
+    /// <summary>A failing row whose reason excuses nothing: the policy applied, or <c>pct</c> let it through.</summary>
+    private static string ReasonRow(string ip, int count, string domain, string reason) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>quarantine</disposition><dkim>fail</dkim><spf>fail</spf>
+                <reason><type>{reason}</type></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{domain}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{domain}</domain><selector>x1</selector><result>permerror</result></dkim>
+              <spf><domain>{domain}</domain><result>fail</result></spf>
+            </auth_results>
+          </record>
+        """;
+
     /// <summary>A row the receiving provider overrode, as a mailing list produces.</summary>
     private static string ForwardedRow(string ip, int count, string domain) => $"""
         <record>
@@ -299,6 +318,30 @@ public sealed class DomainDetailServiceTests : IDisposable
         var listed = detail.Clean.Concat(detail.Misconfigured).Concat(detail.Impersonating)
             .Sum(s => s.Messages);
         Assert.Equal(detail.Messages - detail.OverriddenMessages, listed);
+    }
+
+    /// <summary>
+    /// "Other" and "sampled_out" are not the receiver saying the failure was
+    /// expected, so neither takes a source out of the tables or into the count
+    /// of what was left out. The second matters most: under <c>pct=25</c> it is
+    /// what a receiver writes beside the three quarters of failing mail it let
+    /// through, which is exactly the traffic somebody ramping the policy is
+    /// there to see.
+    /// </summary>
+    [Theory]
+    [InlineData("other")]
+    [InlineData("sampled_out")]
+    public async Task AReasonThatExcusesNothingLeavesTheSourceInTheTablesAndOutOfTheCount(string reason)
+    {
+        await StoreAsync("acme.com", "reject",
+            Row("192.0.2.25", 100, "pass", "acme.com", "acme.com", "pass"),
+            ReasonRow("192.0.2.50", 7, "acme.com", reason));
+
+        var detail = await GetAsync("acme.com");
+
+        Assert.NotNull(detail);
+        Assert.Equal(0, detail!.OverriddenMessages);
+        Assert.Contains(detail.Sources, s => s.SourceIp == "192.0.2.50" && s.Failing == 7);
     }
 
     [Fact]

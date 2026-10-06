@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -227,10 +228,13 @@ public sealed class CorrelationService(string databasePath)
             ClientScope.For(tenantId, clientSlug), ["aggregate_records"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
-        // Overrides are excluded. A mailing list or forwarder breaking
-        // authentication is expected behavior, and including it would bury
-        // the real findings under traffic nobody should act on.
-        command.CommandText = """
+        // Failures the receiver excused are left out. A mailing list or
+        // forwarder breaking authentication is expected behavior, and
+        // including it would bury the real findings under traffic nobody
+        // should act on. A reason that excuses nothing - "other", or the
+        // "sampled_out" a receiver writes beside what pct let through - does
+        // not take a failure out of the list; see PolicyOverrides.
+        command.CommandText = $"""
             SELECT
               r.source_ip,
               SUM(r.message_count)                                   AS failed,
@@ -254,7 +258,7 @@ public sealed class CorrelationService(string databasePath)
               -- somebody sending as them.
               --
               -- Counted over the same rows the outer query reads - this window,
-              -- failures that are not overrides - and compared with the same
+              -- failures that were not excused - and compared with the same
               -- set of domains. Over all time it counted a domain the address
               -- passed for months ago, or failed for only as a forwarder, as if
               -- it vouched for the domain it is failing against now.
@@ -263,7 +267,7 @@ public sealed class CorrelationService(string databasePath)
                 WHERE f.source_ip = r.source_ip
                   AND f.dmarc_result = 'fail'
                   AND f.date_begin >= $since
-                  AND (f.override_reason IS NULL OR f.override_reason = '')
+                  AND NOT {PolicyOverrides.ExcusedSql("f")}
                   AND EXISTS (SELECT 1 FROM aggregate_records p
                                WHERE p.source_ip = f.source_ip
                                  AND p.domain_id = f.domain_id
@@ -302,7 +306,7 @@ public sealed class CorrelationService(string databasePath)
             LEFT JOIN source_names n ON n.ip = r.source_ip
             WHERE r.dmarc_result = 'fail'
               AND r.date_begin >= $since
-              AND (r.override_reason IS NULL OR r.override_reason = '')
+              AND NOT {PolicyOverrides.ExcusedSql("r")}
               AND ($tenant IS NULL OR r.tenant_id = $tenant)
               AND ($client IS NULL OR c.slug = $client)
             GROUP BY r.source_ip

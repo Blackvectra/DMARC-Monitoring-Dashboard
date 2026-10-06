@@ -158,7 +158,7 @@ public static class AggregateReportParser
             spfResults.Add(new AuthResult
             {
                 Domain = d,
-                Result = Text(Child(el, "result")),
+                Result = NormalizeResult(Text(Child(el, "result"))),
                 Scope = Text(Child(el, "scope")),
             });
         }
@@ -175,7 +175,7 @@ public static class AggregateReportParser
             dkimResults.Add(new AuthResult
             {
                 Domain = d,
-                Result = Text(Child(el, "result")),
+                Result = NormalizeResult(Text(Child(el, "result"))),
                 Selector = Text(Child(el, "selector")),
             });
         }
@@ -269,6 +269,17 @@ public static class AggregateReportParser
         string.Equals(raw.Trim(), "pass", StringComparison.OrdinalIgnoreCase)
             ? DmarcResult.Pass
             : DmarcResult.Fail;
+
+    /// <summary>
+    /// An authentication result in the form the schema and every query use.
+    /// </summary>
+    /// <remarks>
+    /// RFC 7489 spells them in lower case and one receiver sends "Fail".
+    /// SQLite compares text exactly and the queries ask for <c>'pass'</c>, so a
+    /// receiver that wrote "Pass" would have every message it passed counted as
+    /// not having passed.
+    /// </remarks>
+    private static string NormalizeResult(string raw) => raw.Trim().ToLowerInvariant();
 
     private static OverrideReason ParseOverride(string raw) => raw.Trim().ToLowerInvariant() switch
     {

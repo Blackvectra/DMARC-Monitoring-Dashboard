@@ -286,7 +286,7 @@ public sealed class ReportStore
                 command.Parameters.AddWithValue("$dmarc", record.IsDmarcPass ? "pass" : "fail");
                 command.Parameters.AddWithValue("$fail", FailReason(record));
                 command.Parameters.AddWithValue("$orType", record.Overrides.Count > 0
-                    ? string.Join(';', record.Overrides.Select(o => o.Type.ToString().ToLowerInvariant()))
+                    ? string.Join(';', record.Overrides.Select(o => PolicyOverrides.Stored(o.Type)))
                     : (object)DBNull.Value);
                 command.Parameters.AddWithValue("$orComment", record.Overrides.Count > 0
                     ? Nullable(record.Overrides[0].Comment)

@@ -88,6 +88,28 @@ public sealed class CorrelationServiceTests : IDisposable
         """;
 
     /// <summary>
+    /// A failing row with a reason that excuses nothing: the policy was applied as
+    /// published, or the message escaped it only through <c>pct</c>.
+    /// </summary>
+    private static string ReasonRow(string ip, int count, string domain, string reason, string disposition) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>{disposition}</disposition><dkim>fail</dkim><spf>fail</spf>
+                <reason><type>{reason}</type></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{domain}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{domain}</domain><selector>x1</selector><result>permerror</result></dkim>
+              <spf><domain>{domain}</domain><result>fail</result></spf>
+            </auth_results>
+          </record>
+        """;
+
+    /// <summary>
     /// A domain nobody has onboarded, which is how every domain starts.
     /// </summary>
     private Task StoreUnassignedAsync(string domain, params string[] rows) =>
@@ -131,6 +153,34 @@ public sealed class CorrelationServiceTests : IDisposable
     {
         var rows = await new CorrelationService(_dbPath).GetFailingSourcesAsync();
         return rows.FirstOrDefault(r => r.SourceIp == ip);
+    }
+
+    /// <summary>
+    /// A receiver that quarantined a message and wrote "other" beside it had
+    /// not excused anything, and one that let a failure through because of
+    /// <c>pct</c> had not either. Both were read as a forwarder and left out of
+    /// the list, which for the second is the one step of a rollout where
+    /// forgeries are still landing.
+    /// </summary>
+    [Theory]
+    [InlineData("other", "quarantine")]
+    [InlineData("sampled_out", "none")]
+    public async Task AFailureTheReceiverGaveNoExcuseForIsStillAFailingSource(string reason, string disposition)
+    {
+        await StoreAsync("a.example", "alpha", ReasonRow("203.0.113.40", 3, "a.example", reason, disposition));
+
+        var source = await SourceAsync("203.0.113.40");
+
+        Assert.NotNull(source);
+        Assert.Equal(3, source!.FailedMessages);
+    }
+
+    [Fact]
+    public async Task AFailureTheReceiverExcusedStaysOutOfTheList()
+    {
+        await StoreAsync("a.example", "alpha", ForwardedRow("203.0.113.41", 3, "a.example"));
+
+        Assert.Null(await SourceAsync("203.0.113.41"));
     }
 
     [Fact]

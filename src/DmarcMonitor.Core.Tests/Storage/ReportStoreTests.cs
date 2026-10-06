@@ -391,6 +391,20 @@ public sealed class ReportStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task StoresAResultInLowerCaseWhateverTheReceiverCapitalised()
+    {
+        // The schema's values are lower case and one receiver writes "Fail".
+        // SQLite compares text exactly, and every query asks for 'pass' as the
+        // schema spells it, so a receiver that wrote "Pass" would have had
+        // every message it passed counted as not having passed.
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("example.com", "s1", "PASS") + SpfResult("example.com", "mfrom", "Fail")), "raw");
+
+        Assert.Equal(("example.com", "s1", "pass"), await StoredDkimAsync());
+        Assert.Equal(("example.com", "fail"), await StoredSpfAsync());
+    }
+
+    [Fact]
     public async Task DoesNotPreferAHeloResultToTheIdentityDmarcReads()
     {
         // A pass for the HELO name never counts toward DMARC, however well the

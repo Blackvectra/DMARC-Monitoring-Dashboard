@@ -1135,3 +1135,33 @@ fail without the fix.
    there is one, then any passing one, then the first, for DKIM and SPF alike.
    Covered by `ReportStoreTests`, which fail without the fix; records already
    stored keep the earlier choice (see "Smaller things").
+9. **A reason of "other" was read as a forwarder, and a carve-out for
+   `sampled_out` matched nothing.** Any reason a receiver wrote beside a record
+   made the tool treat the failure as expected, and `dmarc explain` said so:
+   "the receiver recognized a forwarder or mailing list. Not an attack and not
+   a misconfiguration. Nothing to do." One receiver writes `other` beside mail
+   it quarantined exactly as the policy asked. The message that showed it was
+   signed on the protected domain with a selector nobody had published, from a
+   home broadband address in another country, and the tool told the operator
+   to ignore it. Every table that leaves forwarded failures out left it out
+   too: the sending sources, the threat indicators, the domain page, the
+   authenticated / overridden / unauthenticated split and the client report.
+   One of those queries did try to keep `sampled_out` in, which is how a
+   receiver marks what `pct` let through and so what somebody ramping the
+   policy most needs to see, but it spelled the reason with an underscore and
+   the store writes `sampledout`, so the exception never applied. One rule,
+   `PolicyOverrides`, now says which reasons excuse a failure (forwarded,
+   trusted forwarder, mailing list, local policy) and builds the condition
+   every query uses from the spelling the store writes.
+   The same report put its results in capitals ("Fail"), and every query asks
+   for `'pass'` exactly, so a receiver that wrote "Pass" would have had its
+   passing mail counted as failing; results are lower-cased on the way in. Its
+   signature on the domain was reported as `permerror` because no key existed
+   for the selector, which is a forged signature however a receiver words it,
+   and now counts as one beside `fail`. Covered in every reader by tests that
+   fail without the change. The reason is read when a query runs, so what is
+   already stored is corrected too; only the `fail_reason` label in an
+   export of a record stored earlier still says `override`. Not changed:
+   `local_policy` still excuses, though it says only that the receiver chose to
+   deliver the message, which is not quite the same as the failure being
+   expected.

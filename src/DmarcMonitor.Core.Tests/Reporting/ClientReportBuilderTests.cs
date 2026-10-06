@@ -82,6 +82,46 @@ public sealed class ClientReportBuilderTests : IDisposable
           </record>
         """;
 
+    /// <summary>A failing row whose reason excuses nothing.</summary>
+    private static string ReasonRow(string ip, int count, string headerFrom, string reason) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>quarantine</disposition><dkim>fail</dkim><spf>fail</spf>
+                <reason><type>{reason}</type></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{headerFrom}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{headerFrom}</domain><selector>x1</selector><result>permerror</result></dkim>
+              <spf><domain>{headerFrom}</domain><result>fail</result></spf>
+            </auth_results>
+          </record>
+        """;
+
+    /// <summary>
+    /// The client report's totals carry a count of failures "handled by the
+    /// receiver" and the source tables leave them out. A comment beside the
+    /// query said <c>sampled_out</c> must never count, because under
+    /// <c>pct=25</c> that is how a receiver marks the forgeries it let
+    /// through; the test it lacked is this one, and the query's own spelling of
+    /// the reason matched nothing the store writes.
+    /// </summary>
+    [Theory]
+    [InlineData("other")]
+    [InlineData("sampled_out")]
+    public async Task AReasonThatExcusesNothingIsNotReportedAsHandledByTheReceiver(string reason)
+    {
+        var report = await BuildAsync(Xml("acme.com", "quarantine",
+            Row("203.0.113.9", 50, "pass", "acme.com", "acme.com", "pass", "acme.com", "pass"),
+            ReasonRow("203.0.113.77", 6, "acme.com", reason)));
+
+        Assert.Equal(0, report.OverriddenMessages);
+        Assert.Contains(report.Sources, s => s.SourceIp == "203.0.113.77" && s.Failing == 6);
+    }
+
     /// <summary>Stores a report dated into a given month of 2026.</summary>
     private async Task StoreAsync(string xml, int month)
     {
