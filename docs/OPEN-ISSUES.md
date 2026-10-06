@@ -91,6 +91,28 @@ the export path again.
 figures quoted from it are lower bounds. Ingest against the live mailbox would
 collect the lot.
 
+**`-MoveToDeleted`, and a mark-read failure nobody could see.** The exporter
+only ever marked messages read; it never moved anything, so a person cleaning
+the Inbox by hand each day was doing a job people assumed the script did. It
+now has an opt-in `-MoveToDeleted` that marks a message read and moves it to
+the Deleted Items of the mailbox it is in, on the same terms as marking read
+(its report is saved, nothing on it failed). Never out of Sent Items, Drafts,
+Outbox, Junk Email, Deleted Items itself or anything inside them, and never
+from a search folder, which lists messages that live elsewhere. The moves
+happen after each folder has been walked, because moving a message out of a
+folder shifts the next one into its place and a loop that moves as it counts
+skips every other message. A message that could not be marked read - a shared
+mailbox the signed-in user may read but not change - was only ever mentioned
+with `-Verbose`; it is now counted and named, with the reason, at the end of
+every run.
+
+Known untested, as for the rest of this script: all of it is exercised against
+a fake Outlook. What the fake cannot show is how a real shared mailbox answers
+`GetDefaultFolder` for Deleted Items, whether a cached-mode mailbox refuses a
+move it has not finished syncing, and what the permission error says when
+Outlook refuses. A first run against a real mailbox should be one folder, read
+off the table's `moved` column before it is scheduled.
+
 ---
 
 ## 2. The pages are checked, the browser is not

@@ -51,32 +51,75 @@ BeforeAll {
     }
 
     # Outlook collections are 1-based and expose Count and Item(i).
+    #
+    # Count is read live, not fixed when the collection is made: moving a
+    # message out of a folder shrinks the folder's Items, and a script that
+    # walks 1..Count while it moves things skips every other message. A fake
+    # whose Count never changed could not show that.
     function New-FakeCollection {
         param([object[]]$List = @())
-        $c = [pscustomobject]@{ Count = $List.Count; List = @($List) }
+        $c = [pscustomobject]@{ List = [System.Collections.Generic.List[object]]::new() }
+        foreach ($x in $List) { $c.List.Add($x) }
+        $c | Add-Member ScriptProperty Count { $this.List.Count }
         $c | Add-Member ScriptMethod Item { param([int]$i) $this.List[$i - 1] }
         $c
     }
 
     function New-FakeItem {
-        param([object[]]$Attachments = @(), [bool]$UnRead = $true)
+        param(
+            [object[]]$Attachments = @(),
+            [bool]$UnRead = $true,
+            [switch]$SaveThrows,
+            [switch]$MoveThrows
+        )
         # UnRead and Save() as Outlook has them: the flag changes nothing
-        # until the item is saved, so Saved counts the writes.
-        $item = [pscustomobject]@{ Attachments = (New-FakeCollection $Attachments); UnRead = $UnRead; Saved = 0 }
-        $item | Add-Member ScriptMethod Save { $this.Saved++ }
+        # until the item is saved, so Saved counts the writes. Save() throws
+        # the way it does on a mailbox the signed-in user may only read.
+        #
+        # Move() takes the item out of the folder it is in and puts it in the
+        # destination, as Outlook does, and hands back the moved item. Parent
+        # is set when the item is put in a folder; MovedTo is where it went.
+        $item = [pscustomobject]@{
+            Attachments = (New-FakeCollection $Attachments)
+            UnRead      = $UnRead
+            Saved       = 0
+            Parent      = $null
+            MovedTo     = $null
+            SaveThrows  = [bool]$SaveThrows
+            MoveThrows  = [bool]$MoveThrows
+        }
+        $item | Add-Member ScriptMethod Save {
+            if ($this.SaveThrows) { throw 'You do not have sufficient permission to perform this operation on this object.' }
+            $this.Saved++
+        }
+        $item | Add-Member ScriptMethod Move {
+            param($Destination)
+            if ($this.MoveThrows) { throw 'The operation failed.' }
+            if ($this.Parent) { [void]$this.Parent.Items.List.Remove($this) }
+            $Destination.Items.List.Add($this)
+            $this.Parent = $Destination
+            $this.MovedTo = $Destination
+            $this
+        }
         $item
     }
 
     function New-FakeFolder {
-        param([string]$Name, [object[]]$Items = @(), [object[]]$Children = @(), [string]$EntryID)
+        # -Virtual lists items that live in some other folder, as a search
+        # folder does: their Parent stays the folder they are really in.
+        param([string]$Name, [object[]]$Items = @(), [object[]]$Children = @(), [string]$EntryID, [switch]$Virtual)
         if (-not $EntryID) { $EntryID = [guid]::NewGuid().ToString() }
-        [pscustomobject]@{
+        $folder = [pscustomobject]@{
             Name            = $Name
             EntryID         = $EntryID
             Items           = (New-FakeCollection $Items)
             Folders         = @($Children)
             UnReadItemCount = 0
         }
+        if (-not $Virtual) {
+            foreach ($item in $Items) { if ($item.PSObject.Properties['Parent']) { $item.Parent = $folder } }
+        }
+        $folder
     }
 
     # A store whose .Folders throws the way a real one does.
@@ -103,12 +146,54 @@ public class ThrowingStore {
 '@
     }
 
-    # A store is a folder with a .Store that can answer GetDefaultFolder(6).
-    function New-FakeStore {
-        param([string]$Name, [object[]]$Children = @(), $Inbox, [switch]$FoldersThrow)
+    # Every folder under a store answers .Store, as in Outlook. That is how the
+    # script finds the Deleted Items of the mailbox a message is IN, rather
+    # than the one belonging to whoever is signed in.
+    function Set-FakeStoreOn {
+        param($Folder, $Store)
+        if ($null -eq $Folder) { return }
+        # A test that writes its children as "@(a), (b)" hands over an array
+        # inside the array. Outlook never does; the walk copes so the test can.
+        if ($Folder -is [array]) {
+            foreach ($f in $Folder) { Set-FakeStoreOn -Folder $f -Store $Store }
+            return
+        }
+        if (-not $Folder.PSObject.Properties['Store']) { $Folder | Add-Member NoteProperty Store $Store }
+        foreach ($child in @($Folder.Folders)) { Set-FakeStoreOn -Folder $child -Store $Store }
+    }
 
-        $inner = [pscustomobject]@{ Inbox = $Inbox }
-        $inner | Add-Member ScriptMethod GetDefaultFolder { param([int]$kind) if ($kind -eq 6) { $this.Inbox } }
+    # A store is a folder with a .Store that answers GetDefaultFolder for the
+    # kinds the script asks about: 6 Inbox, 3 Deleted Items, 5 Sent Items,
+    # 16 Drafts, 23 Junk Email. A kind it has no folder for answers nothing,
+    # and -DeletedThrows makes the Deleted Items question throw, as it does on
+    # a store that will not answer.
+    function New-FakeStore {
+        param(
+            [string]$Name, [object[]]$Children = @(), $Inbox,
+            $Deleted, $Sent, $Drafts, $Junk,
+            [hashtable]$Other = @{},
+            [switch]$FoldersThrow, [switch]$DeletedThrows
+        )
+
+        $inner = [pscustomobject]@{
+            StoreID = [guid]::NewGuid().ToString()
+            Inbox = $Inbox; Deleted = $Deleted; Sent = $Sent; Drafts = $Drafts; Junk = $Junk
+            DeletedThrows = [bool]$DeletedThrows
+            Other = $Other
+            Root = $null
+        }
+        $inner | Add-Member ScriptMethod GetDefaultFolder {
+            param([int]$kind)
+            switch ($kind) {
+                6  { $this.Inbox }
+                3  { if ($this.DeletedThrows) { throw 'The operation failed.' }; $this.Deleted }
+                5  { $this.Sent }
+                16 { $this.Drafts }
+                23 { $this.Junk }
+                default { $this.Other[$kind] }
+            }
+        }
+        $inner | Add-Member ScriptMethod GetRootFolder { $this.Root }
 
         if ($FoldersThrow) {
             # A public folder store, an online archive: asking for .Folders
@@ -122,8 +207,26 @@ public class ThrowingStore {
         }
 
         $s = New-FakeFolder -Name $Name -Children $Children
-        $s | Add-Member NoteProperty Store $inner
+        $inner.Root = $s
+        Set-FakeStoreOn -Folder $s -Store $inner
+        # The default folders are tagged too, whether or not the test also
+        # lists them among the children.
+        foreach ($f in @($Inbox, $Deleted, $Sent, $Drafts, $Junk) + @($Other.Values)) { if ($f) { Set-FakeStoreOn -Folder $f -Store $inner } }
         $s
+    }
+
+    # Reference equality, because Should -Be on two folders compares what they
+    # look like rather than whether they are the same folder, and every empty
+    # fake folder looks alike.
+    function Test-Same { param($A, $B) [object]::ReferenceEquals($A, $B) }
+
+    # A mailbox with reports in the Inbox and a Deleted Items to move them to.
+    function New-MoveFixture {
+        param([object[]]$InboxItems, [string]$StoreName = 'DMARC')
+        $inbox = New-FakeFolder 'Inbox' -Items $InboxItems
+        $deleted = New-FakeFolder 'Deleted Items'
+        $store = New-FakeStore $StoreName -Children @($inbox, $deleted) -Inbox $inbox -Deleted $deleted
+        [pscustomobject]@{ Inbox = $inbox; Deleted = $deleted; Store = $store }
     }
 
     function New-FakeOutlook {
@@ -565,6 +668,299 @@ Describe 'Export-DMARCAttachments' {
             $item.UnRead | Should -BeTrue
             $item.Saved  | Should -Be 0
         }
+
+        It 'says so when a message could not be marked read, rather than only with -Verbose' {
+            # A shared mailbox the signed-in user may read but not change
+            # refuses the write. The export is fine and the flag is a nicety,
+            # but a flag that silently never changes is exactly how "my script
+            # is not marking them read" goes unexplained for weeks.
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml') -SaveThrows
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $r.ExitCode | Should -Be 0
+            Test-Path (Join-Path $script:Out 'Inbox' 'google.xml') | Should -BeTrue
+            $r.Text | Should -Match '1 message\(s\) could not be marked read'
+            $r.Text | Should -Match 'sufficient permission'
+        }
+
+        It 'says nothing about failures when every message was marked' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $r.Text | Should -Not -Match 'could not be marked read'
+        }
+    }
+
+    Context 'moving to Deleted Items' {
+        # The cleanup half of the job. Opt in, because a script that moves
+        # people's mail unasked is a surprise; and soft, because Deleted Items
+        # is where a person can still drag a message back from.
+
+        It 'leaves every message where it is without the switch' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $fx = New-MoveFixture @($item)
+
+            Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            $item.MovedTo | Should -BeNullOrEmpty
+            $fx.Inbox.Items.Count   | Should -Be 1
+            $fx.Deleted.Items.Count | Should -Be 0
+        }
+
+        It 'marks a message read and moves it to Deleted Items once its report is saved' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $fx = New-MoveFixture @($item)
+
+            $r = Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $r.ExitCode | Should -Be 0
+            Test-Path (Join-Path $script:Out 'Inbox' 'google.xml') | Should -BeTrue
+            $item.UnRead | Should -BeFalse
+            $item.Saved  | Should -Be 1
+            Test-Same $item.MovedTo $fx.Deleted | Should -BeTrue
+            $fx.Inbox.Items.Count   | Should -Be 0
+            $fx.Deleted.Items.Count | Should -Be 1
+            $r.Text | Should -Match '1 message\(s\) moved to Deleted Items'
+        }
+
+        It 'moves every message, although the folder shrinks as it goes' {
+            # Taking a message out of a folder shifts the next one into its
+            # place. A loop that counts upward while it moves skips every
+            # other message: five reports in, three moved, and the other two
+            # waiting for tomorrow, where the same thing happens again.
+            $items = 1..5 | ForEach-Object { New-FakeItem @(New-FakeAttachment "report$_.xml") }
+            $fx = New-MoveFixture $items
+
+            $r = Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $fx.Inbox.Items.Count   | Should -Be 0
+            $fx.Deleted.Items.Count | Should -Be 5
+            @($items | Where-Object { $_.UnRead }).Count | Should -Be 0
+            @(Get-ChildItem (Join-Path $script:Out 'Inbox') -File).Count | Should -Be 5
+            $r.Text | Should -Match '5 message\(s\) moved to Deleted Items'
+        }
+
+        It 'moves without marking read when asked to leave messages unread' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $fx = New-MoveFixture @($item)
+
+            Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted', '-LeaveUnread') | Out-Null
+
+            $item.UnRead | Should -BeTrue
+            $item.Saved  | Should -Be 0
+            Test-Same $item.MovedTo $fx.Deleted | Should -BeTrue
+        }
+
+        It 'leaves a message with no report on it where it is' {
+            $item = New-FakeItem @(New-FakeAttachment 'signature.png')
+            $fx = New-MoveFixture @($item)
+
+            Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted') | Out-Null
+
+            $item.MovedTo | Should -BeNullOrEmpty
+            $fx.Inbox.Items.Count | Should -Be 1
+        }
+
+        It 'leaves a message where it is when one of its attachments could not be saved' {
+            # The same rule as marking read, and for the same reason: this is
+            # the one message somebody needs to look at.
+            $item = New-FakeItem @((New-FakeAttachment 'broken.xml' -ThrowsOnSave), (New-FakeAttachment 'google.xml'))
+            $fx = New-MoveFixture @($item)
+
+            Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted') | Out-Null
+
+            $item.MovedTo | Should -BeNullOrEmpty
+            $item.UnRead  | Should -BeTrue
+            $fx.Inbox.Items.Count | Should -Be 1
+        }
+
+        It 'still moves a message whose report an earlier run saved' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $fx = New-MoveFixture @($item)
+            Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out) | Out-Null
+
+            $r = Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $r.Text | Should -Match '0 new report\(s\) written'
+            Test-Same $item.MovedTo $fx.Deleted | Should -BeTrue
+            $fx.Inbox.Items.Count | Should -Be 0
+        }
+
+        It 'moves out of the Inbox and out of folders somebody made, in one run' {
+            # A rule that files reports into DMARC\<domain> leaves the newest
+            # ones in the Inbox, so both have to be cleaned. The folder is
+            # named with a literal backslash, as the real ones are.
+            $a = New-FakeItem @(New-FakeAttachment 'a.xml')
+            $b = New-FakeItem @(New-FakeAttachment 'b.xml')
+            $c = New-FakeItem @(New-FakeAttachment 'c.xml')
+            $sub   = New-FakeFolder 'Quarterly' -Items @($c)
+            $inbox = New-FakeFolder 'Inbox' -Items @($a) -Children @($sub)
+            $acme  = New-FakeFolder 'DMARC\acme.example' -Items @($b)
+            $deleted = New-FakeFolder 'Deleted Items'
+            $store = New-FakeStore 'DMARC' -Children @($inbox, $acme, $deleted) -Inbox $inbox -Deleted $deleted
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $deleted.Items.Count | Should -Be 3
+            $inbox.Items.Count + $acme.Items.Count + $sub.Items.Count | Should -Be 0
+            $r.Text | Should -Match '3 message\(s\) moved to Deleted Items'
+        }
+
+        It 'never moves anything out of Sent Items, Drafts, Junk Email or Deleted Items itself' {
+            # A whole-mailbox export visits every folder, and a report file
+            # attached to something somebody sent, or kept as a draft, is not
+            # a message this script has any business deleting.
+            $sentItem  = New-FakeItem @(New-FakeAttachment 'sent.xml')
+            $subItem   = New-FakeItem @(New-FakeAttachment 'sentsub.xml')
+            $draftItem = New-FakeItem @(New-FakeAttachment 'draft.xml')
+            $junkItem  = New-FakeItem @(New-FakeAttachment 'junk.xml')
+            $oldItem   = New-FakeItem @(New-FakeAttachment 'old.xml')
+            $newItem   = New-FakeItem @(New-FakeAttachment 'new.xml')
+            $sentSub = New-FakeFolder 'Old sent' -Items @($subItem)
+            $sent    = New-FakeFolder 'Sent Items' -Items @($sentItem) -Children @($sentSub)
+            $drafts  = New-FakeFolder 'Drafts' -Items @($draftItem)
+            $junk    = New-FakeFolder 'Junk Email' -Items @($junkItem)
+            $deleted = New-FakeFolder 'Deleted Items' -Items @($oldItem)
+            $inbox   = New-FakeFolder 'Inbox' -Items @($newItem)
+            $store = New-FakeStore 'DMARC' -Children @($inbox, $sent, $drafts, $junk, $deleted) `
+                -Inbox $inbox -Deleted $deleted -Sent $sent -Drafts $drafts -Junk $junk
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            # Every one of them is still exported; only the move is withheld.
+            foreach ($f in 'Sent Items\sent.xml', 'Sent Items\Old sent\sentsub.xml', 'Drafts\draft.xml', 'Junk Email\junk.xml', 'Deleted Items\old.xml', 'Inbox\new.xml') {
+                Test-Path (Join-Path $script:Out ($f -replace '\\', [IO.Path]::DirectorySeparatorChar)) | Should -BeTrue -Because $f
+            }
+            foreach ($i in $sentItem, $subItem, $draftItem, $junkItem, $oldItem) { $i.MovedTo | Should -BeNullOrEmpty }
+            $sent.Items.Count    | Should -Be 1
+            $sentSub.Items.Count | Should -Be 1
+            $drafts.Items.Count  | Should -Be 1
+            $junk.Items.Count    | Should -Be 1
+            # The one message that was in the Inbox is the only one that moved.
+            Test-Same $newItem.MovedTo $deleted | Should -BeTrue
+            $deleted.Items.Count | Should -Be 2
+            $r.Text | Should -Match '1 message\(s\) moved to Deleted Items'
+        }
+
+        It 'leaves Conflicts and Sync Issues alone too' {
+            $conflict = New-FakeItem @(New-FakeAttachment 'conflict.xml')
+            $sync     = New-FakeItem @(New-FakeAttachment 'sync.xml')
+            $conflicts  = New-FakeFolder 'Conflicts' -Items @($conflict)
+            $syncIssues = New-FakeFolder 'Sync Issues' -Items @($sync)
+            $inbox = New-FakeFolder 'Inbox'
+            $deleted = New-FakeFolder 'Deleted Items'
+            $store = New-FakeStore 'DMARC' -Children @($inbox, $conflicts, $syncIssues, $deleted) `
+                -Inbox $inbox -Deleted $deleted -Other @{ 19 = $conflicts; 20 = $syncIssues }
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted') | Out-Null
+
+            $conflict.MovedTo | Should -BeNullOrEmpty
+            $sync.MovedTo     | Should -BeNullOrEmpty
+            $conflicts.Items.Count  | Should -Be 1
+            $syncIssues.Items.Count | Should -Be 1
+        }
+
+        It 'does not move a message it only reaches through a search folder' {
+            # "Unread Mail" and its kind list messages that sit in other
+            # folders, Sent Items among them. Moving one from there moves the
+            # original, past the protection on Sent Items itself. A message
+            # is only moved from the folder it actually lives in.
+            $sentItem = New-FakeItem @(New-FakeAttachment 'sent.xml')
+            $inboxItem = New-FakeItem @(New-FakeAttachment 'inbox.xml')
+            $sent = New-FakeFolder 'Sent Items' -Items @($sentItem)
+            $unreadMail = New-FakeFolder 'Unread Mail' -Items @($sentItem, $inboxItem) -Virtual
+            $searchFolders = New-FakeFolder 'Search Folders' -Children @($unreadMail)
+            $inbox = New-FakeFolder 'Inbox' -Items @($inboxItem)
+            $deleted = New-FakeFolder 'Deleted Items'
+            $store = New-FakeStore 'DMARC' -Children @($inbox, $sent, $searchFolders, $deleted) `
+                -Inbox $inbox -Deleted $deleted -Sent $sent
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $sentItem.MovedTo | Should -BeNullOrEmpty
+            $sent.Items.Count | Should -Be 1
+            # The Inbox message is still moved, once, from the Inbox.
+            Test-Same $inboxItem.MovedTo $deleted | Should -BeTrue
+            $deleted.Items.Count | Should -Be 1
+            $r.Text | Should -Match '1 message\(s\) moved to Deleted Items'
+        }
+
+        It 'moves into the Deleted Items of the mailbox the message is in, not the signed-in user''s own' {
+            # The shared mailbox is a store of its own beside the operator's.
+            # Asking the namespace for Deleted Items answers with the
+            # operator's, and the report would leave the shared mailbox for
+            # somebody's personal one.
+            $ownInbox = New-FakeFolder 'Inbox'
+            $ownDeleted = New-FakeFolder 'Deleted Items'
+            $own = New-FakeStore 'Someone Personal' -Children @($ownInbox, $ownDeleted) -Inbox $ownInbox -Deleted $ownDeleted
+
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $fx = New-MoveFixture @($item) -StoreName 'DMARC Reports'
+
+            Invoke-Export -Stores @($own, $fx.Store) -Arguments @('-OutputPath', $script:Out, '-Mailbox', 'DMARC Reports', '-MoveToDeleted') | Out-Null
+
+            Test-Same $item.MovedTo $fx.Deleted | Should -BeTrue
+            $ownDeleted.Items.Count | Should -Be 0
+        }
+
+        It 'falls back to the folder called Deleted Items when the store will not answer for it' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $deleted = New-FakeFolder 'Deleted Items'
+            $store = New-FakeStore 'DMARC' -Children @($inbox, $deleted) -Inbox $inbox -DeletedThrows
+
+            Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted') | Out-Null
+
+            Test-Same $item.MovedTo $deleted | Should -BeTrue
+        }
+
+        It 'says so, and leaves the mail where it is, when there is no Deleted Items to be found' {
+            $item = New-FakeItem @(New-FakeAttachment 'google.xml')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox -DeletedThrows
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $r.ExitCode | Should -Be 0
+            $item.MovedTo | Should -BeNullOrEmpty
+            $inbox.Items.Count | Should -Be 1
+            $r.Text | Should -Match "no Deleted Items folder.*'DMARC'"
+            # Marking read does not depend on it.
+            $item.UnRead | Should -BeFalse
+        }
+
+        It 'costs one message, not the run, when a move fails, and says so' {
+            $first  = New-FakeItem @(New-FakeAttachment 'one.xml')
+            $stuck  = New-FakeItem @(New-FakeAttachment 'two.xml') -MoveThrows
+            $third  = New-FakeItem @(New-FakeAttachment 'three.xml')
+            $fx = New-MoveFixture @($first, $stuck, $third)
+
+            $r = Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $r.ExitCode | Should -Be 0
+            $fx.Deleted.Items.Count | Should -Be 2
+            $fx.Inbox.Items.Count   | Should -Be 1
+            Test-Path (Join-Path $script:Out 'Inbox' 'two.xml') | Should -BeTrue
+            $r.Text | Should -Match '2 message\(s\) moved to Deleted Items'
+            $r.Text | Should -Match '1 message\(s\) could not be moved to Deleted Items'
+            $r.Text | Should -Match 'The operation failed'
+        }
+
+        It 'shows what it moved in the table, and not at all when it was not asked to' {
+            $fx = New-MoveFixture @(New-FakeItem @(New-FakeAttachment 'google.xml'))
+            $with = Invoke-Export -Stores @($fx.Store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+            $with.Text | Should -Match 'marked read\s+moved'
+
+            $fx2 = New-MoveFixture @(New-FakeItem @(New-FakeAttachment 'other.xml'))
+            $without = Invoke-Export -Stores @($fx2.Store) -Arguments @('-OutputPath', (Join-Path $script:Out 'again'))
+            $without.Text | Should -Not -Match 'moved'
+        }
     }
 
     Context 'running again into the same folder' {
@@ -685,6 +1081,16 @@ Describe 'Export-DMARCAttachments' {
             $global:Registered.Action.Argument | Should -Match '-Mailbox "DMARC Reports"'
             $global:Registered.Action.Argument | Should -Match '-LogFile'
             $global:Registered.Action.Argument | Should -Not -Match '-Schedule'
+        }
+
+        It 'passes -MoveToDeleted through to the task, and only when it was asked for' {
+            $with = Invoke-Export -Stores @() -Arguments @('-OutputPath', $script:Out, '-Schedule', '07:00', '-MoveToDeleted')
+            $with.ExitCode | Should -Be 0
+            $global:Registered.Action.Argument | Should -Match '-MoveToDeleted'
+
+            $global:Registered = $null
+            Invoke-Export -Stores @() -Arguments @('-OutputPath', $script:Out, '-Schedule', '07:00') | Out-Null
+            $global:Registered.Action.Argument | Should -Not -Match 'MoveToDeleted'
         }
 
         It 'refuses a time it cannot read, and registers nothing' {
