@@ -15,6 +15,14 @@ public sealed record DomainTriage
     /// <summary>The organization the client belongs to, for a master looking across all of them.</summary>
     public string Organization { get; init; } = "";
 
+    /// <summary>
+    /// The organization itself. <see cref="Organization"/> is what it is
+    /// called, and two organizations can be called the same: anything that
+    /// has to tell them apart - a row's identity, a client's block - goes by
+    /// this.
+    /// </summary>
+    public string TenantId { get; init; } = "";
+
     public string Policy { get; init; } = "none";
     public long Messages { get; init; }
     public long Passing { get; init; }
@@ -98,14 +106,15 @@ public sealed class TriageService(string databasePath)
               d.baseline_days,
               d.policy_target,
               c.slug,
-              t.name
+              t.name,
+              d.tenant_id
             FROM domains d
             JOIN clients c ON c.id = d.client_id
             JOIN tenants t ON t.id = d.tenant_id
             LEFT JOIN aggregate_records r
                    ON r.domain_id = d.id AND r.date_begin >= $since
             WHERE d.is_active = 1 AND ($tenant IS NULL OR d.tenant_id = $tenant) AND ($client IS NULL OR c.slug = $client)
-            GROUP BY d.id, d.name, c.name, c.slug, t.name
+            GROUP BY d.id, d.name, c.name, c.slug, t.name, d.tenant_id
             """;
         command.Parameters.AddWithValue("$since", since);
         command.Parameters.AddWithValue("$tenant", (object?)tenantId ?? DBNull.Value);
@@ -144,6 +153,7 @@ public sealed class TriageService(string databasePath)
                 PolicyTarget = reader.IsDBNull(10) ? "reject" : reader.GetString(10),
                 ClientSlug = reader.GetString(11),
                 Organization = reader.GetString(12),
+                TenantId = reader.GetString(13),
             };
 
             // The judgment lives in Core and is unit tested against every

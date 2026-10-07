@@ -327,7 +327,11 @@ public sealed class AggregateReportParserTests
             """;
         var rec = AggregateReportParser.Parse(xml).Report!.Records[0];
         Assert.Equal(OverrideReason.Unknown, rec.Overrides[0].Type);
-        Assert.True(rec.WasOverridden);
+
+        // Kept, but it excuses nothing: nobody has said what it means, and a
+        // failure that is hidden because of a word nobody recognizes is worse
+        // than one that is shown.
+        Assert.False(rec.WasOverridden);
     }
 
     // ---- bad input ----------------------------------------------------------

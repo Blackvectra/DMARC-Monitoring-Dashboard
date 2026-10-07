@@ -98,9 +98,11 @@ public static class SourceCatalog
     /// PTR into one bucket, so those keep a third label and stay distinct.
     ///
     /// Two-part public suffixes: <c>co.uk</c> and the rest are the suffix, not
-    /// the domain. The list is short on purpose - a full public-suffix list is
-    /// a dependency that goes stale, and being wrong here costs a name rather
-    /// than a wrong answer, because an unmatched domain simply is not named.
+    /// the domain. The list is not a full public-suffix list - that is a
+    /// dependency that goes stale - so a suffix it lacks reduces to the suffix
+    /// itself. Naming a source from the result costs only a name, because an
+    /// unmatched domain is not named; grouping on it costs more, which is why
+    /// <see cref="LooksLikeAPublicSuffix"/> exists for the caller that groups.
     /// </remarks>
     public static string? OrganizationalDomain(string? host)
     {
@@ -125,14 +127,66 @@ public static class SourceCatalog
     }
 
     /// <summary>
+    /// Whether a reduced domain is probably a registry rather than anybody's
+    /// domain: two labels, a two-letter country code, and a first label of
+    /// three letters or fewer, as in <c>ne.jp</c>, <c>co.kr</c> or
+    /// <c>com.pg</c>.
+    /// </summary>
+    /// <remarks>
+    /// For the caller that GROUPS on the reduced domain. The suffix list is
+    /// short and cannot be complete, and a suffix it lacks reduces to the
+    /// suffix itself - so two unrelated ISPs under it share one "domain", and
+    /// a page built on that shows them as a single operator working through
+    /// several customers. Declining to group costs a row that stays on its
+    /// own, as it was before grouping; the other way costs a false finding.
+    /// Deliberately blunt: a real two-letter domain under a country code, such
+    /// as <c>ya.ru</c>, is caught too, and its hosts simply stay ungrouped.
+    /// </remarks>
+    public static bool LooksLikeAPublicSuffix(string? domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain)) { return false; }
+
+        var labels = domain.Trim().TrimEnd('.').Split('.', StringSplitOptions.RemoveEmptyEntries);
+
+        return labels.Length == 2
+            && labels[1].Length == 2
+            && labels[0].Length <= 3
+            && labels[1].All(char.IsAsciiLetter);
+    }
+
+    /// <summary>
+    /// The domain to treat a vendor as living at, when it answers from
+    /// several: <c>googlemail.com</c> is <c>google.com</c>, and
+    /// <c>contaboserver.net</c> is <c>contabo.net</c>. Any other domain is its
+    /// own.
+    /// </summary>
+    /// <remarks>
+    /// So one vendor is one sender however many of its domains an address
+    /// reverses under. Only vendors the catalogue holds under more than one
+    /// domain are listed; a vendor missing from this table is not merged,
+    /// which is how it behaved before.
+    /// </remarks>
+    public static string CanonicalDomain(string domain) =>
+        Aliases.TryGetValue(domain, out var main) ? main : domain;
+
+    private static readonly Dictionary<string, string> Aliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["googlemail.com"] = "google.com",
+        ["contaboserver.net"] = "contabo.net",
+        ["hetzner.de"] = "hetzner.com",
+        ["1and1.com"] = "ionos.com",
+        ["mcsv.net"] = "mailchimp.com",
+    };
+
+    /// <summary>
     /// Suffixes that are not themselves anybody's domain.
     /// </summary>
     /// <remarks>
-    /// Short on purpose. A full public-suffix list is a dependency that goes
-    /// stale between releases, and the cost of being wrong here is only that a
-    /// source goes unnamed - an organizational domain that matches nothing in
-    /// the catalog is simply not named, never named wrongly. These are the
-    /// ones that actually turn up in reverse DNS on this data.
+    /// The registries whose second-level names turn up in the reverse DNS of
+    /// mail senders: the large ISP and hosting markets, where a failing-source
+    /// list is full of residential ranges. It is not a full public-suffix list,
+    /// which is a dependency that goes stale between releases; what it leaves
+    /// out is caught by <see cref="LooksLikeAPublicSuffix"/> where it matters.
     /// </remarks>
     private static readonly HashSet<string> TwoPartSuffixes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -140,10 +194,58 @@ public static class SourceCatalog
         // own reverse name collapses into one bucket called "in-addr.arpa".
         "in-addr.arpa", "ip6.arpa",
 
-        "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk",
-        "com.au", "net.au", "org.au",
-        "co.nz", "co.za", "co.jp", "co.in",
-        "com.br", "com.mx", "com.ar",
+        // Europe and Africa.
+        "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "nhs.uk",
+        "co.at", "or.at", "ac.at", "gv.at",
+        "com.es", "nom.es", "org.es", "gob.es", "edu.es",
+        "com.pl", "net.pl", "org.pl", "gov.pl", "edu.pl",
+        "com.pt", "org.pt", "gov.pt", "edu.pt",
+        "com.gr", "net.gr", "org.gr", "gov.gr", "edu.gr",
+        "com.ro", "org.ro", "co.hu", "org.hu",
+        "com.ua", "net.ua", "org.ua", "gov.ua", "edu.ua", "in.ua",
+        "com.ru", "net.ru", "org.ru",
+        "asso.fr", "com.fr", "gouv.fr",
+        "co.za", "org.za", "net.za", "ac.za", "gov.za",
+        "com.ng", "net.ng", "org.ng", "gov.ng", "edu.ng",
+        "co.ke", "or.ke", "ne.ke", "ac.ke", "go.ke",
+        "com.eg", "net.eg", "org.eg", "gov.eg", "edu.eg",
+        "co.ma", "net.ma", "org.ma", "gov.ma",
+
+        // Middle East and Asia.
+        "co.il", "org.il", "net.il", "ac.il", "gov.il", "k12.il",
+        "com.sa", "net.sa", "org.sa", "gov.sa", "edu.sa",
+        "co.ae", "com.ae", "net.ae", "org.ae", "gov.ae", "ac.ae",
+        "com.tr", "net.tr", "org.tr", "gov.tr", "edu.tr", "gen.tr", "biz.tr", "info.tr",
+        "co.in", "net.in", "org.in", "ac.in", "gov.in", "edu.in", "res.in", "firm.in", "gen.in", "ind.in",
+        "com.pk", "net.pk", "org.pk", "gov.pk", "edu.pk",
+        "com.bd", "net.bd", "org.bd", "gov.bd", "edu.bd",
+        "com.lk", "com.np",
+        "co.th", "in.th", "ac.th", "go.th", "or.th", "net.th",
+        "com.vn", "net.vn", "org.vn", "gov.vn", "edu.vn",
+        "co.id", "net.id", "or.id", "ac.id", "go.id", "web.id", "sch.id",
+        "com.my", "net.my", "org.my", "gov.my", "edu.my",
+        "com.ph", "net.ph", "org.ph", "gov.ph", "edu.ph",
+        "com.sg", "net.sg", "org.sg", "gov.sg", "edu.sg", "per.sg",
+        "com.hk", "net.hk", "org.hk", "gov.hk", "edu.hk", "idv.hk",
+        "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+        "com.tw", "net.tw", "org.tw", "gov.tw", "edu.tw", "idv.tw",
+        "co.jp", "ne.jp", "or.jp", "ac.jp", "ad.jp", "go.jp", "gr.jp", "ed.jp", "lg.jp",
+        "co.kr", "ne.kr", "or.kr", "re.kr", "go.kr", "ac.kr", "pe.kr",
+
+        // Oceania.
+        "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+        "co.nz", "net.nz", "org.nz", "ac.nz", "govt.nz", "school.nz", "geek.nz",
+
+        // The Americas.
+        "com.br", "net.br", "org.br", "gov.br", "edu.br",
+        "com.mx", "net.mx", "org.mx", "gob.mx", "edu.mx",
+        "com.ar", "net.ar", "org.ar", "gob.ar", "gov.ar", "edu.ar",
+        "com.co", "net.co", "org.co", "gov.co", "edu.co",
+        "com.pe", "net.pe", "org.pe", "gob.pe", "edu.pe",
+        "com.ve", "net.ve", "org.ve", "co.ve", "gob.ve",
+        "com.ec", "net.ec", "org.ec", "gob.ec", "edu.ec",
+        "com.uy", "net.uy", "org.uy", "edu.uy",
+        "com.do", "com.gt", "com.pa", "com.sv", "com.ni", "com.hn", "com.py", "com.bo", "com.cu",
     };
 
     private readonly record struct Entry(string Name, SourceKind Kind);

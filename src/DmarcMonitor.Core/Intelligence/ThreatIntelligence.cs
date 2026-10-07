@@ -278,10 +278,12 @@ public sealed class ThreatIntelligenceService(string databasePath)
         await using var command = db.CreateCommand();
         command.Transaction = tx;
 
-        // Everything below is one pass over the failing records. Overrides are
-        // excluded: a mailing list breaking authentication is expected and
-        // would bury real findings.
-        command.CommandText = """
+        // Everything below is one pass over the failing records. Failures the
+        // receiver excused are left out: a mailing list breaking
+        // authentication is expected and would bury real findings. A reason
+        // that excuses nothing does not leave a failure out; see
+        // PolicyOverrides.
+        command.CommandText = $"""
             INSERT INTO threat_indicators
               (id, tenant_id, indicator_type, value, first_seen, last_seen,
                client_count, domain_count, message_count,
@@ -297,7 +299,6 @@ public sealed class ThreatIntelligenceService(string databasePath)
               COUNT(DISTINCT r.domain_id),
               SUM(r.message_count),
               MAX(CASE WHEN r.dkim_auth_result = 'pass' OR r.spf_auth_result = 'pass' THEN 1 ELSE 0 END),
-              -- Forgery: signed AS the domain it was sending as, and failed.
               -- Forgery: signed AS the domain it was sending as, failed, and
               -- has NEVER signed successfully for that domain from this
               -- address. The last clause is what keeps a relay out of it. A
@@ -307,7 +308,12 @@ public sealed class ThreatIntelligenceService(string databasePath)
               -- on the whole address, the two separate cleanly: a relay also
               -- produces passing signatures for that same domain, and a
               -- forger never does.
-              MAX(CASE WHEN r.dkim_auth_result = 'fail'
+              --
+              -- "Failed" is fail or permerror. Receivers disagree about a
+              -- signature whose key does not exist: one says fail, another
+              -- says permerror, and a selector nobody published is the
+              -- commonest kind of forged signature there is.
+              MAX(CASE WHEN r.dkim_auth_result IN ('fail', 'permerror')
                         AND r.dkim_domain IS NOT NULL
                         AND r.dkim_domain = r.header_from
                         AND NOT EXISTS (
@@ -316,7 +322,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
                                  AND ok.dkim_domain = r.dkim_domain
                                  AND ok.dkim_auth_result = 'pass')
                        THEN 1 ELSE 0 END),
-              GROUP_CONCAT(DISTINCT CASE WHEN r.dkim_auth_result = 'fail'
+              GROUP_CONCAT(DISTINCT CASE WHEN r.dkim_auth_result IN ('fail', 'permerror')
                                           AND r.dkim_domain = r.header_from
                                           AND NOT EXISTS (
                                                 SELECT 1 FROM aggregate_records ok
@@ -331,7 +337,7 @@ public sealed class ThreatIntelligenceService(string databasePath)
             JOIN domains d ON d.id = r.domain_id
             WHERE r.dmarc_result = 'fail'
               AND r.date_begin >= $since
-              AND (r.override_reason IS NULL OR r.override_reason = '')
+              AND NOT {PolicyOverrides.ExcusedSql("r")}
             GROUP BY r.tenant_id, r.source_ip
             ON CONFLICT(tenant_id, indicator_type, value) DO UPDATE SET
               first_seen        = MIN(first_seen, excluded.first_seen),

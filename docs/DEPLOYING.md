@@ -423,9 +423,42 @@ Who belongs where is decided by Entra security groups, which the token has
 to carry:
 
 - Under the app registration, **Token configuration → Add groups claim →
-  Security groups**, with the group ID as the claim value. Without this the
-  token names no groups, everybody signed in belongs to nothing, and the
-  page says so.
+  Groups assigned to the application**, with the group ID as the claim value
+  for the ID token. Without a groups claim the token names no groups,
+  everybody signed in belongs to nothing, and the page says so.
+
+  **Choose "Security groups" only if everyone who signs in is in five groups
+  or fewer.** This app signs in with the ID-token flow, and for that flow
+  Microsoft stops listing groups above a handful (its documentation says five
+  in one place and six in another). It does not send the first few: it sends
+  none, and a `hasgroups` marker in their place. An engineer at a provider is
+  in far more groups than that, so the person setting this up is the one who
+  reaches "No organization" whichever group they are added to - the page says
+  when this is the reason. "Groups assigned to the application" lists only the
+  groups assigned to this app, and only the ones the person is a direct member
+  of. What it counts against the limit is therefore each person's direct
+  memberships *among the assigned groups*, not how many groups exist.
+
+  So **every group the app uses has to be assigned to it**, under
+  **Enterprise applications → DMARC Monitor → Users and groups → Add
+  user/group**: the master group; each organization's admin, engineer, tech
+  and viewer groups; and each client's customer-login group, including one you
+  set later. A group left out is left out of the token without a word, and its
+  members see "No organization" although they are in it - the app cannot tell
+  that from being in no group, and says so on the page only as far as it can.
+  The assignment needs Entra ID P1, like assigning a group to restrict sign-in,
+  and it is direct membership only: a person has to be in the assigned group
+  itself, not in a group nested inside it.
+
+  On an Entra ID **Free** tenant groups cannot be assigned to an app at all.
+  "Security groups" is then the only claim that works, and it works for
+  someone who is in about five groups or fewer - which a customer's guest
+  account usually is, and a provider's engineer usually is not.
+
+  Keep a person to the one group per organization that gives them the role
+  they need. The count is of assigned groups they are *in*, so somebody in the
+  master group and in four groups of each of two organizations is over the
+  limit again.
 - Create one security group per organization, and one master group for the
   people who run the whole thing. Copy each group's **Object ID**.
 - Tell the app the master group: `Auth:MasterGroupId` in
@@ -442,7 +475,9 @@ to carry:
 
 Each organization has up to three groups, one per role. The strongest group
 somebody is in wins, so adding a person to a stronger group never means
-removing them from the weaker one first.
+removing them from the weaker one first. With "Groups assigned to the
+application" that is worth doing anyway once a person nears five: remove the
+weaker memberships so the token still lists their groups at all.
 
 | Role | Group | May |
 | --- | --- | --- |

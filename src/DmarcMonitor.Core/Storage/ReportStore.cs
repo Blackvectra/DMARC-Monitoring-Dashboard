@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Domains;
 using DmarcMonitor.Core.Forensic;
 using DmarcMonitor.Core.Tls;
 using Microsoft.Data.Sqlite;
@@ -285,7 +286,7 @@ public sealed class ReportStore
                 command.Parameters.AddWithValue("$dmarc", record.IsDmarcPass ? "pass" : "fail");
                 command.Parameters.AddWithValue("$fail", FailReason(record));
                 command.Parameters.AddWithValue("$orType", record.Overrides.Count > 0
-                    ? string.Join(';', record.Overrides.Select(o => o.Type.ToString().ToLowerInvariant()))
+                    ? string.Join(';', record.Overrides.Select(o => PolicyOverrides.Stored(o.Type)))
                     : (object)DBNull.Value);
                 command.Parameters.AddWithValue("$orComment", record.Overrides.Count > 0
                     ? Nullable(record.Overrides[0].Comment)
@@ -295,11 +296,10 @@ public sealed class ReportStore
                 command.Parameters.AddWithValue("$eto", Nullable(record.EnvelopeTo));
                 command.Parameters.AddWithValue("$isSub", IsSubdomain(record.HeaderFrom, report.Policy.Domain) ? 1 : 0);
 
-                // Prefer an auth result that PASSED, falling back to the first.
-                // A record can carry several, and taking index zero would report a
-                // failed check while a successful one sat beside it.
-                var dkim = PreferPassing(record.DkimResults);
-                var spf = PreferPassing(record.SpfResults);
+                // A record can carry several auth results and the columns hold
+                // one: keep the one that explains the receiver's verdict.
+                var dkim = ChooseAuthResult(record.DkimResults, record.HeaderFrom);
+                var spf = ChooseAuthResult(record.SpfResults, record.HeaderFrom);
 
                 // The RESULT travels with the domain. A source forging a signature
                 // as its victim produces domain=victim.com with result=fail, so
@@ -1539,19 +1539,51 @@ public sealed class ReportStore
     }
 
     /// <summary>
-    /// The auth result worth storing: one that passed if there is one,
-    /// otherwise the first. A record can carry several, and taking index zero
-    /// would record a failed check while a successful one sat beside it.
+    /// The auth result worth storing: a pass that aligns with the From domain
+    /// if there is one, otherwise any pass, otherwise the first.
     /// </summary>
-    private static AuthResult? PreferPassing(IReadOnlyList<AuthResult> results)
+    /// <remarks>
+    /// A record can carry several results and the columns hold one. Taking
+    /// index zero would record a failed check while a successful one sat
+    /// beside it, and taking the first pass is not enough either, because a
+    /// pass is not the same as a result that counted. A Google Workspace
+    /// message is signed twice, by google.com and by the domain's own key, and
+    /// both verify; only the second aligns with the From domain, so only the
+    /// second is what DMARC passed the message on. Filed under the first, a
+    /// row said its pass rested on a signer that does not align, everything
+    /// that reads the column was told something the receiver had not said, and
+    /// a policy simulation could not reproduce the receiver's verdict.
+    ///
+    /// Alignment decides between passes and nothing more. A verified signature
+    /// outranks an unverified one that claims the From domain, in whatever
+    /// order they are listed: the first says who really sent the mail, the
+    /// second only that somebody tried to look like the domain.
+    ///
+    /// Relaxed alignment, whatever the domain's own adkim says. This chooses
+    /// what to show and not whether DMARC passed - the receiver's verdict is
+    /// stored beside it - and a signature one label short of aligning is the
+    /// useful one to show when strict mode is what stopped it.
+    ///
+    /// A pass for the HELO name is never preferred on alignment: it does not
+    /// count toward DMARC however well the name lines up, so a row filed under
+    /// it would say SPF aligned for a message the receiver failed on SPF.
+    /// </remarks>
+    private static AuthResult? ChooseAuthResult(IReadOnlyList<AuthResult> results, string headerFrom)
     {
         if (results.Count == 0) { return null; }
 
-        for (var i = 0; i < results.Count; i++)
+        AuthResult? firstPass = null;
+        foreach (var result in results)
         {
-            if (results[i].IsPass) { return results[i]; }
+            if (!result.IsPass) { continue; }
+
+            var counts = !string.Equals(result.Scope, "helo", StringComparison.OrdinalIgnoreCase);
+            if (counts && Alignment.Aligns(result.Domain, headerFrom, strict: false)) { return result; }
+
+            firstPass ??= result;
         }
-        return results[0];
+
+        return firstPass ?? results[0];
     }
 
     /// <summary>Which half of DMARC failed, matching the prototype's vocabulary.</summary>

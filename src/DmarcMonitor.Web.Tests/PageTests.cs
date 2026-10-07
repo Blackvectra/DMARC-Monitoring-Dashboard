@@ -913,8 +913,14 @@ public sealed class PageTests : IClassFixture<SeededApp>
         var html = await Client().GetStringAsync("/sources");
 
         // The relay sends legitimately for this domain as well as failing, so
-        // it must not be described as somebody sending as the client.
-        Assert.DoesNotContain("Authenticated nothing, against", html, StringComparison.Ordinal);
+        // it must not be described as somebody sending as the client. Asked of
+        // its own row: the key above the table describes every kind of source,
+        // impersonation included, and says it once.
+        var row = html.Split("<tr").Skip(1).Single(r => r.Contains("192.0.2.25", StringComparison.Ordinal));
+
+        Assert.Contains("Own sending path", row, StringComparison.Ordinal);
+        Assert.DoesNotContain("Cross-client", row, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unauthenticated", row, StringComparison.Ordinal);
     }
 }
 

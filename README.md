@@ -144,8 +144,11 @@ what they do:
   repository, no .NET, no app registration. Marks each message read once its
   report is saved (`-LeaveUnread` to skip), saves only reports it has not
   exported before, so the same folder can be kept, and `-Schedule 07:00`
-  runs it daily. Its tests are in `tests/` and run
-  in CI.
+  runs it daily. `-MoveToDeleted` also moves each exported message to the
+  Deleted Items of its own mailbox (off unless asked for; never out of Sent
+  Items, Drafts, Junk Email or Deleted Items itself). Anything it could not
+  mark read or move is named at the end of the run, with the reason. Its
+  tests are in `tests/` and run in CI.
 - **`Test-DMARCMailRules.ps1`** — a read-only check of the inbox rules that
   file reports into per-domain folders: which are switched off, which Exchange
   has marked as failing, which domains have no rule, and how close the mailbox

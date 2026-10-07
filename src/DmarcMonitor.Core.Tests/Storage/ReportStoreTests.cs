@@ -1,4 +1,5 @@
 using DmarcMonitor.Core.Aggregate;
+using DmarcMonitor.Core.Rollout;
 using DmarcMonitor.Core.Storage;
 using DmarcMonitor.Core.Tls;
 
@@ -256,6 +257,192 @@ public sealed class ReportStoreTests : IDisposable
 
         Assert.Equal("pass", reader.GetString(1));
         Assert.NotEqual("nrgtechservices.com", reader.GetString(0));   // the failing one
+    }
+
+    // ---- which of several auth results a record is filed under ----
+    //
+    // A record can carry several DKIM results, and the columns hold one. A
+    // Google Workspace message is signed twice - by google.com and by the
+    // domain's own key - and both verify, but only the domain's own signature
+    // is the one DMARC counts. Filed under the first, a row said its pass
+    // rested on a signer that does not align with the From domain, and every
+    // reader of the column was told something the receiver had not said.
+
+    /// <summary>
+    /// A report of one record for example.com, carrying the given auth_results.
+    /// </summary>
+    private static AggregateReport OneRecord(string authResults, string headerFrom = "example.com", string dkimVerdict = "pass")
+    {
+        var begin = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds();
+        var xml = $"""
+            <feedback>
+              <report_metadata>
+                <org_name>reporter.example.net</org_name><report_id>signers-1</report_id>
+                <date_range><begin>{begin}</begin><end>{begin + 86399}</end></date_range>
+              </report_metadata>
+              <policy_published><domain>example.com</domain><p>none</p></policy_published>
+              <record>
+                <row>
+                  <source_ip>192.0.2.10</source_ip><count>5</count>
+                  <policy_evaluated><disposition>none</disposition><dkim>{dkimVerdict}</dkim><spf>fail</spf></policy_evaluated>
+                </row>
+                <identifiers><header_from>{headerFrom}</header_from></identifiers>
+                <auth_results>{authResults}</auth_results>
+              </record>
+            </feedback>
+            """;
+        return AggregateReportParser.Parse(xml).Report!;
+    }
+
+    private static string DkimResult(string domain, string selector, string result = "pass") =>
+        $"<dkim><domain>{domain}</domain><selector>{selector}</selector><result>{result}</result></dkim>";
+
+    private static string SpfResult(string domain, string scope, string result = "pass") =>
+        $"<spf><domain>{domain}</domain><scope>{scope}</scope><result>{result}</result></spf>";
+
+    private async Task<(string? Domain, string? Selector, string? Result)> StoredDkimAsync()
+    {
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT dkim_domain, dkim_selector, dkim_auth_result FROM aggregate_records";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+
+        return (
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2));
+    }
+
+    private async Task<(string? Domain, string? Result)> StoredSpfAsync()
+    {
+        await using var connection = await new ClientDatabases(_dbPath).OpenAsync(ClientScope.Organization(null));
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT spf_domain, spf_auth_result FROM aggregate_records";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+
+        return (reader.IsDBNull(0) ? null : reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task FilesARecordUnderTheSignatureThatAlignsWhenSeveralPass()
+    {
+        // The Google Workspace shape, as a real report lists it: google.com
+        // first, the domain's own key second, both verified.
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("google.com", "20230601") + DkimResult("example.com", "google")), "raw");
+
+        Assert.Equal(("example.com", "google", "pass"), await StoredDkimAsync());
+    }
+
+    [Fact]
+    public async Task DoesNotDependOnTheOrderTheSignaturesAreListedIn()
+    {
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("example.com", "google") + DkimResult("google.com", "20230601")), "raw");
+
+        Assert.Equal(("example.com", "google", "pass"), await StoredDkimAsync());
+    }
+
+    [Theory]
+    [InlineData("mail.example.com", "example.com")]    // signs as a subdomain of the From domain
+    [InlineData("example.com", "news.example.com")]    // signs as the parent of the From domain
+    public async Task CountsASubdomainRelationAsAlignedWhichIsWhatTheDefaultModeDoes(string signer, string headerFrom)
+    {
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("vendor.example.net", "v1") + DkimResult(signer, "s1"), headerFrom), "raw");
+
+        Assert.Equal((signer, "s1", "pass"), await StoredDkimAsync());
+    }
+
+    [Fact]
+    public async Task KeepsTheFirstPassingSignatureWhenNoneOfThemAligns()
+    {
+        // Nothing to choose between: a vendor signing as itself, twice. The
+        // first stays, as it always did.
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("vendor.example.net", "v1") + DkimResult("other.example.org", "o1")), "raw");
+
+        Assert.Equal(("vendor.example.net", "v1", "pass"), await StoredDkimAsync());
+    }
+
+    [Fact]
+    public async Task StillPrefersAPassingSignatureToAnAlignedOneThatFailed()
+    {
+        // Alignment decides between signatures that verified, and nothing
+        // more. A vendor's verified signature says who really sent the mail;
+        // the one beside it, claiming the From domain and failing, says only
+        // that somebody tried - the case KeepsTheAuthResultAlongside... guards.
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("example.com", "s1", "fail") + DkimResult("vendor.example.net", "v1"), dkimVerdict: "fail"), "raw");
+
+        Assert.Equal(("vendor.example.net", "v1", "pass"), await StoredDkimAsync());
+    }
+
+    [Fact]
+    public async Task FilesAnSpfResultTheSameWay()
+    {
+        // The HELO identity first, then the one DMARC reads.
+        await _store.SaveAggregateAsync(OneRecord(
+            SpfResult("vendor.example.net", "helo") + SpfResult("example.com", "mfrom")), "raw");
+
+        Assert.Equal(("example.com", "pass"), await StoredSpfAsync());
+    }
+
+    [Fact]
+    public async Task StoresAResultInLowerCaseWhateverTheReceiverCapitalised()
+    {
+        // The schema's values are lower case and one receiver writes "Fail".
+        // SQLite compares text exactly, and every query asks for 'pass' as the
+        // schema spells it, so a receiver that wrote "Pass" would have had
+        // every message it passed counted as not having passed.
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("example.com", "s1", "PASS") + SpfResult("example.com", "mfrom", "Fail")), "raw");
+
+        Assert.Equal(("example.com", "s1", "pass"), await StoredDkimAsync());
+        Assert.Equal(("example.com", "fail"), await StoredSpfAsync());
+    }
+
+    [Fact]
+    public async Task DoesNotPreferAHeloResultToTheIdentityDmarcReads()
+    {
+        // A pass for the HELO name never counts toward DMARC, however well the
+        // name lines up. Filed under it, a row would say SPF aligned for a
+        // message the receiver failed on SPF.
+        await _store.SaveAggregateAsync(OneRecord(
+            SpfResult("vendor.example.net", "mfrom") + SpfResult("example.com", "helo")), "raw");
+
+        Assert.Equal(("vendor.example.net", "pass"), await StoredSpfAsync());
+    }
+
+    [Fact]
+    public async Task FallsBackToTheFirstPassWhenTheRecordNamesNoFromDomain()
+    {
+        // Nothing to align against, so nothing to prefer.
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("google.com", "g1") + DkimResult("example.com", "s1"), headerFrom: ""), "raw");
+
+        Assert.Equal(("google.com", "g1", "pass"), await StoredDkimAsync());
+    }
+
+    [Fact]
+    public async Task StoredFactsExplainWhyTheReceiverPassedAGoogleSignedMessage()
+    {
+        // What a policy simulation needs from the store is facts that
+        // reproduce the verdict the receiver reached. DKIM-only mail signed by
+        // both google.com and the domain's own key did not: it came back
+        // "unexplained" and was left out of every figure, and the same mail
+        // arriving with a passing SPF as well was reported as resting on SPF
+        // alone.
+        await _store.SaveAggregateAsync(OneRecord(
+            DkimResult("google.com", "20230601") + DkimResult("example.com", "google")
+            + SpfResult("example.com", "mfrom", "fail")), "raw");
+
+        var row = Assert.Single(await new PolicySimulationService(_dbPath).RowsAsync("example.com", 30));
+
+        Assert.True(row.PassedAsEvaluated);
+        Assert.True(PolicySimulator.WouldPass(row, strictDkim: false, strictSpf: false));
     }
 
     [Fact]

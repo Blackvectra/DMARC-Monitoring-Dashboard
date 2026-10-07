@@ -170,6 +170,43 @@ public sealed class ReportSourcesTests
         Assert.Equal(SourceOutcome.Forwarded, Assert.Single(sources).Outcome);
     }
 
+    /// <summary>
+    /// The report that was called a forwarder or mailing list and told to be
+    /// ignored. A receiver had quarantined the message under the published
+    /// policy and written "other" beside it, with nothing to say what the
+    /// other was; the message was signed with a selector nobody had ever
+    /// published, on the victim's domain, and the receiver spelled its results
+    /// with capitals. None of that is a forwarder.
+    /// </summary>
+    [Theory]
+    [InlineData("other")]
+    [InlineData("sampled_out")]
+    public void AReasonThatExcusesNothingIsNotCalledAForwarder(string reason)
+    {
+        var record = $"""
+            <record>
+                <row><source_ip>203.0.113.77</source_ip><count>1</count>
+                  <policy_evaluated><disposition>quarantine</disposition><dkim>fail</dkim><spf>fail</spf>
+                    <reason><type>{reason}</type></reason>
+                  </policy_evaluated>
+                </row>
+                <identifiers>
+                  <envelope_to>mail.example.net</envelope_to>
+                  <envelope_from>acme.com</envelope_from><header_from>acme.com</header_from>
+                </identifiers>
+                <auth_results>
+                  <dkim><domain>acme.com</domain><selector>K3Q7ZXT0HW9GVVRB</selector><result>permerror</result></dkim>
+                  <spf><domain>acme.com</domain><scope>mfrom</scope><result>Fail</result></spf>
+                </auth_results>
+              </record>
+            """;
+
+        var source = Assert.Single(Describe(Report("r", "r", record)));
+
+        Assert.Equal(SourceOutcome.Unauthenticated, source.Outcome);
+        Assert.Equal(1, source.Failing);
+    }
+
     [Fact]
     public void ASourceThatNeverFailedIsClean()
     {

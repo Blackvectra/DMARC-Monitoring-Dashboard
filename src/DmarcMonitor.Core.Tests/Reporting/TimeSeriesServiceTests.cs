@@ -315,6 +315,50 @@ public sealed class TimeSeriesServiceTests : IDisposable
         Assert.Equal(1000, split.Total);
     }
 
+    [Theory]
+    [InlineData("other")]
+    [InlineData("sampled_out")]
+    public async Task AReasonThatExcusesNothingIsCountedAsUnauthenticatedNotOverridden(string reason)
+    {
+        // The three-way split exists so that the part worth chasing is
+        // visible. A failure the receiver gave no excuse for is that part.
+        await StoreAsync("acme.com", daysAgo: 1, passing: 900, failing: 0);
+        await StoreWithReasonAsync("acme.com", daysAgo: 1, count: 12, reason);
+
+        var split = await Service().BreakdownAsync("acme.com", days: 7);
+
+        Assert.Equal(0, split.Overridden);
+        Assert.Equal(12, split.Unauthenticated);
+    }
+
+    /// <summary>A failing row whose reason excuses nothing.</summary>
+    private async Task StoreWithReasonAsync(string domain, int daysAgo, int count, string reason)
+    {
+        var begin = DateTimeOffset.UtcNow.AddDays(-daysAgo);
+        var xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feedback>
+              <report_metadata><org_name>reporter.example.net</org_name><report_id>{Guid.NewGuid():N}</report_id>
+                <date_range><begin>{begin.ToUnixTimeSeconds()}</begin>
+                            <end>{begin.AddHours(23).ToUnixTimeSeconds()}</end></date_range></report_metadata>
+              <policy_published><domain>{domain}</domain><p>quarantine</p><pct>100</pct></policy_published>
+              <record>
+                <row><source_ip>203.0.113.98</source_ip><count>{count}</count>
+                  <policy_evaluated><disposition>quarantine</disposition><dkim>fail</dkim><spf>fail</spf>
+                    <reason><type>{reason}</type></reason>
+                  </policy_evaluated></row>
+                <identifiers><header_from>{domain}</header_from></identifiers>
+                <auth_results><dkim><domain>{domain}</domain><selector>x1</selector><result>permerror</result></dkim>
+                  <spf><domain>{domain}</domain><result>fail</result></spf></auth_results>
+              </record>
+            </feedback>
+            """;
+
+        var parsed = AggregateReportParser.Parse(xml);
+        Assert.True(parsed.Success, parsed.Error);
+        await _store.SaveAggregateAsync(parsed.Report!, xml, null);
+    }
+
     [Fact]
     public async Task AnOverrideOnMailThatPASSEDDoesNotMoveItOutOfAuthenticated()
     {

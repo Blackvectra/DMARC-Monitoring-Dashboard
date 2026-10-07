@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -218,7 +219,7 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
         SqliteConnection db, string clientId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
     {
         await using var command = db.CreateCommand();
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT COALESCE(SUM(message_count), 0),
                    COALESCE(SUM(CASE WHEN dmarc_result = 'pass' THEN message_count END), 0),
                    -- Forwarded and receiver-overridden FAILURES are counted
@@ -232,16 +233,19 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
                    -- DKIM-authenticated traffic), and counting that as left
                    -- out took a client's own clean mail out of its report.
                    --
-                   -- And never sampled_out. Under pct=25 a receiver tags the
+                   -- And only a reason that excuses the failure, which
+                   -- leaves out sampled_out. Under pct=25 a receiver tags the
                    -- three quarters of failing mail it let through with
                    -- exactly that reason, and it was being filed here as
                    -- "handled by the receiver" - so during the one rollout
                    -- step where forgeries are still landing, three quarters
                    -- of them vanished from the threat table and were
-                   -- described to the client as mailing-list traffic.
+                   -- described to the client as mailing-list traffic. The
+                   -- comparison written here to stop that spelled the reason
+                   -- with an underscore the store never writes, so it did
+                   -- not; see PolicyOverrides.
                    COALESCE(SUM(CASE WHEN dmarc_result <> 'pass'
-                                      AND override_reason IS NOT NULL AND override_reason <> ''
-                                      AND override_reason <> 'sampled_out'
+                                      AND {PolicyOverrides.ExcusedSql()}
                                      THEN message_count END), 0)
             FROM aggregate_records
             WHERE client_id = $client AND date_begin >= $from AND date_begin <= $to
@@ -533,12 +537,11 @@ public sealed class ClientReportBuilder(string databasePath, TimeProvider? clock
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             WHERE r.client_id = $client AND r.date_begin >= $from AND r.date_begin <= $to
-              -- Overridden FAILURES only; see GetTotalsAsync. Mail that passed
+              -- Excused FAILURES only; see GetTotalsAsync. Mail that passed
               -- and merely carried a receiver note is the client's own mail
               -- and belongs in the table.
               AND NOT (r.dmarc_result <> 'pass'
-                       AND r.override_reason IS NOT NULL AND r.override_reason <> ''
-                       AND r.override_reason <> 'sampled_out')
+                       AND {{PolicyOverrides.ExcusedSql("r")}})
             GROUP BY r.source_ip
             ORDER BY SUM(r.message_count) DESC
             """;

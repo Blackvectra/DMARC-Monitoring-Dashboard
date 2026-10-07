@@ -91,6 +91,28 @@ the export path again.
 figures quoted from it are lower bounds. Ingest against the live mailbox would
 collect the lot.
 
+**`-MoveToDeleted`, and a mark-read failure nobody could see.** The exporter
+only ever marked messages read; it never moved anything, so a person cleaning
+the Inbox by hand each day was doing a job people assumed the script did. It
+now has an opt-in `-MoveToDeleted` that marks a message read and moves it to
+the Deleted Items of the mailbox it is in, on the same terms as marking read
+(its report is saved, nothing on it failed). Never out of Sent Items, Drafts,
+Outbox, Junk Email, Deleted Items itself or anything inside them, and never
+from a search folder, which lists messages that live elsewhere. The moves
+happen after each folder has been walked, because moving a message out of a
+folder shifts the next one into its place and a loop that moves as it counts
+skips every other message. A message that could not be marked read - a shared
+mailbox the signed-in user may read but not change - was only ever mentioned
+with `-Verbose`; it is now counted and named, with the reason, at the end of
+every run.
+
+Known untested, as for the rest of this script: all of it is exercised against
+a fake Outlook. What the fake cannot show is how a real shared mailbox answers
+`GetDefaultFolder` for Deleted Items, whether a cached-mode mailbox refuses a
+move it has not finished syncing, and what the permission error says when
+Outlook refuses. A first run against a real mailbox should be one folder, read
+off the table's `moved` column before it is scheduled.
+
 ---
 
 ## 2. The pages are checked, the browser is not
@@ -1026,6 +1048,24 @@ today, is not exposed by any of these.
   `mta-sts.<client domain>` for every client from the Host header, so the
   restriction has to leave that one path out. Defence in depth, not an open
   door.
+- **A person in more than about five Entra groups reaches the app with none**
+  (found while turning on sign-in in the Windows trial, not by the audit).
+  Sign-in uses the ID-token flow, for which Entra sends no groups claim above
+  a handful - its documentation says five in one place and six in another -
+  and a `hasgroups` marker instead. The "No organization" page now says when
+  this is the reason, and DEPLOYING.md §5 and RUNNING.md recommend "Groups
+  assigned to the application", which counts only a person's direct memberships
+  of groups assigned to the app. That keeps the count down but does not remove
+  the limit (somebody in more than about five assigned groups still gets the
+  marker), needs every group the app uses to be assigned (one left out is
+  silently absent, and the app cannot tell that from being in no group), and
+  needs Entra ID P1. Not resolved: the app does not ask Microsoft Graph for the full list,
+  because the ID-token flow gives it no access token to ask with, and that
+  option is unavailable on Entra ID Free. Doing it properly means the
+  authorization-code flow with a certificate (limit 200, and `_claim_names`
+  says where to look) or app roles in place of groups. Either changes the
+  sign-in registration every install already has, so it is a decision rather
+  than a patch.
 - **`AssignDomainAsync` with no tenant** - the master account's path - takes
   the first client with that slug when two organizations hold one. Every
   command and page passes a tenant, so nothing reaches it today.
@@ -1068,6 +1108,7 @@ today, is not exposed by any of these.
 | `ClientReportRenderer` | The report's domain table does not mention `pct`, though the domain page does | Carry `Pct` through and say "on N% of mail", same wording as `DomainView` |
 | `ClientCommand` | Prints "Added X as 'slug'" while the Clients page says "filed as" | Pick one phrasing |
 | `ReportPeriod` | An explicit `--month` can select the current, incomplete month and the report does not say so | Say "covers 1–17 Sep, in progress" when the period has not ended |
+| `ReportStore` | Records stored before the store chose between several passing signatures by alignment (see "Fixed today", 8) keep the first passing one, which for a Google Workspace domain is `google.com`'s own. The raw reports are not kept, only a hash, and a report already stored is skipped when read again, so nothing can re-derive them in place | Read the original report files into a new database. An in-place repair would need the raw reports kept |
 
 ---
 
@@ -1104,3 +1145,45 @@ fail without the fix.
    name to 127.0.0.1 and read the app from the trial user's browser. It now
    answers only to `localhost`, `127.0.0.1` and `[::1]`. Covered by
    `ProxyTests`.
+8. **A record signed twice was filed under the wrong signature.** A Google
+   Workspace message carries two DKIM results, `google.com`'s own and the
+   domain's key, and both verify. The store kept the first passing one, which
+   is Google's and does not align with the From domain, so a row said its pass
+   rested on a signer that is not the domain's. `dmarc simulate` read DKIM-only
+   mail signed that way as unexplained and left it out, and read mail passing
+   both ways as resting on SPF alone: on a real Google Workspace domain it
+   reported mail as SPF-alone that the receivers had passed on DKIM as well.
+   The store now keeps a passing result that aligns with the From domain if
+   there is one, then any passing one, then the first, for DKIM and SPF alike.
+   Covered by `ReportStoreTests`, which fail without the fix; records already
+   stored keep the earlier choice (see "Smaller things").
+9. **A reason of "other" was read as a forwarder, and a carve-out for
+   `sampled_out` matched nothing.** Any reason a receiver wrote beside a record
+   made the tool treat the failure as expected, and `dmarc explain` said so:
+   "the receiver recognized a forwarder or mailing list. Not an attack and not
+   a misconfiguration. Nothing to do." One receiver writes `other` beside mail
+   it quarantined exactly as the policy asked. The message that showed it was
+   signed on the protected domain with a selector nobody had published, from a
+   home broadband address in another country, and the tool told the operator
+   to ignore it. Every table that leaves forwarded failures out left it out
+   too: the sending sources, the threat indicators, the domain page, the
+   authenticated / overridden / unauthenticated split and the client report.
+   One of those queries did try to keep `sampled_out` in, which is how a
+   receiver marks what `pct` let through and so what somebody ramping the
+   policy most needs to see, but it spelled the reason with an underscore and
+   the store writes `sampledout`, so the exception never applied. One rule,
+   `PolicyOverrides`, now says which reasons excuse a failure (forwarded,
+   trusted forwarder, mailing list, local policy) and builds the condition
+   every query uses from the spelling the store writes.
+   The same report put its results in capitals ("Fail"), and every query asks
+   for `'pass'` exactly, so a receiver that wrote "Pass" would have had its
+   passing mail counted as failing; results are lower-cased on the way in. Its
+   signature on the domain was reported as `permerror` because no key existed
+   for the selector, which is a forged signature however a receiver words it,
+   and now counts as one beside `fail`. Covered in every reader by tests that
+   fail without the change. The reason is read when a query runs, so what is
+   already stored is corrected too; only the `fail_reason` label in an
+   export of a record stored earlier still says `override`. Not changed:
+   `local_policy` still excuses, though it says only that the receiver chose to
+   deliver the message, which is not quite the same as the failure being
+   expected.

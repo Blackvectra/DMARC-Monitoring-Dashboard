@@ -50,6 +50,73 @@ public sealed class SourceCatalogTests
     public void TreatsATwoPartSuffixAsASuffix(string host, string expected) =>
         Assert.Equal(expected, SourceCatalog.OrganizationalDomain(host));
 
+    /// <summary>
+    /// The reduction is now a grouping key, so a suffix missing from the list
+    /// is not just an unnamed source: it is two unrelated ISPs reduced to the
+    /// same "domain" and shown as one sender reaching several clients.
+    /// </summary>
+    [Theory]
+    [InlineData("p1234-ipngn100101osakachuo.osaka.ocn.ne.jp", "ocn.ne.jp")]
+    [InlineData("kd027083045012.au-net.ne.jp", "au-net.ne.jp")]
+    [InlineData("host.example.or.jp", "example.or.jp")]
+    [InlineData("static.example.net.br", "example.net.br")]
+    [InlineData("mail.example.com.cn", "example.com.cn")]
+    [InlineData("host.example.com.tr", "example.com.tr")]
+    [InlineData("host.example.co.kr", "example.co.kr")]
+    [InlineData("host.example.co.th", "example.co.th")]
+    [InlineData("host.example.net.in", "example.net.in")]
+    [InlineData("host.example.com.tw", "example.com.tw")]
+    public void TreatsTheCommonCountrySuffixesAsSuffixes(string host, string expected) =>
+        Assert.Equal(expected, SourceCatalog.OrganizationalDomain(host));
+
+    [Theory]
+    [InlineData("ne.jp")]
+    [InlineData("co.kr")]
+    // Not on the list, and the reason the guard exists: a two-letter country
+    // code over a label of three letters or fewer is nearly always a registry.
+    [InlineData("com.pg")]
+    [InlineData("ya.ru")]
+    public void RecognizesWhatLooksLikeAPublicSuffix(string domain) =>
+        Assert.True(SourceCatalog.LooksLikeAPublicSuffix(domain));
+
+    [Theory]
+    [InlineData("colocrossing.com")]
+    [InlineData("nd.gov")]
+    [InlineData("ocn.ne.jp")]
+    [InlineData("example.co.uk")]
+    [InlineData("hetzner.de")]
+    [InlineData("in-addr.arpa")]
+    [InlineData(null)]
+    [InlineData("")]
+    public void DoesNotMistakeARegistrableDomainForASuffix(string? domain) =>
+        Assert.False(SourceCatalog.LooksLikeAPublicSuffix(domain));
+
+    /// <summary>
+    /// One vendor is one name, whichever of its domains an address reverses
+    /// under; the catalogue says so, and the grouping follows it.
+    /// </summary>
+    [Theory]
+    [InlineData("contaboserver.net", "contabo.net")]
+    [InlineData("hetzner.de", "hetzner.com")]
+    [InlineData("1and1.com", "ionos.com")]
+    [InlineData("mcsv.net", "mailchimp.com")]
+    [InlineData("googlemail.com", "google.com")]
+    public void AVendorThatAnswersFromTwoDomainsHasOneMainDomain(string alias, string main)
+    {
+        Assert.Equal(main, SourceCatalog.CanonicalDomain(alias));
+        Assert.Equal(main, SourceCatalog.CanonicalDomain(main));
+
+        // And the catalogue agrees they are the same vendor, so the alias
+        // table cannot drift from the names.
+        Assert.Equal(SourceCatalog.Identify($"host.{main}")!.Value.Name, SourceCatalog.Identify($"host.{alias}")!.Value.Name);
+    }
+
+    [Theory]
+    [InlineData("colocrossing.com")]
+    [InlineData("some-isp.example")]
+    public void ADomainWithNoAliasIsItsOwnMainDomain(string domain) =>
+        Assert.Equal(domain, SourceCatalog.CanonicalDomain(domain));
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

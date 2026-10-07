@@ -114,11 +114,18 @@ public sealed record ReportRecord
     public bool IsDmarcPass => Dkim == DmarcResult.Pass || Spf == DmarcResult.Pass;
 
     /// <summary>
-    /// True when the receiver declined to apply the policy. The authentication
-    /// failure is real but is usually a mailing list or forwarder rather than
-    /// anything the domain owner should act on.
+    /// True when the receiver gave a reason that says this failure was
+    /// expected - a forwarder, a mailing list, a trusted forwarder, or its own
+    /// local policy. The authentication failure is real but is not anything the
+    /// domain owner should act on.
     /// </summary>
-    public bool WasOverridden => Overrides.Count > 0;
+    /// <remarks>
+    /// A record can carry a reason that says nothing of the kind: <c>other</c>,
+    /// which gives no reason, and <c>sampled_out</c>, which says only that
+    /// <c>pct</c> let the message through. Neither is an excuse, so neither
+    /// makes this true. See <see cref="PolicyOverrides"/>.
+    /// </remarks>
+    public bool WasOverridden => Overrides.Any(o => PolicyOverrides.Excuses(o.Type));
 }
 
 public sealed record PolicyOverride
@@ -147,7 +154,12 @@ public sealed record AuthResult
 {
     public required string Domain { get; init; }
 
-    /// <summary>Raw result verbatim: pass, fail, softfail, neutral, none, temperror, permerror.</summary>
+    /// <summary>
+    /// The result as the receiver reported it, in lower case: pass, fail,
+    /// softfail, neutral, none, temperror, permerror. Lower-cased because the
+    /// values are written that way in the schema and compared that way by every
+    /// query, and one receiver writes "Fail".
+    /// </summary>
     public required string Result { get; init; }
 
     /// <summary>DKIM only: the selector that signed.</summary>

@@ -80,6 +80,64 @@ public sealed class ThreatIntelligenceTests : IDisposable
         return all.FirstOrDefault(i => i.Value == ip);
     }
 
+    /// <summary>
+    /// A failing row the receiver quarantined and wrote "other" beside, signed
+    /// with a selector nobody published and reported as <c>permerror</c>.
+    /// </summary>
+    private static string QuarantinedWithOtherRow(string ip, int count, string headerFrom, string selector) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>quarantine</disposition><dkim>fail</dkim><spf>fail</spf>
+                <reason><type>other</type></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{headerFrom}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{headerFrom}</domain><selector>{selector}</selector><result>permerror</result></dkim>
+              <spf><domain>{headerFrom}</domain><result>Fail</result></spf>
+            </auth_results>
+          </record>
+        """;
+
+    /// <summary>
+    /// A signature that names the victim's domain and has no key behind it is a
+    /// forgery attempt however the receiver words it. Microsoft says "fail" and
+    /// another receiver says "permerror" for the same thing, and a selector
+    /// nobody published is the commonest kind of forged signature there is.
+    /// </summary>
+    [Fact]
+    public async Task ASignatureWithNoKeyBehindItIsAForgeryAttemptWhateverTheReceiverCallsIt()
+    {
+        await StoreAsync("acme.example",
+            Row("203.0.113.55", 4, "fail", "acme.example", "acme.example", "permerror", "K3Q7ZXT0HW9GVVRB"));
+
+        var indicator = await IndicatorAsync("203.0.113.55");
+
+        Assert.NotNull(indicator);
+        Assert.True(indicator!.AttemptedForgery);
+        Assert.Contains("K3Q7ZXT0HW9GVVRB", indicator.ForgedSelectors);
+    }
+
+    /// <summary>
+    /// A reason of "other" is not an excuse. Left out as one, the message above
+    /// - quarantined, from an address with no tie to the domain, with a forged
+    /// signature - never reached the indicators at all.
+    /// </summary>
+    [Fact]
+    public async Task AReasonThatExcusesNothingDoesNotKeepAnAddressOutOfTheIndicators()
+    {
+        await StoreAsync("acme.example", QuarantinedWithOtherRow("203.0.113.56", 1, "acme.example", "K3Q7ZXT0HW9GVVRB"));
+
+        var indicator = await IndicatorAsync("203.0.113.56");
+
+        Assert.NotNull(indicator);
+        Assert.True(indicator!.AttemptedForgery);
+        Assert.False(indicator.EverAuthenticated);
+    }
+
     // ---- the distinction that matters ---------------------------------------
 
     [Fact]

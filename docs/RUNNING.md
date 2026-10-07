@@ -41,6 +41,77 @@ and says so in a banner on every page. That makes it safe on a laptop and
 wrong on a server — for a server, see [`DEPLOYING.md`](DEPLOYING.md), which
 starts from the same application with sign-in configured.
 
+### Turning on sign-in in the trial
+
+The banner has no switch of its own. It is on for as long as `AzureAd:TenantId`
+and `AzureAd:ClientId` are blank, because it is how anyone using the app can
+tell that nobody is being checked; filling them in is what turns it off. With
+them comes the whole sign-in model - access decided by Entra groups - so the
+group in step 2 is not optional. Sign-in over `http://localhost:5000` works in
+Edge and Chrome, which accept the sign-in cookies on `localhost`, and Entra
+accepts an `http` redirect URI for `localhost` and for nothing else.
+
+1. **A separate app registration for this machine.** Not the one a server
+   uses: Microsoft advises against leaving `localhost` redirect URIs on a
+   registration that also serves production. Web platform, this directory
+   only, redirect URIs `http://localhost:5000/signin-oidc` and
+   `http://localhost:5000/signout-callback-oidc`, and **ID tokens** ticked under
+   Authentication. Entra ignores the port when it matches a `localhost`
+   address, the path is case-sensitive, and the app builds the redirect URI from
+   the address in the browser bar - so browse to `localhost`, not `127.0.0.1`.
+2. **A group, and the groups claim.** Create a security group, add yourself
+   to it directly, and copy its Object ID. Under the registration's **Token
+   configuration** add a groups claim of **Groups assigned to the
+   application**, then assign the group to the app under **Enterprise
+   applications → Users and groups**. Not "Security groups": with the ID-token
+   sign-in this app uses, Entra sends no groups at all to anyone in more than
+   about five (see [`DEPLOYING.md`](DEPLOYING.md#5-sign-in)). Assigning a
+   group needs **Entra ID P1**; on a Free tenant use "Security groups" instead,
+   which works while you are in about five groups or fewer. If you later give
+   an organization or a client a group of its own, assign that to the app too,
+   or its members will see "No organization".
+3. **`appsettings.json`**, beside `DmarcMonitor.Web.exe`. The `AzureAd` block is
+   already there with empty `TenantId` and `ClientId`: fill those two in and
+   leave `Instance` and `CallbackPath` as they are (without them sign-in fails
+   on every page). `MasterGroupId` is not in the shipped file; add it inside
+   `Auth`:
+
+   ```json
+   "AzureAd": {
+     "Instance": "https://login.microsoftonline.com/",
+     "TenantId": "<Directory (tenant) ID>",
+     "ClientId": "<Application (client) ID>",
+     "CallbackPath": "/signin-oidc"
+   },
+   "Auth": { "MasterGroupId": "<the group's Object ID>" }
+   ```
+
+4. Restart with `Start DMARC Monitor.cmd`, open <http://localhost:5000>, and
+   sign in. Group membership is read from the token when you sign in, so sign
+   out and back in after changing it.
+
+Two things stop being done for you once sign-in is on, because both were only
+ever done for a trial: the browser no longer opens by itself, and a newer
+build no longer brings an older `dmarc.db` up to date when it starts. After
+copying `dmarc.db` and the `dmarc-clients` folder (the reports themselves are
+in that folder, one file per client) into a new download's folder, run
+`.\dmarc.exe init-db` there once before starting it, as a server's `update.sh`
+does.
+
+The local-mode guard that refuses requests from other machines is not in force
+once sign-in is on. The app stays on this machine only because it listens on
+`localhost:5000` by default and Entra will not accept an `http` redirect URI
+for any other address; do not change the address it listens on without moving
+to the server setup in [`DEPLOYING.md`](DEPLOYING.md).
+
+**No organization** after signing in means the token did not carry a group
+the app knows. There are three causes. You are in none of them. Or Entra left
+the list out for being too long, which the page recognizes and says (fix: step
+2). Or the group is not assigned to the app, or you are in it only through
+another group, in which case the token simply does not mention it and the page
+cannot tell this from the first. To go back to local mode, blank the two
+`AzureAd` values and restart.
+
 ## Quickest possible start from the command line
 
 No mailbox, no app registration, no configuration. Enough to see whether the
@@ -162,6 +233,57 @@ The sign-in app registration is separate from the ingest one and needs far
 less: a web platform with redirect URI `https://<host>/signin-oidc`, and no
 API permissions beyond the default sign-in scopes. It authenticates your
 staff; it never reads mail.
+
+## Reading the two long lists
+
+**Domain health** is one table of every domain. Type to find one by domain or
+client; press a column to order by it, and again to reverse it; press a policy
+count ("4 p=none") to see only those. Each column opens on the order its
+pressing asks for — Volume on the busiest, Passing on the worst, Last report on
+whoever has gone quiet.
+
+A client with more than one domain gets a heading, and its domains sit under it
+while the table is ordered by name. Ordered by anything else it is one list
+across every client: pressing "Passing" asks which domains are worst, not which
+are worst within each client. The Records column is drawn from the last stored
+DNS reading and stays quiet until one exists — **Read DNS now**, or the nightly
+scan.
+
+**Sending sources** is one row per sender, not per address: a mail provider's
+fourteen addresses are one row, and a hosting provider's four addresses working
+through three customers are one row showing how many unrelated clients it
+reached. The addresses stay one click away, because blocking is done by address.
+Each row says in words what it looks like, and the key under the counts says what
+each means:
+
+| Looks like | It means |
+|---|---|
+| **Cross-client** | authenticated nothing, against several unrelated clients |
+| **Unauthenticated** | authenticated nothing, against one client so far |
+| **Unaligned service** | a real service, authenticating as its own domain rather than the client's |
+| **Own sending path** | passes for the client elsewhere; these are signatures broken in transit |
+
+**Spanning clients** is not a fifth kind: it is several addresses at one
+operator reaching clients that have nothing to do with each other, which no
+single address shows. A mail provider is never counted as one. A sender whose
+addresses each reached one client but together reached several reads
+"Unauthenticated", the worst of its addresses, and is flagged as spanning
+clients; its hover says so.
+
+Names come from reverse DNS, checked against the name's own forward records
+before a vendor's name is used. A name never changes what an address looks like.
+It does decide who an address is grouped with, because addresses are grouped by
+the domain their name claims, and so it can decide whether a sender is flagged as
+spanning clients; a group made of unconfirmed claims says "names not confirmed".
+Names are filled in by the nightly scan (`dmarc intel --names`). Where there is no
+nightly scan — the Windows trial — the page says how many are due and an operator
+can press **Look up names now**, which does up to 40 of the addresses on screen,
+busiest first. If none of a run's addresses comes back with a name, the page says
+the resolver probably was not answering, and asks again after a day.
+
+The query behind the page returns the 1,000 widest-reaching, busiest failing
+addresses in the window; the page says so when a window has more, because a
+sender's row is built from the addresses that fit.
 
 ---
 
@@ -433,9 +555,13 @@ wrong answer:
   decides what happens to failing mail, never whether it fails, so changing it
   alone must cost nothing — and measured the other way it appeared to cost 9.
 - **A message the stored row cannot account for is set aside, not counted.** A
-  message can carry several DKIM signatures and the store keeps one. Where
-  replaying the row disagrees with what the receiver did, the receiver is
-  right, the row is excluded from every figure, and the count is stated.
+  message can carry several DKIM signatures and the store keeps one: a passing
+  signature that lines up with the From domain if there is one, otherwise any
+  passing one. Where replaying the row still disagrees with what the receiver
+  did, the receiver is right, the row is excluded from every figure, and the
+  count is stated. (Reports stored before the store chose by alignment kept the
+  first passing signature, which for a Google Workspace domain is Google's own;
+  see the note in `OPEN-ISSUES.md` on filling such a database again.)
 
 ---
 

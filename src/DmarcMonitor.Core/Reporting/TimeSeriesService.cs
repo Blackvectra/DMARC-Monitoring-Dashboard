@@ -1,4 +1,5 @@
 using System.Globalization;
+using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -193,14 +194,15 @@ public sealed class TimeSeriesService(string databasePath)
         // also record an override on mail that passed - Microsoft stamps "SPF
         // ignored due to local policy" on traffic that authenticated perfectly
         // well by DKIM - and counting those here would move a domain's own
-        // clean mail out of the authenticated segment.
+        // clean mail out of the authenticated segment. And only a reason that
+        // excuses the failure counts as one; see PolicyOverrides.
         command.CommandText = $"""
             SELECT COALESCE(SUM(CASE WHEN r.dmarc_result = 'pass' THEN r.message_count END), 0),
                    COALESCE(SUM(CASE WHEN r.dmarc_result <> 'pass'
-                                      AND r.override_reason IS NOT NULL AND r.override_reason <> ''
+                                      AND {PolicyOverrides.ExcusedSql("r")}
                                      THEN r.message_count END), 0),
                    COALESCE(SUM(CASE WHEN r.dmarc_result <> 'pass'
-                                      AND (r.override_reason IS NULL OR r.override_reason = '')
+                                      AND NOT {PolicyOverrides.ExcusedSql("r")}
                                      THEN r.message_count END), 0)
             FROM aggregate_records r
             {Joins(name, client, "r")}
@@ -374,7 +376,7 @@ public sealed class TimeSeriesService(string databasePath)
             {(client is not null ? "JOIN clients c ON c.id = d.client_id" : "")}
             WHERE r.date_begin >= $since
               AND r.dmarc_result <> 'pass'
-              AND (r.override_reason IS NULL OR r.override_reason = '')
+              AND NOT {PolicyOverrides.ExcusedSql("r")}
               {(name is not null ? "AND d.name = $domain" : "")}
               {(client is not null ? "AND c.slug = $slug" : "")}
               {(tenantId is not null ? "AND r.tenant_id = $tenant" : "")}

@@ -191,4 +191,118 @@ public sealed class ReleaseChannelTests
         Assert.NotEmpty(answer.Seen!.Headers.UserAgent);
         Assert.Equal("Bearer", answer.Seen.Headers.Authorization?.Scheme);
     }
+
+    // ---- the setting -----------------------------------------------------------
+
+    [Theory]
+    [InlineData("owner/repo")]
+    [InlineData("  owner/repo  ")]
+    [InlineData("owner/repo/")]
+    [InlineData("owner/repo.git")]
+    [InlineData("github.com/owner/repo")]
+    [InlineData("https://github.com/owner/repo")]
+    [InlineData("https://www.github.com/owner/repo/")]
+    [InlineData("https://github.com/owner/repo.git")]
+    [InlineData("git@github.com:owner/repo.git")]
+    // The other clone addresses GitHub hands out, and the API's own.
+    [InlineData("git@ssh.github.com:owner/repo.git")]
+    [InlineData("ssh://git@github.com/owner/repo.git")]
+    [InlineData("ssh://git@ssh.github.com/owner/repo.git")]
+    [InlineData("git://github.com/owner/repo.git")]
+    [InlineData("https://api.github.com/repos/owner/repo")]
+    [InlineData("https://api.github.com/repos/owner/repo/releases?per_page=20")]
+    // Without a scheme, with a www, which is how an address is often typed.
+    [InlineData("www.github.com/owner/repo")]
+    // A token pasted into the address is dropped, not carried.
+    [InlineData("https://notarealtoken@github.com/owner/repo")]
+    // Invisible characters come along when an address is copied from a web
+    // page or a chat window, and are not whitespace to Trim.
+    [InlineData("\u200Bowner/repo")]
+    [InlineData("owner/repo\uFEFF")]
+    [InlineData("https://github.com/owner/repo\u200B")]
+    // The address bar after publishing a release, which is what got pasted.
+    [InlineData("https://github.com/owner/repo/releases/tag/v2.0.2")]
+    [InlineData("https://github.com/owner/repo/tree/main?tab=readme#top")]
+    public void ReadsTheRepositoryFromHoweverItWasWritten(string setting)
+    {
+        Assert.Equal("owner/repo", ReleaseChannel.NormalizeRepository(setting));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("repo")]
+    [InlineData("owner/repo/releases")]
+    [InlineData("https://github.com/owner")]
+    [InlineData("https://gitlab.com/owner/repo")]
+    [InlineData("https://github.com.example/owner/repo")]
+    [InlineData("ftp://github.com/owner/repo")]
+    [InlineData("owner/../repo")]
+    [InlineData("../repo")]
+    [InlineData("owner/re po")]
+    [InlineData("owner/repo?x=1")]
+    // Pages of github.com that have a repository's shape and are not one.
+    [InlineData("https://github.com/orgs/acme/repositories")]
+    [InlineData("https://github.com/orgs/acme")]
+    [InlineData("github.com/settings/tokens")]
+    [InlineData("https://github.com/marketplace/actions/some-action")]
+    [InlineData("https://github.com/sponsors/someone")]
+    [InlineData("https://github.com/topics/dmarc")]
+    // Somebody else's host, however GitHub's name is worked into the address.
+    [InlineData("https://github.com@evil.example/owner/repo")]
+    [InlineData("ssh://git@evil.example/owner/repo.git")]
+    [InlineData("git://evil.example/owner/repo.git")]
+    [InlineData("ssh://git@api.github.com/repos/owner/repo")]
+    [InlineData("https://github.com/owner/%2e%2e")]
+    // The API's host, but not its repository path.
+    [InlineData("https://api.github.com/users/owner/repos")]
+    [InlineData("https://api.github.com/repos/owner")]
+    public void ReadsNothingRatherThanGuessing(string setting)
+    {
+        Assert.Null(ReleaseChannel.NormalizeRepository(setting));
+    }
+
+    [Fact]
+    public async Task AsksGitHubAboutTheRepositoryNotTheAddressThatWasPasted()
+    {
+        var answer = new Answer(HttpStatusCode.OK, Releases(Entry("v2.0.2")));
+
+        await new ReleaseChannel(new HttpClient(answer)).CheckAsync(
+            "https://github.com/owner/repo/releases/tag/v2.0.2", "2.0.1");
+
+        Assert.Equal("https://api.github.com/repos/owner/repo/releases?per_page=20", answer.Seen!.RequestUri!.ToString());
+    }
+
+    /// <summary>
+    /// The message goes to a page every staff login can read, so a token
+    /// pasted into an address that did not parse is not written back to it.
+    /// </summary>
+    [Fact]
+    public async Task ASettingThatIsNotARepositoryDoesNotEchoACredentialPastedIntoIt()
+    {
+        var answer = new Answer(HttpStatusCode.OK, "[]");
+
+        var status = await new ReleaseChannel(new HttpClient(answer)).CheckAsync(
+            "https://notarealtoken@gitlab.com/owner/repo", "1.2.0");
+
+        Assert.Null(answer.Seen);
+        Assert.Contains("gitlab.com/owner/repo", status.Problem!, StringComparison.Ordinal);
+        Assert.DoesNotContain("notarealtoken", status.Problem!, StringComparison.Ordinal);
+        Assert.DoesNotContain("notarealtoken", status.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ASettingThatIsNotARepositoryIsSaidToBeThatAndNeverSent()
+    {
+        var answer = new Answer(HttpStatusCode.OK, "[]");
+
+        var status = await new ReleaseChannel(new HttpClient(answer)).CheckAsync("not a repository", "1.2.0");
+
+        // Not the "was not found, an access token is needed" a public repository
+        // would get for a wrong name: the fix is the setting, not a token.
+        Assert.Null(answer.Seen);
+        Assert.False(status.UpdateAvailable);
+        Assert.Contains("owner/name", status.Problem!, StringComparison.Ordinal);
+        Assert.DoesNotContain("access token", status.Problem!, StringComparison.Ordinal);
+    }
 }

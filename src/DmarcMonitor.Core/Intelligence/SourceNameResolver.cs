@@ -5,17 +5,35 @@ namespace DmarcMonitor.Core.Intelligence;
 /// <summary>What one pass of reverse lookups did.</summary>
 /// <param name="Looked">Addresses asked about.</param>
 /// <param name="Named">Of those, how many came back with a name.</param>
-/// <param name="Silent">Of those, how many had a reverse zone that did not answer.</param>
+/// <param name="Silent">
+/// Of those, how many came back with none: no reverse record, or a reverse
+/// zone that did not answer, which a lookup cannot tell apart.
+/// </param>
 /// <param name="Confirmed">Of the named, how many names point back at the address.</param>
 public readonly record struct SourceNameRun(int Looked, int Named, int Silent, int Confirmed = 0)
 {
     /// <summary>Of the addresses asked about, how many now have nothing to show but digits.</summary>
     public int Unnamed => Looked - Named;
 
+    /// <summary>
+    /// A whole run, of a size worth reading anything into, and not one name.
+    /// </summary>
+    /// <remarks>
+    /// Far more often a resolver that is not answering - an offline machine, a
+    /// firewall that drops DNS - than that many addresses which publish
+    /// nothing. Said as such, and recorded so the addresses are asked again
+    /// tomorrow and not next month.
+    /// </remarks>
+    public bool NothingAnswered => Looked >= SourceNameResolver.AtOnce && Named == 0;
+
     public string Describe() => Looked == 0
         ? "Every source already has a name; nothing to look up."
-        : $"Looked up {Looked} source(s): {Named} named ({Confirmed} confirmed by their own forward records), "
-        + $"{Unnamed} with no name ({Silent} whose reverse zone did not answer).";
+        : NothingAnswered
+            ? $"Looked up {Looked} source(s) and none came back with a name. That is usually a resolver that is "
+            + "not answering - check that this machine can reach a DNS server - rather than that many addresses "
+            + "with no reverse record. They will be asked again tomorrow."
+            : $"Looked up {Looked} source(s): {Named} named ({Confirmed} confirmed by their own forward records), "
+            + $"{Unnamed} with no name.";
 }
 
 /// <summary>
@@ -57,11 +75,38 @@ public sealed class SourceNameResolver(SourceNameStore store, DnsLookup dns)
     public async Task<SourceNameRun> RunAsync(int limit = 500, CancellationToken ct = default)
     {
         var addresses = await _store.NeedingLookupAsync(limit, ct: ct).ConfigureAwait(false);
+        return await ResolveAsync(addresses, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Looks up the first <paramref name="limit"/> of these addresses that are
+    /// due, in the order given, and leaves every other address alone.
+    /// </summary>
+    /// <remarks>
+    /// For a page that has a table of addresses in front of somebody and no
+    /// nightly job behind it - the Windows trial has no scheduler - where
+    /// "name the ones on screen" is the useful unit and "name the busiest 500
+    /// in the estate" may name none of them. The addresses must have come from
+    /// a query already scoped to the person asking; see
+    /// <see cref="SourceNameStore.DueAmongAsync"/>.
+    /// </remarks>
+    public async Task<SourceNameRun> RunAsync(
+        IReadOnlyCollection<string> among, int limit, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(among);
+
+        var addresses = await _store.DueAmongAsync(among, limit, ct: ct).ConfigureAwait(false);
+        return await ResolveAsync(addresses, ct).ConfigureAwait(false);
+    }
+
+    private async Task<SourceNameRun> ResolveAsync(IReadOnlyList<string> addresses, CancellationToken ct)
+    {
         if (addresses.Count == 0) { return new SourceNameRun(0, 0, 0); }
 
         var named = 0;
         var silent = 0;
         var confirmed = 0;
+        var nameless = new List<string>();
 
         foreach (var batch in addresses.Chunk(AtOnce))
         {
@@ -90,7 +135,7 @@ public sealed class SourceNameResolver(SourceNameStore store, DnsLookup dns)
                 // answered so the common case - an address that simply has no
                 // PTR - is not re-asked daily.
                 var has = !string.IsNullOrWhiteSpace(name);
-                if (has) { named++; } else { silent++; }
+                if (has) { named++; } else { silent++; nameless.Add(ip); }
                 if (points) { confirmed++; }
 
                 await _store.SaveAsync(ip, name, answered: true, forwardConfirmed: has ? points : null, ct: ct)
@@ -100,6 +145,20 @@ public sealed class SourceNameResolver(SourceNameStore store, DnsLookup dns)
             }
         }
 
-        return new SourceNameRun(addresses.Count, named, silent, confirmed);
+        var run = new SourceNameRun(addresses.Count, named, silent, confirmed);
+
+        // Not one name in a run this size says the resolver was not answering.
+        // Left recorded as answered, every address in it would be skipped for a
+        // month - and a trial machine that was offline for the first press
+        // would have its button disappear with the table still full of digits.
+        if (run.NothingAnswered)
+        {
+            foreach (var ip in nameless)
+            {
+                await _store.SaveAsync(ip, null, answered: false, ct: ct).ConfigureAwait(false);
+            }
+        }
+
+        return run;
     }
 }

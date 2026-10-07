@@ -1,6 +1,7 @@
 using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Intelligence;
 using DmarcMonitor.Core.Storage;
+using DmarcMonitor.Core.Tests.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace DmarcMonitor.Core.Tests.Intelligence;
@@ -67,13 +68,58 @@ public sealed class CorrelationServiceTests : IDisposable
           </record>
         """;
 
+    /// <summary>A failing row the receiver says it overrode, as a forwarder or mailing list produces.</summary>
+    private static string ForwardedRow(string ip, int count, string domain) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>none</disposition><dkim>fail</dkim><spf>fail</spf>
+                <reason><type>forwarded</type><comment>mailing list</comment></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{domain}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{domain}</domain><result>fail</result></dkim>
+              <spf><domain>{domain}</domain><result>fail</result></spf>
+            </auth_results>
+          </record>
+        """;
+
+    /// <summary>
+    /// A failing row with a reason that excuses nothing: the policy was applied as
+    /// published, or the message escaped it only through <c>pct</c>.
+    /// </summary>
+    private static string ReasonRow(string ip, int count, string domain, string reason, string disposition) => $"""
+        <record>
+            <row>
+              <source_ip>{ip}</source_ip>
+              <count>{count}</count>
+              <policy_evaluated>
+                <disposition>{disposition}</disposition><dkim>fail</dkim><spf>fail</spf>
+                <reason><type>{reason}</type></reason>
+              </policy_evaluated>
+            </row>
+            <identifiers><header_from>{domain}</header_from></identifiers>
+            <auth_results>
+              <dkim><domain>{domain}</domain><selector>x1</selector><result>permerror</result></dkim>
+              <spf><domain>{domain}</domain><result>fail</result></spf>
+            </auth_results>
+          </record>
+        """;
+
     /// <summary>
     /// A domain nobody has onboarded, which is how every domain starts.
     /// </summary>
     private Task StoreUnassignedAsync(string domain, params string[] rows) =>
         StoreAsync(domain, clientSlug: null, rows);
 
-    private async Task StoreAsync(string domain, string? clientSlug, params string[] rows)
+    private Task StoreAsync(string domain, string? clientSlug, params string[] rows) =>
+        StoreAsync(domain, clientSlug, daysAgo: 2, rows);
+
+    /// <param name="daysAgo">How long ago the report's window began; the sources list looks back thirty days.</param>
+    private async Task StoreAsync(string domain, string? clientSlug, int daysAgo, params string[] rows)
     {
         var xml = $"""
             <?xml version="1.0" encoding="UTF-8"?>
@@ -81,8 +127,8 @@ public sealed class CorrelationServiceTests : IDisposable
               <report_metadata>
                 <org_name>test.example</org_name>
                 <report_id>{Guid.NewGuid():N}</report_id>
-                <date_range><begin>{DateTimeOffset.UtcNow.AddDays(-2).ToUnixTimeSeconds()}</begin>
-                            <end>{DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds()}</end></date_range>
+                <date_range><begin>{DateTimeOffset.UtcNow.AddDays(-daysAgo).ToUnixTimeSeconds()}</begin>
+                            <end>{DateTimeOffset.UtcNow.AddDays(-daysAgo + 1).ToUnixTimeSeconds()}</end></date_range>
               </report_metadata>
               <policy_published><domain>{domain}</domain><p>none</p><pct>100</pct></policy_published>
               {string.Join("\n  ", rows)}
@@ -109,6 +155,34 @@ public sealed class CorrelationServiceTests : IDisposable
         return rows.FirstOrDefault(r => r.SourceIp == ip);
     }
 
+    /// <summary>
+    /// A receiver that quarantined a message and wrote "other" beside it had
+    /// not excused anything, and one that let a failure through because of
+    /// <c>pct</c> had not either. Both were read as a forwarder and left out of
+    /// the list, which for the second is the one step of a rollout where
+    /// forgeries are still landing.
+    /// </summary>
+    [Theory]
+    [InlineData("other", "quarantine")]
+    [InlineData("sampled_out", "none")]
+    public async Task AFailureTheReceiverGaveNoExcuseForIsStillAFailingSource(string reason, string disposition)
+    {
+        await StoreAsync("a.example", "alpha", ReasonRow("203.0.113.40", 3, "a.example", reason, disposition));
+
+        var source = await SourceAsync("203.0.113.40");
+
+        Assert.NotNull(source);
+        Assert.Equal(3, source!.FailedMessages);
+    }
+
+    [Fact]
+    public async Task AFailureTheReceiverExcusedStaysOutOfTheList()
+    {
+        await StoreAsync("a.example", "alpha", ForwardedRow("203.0.113.41", 3, "a.example"));
+
+        Assert.Null(await SourceAsync("203.0.113.41"));
+    }
+
     [Fact]
     public async Task SeesImpersonationAcrossDomainsNobodyHasOnboardedYet()
     {
@@ -131,6 +205,34 @@ public sealed class CorrelationServiceTests : IDisposable
         Assert.Equal(SourceVerdict.CrossClientImpersonation, source.Verdict);
     }
 
+    /// <summary>
+    /// What the cut at the limit keeps, since a sender is built from the
+    /// addresses that survive it: the widest-reaching first, then the busiest,
+    /// and among equals the same ones every time.
+    /// </summary>
+    [Fact]
+    public async Task TheLimitKeepsTheWidestThenTheBusiestAndAmongEqualsTheSameOnesEveryTime()
+    {
+        // Three addresses that reached one party and sent one message each...
+        foreach (var ip in new[] { "203.0.113.3", "203.0.113.2", "203.0.113.1" })
+        {
+            await StoreUnassignedAsync("only.example", Row(ip, 1, "fail", "only.example", "fail"));
+        }
+
+        // ...one that was busier, and one that reached two parties.
+        await StoreUnassignedAsync("only.example", Row("203.0.113.60", 9, "fail", "only.example", "fail"));
+        await StoreUnassignedAsync("wide-a.example", Row("203.0.113.50", 1, "fail", "wide-a.example", "fail"));
+        await StoreUnassignedAsync("wide-b.example", Row("203.0.113.50", 1, "fail", "wide-b.example", "fail"));
+
+        var service = new CorrelationService(_dbPath);
+
+        var first = await service.GetFailingSourcesAsync(limit: 3);
+        var again = await service.GetFailingSourcesAsync(limit: 3);
+
+        Assert.Equal(["203.0.113.50", "203.0.113.60", "203.0.113.1"], first.Select(s => s.SourceIp));
+        Assert.Equal(first.Select(s => s.SourceIp), again.Select(s => s.SourceIp));
+    }
+
     [Fact]
     public async Task OneUnassignedDomainIsStillOnlyOneParty()
     {
@@ -143,6 +245,138 @@ public sealed class CorrelationServiceTests : IDisposable
         Assert.NotNull(source);
         Assert.Equal(1, source!.IndependentParties);
         Assert.False(source.IsCrossClient);
+    }
+
+    /// <summary>
+    /// Which parties, not only how many: the page groups addresses into
+    /// senders, and what a sender reached is the union of what its addresses
+    /// did. A client and an unfiled domain are told apart even when one is
+    /// named like the other.
+    /// </summary>
+    [Fact]
+    public async Task NamesTheParties()
+    {
+        await StoreAsync("a.example", "alpha", Row("203.0.113.9", 5, "fail", "a.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("203.0.113.9", 5, "fail", "b.example", "fail"));
+        await StoreUnassignedAsync("c.example", Row("203.0.113.9", 5, "fail", "c.example", "fail"));
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+
+        // A client is identified by the client, not by what it is called, so
+        // the keys are opaque; an unfiled domain is told apart by its name.
+        Assert.Equal(3, source!.PartyKeys.Count);
+        Assert.Equal(3, source.IndependentParties);
+        Assert.Contains("domain:c.example", source.PartyKeys);
+        Assert.Equal(2, source.PartyKeys.Count(k => k.StartsWith("client:", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task TwoDomainsOfOneClientAreOnePartyKey()
+    {
+        // One customer with two domains is one party. A sender that hit both
+        // has not worked through two customers.
+        await StoreAsync("one.example", "pair", Row("203.0.113.9", 5, "fail", "one.example", "fail"));
+        await StoreUnassignedAsync("two.example", Row("203.0.113.9", 5, "fail", "two.example", "fail"));
+        await _store.AssignDomainAsync("two.example", "pair");
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        var party = Assert.Single(source!.PartyKeys);
+        Assert.StartsWith("client:", party);
+        Assert.Equal(2, source.DomainCount);
+        Assert.False(source.IsCrossClient);
+    }
+
+    /// <summary>
+    /// A slug is unique inside an organization, not across them, so with no
+    /// organization chosen two clients can carry the same one. They are two
+    /// parties: the count already said so, and the keys said one, which left
+    /// the row reading "Cross-client" beside "1 party" and made a sender
+    /// working through both organizations' customers look like it had
+    /// reached a single one.
+    /// </summary>
+    [Fact]
+    public async Task ClientsWithTheSameSlugInTwoOrganizationsAreTwoParties()
+    {
+        await SeedTwoOrganizationsWithAnAcmeEachAsync("203.0.113.9");
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(2, source!.PartyKeys.Count);
+        Assert.Equal(2, source.IndependentParties);
+        Assert.True(source.IsCrossClient);
+
+        // And the sender made of such addresses agrees with each of them.
+        var group = Assert.Single(SenderGroup.Build([source]));
+        Assert.Equal(2, group.IndependentParties);
+    }
+
+    [Fact]
+    public async Task TheSourcePageCountsThemTheSameWay()
+    {
+        await SeedTwoOrganizationsWithAnAcmeEachAsync("203.0.113.9");
+
+        var listed = await SourceAsync("203.0.113.9");
+        var detail = await DetailAsync("203.0.113.9");
+
+        Assert.Equal(2, detail!.IndependentParties);
+        Assert.Equal(listed!.IndependentParties, detail.IndependentParties);
+        Assert.Equal(SourceVerdict.CrossClientImpersonation, detail.Verdict);
+    }
+
+    /// <summary>
+    /// Seeded as SQL, the way the tests of the organization boundary are: the
+    /// public API files a domain under one organization's clients, and what
+    /// is wanted here is the shape the schema allows - UNIQUE(tenant_id, slug)
+    /// - with the same slug in two of them.
+    /// </summary>
+    private async Task SeedTwoOrganizationsWithAnAcmeEachAsync(string ip)
+    {
+        var when = DateTime.UtcNow.AddDays(-2).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+
+        await SingleDatabase.ExecuteAsync(_dbPath, $"""
+            INSERT INTO tenants (id,slug,name,created_at,updated_at)
+              VALUES ('t-a','orga','Org A','{when}','{when}'),('t-b','orgb','Org B','{when}','{when}');
+            INSERT INTO clients (id,tenant_id,slug,name,created_at,updated_at)
+              VALUES ('c-a','t-a','acme','Acme','{when}','{when}'),('c-b','t-b','acme','Acme','{when}','{when}');
+            INSERT INTO domains (id,tenant_id,client_id,name,created_at,updated_at)
+              VALUES ('d-a','t-a','c-a','a.example','{when}','{when}'),
+                     ('d-b','t-b','c-b','b.example','{when}','{when}');
+            INSERT INTO aggregate_reports
+              (id,tenant_id,client_id,domain_id,org_name,external_report_id,
+               date_begin,date_end,raw_hash,received_at,ingested_at,policy_p)
+              VALUES ('r-a','t-a','c-a','d-a','test.example','rep-a','{when}','{when}','hash-a','{when}','{when}','none'),
+                     ('r-b','t-b','c-b','d-b','test.example','rep-b','{when}','{when}','hash-b','{when}','{when}','none');
+            INSERT INTO aggregate_records
+              (report_id,tenant_id,client_id,domain_id,date_begin,source_ip,message_count,
+               dmarc_result,dkim_auth_result,header_from)
+              VALUES ('r-a','t-a','c-a','d-a','{when}','{ip}',4,'fail','fail','a.example'),
+                     ('r-b','t-b','c-b','d-b','{when}','{ip}',6,'fail','fail','b.example');
+            """);
+    }
+
+    /// <summary>
+    /// Client names are free text and commas are ordinary in them. Read back
+    /// from a comma-joined column, "Acme, Inc." became two clients, "Acme" and
+    /// "Inc.", and a search for the second found a sender it had no business
+    /// finding.
+    /// </summary>
+    [Fact]
+    public async Task AClientNameWithACommaStaysOneClient()
+    {
+        await _store.CreateClientAsync("Acme, Inc.", "acme-inc");
+        await StoreUnassignedAsync("a.example", Row("203.0.113.9", 5, "fail", "a.example", "fail"));
+        await _store.AssignDomainAsync("a.example", "acme-inc");
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(["Acme, Inc."], source!.Clients);
+        Assert.Equal(1, source.ClientCount);
     }
 
     // ---- the regression this file exists for ---------------------------------
@@ -186,6 +420,89 @@ public sealed class CorrelationServiceTests : IDisposable
         Assert.NotNull(source);
         Assert.True(source!.IsOwnSendingPath);
         Assert.Equal(SourceVerdict.Misconfigured, source.Verdict);
+    }
+
+    /// <summary>
+    /// "Has sent authenticated mail for every domain it fails against" is a
+    /// claim about the window being shown. An address that carried two
+    /// clients properly months ago, and now fails with nothing signed only
+    /// against a third, has not passed for the third - and clearing it as
+    /// one of the client's own paths is the dangerous way to be wrong.
+    /// </summary>
+    [Fact]
+    public async Task PassingLongAgoForOtherDomainsDoesNotClearAnAddressNowFailingForANewOne()
+    {
+        await StoreAsync("b.example", "beta", daysAgo: 100,
+            Row("203.0.113.9", 5, "pass", "b.example", "pass"),
+            Row("203.0.113.9", 5, "fail", "b.example", "fail"));
+        await StoreAsync("c.example", "gamma", daysAgo: 100,
+            Row("203.0.113.9", 5, "pass", "c.example", "pass"),
+            Row("203.0.113.9", 5, "fail", "c.example", "fail"));
+        await StoreAsync("a.example", "alpha", Row("203.0.113.9", 5, "fail", "a.example", "fail"));
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(["a.example"], source!.Domains);
+        Assert.False(source.IsOwnSendingPath, "it has never passed for a.example");
+        Assert.Equal(SourceReading.Unauthenticated, source.Reading);
+    }
+
+    /// <summary>
+    /// The pass has to be inside the window too, as it is on the page behind
+    /// the address. Otherwise a pass from before the window clears an address
+    /// that has not authenticated once in the period being read.
+    /// </summary>
+    [Fact]
+    public async Task APassFromBeforeTheWindowDoesNotMakeAnAddressAnOwnSendingPath()
+    {
+        await StoreAsync("b.example", "beta", daysAgo: 100, Row("203.0.113.9", 5, "pass", "b.example", "pass"));
+        await StoreAsync("b.example", "beta", Row("203.0.113.9", 5, "fail", "b.example", "fail"));
+
+        var listed = await SourceAsync("203.0.113.9");
+        var detail = await DetailAsync("203.0.113.9");
+
+        Assert.False(listed!.IsOwnSendingPath);
+        Assert.False(detail!.IsOwnSendingPath, "the two pages must agree");
+    }
+
+    /// <summary>
+    /// And the failure has to be current: a domain the address has stopped
+    /// failing against is not one of the domains it is being judged on, so it
+    /// cannot stand in for one it is failing against now.
+    /// </summary>
+    [Fact]
+    public async Task ADomainItStoppedFailingAgainstDoesNotVouchForOneItFailsNow()
+    {
+        await StoreAsync("b.example", "beta", daysAgo: 100, Row("203.0.113.9", 5, "fail", "b.example", "fail"));
+        await StoreAsync("b.example", "beta", Row("203.0.113.9", 5, "pass", "b.example", "pass"));
+        await StoreAsync("a.example", "alpha", Row("203.0.113.9", 5, "fail", "a.example", "fail"));
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(["a.example"], source!.Domains);
+        Assert.False(source.IsOwnSendingPath);
+    }
+
+    /// <summary>
+    /// The same, for failures the list itself does not count: a forwarded
+    /// failure is excluded from the findings, so it cannot be what makes
+    /// the address look like it passes for everything it is listed against.
+    /// </summary>
+    [Fact]
+    public async Task AFailureTheListIgnoresDoesNotClearAnAddressFailingForAnotherDomain()
+    {
+        await StoreAsync("b.example", "beta",
+            Row("203.0.113.9", 5, "pass", "b.example", "pass"),
+            ForwardedRow("203.0.113.9", 5, "b.example"));
+        await StoreAsync("a.example", "alpha", Row("203.0.113.9", 5, "fail", "a.example", "fail"));
+
+        var source = await SourceAsync("203.0.113.9");
+
+        Assert.NotNull(source);
+        Assert.Equal(["a.example"], source!.Domains);
+        Assert.False(source.IsOwnSendingPath);
     }
 
     [Fact]
@@ -447,6 +764,44 @@ public sealed class CorrelationServiceTests : IDisposable
         Assert.Equal(SourceVerdict.CrossClientImpersonation, listed!.Verdict);
         Assert.Equal(listed.Verdict, detail!.Verdict);
         Assert.Equal(listed.IndependentParties, detail.IndependentParties);
+        Assert.Equal(SourceReading.CrossClient, detail.Reading);
+        Assert.Equal(listed.Reading, detail.Reading);
+    }
+
+    /// <summary>
+    /// The list splits the benign half of the verdict in two, and the page
+    /// behind a name has to call the same address the same thing: an
+    /// "Unaligned service" in the list is not "Misconfigured" on its own page.
+    /// </summary>
+    [Theory]
+    [InlineData(SourceReading.OwnSendingPath)]
+    [InlineData(SourceReading.Unaligned)]
+    [InlineData(SourceReading.Unauthenticated)]
+    public async Task ReadsEachKindOfSourceTheSameWayAsTheList(SourceReading expected)
+    {
+        const string ip = "198.51.100.77";
+
+        switch (expected)
+        {
+            case SourceReading.OwnSendingPath:
+                await StoreAsync("a.example", "alpha",
+                    Row(ip, 5, "pass", "a.example", "pass"), Row(ip, 5, "fail", "a.example", "fail"));
+                break;
+
+            case SourceReading.Unaligned:
+                await StoreAsync("a.example", "alpha", ThirdPartyRow(ip, 5, "a.example", "mailchimpapp.net"));
+                break;
+
+            default:
+                await StoreAsync("a.example", "alpha", Row(ip, 5, "fail", "a.example", "fail"));
+                break;
+        }
+
+        var listed = await SourceAsync(ip);
+        var detail = await DetailAsync(ip);
+
+        Assert.Equal(expected, listed!.Reading);
+        Assert.Equal(expected, detail!.Reading);
     }
 
     [Fact]

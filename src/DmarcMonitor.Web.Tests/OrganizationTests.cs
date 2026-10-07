@@ -105,6 +105,83 @@ public sealed class OrganizationTests : IClassFixture<TwoOrganizationApp>
     }
 
     [Fact]
+    public async Task SomebodyWhoseTokenLeftTheirGroupsOutIsToldThatNotToJoinAnotherGroup()
+    {
+        // The person who set this up is the likeliest to be in too many groups
+        // for Entra to list. Told only to "ask to be added", they add
+        // themselves to the master group, sign in again, and get the same page.
+        var client = As("engineer@example.com");
+        client.DefaultRequestHeaders.Add(TestAuthHandler.HasGroupsHeader, "true");
+
+        var html = await client.GetStringAsync("/");
+
+        Assert.Contains("No organization", html, StringComparison.Ordinal);
+        Assert.Contains("left your group list out", html, StringComparison.Ordinal);
+        Assert.Contains("Groups assigned to the application", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("acme.com", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SomebodyWhoIsSimplyInNoGroupIsNotToldTheirGroupsWereLeftOut()
+    {
+        var html = await As("stranger@example.com", "33333333-3333-3333-3333-333333333333").GetStringAsync("/");
+
+        Assert.Contains("No organization", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("left your group list out", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A token with no groups claim at all and no marker either - the claim was
+    /// never added, or a person is in nothing - is not the "left out" case. That
+    /// one needs the marker; without it the page must not tell somebody who is
+    /// in the right group to go and change the registration.
+    /// </summary>
+    [Fact]
+    public async Task ATokenWithNoGroupsAndNoMarkerIsNotTheLeftOutCaseEither()
+    {
+        var html = await As("nogroups@example.com").GetStringAsync("/");
+
+        Assert.Contains("No organization", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("left your group list out", html, StringComparison.Ordinal);
+
+        // And the plain case points at the two ways it goes wrong that are not
+        // "you are in no group": the group not assigned to the app, or the
+        // membership indirect.
+        Assert.Contains("assigned to this app", html, StringComparison.Ordinal);
+        Assert.Contains("directly rather than", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheLeftOutCaseSaysEveryGroupMustBeAssignedAndWhatItNeeds()
+    {
+        var client = As("engineer@example.com");
+        client.DefaultRequestHeaders.Add(TestAuthHandler.HasGroupsHeader, "true");
+
+        var html = await client.GetStringAsync("/");
+
+        Assert.Contains("every", html, StringComparison.Ordinal);
+        Assert.Contains("Entra ID P1", html, StringComparison.Ordinal);
+        Assert.Contains("viewer groups", html, StringComparison.Ordinal);
+        Assert.Contains("customer", html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The name lookup reaches outside the machine, so it is an operator's
+    /// button. A viewer reads the same table without it, whatever is due.
+    /// </summary>
+    [Fact]
+    public async Task AViewerIsNotOfferedTheNameLookupAndAnAdminIs()
+    {
+        var viewer = await As("viewer@example.com", TwoOrganizationApp.NrgViewers).GetStringAsync("/sources");
+        var admin = await As("admin@example.com", TwoOrganizationApp.NrgAdmins).GetStringAsync("/sources");
+
+        // Something is due either way: nothing has been looked up.
+        Assert.Contains("are due a lookup", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Look up names now", viewer, StringComparison.Ordinal);
+        Assert.Contains("Look up names now", admin, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AnotherOrganizationsDomainPageConfirmsNothing()
     {
         // The same page a domain nobody has reported on gets, so the URL
@@ -582,6 +659,9 @@ internal sealed class TestAuthHandler(
     public const string GroupsHeader = "X-Test-Groups";
     public const string OrgHeader = "X-Test-Org";
 
+    /// <summary>Present means: the token carries Entra's "too many groups to list" marker.</summary>
+    public const string HasGroupsHeader = "X-Test-HasGroups";
+
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
         if (!Request.Headers.TryGetValue(UserHeader, out var user) || string.IsNullOrEmpty(user))
@@ -604,6 +684,12 @@ internal sealed class TestAuthHandler(
         if (Request.Headers.TryGetValue(OrgHeader, out var org) && !string.IsNullOrEmpty(org))
         {
             claims.Add(new Claim(OrgContext.ChoiceClaim, org.ToString()));
+        }
+
+        // What the implicit flow sends in place of a group list that will not fit.
+        if (Request.Headers.ContainsKey(HasGroupsHeader))
+        {
+            claims.Add(new Claim("hasgroups", "true"));
         }
 
         var identity = new ClaimsIdentity(claims, SchemeName);

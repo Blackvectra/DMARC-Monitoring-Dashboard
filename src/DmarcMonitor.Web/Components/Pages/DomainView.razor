@@ -1232,18 +1232,8 @@ else
     private static string Sample(DomainDetail d) =>
         d.Pct < 100 ? $", but only for {d.Pct}% of it - the rest is delivered" : "";
 
-    private static string Ago(DateTimeOffset? when)
-    {
-        if (when is null) { return "—"; }
-
-        var days = (int)(DateTimeOffset.UtcNow - when.Value).TotalDays;
-        return days switch
-        {
-            <= 0 => "today",
-            1 => "yesterday",
-            _ => $"{days} days ago",
-        };
-    }
+    /// <summary>How long ago, or a dash where this page has nothing to say, which is not "never".</summary>
+    private static string Ago(DateTimeOffset? when) => when is null ? "—" : TimeAgo.Days(when);
 
     private static string Css(TriageLevel level) => level switch
     {

@@ -45,6 +45,37 @@
     rather than everything ever received. A message whose attachment could
     not be saved is never marked, so it is still there to be noticed.
 
+    A message that could not be marked - a shared mailbox the signed-in user
+    may read but not change refuses the write - is counted and named at the
+    end of the run, with the reason Outlook gave.
+
+.PARAMETER MoveToDeleted
+    Clean up as well as export: once a message's report is saved (or was saved
+    by an earlier run), mark it read and move it to the Deleted Items of the
+    mailbox it is in. Off unless asked for, because a script that moves mail
+    nobody told it to move is a surprise. It is a soft delete - a person can
+    drag the message back out - and it does not free quota until Deleted
+    Items is emptied.
+
+    Only the Inbox and folders somebody made are touched. Nothing is ever
+    moved out of Sent Items, Drafts, Outbox, Junk Email, Deleted Items itself,
+    a calendar, contacts or tasks, or out of a folder inside any of those:
+    a whole-mailbox export visits every folder, and a report file attached to
+    something somebody sent is not this script's to delete. A message listed
+    in a search folder is moved only from the folder it really lives in, so a
+    search folder cannot be used to reach past those rules. A message with no
+    report on it, and a message with an attachment that could not be saved,
+    stay where they are.
+
+    The message is marked read first (unless -LeaveUnread), then moved. A move
+    that fails is counted and named at the end, with the reason, and costs
+    that one message, not the run.
+
+    The next run still reads Deleted Items, because a whole-mailbox export
+    visits every folder. Nothing in it is saved twice - a report is
+    recognized by its contents - but the folder grows, and so does the time
+    spent reading it.
+
 .PARAMETER Schedule
     Register a Windows scheduled task that runs this export every day at the
     given time - "07:00", "6:30 PM" - with the same -OutputPath, -Mailbox,
@@ -98,6 +129,11 @@
     each message read. -Unschedule removes it.
 
 .EXAMPLE
+    .\Export-DMARCAttachments.ps1 -OutputPath C:\dmarc-export -Mailbox "DMARC Reports" -Schedule 07:00 -MoveToDeleted
+    The same, and each message is also moved to Deleted Items once its report
+    is saved, so the Inbox holds only what has not been exported yet.
+
+.EXAMPLE
     .\Export-DMARCAttachments.ps1 -OutputPath C:\x -Mailbox "DMARC Reports" -List
     Show what folders exist, without exporting.
 
@@ -120,6 +156,7 @@ param(
     [switch]$List,
     [switch]$SkipInbox,
     [switch]$LeaveUnread,
+    [switch]$MoveToDeleted,
     [string]$Schedule,
     [switch]$Unschedule,
     [string]$LogFile,
@@ -181,6 +218,7 @@ if ($Schedule) {
     if ($Folder)      { $taskArgs += @('-Folder', "`"$Folder`"") }
     if ($SkipInbox)   { $taskArgs += '-SkipInbox' }
     if ($LeaveUnread) { $taskArgs += '-LeaveUnread' }
+    if ($MoveToDeleted) { $taskArgs += '-MoveToDeleted' }
     if ($PSBoundParameters.ContainsKey('Extensions')) { $taskArgs += @('-Extensions', ($Extensions -join ',')) }
 
     # Whichever PowerShell is running this - Windows PowerShell or 7 - runs
@@ -362,6 +400,73 @@ function Get-Inbox {
     }
 
     return $null
+}
+
+# What -MoveToDeleted needs to know about the mailbox a folder is in: where its
+# Deleted Items is, and which folders are Outlook's own. Found once per store
+# and remembered by the store's id, so every folder in a mailbox asks once and
+# two mailboxes never share an answer.
+$script:StoreInfo = @{}
+
+# The folders a message is never moved out of, as olDefaultFolders values:
+# Deleted Items (3), Outbox (4), Sent Items (5), Calendar (9), Contacts (10),
+# Journal (11), Notes (12), Tasks (13), Drafts (16), Conflicts (19), Sync
+# Issues (20), Local Failures (21), Server Failures (22), Junk Email (23), RSS
+# Feeds (25), To-Do (28), Managed Email (29), Suggested Contacts (30). The
+# Inbox is deliberately not among them.
+$ProtectedKinds = @(3, 4, 5, 9, 10, 11, 12, 13, 16, 19, 20, 21, 22, 23, 25, 28, 29, 30)
+
+function Get-StoreInfo {
+    param($MailFolder)
+
+    $store = $null
+    try { $store = $MailFolder.Store } catch { $store = $null }
+    if ($null -eq $store) { return $null }
+
+    $key = ''
+    try { $key = [string]$store.StoreID } catch { $key = '' }
+    if ($key -and $script:StoreInfo.ContainsKey($key)) { return $script:StoreInfo[$key] }
+
+    $root = $null
+    try { $root = $store.GetRootFolder() } catch { $root = $null }
+
+    # Asked of the store, not of the namespace: the namespace answers with the
+    # signed-in user's own Deleted Items, and a report moved there has left
+    # the shared mailbox it came from for somebody's personal one.
+    $deleted = $null
+    try {
+        $deleted = $store.GetDefaultFolder(3)      # olFolderDeletedItems
+    } catch {
+        Write-Verbose "The store would not say where its Deleted Items is: $($_.Exception.Message)"
+    }
+
+    # Older Outlook, or a store that will not answer: look for it by name.
+    if (-not $deleted -and $root) {
+        foreach ($child in (Get-ChildFolders $root)) {
+            if ($child.Name -eq 'Deleted Items') { $deleted = $child; break }
+        }
+    }
+
+    $protected = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($kind in $ProtectedKinds) {
+        try {
+            $special = $store.GetDefaultFolder($kind)
+            if ($special) { [void]$protected.Add([string]$special.EntryID) }
+        } catch {
+            # A store with no folder of that kind says so by throwing. There is
+            # nothing to protect.
+        }
+    }
+    if ($deleted) { [void]$protected.Add([string]$deleted.EntryID) }
+
+    $name = ''
+    if ($root) { try { $name = [string]$root.Name } catch { $name = '' } }
+    if (-not $name) { try { $name = [string]$store.DisplayName } catch { $name = '' } }
+    if (-not $name) { $name = 'this mailbox' }
+
+    $info = [pscustomobject]@{ Name = $name; Deleted = $deleted; Protected = $protected }
+    if ($key) { $script:StoreInfo[$key] = $info }
+    return $info
 }
 
 # Every open store, not just the first. A shared mailbox such as
@@ -558,13 +663,32 @@ if (-not (Test-Path $Staging)) { New-Item -Path $Staging -ItemType Directory -Fo
 
 $script:alreadyTotal = 0
 
+# One row per folder; a "moved" column only when moving was asked for, so a
+# run that moves nothing looks the way it always did.
+$RowFormat = if ($MoveToDeleted) { '    {0,-34} {1,8} {2,6} {3,12} {4,8} {5,12} {6,7}' }
+             else                { '    {0,-34} {1,8} {2,6} {3,12} {4,8} {5,12}' }
+
+# What went wrong with the housekeeping, kept for the end of the run. These
+# used to be visible only with -Verbose, which is how a message that never gets
+# marked read can go unexplained for weeks: the export is fine, nothing is
+# printed, and nobody thinks to ask for the noise.
+$script:movedTotal = 0
+$script:markFailed = 0
+$script:firstMarkError = ''
+$script:moveFailed = 0
+$script:firstMoveError = ''
+$script:noDeletedItems = New-Object 'System.Collections.Generic.List[string]'
+
 # Folders already done, by EntryID. Without this, -Folder Inbox would export
 # the Inbox twice: once as the folder asked for and once as the Inbox added
 # to it.
 $seen = New-Object 'System.Collections.Generic.HashSet[string]'
 
 function Export-Folder {
-    param($MailFolder, [string]$Destination)
+    # $Protected is true for a folder Outlook keeps for itself, or one inside
+    # it. It is handed down to every folder below, so a subfolder of Sent Items
+    # is as safe as Sent Items.
+    param($MailFolder, [string]$Destination, [bool]$Protected = $false)
 
     $id = ''
     try { $id = [string]$MailFolder.EntryID } catch { $id = '' }
@@ -579,6 +703,26 @@ function Export-Folder {
     $scanned = 0
     $skipped = 0
     $marked = 0
+    $moved = 0
+
+    # Whether anything may be moved out of this folder. Decided once, before a
+    # single message is looked at: a folder that cannot be placed in a store,
+    # or that has no id to compare, is not one to delete from.
+    $mayMove = $false
+    if ($MoveToDeleted -and -not $Protected) {
+        $info = Get-StoreInfo $MailFolder
+        if ($id -and $null -ne $info -and -not $info.Protected.Contains($id)) {
+            $mayMove = $true
+        } else {
+            $Protected = $true
+        }
+    }
+
+    # Messages to move once every message in the folder has been looked at.
+    # Moving one out of Items shifts the next into its place, and a loop that
+    # counts upward while it moves skips every other message: five reports,
+    # three moved, and the same again tomorrow.
+    $toMove = New-Object 'System.Collections.Generic.List[object]'
 
     $items = $null
     try { $items = $MailFolder.Items } catch { $items = $null }
@@ -670,7 +814,9 @@ function Export-Folder {
             # A message whose report an earlier run already saved counts: it
             # is exported, and leaving it unread would have every run
             # re-read it and the unread count never go down.
-            if (-not $LeaveUnread -and ($savedHere + $alreadyHere) -gt 0 -and $failedHere -eq 0) {
+            $accountedFor = ($savedHere + $alreadyHere) -gt 0 -and $failedHere -eq 0
+
+            if ($accountedFor -and -not $LeaveUnread) {
                 try {
                     if ($item.UnRead) {
                         $item.UnRead = $false
@@ -679,12 +825,53 @@ function Export-Folder {
                     }
                 } catch {
                     # A read-only store, or a shared mailbox without write
-                    # access. The export still counts; the flag is a nicety.
+                    # access. The export still counts and the flag is a
+                    # nicety, but it is counted and reported at the end: a
+                    # flag that quietly never changes is the kind of thing
+                    # nobody finds without being told.
+                    $script:markFailed++
+                    if (-not $script:firstMarkError) { $script:firstMarkError = $_.Exception.Message }
                     Write-Verbose "Could not mark a message read in '$($MailFolder.Name)': $($_.Exception.Message)"
+                }
+            }
+
+            # Moved on the same terms - its report is on disk and nothing on
+            # it failed - but not until the folder has been walked.
+            #
+            # And only from the folder the message actually lives in. A search
+            # folder ("Unread Mail", say) lists messages that sit in other
+            # folders - Sent Items among them - and moving one from there
+            # moves the original, past every protection above. A message is
+            # left for the walk of its own folder, where those rules apply.
+            if ($accountedFor -and $mayMove) {
+                $livesIn = ''
+                try { $livesIn = [string]$item.Parent.EntryID } catch { $livesIn = '' }
+                if ($livesIn -eq $id) { $toMove.Add($item) }
+            }
+        }
+    }
+
+    if ($toMove.Count -gt 0) {
+        $info = Get-StoreInfo $MailFolder
+        if ($null -eq $info -or $null -eq $info.Deleted) {
+            # Nothing to move them into. Said once per mailbox at the end, and
+            # the messages stay where they are, still exported and still read.
+            $label = if ($info) { $info.Name } else { [string]$MailFolder.Name }
+            if (-not $script:noDeletedItems.Contains($label)) { $script:noDeletedItems.Add($label) }
+        } else {
+            foreach ($message in $toMove) {
+                try {
+                    [void]$message.Move($info.Deleted)
+                    $moved++
+                } catch {
+                    $script:moveFailed++
+                    if (-not $script:firstMoveError) { $script:firstMoveError = $_.Exception.Message }
+                    Write-Verbose "Could not move a message out of '$($MailFolder.Name)': $($_.Exception.Message)"
                 }
             }
         }
     }
+    $script:movedTotal += $moved
 
     $unread = 0
     try { $unread = $MailFolder.UnReadItemCount } catch { $unread = 0 }
@@ -692,9 +879,12 @@ function Export-Folder {
     # Every folder looked in is printed, including empty ones. A folder that
     # was searched and held nothing, and a folder that was never searched,
     # are different problems and used to look identical.
-    Write-Host ("    {0,-34} {1,8} {2,6} {3,12} {4,8} {5,12}" -f `
-        $MailFolder.Name, $scanned, $saved, $(if ($already) { $already } else { '' }),
+    $cells = @($MailFolder.Name, $scanned, $saved, $(if ($already) { $already } else { '' }),
         $(if ($skipped) { $skipped } else { '' }), $(if ($marked) { $marked } else { '' }))
+    # The extra column only when it was asked for, so a run that moves nothing
+    # looks the way it always did.
+    if ($MoveToDeleted) { $cells += $(if ($moved) { $moved } else { '' }) }
+    Write-Host ($RowFormat -f $cells)
 
     $script:alreadyTotal += $already
 
@@ -708,7 +898,7 @@ function Export-Folder {
         # Mirror the folder structure, so a report sorted into DMARC\acme.com
         # still says which domain it belongs to after export.
         $safe = ($child.Name -replace '[<>:"/\\|?*]', '_')
-        $total += Export-Folder -MailFolder $child -Destination (Join-Path $Destination $safe)
+        $total += Export-Folder -MailFolder $child -Destination (Join-Path $Destination $safe) -Protected $Protected
     }
 
     return $total
@@ -723,7 +913,9 @@ if ($Folder) {
 }
 Write-Host "Output  : $OutputPath"
 Write-Host ""
-Write-Host ("    {0,-34} {1,8} {2,6} {3,12} {4,8} {5,12}" -f 'folder', 'scanned', 'new', 'had already', 'skipped', 'marked read') -ForegroundColor DarkGray
+$headings = @('folder', 'scanned', 'new', 'had already', 'skipped', 'marked read')
+if ($MoveToDeleted) { $headings += 'moved' }
+Write-Host ($RowFormat -f $headings) -ForegroundColor DarkGray
 
 $count = 0
 foreach ($target in $targets) {
@@ -739,6 +931,24 @@ if ($script:alreadyTotal -gt 0) {
 }
 if ($adopted -gt 0) {
     Write-Host "$adopted report(s) already in the folder were added to the index, so they will not be exported again." -ForegroundColor DarkGray
+}
+if ($MoveToDeleted) {
+    Write-Host "$($script:movedTotal) message(s) moved to Deleted Items." -ForegroundColor Green
+}
+
+# The housekeeping that did not work, with the reason Outlook gave. None of it
+# stops the export, and all of it used to be silent.
+if ($script:markFailed -gt 0) {
+    Write-Host "$($script:markFailed) message(s) could not be marked read: $($script:firstMarkError)" -ForegroundColor Yellow
+    Write-Host "  Their reports were saved all the same. On a shared mailbox this usually means the signed-in" -ForegroundColor DarkGray
+    Write-Host "  account may read it but not change it; Outlook needs Edit permission on the folder." -ForegroundColor DarkGray
+}
+if ($script:moveFailed -gt 0) {
+    Write-Host "$($script:moveFailed) message(s) could not be moved to Deleted Items: $($script:firstMoveError)" -ForegroundColor Yellow
+    Write-Host "  They are still in their folders, and their reports were saved." -ForegroundColor DarkGray
+}
+foreach ($label in $script:noDeletedItems) {
+    Write-Host "There is no Deleted Items folder to be found in '$label', so its messages were left where they are." -ForegroundColor Yellow
 }
 Write-Host ""
 Write-Host "Next: import them." -ForegroundColor DarkGray

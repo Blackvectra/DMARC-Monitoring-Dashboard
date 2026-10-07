@@ -34,7 +34,7 @@ verify, and a document you hand a customer.
 | Client deliverable | a dashboard screenshot | a rendered narrative report for a non-technical reader |
 | Deployment | JVM cluster + Python + a mail fetcher, usually Docker Compose | two self-contained artifacts, one bootstrap script, no runtime install |
 | Ingest | **IMAP, Gmail API, Graph, maildir, S3, Kafka** | Microsoft Graph, folder, zip, browser upload |
-| Enrichment | **GeoIP, reverse DNS** | neither, deliberately |
+| Enrichment | **GeoIP, reverse DNS** | reverse DNS, checked against the name's own forward records and named from a vendor catalogue; no GeoIP |
 | Alerting | **the OpenSearch alerting plugin** | none |
 | Licence | Apache 2.0 | proprietary |
 
@@ -87,10 +87,19 @@ contradiction in raw XML. It is a valid signature over the wrong domain, and
 the fix is at the vendor rather than in the key. Explained here rather than
 charted.
 
-**Naming a sender without guessing.** `SenderCatalog` groups by providers'
-published ranges, not reverse DNS, because a wrong PTR-derived label —
-"Microsoft 365" on an intruder's line — is worse than a bare IP address. One
-real domain had 630 "sources" in a month; 618 were Microsoft load balancers.
+**Naming a sender without guessing.** A reverse name is written by whoever
+holds the address, so it is used for reading and never for judging. The sources
+page prints a vendor's name — "Microsoft 365", "Avanan (Check Point Harmony)" —
+only where the name's own forward records point back at the address; a name that
+does not is shown as the hostname it claims, and a sender claiming to be a mail
+provider is kept apart from the real ones rather than lost among them. What an
+address looks like still comes from what was signed and how many unrelated
+clients it was seen against. Names do decide who addresses are grouped with
+(by the domain their name claims), and so whether a sender is flagged as
+spanning clients - which is why a group of unconfirmed claims says so. `SenderCatalog` additionally groups by providers'
+published ranges, because a wrong PTR-derived label — "Microsoft 365" on an
+intruder's line — is worse than a bare IP address. One real domain had 630
+"sources" in a month; 618 were Microsoft load balancers.
 
 ---
 
@@ -110,7 +119,8 @@ aligned on SPF only, in a six-hour window" is one query in a DSL. Here it is a
 step and without a saved visualisation at the end of it. `dmarc intel` covers
 cross-client correlation specifically, not the general case.
 
-**Enrichment.** GeoIP and reverse DNS out of the box. This does neither.
+**Enrichment.** GeoIP and reverse DNS out of the box. This does reverse DNS —
+nightly, or for the addresses on screen from the sources page — and no GeoIP.
 
 **Alerting.** OpenSearch has an alerting plugin. Nothing here pages anybody —
 you find out by looking, which for an MSP is the single largest gap.

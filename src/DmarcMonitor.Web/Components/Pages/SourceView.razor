@@ -25,7 +25,7 @@
 
 <header class="page-head">
     <div>
-        <p class="crumb"><a href="/sources">Sources</a></p>
+        <p class="crumb"><a href="/sources">Sending sources</a></p>
         <h1>@(_source?.Display ?? Address)</h1>
         @if (_source is { IsNamed: true })
         {
@@ -70,7 +70,7 @@ else if (_source is null)
 }
 else
 {
-    <section class="callout @Css(_source.Verdict)">
+    <section class="callout @Css(_source.Reading)">
         <h2>@Headline()</h2>
         <p>@Explain()</p>
     </section>
@@ -89,7 +89,7 @@ else
             <div class="stat-label">unrelated parties</div>
         </div>
         <div class="stat">
-            <div class="stat-value">@(_source.LastSeen is { } seen ? Ago(seen) : "—")</div>
+            <div class="stat-value">@(_source.LastSeen is { } seen ? TimeAgo.Days(seen) : "—")</div>
             <div class="stat-label">last seen</div>
         </div>
     </div>
@@ -125,7 +125,7 @@ else
                             @if (a.EverPassed) { <span class="chip fine">yes</span> }
                             else { <span class="chip urgent">never</span> }
                         </td>
-                        <td class="when">@(a.LastSeen is { } s ? Ago(s) : "—")</td>
+                        <td class="when">@(a.LastSeen is { } s ? TimeAgo.Days(s) : "—")</td>
                     </tr>
                 }
             </tbody>
@@ -183,11 +183,16 @@ else
         }
     }
 
-    private static string Css(SourceVerdict verdict) => verdict switch
+    // Read the way the list reads it, from the same four labels: a source that is
+    // an "Unaligned service" in the list is not "Misconfigured" on its own page.
+    // Neutral for an own sending path, as in the list - it is not a finding.
+    private static string Css(SourceReading reading) => reading switch
     {
-        SourceVerdict.CrossClientImpersonation => "urgent",
-        SourceVerdict.Unauthenticated => "act",
-        _ => "watch",
+        SourceReading.CrossClient => "urgent",
+        SourceReading.Unauthenticated => "act",
+        SourceReading.Unaligned => "watch",
+        SourceReading.OwnSendingPath => "",
+        _ => throw new ArgumentOutOfRangeException(nameof(reading), reading, null),
     };
 
     /// <summary>
@@ -195,60 +200,55 @@ else
     /// Calling a customer's own marketing platform an attacker is how an
     /// operator blocks their client's invoices.
     /// </summary>
-    private string Headline() => _source!.Verdict switch
+    private string Headline() => _source!.Reading switch
     {
-        SourceVerdict.CrossClientImpersonation =>
+        SourceReading.CrossClient =>
             $"Authenticated nothing, against {_source.IndependentParties} unrelated parties",
-        SourceVerdict.Unauthenticated =>
+        SourceReading.Unauthenticated =>
             "Authenticated nothing",
-        _ when _source.IsOwnSendingPath =>
-            "A real sending path for every domain it touches",
-        _ => "A real service, sending unaligned",
+        SourceReading.OwnSendingPath =>
+            "Own sending path: authenticated for every domain it touches",
+        SourceReading.Unaligned =>
+            "Unaligned service: a real service, sending as itself",
+        _ => throw new ArgumentOutOfRangeException(nameof(_source.Reading), _source.Reading, null),
     };
 
-    private string Explain() => _source!.Verdict switch
+    private string Explain() => _source!.Reading switch
     {
-        SourceVerdict.CrossClientImpersonation =>
+        SourceReading.CrossClient =>
             "One domain would be noise. The same address proving nothing against several businesses "
             + "that have nothing to do with each other is somebody working through a list.",
-        SourceVerdict.Unauthenticated =>
+        SourceReading.Unauthenticated =>
             "It proved nothing when it failed, and it has been seen against one party only. That is "
             + "as consistent with a forgotten mail service as with forgery, so it is worth "
             + "identifying before it is blocked.",
-        _ when _source.IsOwnSendingPath =>
+        SourceReading.OwnSendingPath =>
             "It has authenticated for every domain it sends as, so it holds keys a forger would not. "
             + "Failures here are alignment or a gateway breaking signatures in transit, not forgery.",
-        _ => "It authenticated for a domain of its own rather than your customer's, which is what a "
+        SourceReading.Unaligned =>
+            "It authenticated for a domain of its own rather than your customer's, which is what a "
             + "real service set up without alignment looks like.",
+        _ => throw new ArgumentOutOfRangeException(nameof(_source.Reading), _source.Reading, null),
     };
 
-    private string Advice() => _source!.Verdict switch
+    private string Advice() => _source!.Reading switch
     {
-        SourceVerdict.CrossClientImpersonation =>
+        SourceReading.CrossClient =>
             "Do not add this to anybody's SPF record. Advancing the policy on the domains above is what "
             + "stops it — the reports already show what enforcing would cost. If the same address keeps "
             + "appearing after that, it is worth reporting to the network that owns it.",
-        SourceVerdict.Unauthenticated =>
+        SourceReading.Unauthenticated =>
             "Find out what it is before changing anything. Ask the customer whether they recognize it: a "
             + "scanner, a booking system or a payroll run nobody remembered is the usual answer. If they "
             + "own it, align it; if they do not, enforcing the policy is what stops it.",
-        _ when _source.IsOwnSendingPath =>
+        SourceReading.OwnSendingPath =>
             "Nothing in DNS fixes a signature broken in transit. If mail is being lost, have the gateway "
             + "stop modifying the body, or deliver without a re-send. Relaxing alignment or lowering the "
             + "policy does not help — the signature is broken, not misaligned.",
-        _ => "Align it. Either have the service sign as the customer's domain, or add it to SPF if the "
+        SourceReading.Unaligned =>
+            "Align it. Either have the service sign as the customer's domain, or add it to SPF if the "
             + "customer owns the sending. Check the SPF lookup count before adding anything: ten is the "
             + "limit and going over it breaks every sender at once.",
+        _ => throw new ArgumentOutOfRangeException(nameof(_source.Reading), _source.Reading, null),
     };
-
-    private static string Ago(DateTimeOffset when)
-    {
-        var days = (int)(DateTimeOffset.UtcNow - when).TotalDays;
-        return days switch
-        {
-            <= 0 => "today",
-            1 => "yesterday",
-            _ => $"{days} days ago",
-        };
-    }
 }

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text.Json;
+using DmarcMonitor.Core.Aggregate;
 using DmarcMonitor.Core.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -54,8 +56,27 @@ public sealed record FailingSource
     /// different clients, and counting the bucket as one client meant a fresh
     /// install - where everything is unassigned - could never see a source
     /// working through several of them.
+    ///
+    /// Counted from <see cref="PartyKeys"/> rather than beside them. The two
+    /// were separate columns of one query, and keyed differently - one by the
+    /// client, the other by its slug, which two organizations can share - so
+    /// a row could read "Cross-client" beside "1 party".
     /// </remarks>
-    public int IndependentParties { get; init; }
+    public int IndependentParties => PartyKeys.Count;
+
+    /// <summary>
+    /// The parties themselves, one entry each: a client, or for a domain still
+    /// in Unassigned the domain.
+    /// </summary>
+    /// <remarks>
+    /// Identifiers rather than names, since two clients can share a name and
+    /// two organizations a slug. A sender that works through several addresses
+    /// is several of these records, and how many unrelated parties the SENDER
+    /// reached is the union of their lists - not a sum, because two addresses
+    /// hitting the same client reached one party, and not the largest, because
+    /// they may have reached different ones.
+    /// </remarks>
+    public required IReadOnlyList<string> PartyKeys { get; init; }
 
     /// <summary>Seen against more than one unrelated party. Only a multi-client platform can see this.</summary>
     public bool IsCrossClient => IndependentParties > 1;
@@ -109,70 +130,46 @@ public sealed record FailingSource
         IsOwnSendingPath || !AuthenticatedNothing ? SourceVerdict.Misconfigured
         : IsCrossClient ? SourceVerdict.CrossClientImpersonation
         : SourceVerdict.Unauthenticated;
+
+    /// <summary>
+    /// The verdict, with the benign half split in two because the two halves
+    /// are fixed in different places.
+    /// </summary>
+    /// <remarks>
+    /// "Misconfigured" covers a client's own relay breaking signatures in
+    /// transit, where nothing in DNS is wrong and the fix is at the gateway,
+    /// and a real service signing as its own domain, where the fix is to set it
+    /// up to sign as the client. A page that wrote both down as one thing sent
+    /// somebody to edit records for a fault that was never in them.
+    ///
+    /// Own sending path first: a source that has passed for every domain it
+    /// fails against is that however else its failing rows authenticated.
+    /// </remarks>
+    public SourceReading Reading => Verdict switch
+    {
+        SourceVerdict.CrossClientImpersonation => SourceReading.CrossClient,
+        SourceVerdict.Unauthenticated => SourceReading.Unauthenticated,
+        _ => IsOwnSendingPath ? SourceReading.OwnSendingPath : SourceReading.Unaligned,
+    };
 }
 
 /// <summary>
-/// Several addresses at one operator, seen failing against the estate.
+/// What a failing source most likely is, from least to most worrying, so the
+/// worst of several is simply the largest.
 /// </summary>
-/// <remarks>
-/// <para>
-/// From a real import of 83 reports over 17 domains, the sources list
-/// reported four separate findings:
-/// </para>
-/// <code>
-///   107.175.149.54   107-175-149-54-host.colocrossing.com   client-c.example
-///   192.210.194.21   192-210-194-21-host.colocrossing.com   client-b.example
-///   198.46.243.200   198-46-243-200-host.colocrossing.com   client-b.example
-///   192.210.134.82   192-210-134-82-host.colocrossing.com   client-a.example
-/// </code>
-/// <para>
-/// One hosting provider, four addresses, three unrelated customers. As four
-/// single-domain rows each is noise; as one operator working through the
-/// estate it is the pattern only a multi-client platform can see - and the
-/// per-address view misses it entirely, because changing address between
-/// customers costs nothing on a VPS host.
-/// </para>
-/// <para>
-/// The addresses are kept rather than replaced. They are the identity, and
-/// blocking is done by address.
-/// </para>
-/// </remarks>
-public sealed record FailingOperator
+public enum SourceReading
 {
-    /// <summary>The vendor the catalogue recognizes, else the registrable domain.</summary>
-    public required string Name { get; init; }
+    /// <summary>One of the client's own sending paths, its signatures broken in transit.</summary>
+    OwnSendingPath,
 
-    /// <summary>The registrable domain the addresses share, e.g. colocrossing.com.</summary>
-    public required string Domain { get; init; }
+    /// <summary>A real service that authenticated, but for its own domain rather than the client's.</summary>
+    Unaligned,
 
-    public SourceKind Kind { get; init; }
+    /// <summary>Authenticated nothing, against one party.</summary>
+    Unauthenticated,
 
-    /// <summary>The addresses, worst first, exactly as the per-source list has them.</summary>
-    public required IReadOnlyList<FailingSource> Sources { get; init; }
-
-    public int AddressCount => Sources.Count;
-    public long FailedMessages => Sources.Sum(s => s.FailedMessages);
-
-    public IReadOnlyList<string> Domains =>
-        [.. Sources.SelectMany(s => s.Domains).Distinct(StringComparer.OrdinalIgnoreCase)
-                   .OrderBy(d => d, StringComparer.Ordinal)];
-
-    public IReadOnlyList<string> Clients =>
-        [.. Sources.SelectMany(s => s.Clients).Distinct(StringComparer.OrdinalIgnoreCase)
-                   .OrderBy(c => c, StringComparer.Ordinal)];
-
-    public DateTimeOffset? LastSeen =>
-        Sources.Where(s => s.LastSeen is not null).Max(s => s.LastSeen);
-
-    /// <summary>
-    /// The worst verdict any of its addresses earned.
-    /// </summary>
-    /// <remarks>
-    /// The group does not get a softer reading than its members. One address
-    /// authenticating for itself does not excuse the three beside it that
-    /// authenticated nothing.
-    /// </remarks>
-    public SourceVerdict Verdict => Sources.Max(s => s.Verdict);
+    /// <summary>Authenticated nothing, against several unrelated parties.</summary>
+    CrossClient,
 }
 
 public enum SourceVerdict
@@ -231,24 +228,21 @@ public sealed class CorrelationService(string databasePath)
             ClientScope.For(tenantId, clientSlug), ["aggregate_records"], ct: ct).ConfigureAwait(false);
         await using var command = db.CreateCommand();
 
-        // Overrides are excluded. A mailing list or forwarder breaking
-        // authentication is expected behavior, and including it would bury
-        // the real findings under traffic nobody should act on.
-        command.CommandText = """
+        // Failures the receiver excused are left out. A mailing list or
+        // forwarder breaking authentication is expected behavior, and
+        // including it would bury the real findings under traffic nobody
+        // should act on. A reason that excuses nothing - "other", or the
+        // "sampled_out" a receiver writes beside what pct let through - does
+        // not take a failure out of the list; see PolicyOverrides.
+        command.CommandText = $"""
             SELECT
               r.source_ip,
               SUM(r.message_count)                                   AS failed,
-              GROUP_CONCAT(DISTINCT d.name)                          AS domains,
-              GROUP_CONCAT(DISTINCT c.name)                          AS clients,
-              -- Independent parties, not rows in the clients table. A domain
-              -- nobody has filed yet sits in the single "Unassigned" bucket
-              -- with every other unfiled domain, so counting clients made
-              -- every source on a fresh install look like it touched exactly
-              -- one - and cross-client impersonation, the one thing only a
-              -- multi-client platform can see, could never fire until an
-              -- operator had finished onboarding. Unfiled domains are not
-              -- related to each other; each counts for itself.
-              COUNT(DISTINCT CASE WHEN c.slug = 'unassigned' THEN d.name ELSE c.id END) AS parties,
+              -- Lists as JSON rather than comma-joined text. Names are free
+              -- text and commas are ordinary in them ("Acme, Inc."), which a
+              -- split on the comma turned into two clients.
+              json_group_array(DISTINCT d.name)                      AS domains,
+              json_group_array(DISTINCT c.name)                      AS clients,
               MAX(r.date_begin)                                      AS last_seen,
               GROUP_CONCAT(DISTINCT
                 CASE WHEN r.spf_auth_result = 'pass' THEN COALESCE(r.spf_domain, '') ELSE '' END
@@ -262,14 +256,23 @@ public sealed class CorrelationService(string databasePath)
               -- query cannot tell a customer's own gateway - which signs for
               -- them and breaks a share of its signatures in transit - from
               -- somebody sending as them.
+              --
+              -- Counted over the same rows the outer query reads - this window,
+              -- failures that were not excused - and compared with the same
+              -- set of domains. Over all time it counted a domain the address
+              -- passed for months ago, or failed for only as a forwarder, as if
+              -- it vouched for the domain it is failing against now.
               (SELECT COUNT(DISTINCT f.domain_id)
                  FROM aggregate_records f
                 WHERE f.source_ip = r.source_ip
                   AND f.dmarc_result = 'fail'
+                  AND f.date_begin >= $since
+                  AND NOT {PolicyOverrides.ExcusedSql("f")}
                   AND EXISTS (SELECT 1 FROM aggregate_records p
                                WHERE p.source_ip = f.source_ip
                                  AND p.domain_id = f.domain_id
-                                 AND p.dmarc_result = 'pass')) AS domains_also_passed,
+                                 AND p.dmarc_result = 'pass'
+                                 AND p.date_begin >= $since)) AS domains_also_passed,
               -- What the address reverses to, if anything has looked. Joined
               -- rather than resolved per row: a page cannot make a DNS query
               -- while it renders, least of all one per row against addresses
@@ -279,18 +282,37 @@ public sealed class CorrelationService(string databasePath)
               n.reverse_name                                        AS reverse_name,
               -- Whether that name points back at the address. Without it the
               -- name is a claim the sender wrote, and decides nothing.
-              n.forward_confirmed                                   AS forward_confirmed
+              n.forward_confirmed                                   AS forward_confirmed,
+              -- Independent parties, and which. A domain nobody has filed yet
+              -- sits in the single "Unassigned" bucket with every other unfiled
+              -- domain, so counting clients made every source on a fresh
+              -- install look like it touched exactly one - and cross-client
+              -- impersonation, the one thing only a multi-client platform can
+              -- see, could never fire until an operator had finished
+              -- onboarding. Unfiled domains are not related to each other; each
+              -- counts for itself.
+              --
+              -- The page groups addresses that belong to one sender, and what
+              -- the SENDER reached is the union of what its addresses did:
+              -- summing the counts double counts a client two addresses both
+              -- hit, and taking the largest misses the ones they did not share.
+              -- By client id, because a slug is unique within an organization
+              -- and not across them. Prefixed so a client whose id happens to
+              -- equal an unfiled domain's name is still two parties.
+              json_group_array(DISTINCT CASE WHEN c.slug = 'unassigned' THEN 'domain:' || d.name ELSE 'client:' || c.id END) AS party_keys
             FROM aggregate_records r
             JOIN domains d ON d.id = r.domain_id
             JOIN clients c ON c.id = r.client_id
             LEFT JOIN source_names n ON n.ip = r.source_ip
             WHERE r.dmarc_result = 'fail'
               AND r.date_begin >= $since
-              AND (r.override_reason IS NULL OR r.override_reason = '')
+              AND NOT {PolicyOverrides.ExcusedSql("r")}
               AND ($tenant IS NULL OR r.tenant_id = $tenant)
               AND ($client IS NULL OR c.slug = $client)
             GROUP BY r.source_ip
-            ORDER BY COUNT(DISTINCT CASE WHEN c.slug = 'unassigned' THEN d.name ELSE c.id END) DESC, failed DESC
+            -- Widest first, then busiest, then by address so that the cut at
+            -- the limit falls on the same rows every time.
+            ORDER BY COUNT(DISTINCT CASE WHEN c.slug = 'unassigned' THEN d.name ELSE c.id END) DESC, failed DESC, r.source_ip
             LIMIT $limit
             """;
         command.Parameters.AddWithValue("$since", since);
@@ -303,12 +325,9 @@ public sealed class CorrelationService(string databasePath)
 
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
-            var domains = Split(reader.IsDBNull(2) ? "" : reader.GetString(2));
-            var clients = Split(reader.IsDBNull(3) ? "" : reader.GetString(3));
-
             DateTimeOffset? lastSeen = null;
-            if (!reader.IsDBNull(5) &&
-                DateTime.TryParse(reader.GetString(5), CultureInfo.InvariantCulture,
+            if (!reader.IsDBNull(4) &&
+                DateTime.TryParse(reader.GetString(4), CultureInfo.InvariantCulture,
                     DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
             {
                 lastSeen = new DateTimeOffset(parsed, TimeSpan.Zero);
@@ -318,107 +337,32 @@ public sealed class CorrelationService(string databasePath)
             {
                 SourceIp = reader.GetString(0),
                 FailedMessages = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                Domains = domains,
-                Clients = clients,
-                IndependentParties = reader.IsDBNull(4) ? clients.Count : reader.GetInt32(4),
+                Domains = ParseList(reader.IsDBNull(2) ? null : reader.GetString(2)),
+                Clients = ParseList(reader.IsDBNull(3) ? null : reader.GetString(3)),
                 LastSeen = lastSeen,
-                AuthenticatedFor = ParseAuthDomains(reader.IsDBNull(6) ? "" : reader.GetString(6)),
-                DomainsAlsoPassed = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
-                ReverseName = reader.IsDBNull(8) ? null : reader.GetString(8),
-                NameConfirmed = !reader.IsDBNull(9) && reader.GetInt64(9) == 1,
+                AuthenticatedFor = ParseAuthDomains(reader.IsDBNull(5) ? "" : reader.GetString(5)),
+                DomainsAlsoPassed = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                ReverseName = reader.IsDBNull(7) ? null : reader.GetString(7),
+                NameConfirmed = !reader.IsDBNull(8) && reader.GetInt64(8) == 1,
+                PartyKeys = ParseList(reader.IsDBNull(9) ? null : reader.GetString(9)),
             });
         }
 
         return results;
     }
 
-    /// <summary>
-    /// Sources that share an operator, where that tells you something the
-    /// per-address list cannot.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// A pure function of the rows the list already returns, so it needs no
-    /// query, no schema and no network - and can be tested against the exact
-    /// shapes that came out of a real estate.
-    /// </para>
-    /// <para>
-    /// Three exclusions, each of which would otherwise produce a finding
-    /// nobody should act on:
-    /// </para>
-    /// <para>
-    /// Mail providers. Grouping every Microsoft address into one row produces
-    /// "Microsoft 365, 9 domains" on every estate on earth, which is true,
-    /// useless, and would sit at the top of the page forever. A provider in
-    /// the catalogue is infrastructure, not an actor. Gateways are kept: a
-    /// gateway breaking signatures across five customers is a real finding,
-    /// and one an MSP is uniquely placed to notice.
-    /// </para>
-    /// <para>
-    /// Single addresses. If an operator has one address here, the row for
-    /// that address already says everything this would, and saying it twice
-    /// makes the page longer without making it truer.
-    /// </para>
-    /// <para>
-    /// Single domains. Several addresses at one host against one customer is
-    /// ordinary - it is what a mail provider looks like. The finding is the
-    /// same operator reaching customers that have nothing to do with each
-    /// other.
-    /// </para>
-    /// </remarks>
-    public static IReadOnlyList<FailingOperator> ByOperator(IReadOnlyList<FailingSource> sources)
+    /// <summary>Reads a JSON array of strings: distinct, sorted, nothing blank.</summary>
+    private static List<string> ParseList(string? json)
     {
-        ArgumentNullException.ThrowIfNull(sources);
+        if (string.IsNullOrWhiteSpace(json)) { return []; }
 
-        var groups = new List<FailingOperator>();
+        var values = JsonSerializer.Deserialize<string?[]>(json) ?? [];
 
-        foreach (var group in sources
-            .Select(s => (Source: s, Domain: SourceCatalog.OrganizationalDomain(s.ReverseName)))
-            .Where(x => !string.IsNullOrWhiteSpace(x.Domain))
-            .GroupBy(x => x.Domain!, StringComparer.OrdinalIgnoreCase))
-        {
-            // Infrastructure rather than an actor, see the remarks above - but
-            // only where the name is confirmed. Grouping is by the domain each
-            // address CLAIMS, and a sender forging mail can reverse to
-            // something.outlook.com; dropping the whole group on that claim
-            // took a campaign off the page because it said it was Microsoft.
-            var members = group.Select(x => x.Source)
-                .Where(m => SourceCatalog.Identify(m.VerifiedName) is not { Kind: SourceKind.MailProvider })
-                .ToList();
-
-            if (members.Count < 2) { continue; }
-
-            // Named for the vendor only when every address in it is confirmed
-            // as the vendor's. One unconfirmed member is a claim, and naming
-            // the row "INKY" would vouch for it.
-            var identity = members.All(m => m.NameConfirmed)
-                ? SourceCatalog.Identify(members[0].ReverseName)
-                : null;
-
-            var operators = new FailingOperator
-            {
-                Name = identity?.Name ?? group.Key,
-                Domain = group.Key,
-                Kind = identity?.Kind ?? SourceKind.Unknown,
-                Sources = members,
-            };
-
-            if (operators.Domains.Count < 2) { continue; }
-
-            groups.Add(operators);
-        }
-
-        // Reach first, then volume: an operator against five customers matters
-        // more than one against two, whatever the message counts say.
-        return [.. groups
-            .OrderByDescending(o => o.Domains.Count)
-            .ThenByDescending(o => o.FailedMessages)];
+        return [.. values.Where(v => !string.IsNullOrWhiteSpace(v))
+                         .Select(v => v!.Trim())
+                         .Distinct(StringComparer.OrdinalIgnoreCase)
+                         .OrderBy(v => v, StringComparer.Ordinal)];
     }
-
-    private static List<string> Split(string value) =>
-        [.. value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                 .OrderBy(v => v, StringComparer.Ordinal)];
 
     /// <summary>
     /// Unpacks the "spf|dkim" pairs the query concatenates, dropping the empty
@@ -485,7 +429,8 @@ public sealed class CorrelationService(string databasePath)
                   -- the thing a forger cannot do, and only for the domain it
                   -- passed for: an address carrying one customer's mail
                   -- properly is not thereby cleared of forging the rest.
-                  MAX(CASE WHEN r.dmarc_result = 'pass' THEN 1 ELSE 0 END)
+                  MAX(CASE WHEN r.dmarc_result = 'pass' THEN 1 ELSE 0 END),
+                  c.id
                 FROM aggregate_records r
                 JOIN domains d ON d.id = r.domain_id
                 JOIN clients c ON c.id = r.client_id
@@ -517,6 +462,7 @@ public sealed class CorrelationService(string databasePath)
                     Domain = reader.GetString(0),
                     ClientName = reader.GetString(1),
                     ClientSlug = reader.GetString(2),
+                    ClientId = reader.GetString(7),
                     Messages = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                     Passing = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                     LastSeen = last,
@@ -580,10 +526,22 @@ public sealed record SourceAppearance
     public required string Domain { get; init; }
     public required string ClientName { get; init; }
     public required string ClientSlug { get; init; }
+
+    /// <summary>The client itself. A slug is unique within an organization and not across them.</summary>
+    public required string ClientId { get; init; }
+
     public long Messages { get; init; }
     public long Passing { get; init; }
     public long Failing => Messages - Passing;
     public DateTimeOffset? LastSeen { get; init; }
+
+    /// <summary>
+    /// Who this appearance counts as: the client, or for a domain still
+    /// unfiled the domain. The same key the sources list builds, so the two
+    /// pages cannot count one address's parties differently.
+    /// </summary>
+    public string PartyKey => ClientSlug.Equals("unassigned", StringComparison.OrdinalIgnoreCase)
+        ? $"domain:{Domain}" : $"client:{ClientId}";
 
     /// <summary>Whether this source has ever authenticated for this domain.</summary>
     /// <remarks>
@@ -636,9 +594,8 @@ public sealed record SourceDetail
     /// related than two belonging to different customers.
     /// </remarks>
     public int IndependentParties => Appearances
-        .Select(a => a.ClientSlug.Equals("unassigned", StringComparison.OrdinalIgnoreCase)
-            ? $"domain:{a.Domain}" : $"client:{a.ClientSlug}")
-        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Select(a => a.PartyKey)
+        .Distinct(StringComparer.Ordinal)
         .Count();
 
     public bool IsCrossClient => IndependentParties > 1;
@@ -658,6 +615,20 @@ public sealed record SourceDetail
         IsOwnSendingPath || !AuthenticatedNothing ? SourceVerdict.Misconfigured
         : IsCrossClient ? SourceVerdict.CrossClientImpersonation
         : SourceVerdict.Unauthenticated;
+
+    /// <summary>
+    /// The verdict with its benign half split in two, as the list reads it.
+    /// </summary>
+    /// <remarks>
+    /// The same expression as <see cref="FailingSource.Reading"/>, so a source
+    /// is called the same thing on the page behind its name as in the list.
+    /// </remarks>
+    public SourceReading Reading => Verdict switch
+    {
+        SourceVerdict.CrossClientImpersonation => SourceReading.CrossClient,
+        SourceVerdict.Unauthenticated => SourceReading.Unauthenticated,
+        _ => IsOwnSendingPath ? SourceReading.OwnSendingPath : SourceReading.Unaligned,
+    };
 
     /// <summary>
     /// The vendor the catalogue recognizes in a confirmed name, else the
