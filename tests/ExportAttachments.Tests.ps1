@@ -70,7 +70,8 @@ BeforeAll {
             [object[]]$Attachments = @(),
             [bool]$UnRead = $true,
             [switch]$SaveThrows,
-            [switch]$MoveThrows
+            [switch]$MoveThrows,
+            [int]$DownloadState = 1
         )
         # UnRead and Save() as Outlook has them: the flag changes nothing
         # until the item is saved, so Saved counts the writes. Save() throws
@@ -87,6 +88,7 @@ BeforeAll {
             MovedTo     = $null
             SaveThrows  = [bool]$SaveThrows
             MoveThrows  = [bool]$MoveThrows
+            DownloadState = $DownloadState
         }
         $item | Add-Member ScriptMethod Save {
             if ($this.SaveThrows) { throw 'You do not have sufficient permission to perform this operation on this object.' }
@@ -592,6 +594,44 @@ Describe 'Export-DMARCAttachments' {
 
             Test-Path (Join-Path $script:Out 'Inbox' 'google.xml')     | Should -BeTrue
             Test-Path (Join-Path $script:Out 'Inbox' 'signature.png') | Should -BeFalse
+        }
+    }
+
+    Context 'a message with nothing to export' {
+        It 'counts a header-only message and says why it was left alone' {
+            # Cached mode: Outlook holds the headers, so no attachments show.
+            $item = New-FakeItem @() -DownloadState 0
+            $folder = New-FakeFolder 'bmcedc.com' -Items @($item)
+            $inbox = New-FakeFolder 'Inbox'
+            $deleted = New-FakeFolder 'Deleted Items'
+            $store = New-FakeStore 'DMARC' -Children @($inbox, $folder, $deleted) -Inbox $inbox -Deleted $deleted
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out, '-MoveToDeleted')
+
+            $r.Text | Should -Match '1 message\(s\) are only headers in Outlook'
+            $r.Text | Should -Match 'no report attachment.*bmcedc\.com \(1\)'
+            $item.UnRead | Should -BeTrue
+            $item.MovedTo | Should -BeNullOrEmpty
+        }
+
+        It 'names a fully downloaded message that carries no report' {
+            $item = New-FakeItem @(New-FakeAttachment 'signature.png')
+            $inbox = New-FakeFolder 'Inbox' -Items @($item)
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $r.Text | Should -Match '1 message\(s\) had no report attachment.*Inbox \(1\)'
+            $r.Text | Should -Not -Match 'only headers'
+        }
+
+        It 'says nothing when every message carried a report' {
+            $inbox = New-FakeFolder 'Inbox' -Items @(New-FakeItem @(New-FakeAttachment 'google.xml'))
+            $store = New-FakeStore 'DMARC' -Children @($inbox) -Inbox $inbox
+
+            $r = Invoke-Export -Stores @($store) -Arguments @('-OutputPath', $script:Out)
+
+            $r.Text | Should -Not -Match 'no report attachment|only headers'
         }
     }
 

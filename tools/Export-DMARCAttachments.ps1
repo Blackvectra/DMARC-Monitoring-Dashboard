@@ -679,6 +679,15 @@ $script:moveFailed = 0
 $script:firstMoveError = ''
 $script:noDeletedItems = New-Object 'System.Collections.Generic.List[string]'
 
+# Messages nothing could be done with: no attachment the filter recognised, so
+# nothing saved, marked or moved. Counted because they are exactly what leaves
+# a mailbox full while the run looks clean. In cached mode a message Outlook
+# holds only the headers of shows no attachments at all, which is why the
+# header-only ones are counted apart.
+$script:noReport = 0
+$script:headerOnly = 0
+$script:noReportFolders = New-Object 'System.Collections.Generic.List[string]'
+
 # Folders already done, by EntryID. Without this, -Folder Inbox would export
 # the Inbox twice: once as the folder asked for and once as the Inbox added
 # to it.
@@ -704,6 +713,7 @@ function Export-Folder {
     $skipped = 0
     $marked = 0
     $moved = 0
+    $noReportHere = 0
 
     # Whether anything may be moved out of this folder. Decided once, before a
     # single message is looked at: a folder that cannot be placed in a store,
@@ -816,6 +826,13 @@ function Export-Folder {
             # re-read it and the unread count never go down.
             $accountedFor = ($savedHere + $alreadyHere) -gt 0 -and $failedHere -eq 0
 
+            if (($savedHere + $alreadyHere + $failedHere) -eq 0) {
+                $noReportHere++
+                $state = $null
+                try { $state = $item.DownloadState } catch { $state = $null }
+                if ($null -ne $state -and [int]$state -eq 0) { $script:headerOnly++ }   # olHeaderOnly
+            }
+
             if ($accountedFor -and -not $LeaveUnread) {
                 try {
                     if ($item.UnRead) {
@@ -872,6 +889,10 @@ function Export-Folder {
         }
     }
     $script:movedTotal += $moved
+    if ($noReportHere -gt 0) {
+        $script:noReport += $noReportHere
+        $script:noReportFolders.Add("$($MailFolder.Name) ($noReportHere)")
+    }
 
     $unread = 0
     try { $unread = $MailFolder.UnReadItemCount } catch { $unread = 0 }
@@ -949,6 +970,15 @@ if ($script:moveFailed -gt 0) {
 }
 foreach ($label in $script:noDeletedItems) {
     Write-Host "There is no Deleted Items folder to be found in '$label', so its messages were left where they are." -ForegroundColor Yellow
+}
+if ($script:headerOnly -gt 0) {
+    Write-Host "$($script:headerOnly) message(s) are only headers in Outlook: their attachments have not been downloaded, so nothing was saved, marked or moved for them." -ForegroundColor Yellow
+    Write-Host "  Have Outlook download full items for this mailbox (Account Settings > Change > More Settings > Advanced >" -ForegroundColor DarkGray
+    Write-Host "  'Download shared folders'), let it finish syncing, and run again." -ForegroundColor DarkGray
+}
+if ($script:noReport -gt 0) {
+    Write-Host "$($script:noReport) message(s) had no report attachment Outlook would show, and were left where they are: $($script:noReportFolders -join ', ')" -ForegroundColor Yellow
+    Write-Host "  An auto-reply or a note is expected. A report is not: open one and check its attachment is there." -ForegroundColor DarkGray
 }
 Write-Host ""
 Write-Host "Next: import them." -ForegroundColor DarkGray
