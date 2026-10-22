@@ -2004,3 +2004,19 @@ table.grid .num.urgent { color: var(--urgent); }
 
 .filed { list-style: none; margin-top: 8px; display: grid; gap: 4px; font-size: 13px; }
 .filed .muted { font-size: 12px; }
+
+/* By domain: one card per domain, groups as label / names lines. */
+.briefing-card { margin-bottom: 12px; }
+.briefing-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.briefing-head h2 { font-size: 16px; margin: 0; }
+.briefing-facts { margin-left: auto; font-size: 13px; color: var(--muted); }
+.briefing-facts strong { color: var(--text, inherit); }
+.briefing-groups { display: grid; grid-template-columns: minmax(0, 16rem) 1fr; gap: 4px 16px; margin: 10px 0 0; font-size: 13px; }
+.briefing-groups dt { font-weight: 600; }
+.briefing-groups dd { margin: 0; overflow-wrap: anywhere; }
+.briefing-action { margin: 10px 0 0; font-size: 13px; }
+@media (max-width: 640px) {
+    .briefing-groups { grid-template-columns: 1fr; }
+    .briefing-groups dd { margin-bottom: 6px; }
+    .briefing-facts { margin-left: 0; }
+}
