@@ -54,6 +54,9 @@ public sealed record DomainSource
     /// </remarks>
     public string Display =>
         NameConfirmed && DmarcMonitor.Core.Intelligence.SourceCatalog.Identify(ReverseName) is { } known ? known.Name
+        // A vendor's published range outranks an unconfirmed PTR: the range is the
+        // vendor's own statement, the PTR whatever the address's holder typed.
+        : DmarcMonitor.Core.Intelligence.SourceRanges.Identify(SourceIp) is { } ranged ? ranged.Name
         : !string.IsNullOrWhiteSpace(ReverseName) ? ReverseName
         : SourceIp;
 
