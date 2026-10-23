@@ -1,0 +1,127 @@
+@page "/briefing"
+@using DmarcMonitor.Core.Domains
+@using DmarcMonitor.Core.Rollout
+@using DmarcMonitor.Core.Tenancy
+@using DmarcMonitor.Web.Auth
+@using DmarcMonitor.Web.Data
+@inject TriageService Triage
+@inject DomainDetailService Detail
+@inject ReportStoreConnection Db
+@inject OrgContext Org
+@rendermode InteractiveServer
+
+<PageTitle>By domain — DMARC Monitor</PageTitle>
+
+<header class="page-head">
+    <div>
+        <h1>By domain</h1>
+        <p class="sub">What happened to each domain, one card each: who sent its mail cleanly, who failed and
+           why, and what to do about it. Domains losing the most mail come first.</p>
+    </div>
+    <div class="head-actions">
+        <label>
+            Window
+            <select @bind="_days" @bind:after="LoadAsync">
+                <option value="7">7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+            </select>
+        </label>
+    </div>
+</header>
+
+@if (_cards is null)
+{
+    <p class="muted">Loading…</p>
+}
+else if (_cards.Count == 0)
+{
+    <p class="muted">No reports in this window.</p>
+}
+else
+{
+    @foreach (var d in _cards)
+    {
+        <section class="card briefing-card" data-domain="@d.Domain">
+            <header class="briefing-head">
+                <h2><a href="domains/@d.Domain">@d.Domain</a></h2>
+                @if (!d.ClientName.Equals(d.Domain, StringComparison.OrdinalIgnoreCase))
+                {
+                    <span class="muted">@d.ClientName</span>
+                }
+                <span class="briefing-facts">
+                    p=@d.Policy <span aria-hidden="true">·</span>
+                    @d.Messages.ToString("N0") msgs <span aria-hidden="true">·</span>
+                    @d.Failing.ToString("N0") failing <span aria-hidden="true">·</span>
+                    <strong>@d.PassRate.ToString("0.0")% pass</strong>
+                </span>
+            </header>
+
+            <dl class="briefing-groups">
+                @* Each source group is one line of names and counts. The domain page has
+                   the tables and evidence; this is the page for reading the whole book. *@
+                @Group("Passing", d.Clean, s => s.Passing)
+                @Group("Broken in transit (forwarders and gateways)", d.Forwarders, s => s.Failing)
+                @Group("Real senders not aligned", d.Misconfigured, s => s.Failing)
+                @Group("Sending as this domain without authenticating", d.Impersonating, s => s.Failing)
+            </dl>
+
+            @if (!string.IsNullOrWhiteSpace(d.Headline))
+            {
+                <p class="briefing-action"><strong>Next:</strong> @d.Headline</p>
+            }
+        </section>
+    }
+}
+
+@code {
+    private int _days = 7;
+    private List<DomainDetail>? _cards;
+
+    /// <summary>How many senders a line names before it says "and N more".</summary>
+    private const int Shown = 5;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        if (!Db.Exists) { _cards = []; return; }
+
+        var access = await Org.GetAsync();
+        var rows = await Triage.GetAsync(_days, access.TenantId, access.RestrictedClient);
+
+        // One detail read per domain, scoped exactly as the domain page scopes it,
+        // so a card can never show what that page would refuse to.
+        var cards = new List<DomainDetail>();
+        foreach (var row in rows.Where(r => r.Messages > 0))
+        {
+            var detail = await Detail.GetAsync(row.Domain, _days, row.TenantId, access.RestrictedClient);
+            if (detail is not null) { cards.Add(detail); }
+        }
+
+        _cards = [.. cards.OrderByDescending(c => c.Failing).ThenBy(c => c.Domain, StringComparer.Ordinal)];
+    }
+
+    /// <summary>Sources grouped by the name they display as, largest first.</summary>
+    internal static IReadOnlyList<(string Name, long Count)> Summarize(
+        IEnumerable<DomainSource> sources, Func<DomainSource, long> count) =>
+        [.. sources.GroupBy(s => s.Display, StringComparer.OrdinalIgnoreCase)
+                   .Select(g => (g.Key, g.Sum(count)))
+                   .Where(g => g.Item2 > 0)
+                   .OrderByDescending(g => g.Item2)
+                   .ThenBy(g => g.Key, StringComparer.Ordinal)];
+
+    private RenderFragment Group(string label, IEnumerable<DomainSource> sources, Func<DomainSource, long> count) => __builder =>
+    {
+        var groups = Summarize(sources, count);
+        if (groups.Count == 0) { return; }
+        <dt>@label <span class="muted">(@groups.Sum(g => g.Count).ToString("N0"))</span></dt>
+        <dd>
+            @string.Join(", ", groups.Take(Shown).Select(g => $"{g.Name} {g.Count:N0}"))
+            @if (groups.Count > Shown)
+            {
+                <span class="muted"> and @(groups.Count - Shown) more</span>
+            }
+        </dd>
+    };
+}
