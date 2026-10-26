@@ -43,7 +43,9 @@ public sealed class CrossTenantIsolationTests : IDisposable
     /// <summary>Two organizations, each managing a domain called example.com.</summary>
     private async Task SeedAsync()
     {
-        const string when = "2026-09-20 00:00:00";
+        // Relative, because the reads under test look back a fixed number of
+        // days: a fixed date ages out of that window and the data vanishes.
+        var when = DateTimeOffset.UtcNow.AddDays(-2).UtcDateTime.ToString("yyyy-MM-dd 00:00:00", System.Globalization.CultureInfo.InvariantCulture);
 
         // Written as one database; split into client files as an upgrade would.
         Task Run(string sql) => SingleDatabase.ExecuteAsync(_dbPath, sql);

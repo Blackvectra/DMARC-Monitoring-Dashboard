@@ -282,6 +282,31 @@ public static class ReportAttachment
             yield break;
         }
 
+        // An Outlook .msg, saved by dragging the message out of Outlook rather
+        // than by the exporter. Its attachments go back through the top like a
+        // zip's members, because they are the receivers' .gz and .zip files.
+        if (OutlookMessage.LooksLikeOne(content))
+        {
+            IReadOnlyList<OutlookMessage.Attachment> attachments;
+            try
+            {
+                attachments = OutlookMessage.ReadAttachments(content, MaxDecompressedBytes);
+            }
+            catch (Exception ex) when (IsDamage(ex))
+            {
+                Unreadable(budget, fileName, depth, $"could not be read as an Outlook message ({ex.Message})");
+                yield break;
+            }
+
+            foreach (var attachment in attachments)
+            {
+                if (!budget.TryTakeEntry()) { yield break; }
+                foreach (var report in Walk(attachment.Name, attachment.Content, budget, depth + 1)) { yield return report; }
+            }
+
+            yield break;
+        }
+
         if (content.Length > MaxDecompressedBytes)
         {
             Unreadable(budget, fileName, depth, TooLarge);
