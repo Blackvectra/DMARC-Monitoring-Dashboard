@@ -2,6 +2,16 @@
 
 [![License](https://img.shields.io/badge/License-Proprietary-red?style=flat-square)](LICENSE)
 
+> **Status: active development is paused (November 2026).**
+>
+> Client DMARC operations now run on a commercial platform, and this project
+> is not intended to compete with it. The repository is retained for research
+> and as a portfolio reference: the code, tests and documentation remain as of
+> the last merged change. Pull requests, releases, deployment scripts and
+> dependency advisories are not maintained, so it should not be deployed for
+> production use. Known limitations are recorded in
+> [docs/OPEN-ISSUES.md](docs/OPEN-ISSUES.md).
+
 Self-hosted DMARC monitoring for a service provider looking after other
 people's domains. Collects aggregate, forensic and TLS reports, says in plain
 English what is wrong with each domain, offers to fix the DNS, and produces a
